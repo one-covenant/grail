@@ -1,7 +1,3 @@
-Of course. Here is the full technical specification with the "Design Rationale" section removed as requested.
-
----
-
 ## **Technical Specification: Thronos (v2.2 - Final)**
 
 **Document Version:** 1.2
