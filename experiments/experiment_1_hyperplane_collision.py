@@ -10,7 +10,7 @@ is computationally infeasible.
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
-from typing import List, Tuple
+from typing import List
 import json
 import os
 import sys
