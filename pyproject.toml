@@ -1,0 +1,154 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "grail"
+version = "0.0.0"
+description = "GRAIL – Guaranteed Rollout Authenticity via Inference Ledger"
+readme = "SPEC.md"
+license = {text = "MIT"}
+authors = [
+    {name = "GRAIL Team"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.0.0",
+    "numpy>=1.20.0",
+    "transformers>=4.20.0",
+    "matplotlib>=3.5.0",
+    "safetensors>=0.3.0",
+    "click>=8.0.0",
+    "python-dotenv>=0.19.0",
+    "aiobotocore>=2.0.0",
+    "botocore>=1.24.0",
+    "bittensor>=7.0.0",
+    "trl>=0.7.0",
+    "accelerate>=0.20.0",
+    "pydantic>=2.3,<3.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=22.0.0",
+    "flake8>=5.0.0",
+    "mypy>=1.0.0",
+    "pre-commit>=2.20.0",
+]
+experiments = [
+    "vllm>=0.2.0",
+    "jupyter>=1.0.0",
+    "notebook>=6.4.0",
+    "seaborn>=0.11.0",
+]
+all = [
+    "grail[dev,experiments]",
+]
+
+[project.scripts]
+grail = "grail:main"
+
+[project.urls]
+Repository = "https://github.com/your-org/grail"
+Documentation = "https://github.com/your-org/grail/blob/main/SPEC.md"
+Issues = "https://github.com/your-org/grail/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["grail"]
+
+[tool.hatch.version]
+path = "grail/__init__.py"
+
+[tool.black]
+line-length = 88
+target-version = ['py39', 'py310', 'py311']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = [
+    "bittensor.*",
+    "trl.*",
+    "accelerate.*",
+    "vllm.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "--verbose",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+]
+
+[tool.coverage.run]
+source = ["grail"]
+omit = [
+    "*/tests/*",
+    "*/experiments/*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+] 

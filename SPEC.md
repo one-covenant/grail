@@ -1,4 +1,4 @@
-## **Technical Specification: Thronos (v2.2 - Final)**
+## **Technical Specification: GRAIL (v2.2 - Final)**
 
 **Document Version:** 1.2
 **Date:** July 28, 2025
@@ -6,22 +6,22 @@
 
 ### **1. Overview & Goals**
 
-**Objective:** Thronos is a Bittensor subnet that leverages a decentralized network of miners for massively parallel LLM inference and data generation, which is then consumed by a centralized orchestrator for Reinforcement Learning.
+**Objective:** GRAIL is a Bittensor subnet that leverages a decentralized network of miners for massively parallel LLM inference and data generation, which is then consumed by a centralized orchestrator for Reinforcement Learning.
 
 **Core Principles:**
-1.  **Trustless Verification:** All miner contributions must be verifiable. We will use the `toploc` library to create cryptographic proofs of honest inference.
+1.  **Trustless Verification:** All miner contributions must be verifiable. We will use the GRAIL proof system to create cryptographic proofs of honest inference.
 2.  **Competitive Incentives:** The reward mechanism must be competitive, creating a "Dirac delta" payoff function. Rewards will be sharply concentrated around the optimal strategy: being **honest, fast, and high-quality**.
 3.  **Performance:** The entire system must be high-performance. Both miners and validators will utilize a modified version of **vLLM** for optimized inference.
 
 ### **2. Core Components & Technology**
 
-*   **Miners:** Nodes that run inference on the current model, generate completions and `toploc` proofs, and upload them to their own R2 buckets.
-*   **Validators:** Nodes that audit miners by sending them challenge prompts, verifying their `toploc` proofs, and scoring them on performance and quality.
+*   **Miners:** Nodes that run inference on the current model, generate completions and GRAIL proofs (sketch values), and upload them to their own R2 buckets.
+*   **Validators:** Nodes that audit miners by sending them challenge prompts, verifying their GRAIL proofs, and scoring them on performance and quality.
 *   **Orchestrator (Subnet Owner):** A centralized, off-chain entity responsible for RL training and publishing new model versions.
 *   **Technology Stack:**
     *   **Bittensor:** For network registration, peer discovery (metagraph), and incentive/reward propagation.
     *   **vLLM (with modifications):** The inference engine for both miners and validators.
-    *   **`toploc` Library:** For generating and verifying proofs of honest computation.
+    *   **GRAIL System:** For generating and verifying sketch-based proofs of honest computation.
     *   **R2 Object Storage:** Decentralized storage where each participant (miners, validators, orchestrator) has their own bucket.
 
 ### **3. System Architecture & Data Flow**
@@ -53,7 +53,7 @@ graph TB
     
     subgraph "Core Technologies"
         VLLM[vLLM Engine<br/>+ Custom Worker]
-        TOPLOC[toploc Library<br/>Proof System]
+        GRAIL[GRAIL System<br/>Sketch-based Proofs]
     end
     
     %% Orchestrator connections
@@ -68,7 +68,7 @@ graph TB
     V1 & V2 & Vn -->|Challenge| M1 & M2 & Mn
     V1 & V2 & Vn -->|Download bundles| R2M
     V1 & V2 & Vn -.->|Uses| VLLM
-    V1 & V2 & Vn -.->|Verifies with| TOPLOC
+    V1 & V2 & Vn -.->|Verifies with| GRAIL
     V1 & V2 & Vn -->|Store checkpoints| R2V
     
     %% Miner connections
@@ -76,7 +76,7 @@ graph TB
     M1 & M2 & Mn -->|Download model| R2V
     M1 & M2 & Mn -->|Upload bundles| R2M
     M1 & M2 & Mn -.->|Uses| VLLM
-    M1 & M2 & Mn -.->|Generates proofs| TOPLOC
+    M1 & M2 & Mn -.->|Generates proofs| GRAIL
     M1 & M2 & Mn -->|Publish bucket info| BC
     
     %% Network discovery
@@ -96,8 +96,8 @@ The system operates in **Epochs**, long periods (e.g., 12-24 hours) correspondin
 2.  **Synchronization:** All miners and validators download and verify the new model from the validator's R2 bucket.
 3.  **Challenge-Response Loop (Continuous):**
     *   A validator selects a miner and sends a timestamped `Challenge` Synapse containing a unique `prompt`.
-    *   The miner performs inference, generates `toploc` proofs, uploads a signed `MinerDataBundle` to their own R2 bucket using epoch-window naming (e.g., `gradient-{window}-{uid}-v{version}.pt`), and immediately returns a `ChallengeResponse` Synapse with the R2 URI.
-4.  **Asynchronous Verification:** The validator adds the miner's response to a background queue. A worker thread downloads the bundle from the miner's R2 bucket, re-runs inference locally to get reference activations, and performs `toploc` verification and performance scoring.
+    *   The miner performs inference, generates GRAIL sketch values (s_vals), uploads a signed `MinerDataBundle` to their own R2 bucket using epoch-window naming (e.g., `gradient-{window}-{uid}-v{version}.pt`), and immediately returns a `ChallengeResponse` Synapse with the R2 URI.
+4.  **Asynchronous Verification:** The validator adds the miner's response to a background queue. A worker thread downloads the bundle from the miner's R2 bucket, re-runs inference locally to get reference hidden states, and performs GRAIL verification by checking sketch values at random indices and performance scoring.
 5.  **Weight Setting:** At the end of every scoring window (a set number of blockchain windows), the validator aggregates the scores, updates its moving averages for each miner, and sets its weights on the Bittensor network.
 6.  **Epoch End:** The Orchestrator accesses each miner's R2 bucket to scrape all valid data bundles for the epoch windows, performs its RL training, and publishes `model_vN+1`, starting the next epoch.
 
@@ -109,7 +109,7 @@ sequenceDiagram
     participant M as Miner
     participant R2 as R2 Storage
     participant VLLM as vLLM Engine
-    participant T as toploc
+    participant G as GRAIL
     
     Note over V,M: Challenge Phase
     V->>M: Challenge Synapse<br/>(prompt, timestamp)
@@ -119,8 +119,8 @@ sequenceDiagram
     VLLM-->>M: Completion + Activations
     
     Note over M: Proof Generation
-    M->>T: Generate toploc proofs<br/>(activations)
-    T-->>M: Cryptographic proofs
+    M->>G: Generate GRAIL sketches<br/>(hidden states)
+    G-->>M: Sketch values (s_vals)
     
     Note over M: Bundle Creation
     M->>M: Create MinerDataBundle<br/>(metadata, completion, proofs)
@@ -146,8 +146,8 @@ sequenceDiagram
         V->>VLLM: Re-run inference locally
         VLLM-->>V: Reference activations
         
-        V->>T: Verify toploc proofs
-        T-->>V: Verification result
+        V->>G: Verify GRAIL sketches<br/>(at random indices)
+        G-->>V: Verification result
         
         V->>V: Calculate scores<br/>(honesty, latency, quality)
         V->>V: Update moving average
@@ -223,12 +223,12 @@ sequenceDiagram
 
 ### **4. Data Schemas & Synapses**
 
-**File:** `src/thronos/schemas.py`
+**File:** `src/grail/schemas.py`
 
 ```python
 import bittensor as bt
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 # --------------------------------------------------
 # Bucket Configuration Schema
@@ -248,9 +248,10 @@ class Bucket(BaseModel):
 class Challenge(bt.Synapse):
     """
     Synapse sent from a Validator to a Miner.
-    Contains the prompt and a timestamp for latency calculation.
+    Contains the prompt, randomness for GRAIL sketch generation, and a timestamp for latency calculation.
     """
     prompt: str = Field(..., description="The prompt for the miner to run inference on.")
+    randomness: str = Field(..., description="Hex randomness for GRAIL sketch vector generation.")
     timestamp: float = Field(..., description="Timestamp (time.time()) of when the validator sent the request.")
     window: int = Field(..., description="Current window number for data organization.")
 
@@ -286,7 +287,7 @@ class MinerDataBundle(BaseModel):
     metadata: Metadata
     prompt: str
     completion: str
-    toploc_proofs: List[str]  # List of base64 encoded toploc proofs
+    grail_commitment: Dict[str, Any]  # GRAIL commitment containing tokens, s_vals, signature
     signature: str           # Signature of the (metadata, prompt, completion) tuple with the miner's hotkey
     
 # --------------------------------------------------
@@ -308,12 +309,12 @@ The final score for a miner's work is a composite of honesty, latency, and quali
 
 `Final Score = Score_honesty * (w_latency * Score_latency + w_quality * Score_quality)`
 
-*   **`Score_honesty` (Binary Gate):** 1 if `toploc` verification passes within tolerance, 0 otherwise. If 0, the final score is 0.
+*   **`Score_honesty` (Binary Gate):** 1 if GRAIL sketch verification passes within tolerance (±3), 0 otherwise. If 0, the final score is 0.
 *   **`Score_latency` (0-1):** A sigmoid function of the round-trip time.
 *   **`Score_quality` (0-1):** The miner's average log-probability for their completion, normalized relative to other miners in the same scoring window.
 *   **`Weight`:** A moving average of a miner's `Final_Score` over time, providing stability.
 
-**File:** `src/thronos/metrics.py`
+**File:** `src/grail/metrics.py`
 ```python
 import math
 from typing import Dict
@@ -339,93 +340,87 @@ def normalize_quality_scores(log_prob_scores: Dict[str, float]) -> Dict[str, flo
 #### **6.1. File Structure (Proposed)**
 
 ```
-thronos/
+grail/
 ├── neurons/
 │   ├── base_node.py
 │   ├── miner.py
 │   └── validator.py
 └── src/
-    └── thronos/
+    └── grail/
         ├── config.py
         ├── metrics.py
         ├── schemas.py
         └── vllm_interop.py
 ```
 
-#### **6.2. vLLM Activation Hooking: The Custom Worker**
+#### **6.2. GRAIL Integration with vLLM**
 
-**File:** `src/thronos/vllm_interop.py`
-This is the most critical engineering task.
+**File:** `src/grail/vllm_interop.py`
+With GRAIL, we can use standard vLLM without complex activation hooking.
 
 ```python
-from vllm import AsyncLLMEngine
+from vllm import AsyncLLMEngine, LLM
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.worker.worker import Worker
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
-from typing import List, Dict
+from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
+import hashlib
+import struct
+from typing import List, Dict, Any
+import grail.grail as grail
 
-class ActivationHookingWorker(Worker):
-    """A custom vLLM Worker that hooks into transformer layers to capture activations."""
-    def __init__(self, *args, layers_to_hook: List[int] = None, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.layers_to_hook = layers_to_hook if layers_to_hook is not None else []
-        self.activation_store: Dict[str, List[torch.Tensor]] = {}
-
-        if self.layers_to_hook:
-            self._add_hooks()
-            print(f"[ActivationHookingWorker] Hooks successfully added for layers: {self.layers_to_hook}")
-
-    def _add_hooks(self):
-        model_layers = self.model_runner.model.model.layers
-        for layer_idx in self.layers_to_hook:
-            if 0 <= layer_idx < len(model_layers):
-                model_layers[layer_idx].register_forward_hook(self._create_hook_fn(layer_idx))
-            else:
-                print(f"[ActivationHookingWorker] ERROR: Layer index {layer_idx} is out of bounds.")
-
-    def _create_hook_fn(self, layer_idx: int):
-        def hook(module, input, output):
-            seq_group_metadata_list = getattr(self, "_current_seq_group_metadata", [])
-            batch_hidden_states = output[0] # MUST be verified for the model architecture
-            
-            for seq_group in seq_group_metadata_list:
-                req_id = seq_group.request_id
-                # CRITICAL TASK: Implement the logic to map sequence data to batch rows.
-                row_indices = [seq.seq_id for seq in seq_group.get_seqs()]
-                request_activations = batch_hidden_states[row_indices]
-                self.activation_store[req_id].append(request_activations.detach().clone().cpu())
-        return hook
-
-    def execute_model(
-        self, seq_group_metadata_list: List[SequenceGroupMetadata], **kwargs
-    ) -> List[SamplerOutput]:
-        self._current_seq_group_metadata = seq_group_metadata_list
-        for seq_group in seq_group_metadata_list:
-            if seq_group.request_id not in self.activation_store:
-                self.activation_store[seq_group.request_id] = []
+class GRAILInferenceEngine:
+    """Wrapper for vLLM that integrates GRAIL proof generation."""
+    
+    def __init__(self, model_name: str, device: str = "cuda"):
+        self.model_name = model_name
+        self.device = device
+        self.llm = LLM(model=model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         
-        try:
-            sampler_output_list = super().execute_model(seq_group_metadata_list, **kwargs)
-        finally:
-            delattr(self, "_current_seq_group_metadata")
-
-        for sampler_output in sampler_output_list:
-            req_id = sampler_output.parent_seq_group.request_id
-            sampler_output.captured_activations = self.activation_store.pop(req_id, [])
+        # Initialize GRAIL components
+        self.prover = grail.Prover(model_name)
         
-        return sampler_output_list
+    async def generate_with_proof(self, prompt: str, randomness: str, max_tokens: int = 32) -> Dict[str, Any]:
+        """
+        Generate text with GRAIL proof.
+        Returns both the generated text and the GRAIL commitment.
+        """
+        # Use GRAIL prover for generation and commitment
+        commitment = self.prover.commit(prompt, randomness, max_tokens)
+        
+        # Extract generated text
+        tokens = commitment["tokens"]
+        generated_text = self.tokenizer.decode(tokens, skip_special_tokens=True)
+        
+        return {
+            "generated_text": generated_text,
+            "tokens": tokens,
+            "grail_commitment": {
+                "s_vals": commitment["s_vals"],
+                "signature": commitment["signature"],
+                "model_hash": commitment["model_hash"]
+            },
+            "randomness": randomness
+        }
+    
+    def prepare_challenge_response(self, tokens: List[int], challenge_randomness: str, k: int = 16) -> Dict[str, Any]:
+        """
+        Prepare response to a validator's challenge.
+        """
+        indices = grail.indices_from_root(tokens, challenge_randomness, len(tokens), k)
+        return {
+            "challenge_randomness": challenge_randomness,
+            "indices": indices
+        }
 
-def create_vllm_engine(model_name: str, layers_to_hook: List[int], **engine_kwargs) -> AsyncLLMEngine:
-    engine_args = AsyncEngineArgs(model=model_name, **engine_kwargs)
-    engine_args.worker_class = "thronos.vllm_interop.ActivationHookingWorker"
-    engine_args.extra_configs = {"layers_to_hook": layers_to_hook}
-    return AsyncLLMEngine.from_engine_args(engine_args)
+def create_grail_engine(model_name: str, **kwargs) -> GRAILInferenceEngine:
+    """Factory function to create a GRAIL-enabled inference engine."""
+    return GRAILInferenceEngine(model_name, **kwargs)
 ```
 
 ### **7. Configuration**
 
-**File:** `src/thronos/config.py`
+**File:** `src/grail/config.py`
 
 ```python
 from types import SimpleNamespace
@@ -472,12 +467,12 @@ HPARAMS = SimpleNamespace(
     scoring_window_size=10,     # Score and set weights every 10 windows (~30 mins)
     windows_per_epoch=240,      # ~12 hours per model version
     
-    # TOPLOC Parameters
-    toploc_layers_to_hook=[6, 12, 18, 24],
-    toploc_topk=128,
-    toploc_decode_batching_size=32,
-    toploc_exp_mismatch_tolerance=0,
-    toploc_mant_error_tolerance=5.0,
+    # GRAIL Parameters
+    grail_layer_index=-1,  # Last layer by default
+    grail_challenge_k=16,  # Number of indices to verify
+    grail_tolerance=3,  # Maximum allowed difference in sketch values
+    grail_prime_q=2147483647,  # Modulus for sketch computation
+    grail_scaling_factor=1024,  # Scaling factor for hidden states
     
     # Incentive Weights
     w_latency=0.3,
@@ -543,11 +538,53 @@ model = await comms.s3_get_object(f"model-{epoch}-v{version}.pt", validator_buck
 - **Model files:** Named by epoch, retained for entire epoch duration
 - **Checkpoints:** Keep last N checkpoints, older ones automatically deleted
 
-### **9. Development Roadmap**
+### **9. Security Analysis: GRAIL vs toploc**
 
-1.  **Phase 1: vLLM Modification & Foundational Setup**
-    *   **Deliverable:** A functional `ActivationHookingWorker` and `create_vllm_engine` factory.
-    *   **Tasks:** Implement the custom worker, focusing on the logic of mapping sequence data to batch rows. Set up the `BaseNode` with the block listener. Create basic Miner/Validator classes.
+#### **9.1. Improvements with GRAIL**
+
+1. **Reduced Data Transmission**: GRAIL only requires transmitting integer sketch values (s_vals) instead of full activation tensors, significantly reducing bandwidth requirements.
+
+2. **Enhanced Privacy**: The sketch-based approach doesn't reveal actual activation values, only their projections onto a random vector modulo a prime.
+
+3. **Deterministic Randomness**: GRAIL uses cryptographic PRFs for generating random vectors and selecting indices, ensuring reproducibility and preventing manipulation.
+
+4. **Integrity Protection**: HMAC signatures on sketch values prevent tampering and ensure data authenticity.
+
+5. **Simplified Implementation**: GRAIL doesn't require custom vLLM modifications for capturing specific layer activations - it can work with standard model outputs.
+
+#### **9.2. Trade-offs and Considerations**
+
+1. **Statistical Security**: GRAIL checks only K=16 random positions rather than all positions, providing statistical rather than deterministic security. The security level is 1 - (1/2^K) for random errors.
+
+2. **Single Layer Focus**: GRAIL typically uses one layer (e.g., the last hidden layer) while toploc was designed for multiple layer verification. This could be extended if needed.
+
+3. **Tolerance Handling**: GRAIL uses a fixed tolerance of ±3 for modular arithmetic differences, which may need tuning based on model precision requirements.
+
+4. **Challenge-Response Protocol**: GRAIL requires a two-phase commit-reveal protocol with external randomness, adding slight complexity to the interaction flow.
+
+#### **9.3. Implementation Changes**
+
+The key changes when replacing toploc with GRAIL:
+
+1. **Miner Side**: 
+   - Generate sketch values during inference
+   - Store commitment with tokens and s_vals
+   - Respond to challenges with selected indices
+
+2. **Validator Side**:
+   - Provide randomness for sketch generation
+   - Verify only at challenged positions
+   - Check modular arithmetic tolerance
+
+3. **Data Storage**:
+   - Store GRAIL commitments instead of activation proofs
+   - Reduced storage requirements (integers vs tensors)
+
+### **10. Development Roadmap**
+
+1.  **Phase 1: GRAIL Integration & Foundational Setup**
+    *   **Deliverable:** A functional GRAIL-enabled inference engine and verification system.
+    *   **Tasks:** Integrate GRAIL proof generation with vLLM inference. Set up the `BaseNode` with the block listener. Create basic Miner/Validator classes that use GRAIL for verification.
 
 2.  **Phase 2: Core Protocol Implementation**
     *   **Deliverable:** A functional subnet where validators can challenge miners, and miners can respond with R2 URIs.
@@ -555,7 +592,7 @@ model = await comms.s3_get_object(f"model-{epoch}-v{version}.pt", validator_buck
 
 3.  **Phase 3: Honesty & Performance Layers** 
     *   **Deliverable:** A fully functional scoring system.
-    *   **Tasks:** Integrate `toploc` for proof generation and verification. Implement the `Score_honesty` gate. Implement `Score_latency` and `Score_quality` metrics and normalization. Implement the moving average logic and the `set_weights` call.
+    *   **Tasks:** Integrate GRAIL for sketch generation and verification. Implement the `Score_honesty` gate based on sketch verification. Implement `Score_latency` and `Score_quality` metrics and normalization. Implement the moving average logic and the `set_weights` call.
 
 4.  **Phase 4: Orchestrator & Deployment** (Ongoing)
     *   **Deliverable:** A live subnet on the Bittensor testnet.
