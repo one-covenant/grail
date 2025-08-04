@@ -18,7 +18,10 @@ sys.path.append('..')
 from grail.grail import PRIME_Q, dot_mod_q
 
 class HyperplaneCollisionExperiment:
-    def __init__(self, dimensions: List[int] = [64, 256, 768, 2048]):
+    def __init__(self, dimensions: List[int] = None):
+        if dimensions is None:
+            dimensions = [64, 256, 768, 2048]
+        self.dimensions = dimensions
         self.dimensions = dimensions
         self.num_trials = 1000
         self.results = {}
