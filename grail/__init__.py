@@ -66,9 +66,10 @@ def setup_logging(verbosity: int):
 # --------------------------------------------------------------------------- #
 load_dotenv(override=True)
 def get_conf(key, default=None) -> Any:
-    v = os.getenv(key); 
+    v = os.getenv(key)
     if not v and default is None:
-        click.echo(f"{key} not set.\nRun:\n\taf set {key} <value>", err=True); sys.exit(1)
+        click.echo(f"{key} not set.\nRun:\n\taf set {key} <value>", err=True)
+        sys.exit(1)
     return v or default
 
 # --------------------------------------------------------------------------- #
