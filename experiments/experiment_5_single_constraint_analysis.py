@@ -10,8 +10,6 @@ the same sketch value for a single position, demonstrating:
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import json
