@@ -31,11 +31,14 @@ class MultiPositionConstraintExperiment:
         print("Loading model...")
         # Force safetensors to avoid torch.load vulnerability
         try:
-            self.model = AutoModelForCausalLM.from_pretrained(model_name, use_safetensors=True).to(self.device).eval()
+        try:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name, use_safetensors=True
+            ).to(self.device).eval()
             print("Model loaded successfully (safetensors)")
-        except:
+        except (OSError, ImportError, RuntimeError) as e:
             # Fallback if safetensors not available
-            print("Safetensors not available, using standard loading...")
+            print(f"Safetensors not available ({e}), using standard loading...")
             self.model = AutoModelForCausalLM.from_pretrained(model_name).to(self.device).eval()
             print("Model loaded successfully (standard)")
         
