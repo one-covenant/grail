@@ -22,7 +22,6 @@ class HyperplaneCollisionExperiment:
         if dimensions is None:
             dimensions = [64, 256, 768, 2048]
         self.dimensions = dimensions
-        self.dimensions = dimensions
         self.num_trials = 1000
         self.results = {}
         
