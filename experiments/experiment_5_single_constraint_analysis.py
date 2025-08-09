@@ -220,7 +220,7 @@ class SingleConstraintAnalysis:
             best_h = None
             
             for i in range(max_iters):
-                def closure():
+                def closure(h=h, optimizer=optimizer, i=i):
                     optimizer.zero_grad()
                     
                     current_sketch = dot_mod_q(h, r_vec)
@@ -255,7 +255,12 @@ class SingleConstraintAnalysis:
                     
                     # For other optimizers
                     # Create a differentiable loss
-                    loss_tensor = torch.tensor(float(loss), dtype=torch.float32, device=h.device, requires_grad=True)
+                    loss_tensor = torch.tensor(
+                        float(loss),
+                        dtype=torch.float32,
+                        device=h.device,
+                        requires_grad=True
+                    )
                     
                     # Compute gradient manually since loss is not differentiable
                     # We'll use a finite difference approximation
