@@ -50,8 +50,7 @@ def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
     try:
         raw = prf(RNG_LABEL["sketch"], bytes.fromhex(clean_hex), out_bytes=4*d_model)
     except ValueError as e:
--        raise ValueError(f"Invalid hex string for randomness: '{rand_hex}' -> '{clean_hex}': {e}")
-+        raise ValueError(f"Invalid hex string for randomness: '{rand_hex}' -> '{clean_hex}': {e}") from e
+        raise ValueError(f"Invalid hex string for randomness: '{rand_hex}' -> '{clean_hex}': {e}") from e
     ints = struct.unpack(">" + "i"*d_model, raw)
     logger.debug(f"[SketchVec] first 4 ints: {ints[:4]}")
     return torch.tensor(ints, dtype=torch.int32)
