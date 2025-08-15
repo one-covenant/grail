@@ -1,0 +1,106 @@
+{
+  "constraint_satisfaction": [
+    {
+      "k": 1,
+      "avg_iterations": 500.0,
+      "success_rate": 0.0,
+      "avg_constraints_satisfied": 0.0,
+      "theoretical_difficulty": 21.487562596892644
+    },
+    {
+      "k": 2,
+      "avg_iterations": 1000.0,
+      "success_rate": 0.0,
+      "avg_constraints_satisfied": 0.0,
+      "theoretical_difficulty": 42.97512519378529
+    },
+    {
+      "k": 4,
+      "avg_iterations": 0,
+      "success_rate": 0.0,
+      "avg_constraints_satisfied": 0,
+      "theoretical_difficulty": 85.95025038757058,
+      "skipped": true
+    },
+    {
+      "k": 8,
+      "avg_iterations": 0,
+      "success_rate": 0.0,
+      "avg_constraints_satisfied": 0,
+      "theoretical_difficulty": 171.90050077514115,
+      "skipped": true
+    },
+    {
+      "k": 16,
+      "avg_iterations": 0,
+      "success_rate": 0.0,
+      "avg_constraints_satisfied": 0,
+      "theoretical_difficulty": 343.8010015502823,
+      "skipped": true
+    },
+    {
+      "k": 32,
+      "avg_iterations": 0,
+      "success_rate": 0.0,
+      "avg_constraints_satisfied": 0,
+      "theoretical_difficulty": 687.6020031005646,
+      "skipped": true
+    }
+  ],
+  "autoregressive_cascade": [
+    {
+      "perturbation_position": 0,
+      "perturbation_magnitude": 0.14267262816429138,
+      "mean_divergence": 0.0,
+      "final_divergence": 0.0,
+      "divergence_growth": 0
+    },
+    {
+      "perturbation_position": 9,
+      "perturbation_magnitude": 0.07889293879270554,
+      "mean_divergence": 0.0,
+      "final_divergence": 0.0,
+      "divergence_growth": 0
+    },
+    {
+      "perturbation_position": 19,
+      "perturbation_magnitude": 0.12475482374429703,
+      "mean_divergence": 0.0,
+      "final_divergence": 0.0,
+      "divergence_growth": 0
+    },
+    {
+      "perturbation_position": 28,
+      "perturbation_magnitude": 0.10747572034597397,
+      "mean_divergence": 0.0,
+      "final_divergence": 0.0,
+      "divergence_growth": 0
+    }
+  ],
+  "sketch_uniqueness": [
+    {
+      "perturbation_scale": 0.001,
+      "mean_sketch_diff": 357498879.8,
+      "max_sketch_diff": 1036779519,
+      "sketches_preserved": false
+    },
+    {
+      "perturbation_scale": 0.01,
+      "mean_sketch_diff": 729337036.8,
+      "max_sketch_diff": 765853696,
+      "sketches_preserved": false
+    },
+    {
+      "perturbation_scale": 0.1,
+      "mean_sketch_diff": 831166873.4,
+      "max_sketch_diff": 1183318015,
+      "sketches_preserved": false
+    },
+    {
+      "perturbation_scale": 1.0,
+      "mean_sketch_diff": 746848256.0,
+      "max_sketch_diff": 761659392,
+      "sketches_preserved": false
+    }
+  ]
+}

@@ -12,6 +12,7 @@ import asyncio
 import logging
 import hashlib
 import traceback
+import gzip
 import bittensor as bt
 from dotenv import load_dotenv
 from botocore.config import Config
@@ -28,7 +29,10 @@ from accelerate import Accelerator
 
 __version__ = "0.0.0"
 
-from .grail import Prover, Verifier, SATProblem, SATEnvironment, generate_sat_problem
+from .grail import (
+    Prover, Verifier, SATProblem, SATEnvironment, generate_sat_problem,
+    get_drand_beacon, get_round_at_time
+)
 
 __all__ = ["Prover", "Verifier", "SATProblem", "SATEnvironment", "generate_sat_problem", "main", "cli"]
 
@@ -123,8 +127,15 @@ class TransferProgress:
             self.last_log_time = now
             self.last_transferred = self.transferred
 
-async def upload_file_chunked(key: str, data: bytes, chunk_size: int = 5 * 1024 * 1024, max_retries: int = 3) -> bool:
-    """Upload file in chunks with retry logic and progress logging"""
+async def upload_file_chunked(key: str, data: bytes, chunk_size: int = 100 * 1024 * 1024, max_retries: int = 3, compress: bool = True) -> bool:
+    """Upload file in chunks optimized for H100 high-bandwidth - 100MB chunks with compression"""
+    # Compress data if enabled and it's JSON
+    if compress and key.endswith('.json'):
+        original_size = len(data)
+        data = gzip.compress(data, compresslevel=1)  # Fast compression
+        key = key + '.gz'
+        logger.info(f"🗜️ Compressed {original_size} → {len(data)} bytes ({100*(1-len(data)/original_size):.1f}% reduction)")
+    
     total_size = len(data)
     progress = TransferProgress(total_size, f"Upload {key}")
     
@@ -146,7 +157,7 @@ async def upload_file_chunked(key: str, data: bytes, chunk_size: int = 5 * 1024 
             upload_id = response['UploadId']
             
             # Upload chunks concurrently with limited concurrency
-            semaphore = asyncio.Semaphore(3)  # Limit to 3 concurrent chunks
+            semaphore = asyncio.Semaphore(30)  # High concurrency for H100 bandwidth
             tasks = []
             
             for i in range(0, total_size, chunk_size):
@@ -231,36 +242,56 @@ async def _upload_chunk_with_semaphore(semaphore, client, key: str, upload_id: s
                     raise e
 
 async def download_file_chunked(key: str, max_retries: int = 3) -> Optional[bytes]:
-    """Download file in chunks with retry logic and progress logging"""
+    """Download file in chunks with automatic decompression"""
+    actual_key = key
+    is_compressed = False
+    
     for attempt in range(max_retries):
         try:
             async with get_client_ctx() as client:
-                # Get object info first to know the size
-                head_response = await client.head_object(Bucket=get_conf("R2_BUCKET_ID"), Key=key)
+                # Try compressed version first if not already .gz
+                if not key.endswith('.gz'):
+                    try:
+                        compressed_key = key + '.gz'
+                        head_response = await client.head_object(Bucket=get_conf("R2_BUCKET_ID"), Key=compressed_key)
+                        actual_key = compressed_key
+                        is_compressed = True
+                        logger.debug(f"Found compressed version: {compressed_key}")
+                    except:
+                        # Fallback to uncompressed
+                        head_response = await client.head_object(Bucket=get_conf("R2_BUCKET_ID"), Key=key)
+                        actual_key = key
+                else:
+                    head_response = await client.head_object(Bucket=get_conf("R2_BUCKET_ID"), Key=key)
+                    is_compressed = key.endswith('.gz')
                 total_size = head_response['ContentLength']
                 
-                logger.info(f"📥 Downloading {key} ({total_size} bytes)")
-                progress = TransferProgress(total_size, f"Download {key}")
+                logger.info(f"📥 Downloading {actual_key} ({total_size} bytes){' (compressed)' if is_compressed else ''}")
+                progress = TransferProgress(total_size, f"Download {actual_key}")
                 
                 # For small files, download in one go
-                chunk_size = 5 * 1024 * 1024  # 5MB chunks
+                chunk_size = 100 * 1024 * 1024  # 100MB chunks for H100 bandwidth
                 if total_size <= chunk_size:
-                    response = await client.get_object(Bucket=get_conf("R2_BUCKET_ID"), Key=key)
+                    response = await client.get_object(Bucket=get_conf("R2_BUCKET_ID"), Key=actual_key)
                     data = await response["Body"].read()
                     progress.update(len(data))
                     elapsed = time.time() - progress.start_time
                     speed_mbps = (total_size / (1024 * 1024)) / elapsed if elapsed > 0 else 0
-                    logger.info(f"✅ Download completed: {key} ({total_size} bytes) in {elapsed:.1f}s @ {speed_mbps:.2f} MB/s")
+                    logger.info(f"✅ Download completed: {actual_key} ({total_size} bytes) in {elapsed:.1f}s @ {speed_mbps:.2f} MB/s")
+                    # Decompress if needed
+                    if is_compressed:
+                        data = gzip.decompress(data)
+                        logger.debug(f"🗜️ Decompressed to {len(data)} bytes")
                     return data
                 
                 # For large files, download in chunks
                 chunks = []
-                semaphore = asyncio.Semaphore(3)  # Limit concurrent downloads
+                semaphore = asyncio.Semaphore(30)  # High concurrency for H100 bandwidth
                 tasks = []
                 
                 for start in range(0, total_size, chunk_size):
                     end = min(start + chunk_size - 1, total_size - 1)
-                    task = _download_chunk_with_semaphore(semaphore, client, key, start, end, progress, max_retries)
+                    task = _download_chunk_with_semaphore(semaphore, client, actual_key, start, end, progress, max_retries)
                     tasks.append(task)
                 
                 # Wait for all chunks
@@ -276,7 +307,12 @@ async def download_file_chunked(key: str, max_retries: int = 3) -> Optional[byte
                 data = b''.join(chunks)
                 elapsed = time.time() - progress.start_time
                 speed_mbps = (total_size / (1024 * 1024)) / elapsed if elapsed > 0 else 0
-                logger.info(f"✅ Download completed: {key} ({total_size} bytes) in {elapsed:.1f}s @ {speed_mbps:.2f} MB/s")
+                logger.info(f"✅ Download completed: {actual_key} ({total_size} bytes) in {elapsed:.1f}s @ {speed_mbps:.2f} MB/s")
+                
+                # Decompress if needed
+                if is_compressed:
+                    data = gzip.decompress(data)
+                    logger.debug(f"🗜️ Decompressed to {len(data)} bytes")
                 return data
                 
         except Exception as e:
@@ -333,11 +369,20 @@ async def sink_window_inferences(wallet: bt.wallet, window_start: int, inference
         logger.error(f"❌ Failed to upload window data for window {window_start}")
 
 async def file_exists(key: str) -> bool:
-    """Check if a file exists in the bucket without downloading it"""
+    """Check if a file exists in the bucket (checks both compressed and uncompressed)"""
     try:
         async with get_client_ctx() as client:
+            # Check for compressed version first
+            if not key.endswith('.gz'):
+                try:
+                    await client.head_object(Bucket=get_conf("R2_BUCKET_ID"), Key=key + '.gz')
+                    return True
+                except:
+                    pass
+            
+            # Check for original key
             await client.head_object(Bucket=get_conf("R2_BUCKET_ID"), Key=key)
-        return True
+            return True
     except Exception:
         return False
 
@@ -455,40 +500,54 @@ async def model_state_exists(hotkey: str, window: int) -> bool:
     key = f"grail/models/{hotkey}-{window}.safetensors"
     return await file_exists(key)
 
-async def upload_valid_inferences(window: int, valid_inferences: List[dict]):
-    """Upload validated inferences for training with chunked upload and progress logging"""
-    key = f"grail/valid_inferences/{window}.json"
+async def upload_valid_rollouts(window: int, valid_rollouts: List[dict]):
+    """Upload validated SAT rollouts for training with chunked upload and progress logging"""
+    key = f"grail/valid_rollouts/{window}.json"
     
     data = {
         "window": window,
-        "count": len(valid_inferences),
-        "inferences": valid_inferences,
+        "count": len(valid_rollouts),
+        "rollouts": valid_rollouts,
         "timestamp": time.time()
     }
     
     body = json.dumps(data).encode()
-    logger.debug(f"[VALID] Uploading {len(valid_inferences)} valid inferences for window {window}")
+    logger.debug(f"[VALID] Uploading {len(valid_rollouts)} valid rollouts for window {window}")
     
     success = await upload_file_chunked(key, body)
     
     if success:
-        logger.info(f"📤 Uploaded {len(valid_inferences)} valid inferences for window {window}")
+        logger.info(f"📤 Uploaded {len(valid_rollouts)} valid rollouts for window {window}")
     else:
-        logger.error(f"❌ Failed to upload valid inferences for window {window}")
+        logger.error(f"❌ Failed to upload valid rollouts for window {window}")
     
     return success
 
-async def get_valid_inferences(window: int) -> List[dict]:
-    """Download valid inferences for training"""
-    key = f"grail/valid_inferences/{window}.json"
+async def get_valid_rollouts(window: int) -> List[dict]:
+    """
+    Download valid SAT rollouts for training.
+    
+    These rollouts have already been:
+    - Verified by validators using verify_rollout()
+    - Confirmed to have valid GRAIL proofs (model identity verified)
+    - Checked for SAT problem correctness and solution validity
+    
+    The trainer can safely use these for GRPO training.
+    """
+    key = f"grail/valid_rollouts/{window}.json"
     
     try:
         data = await get_file(key)
-        if data and 'inferences' in data:
+        if data and 'rollouts' in data:
+            logger.info(f"Downloaded {len(data['rollouts'])} verified rollouts for window {window}")
+            return data['rollouts']
+        # Backward compatibility: check old format
+        elif data and 'inferences' in data:
+            logger.info(f"Downloaded {len(data['inferences'])} verified rollouts (legacy format) for window {window}")
             return data['inferences']
         return []
     except Exception:
-        logger.debug("No valid inferences found for window %s", window)
+        logger.debug("No valid rollouts found for window %s", window)
         return []
 
 # --------------------------------------------------------------------------- #
@@ -522,21 +581,24 @@ def parse_window_filename(filename: str) -> Tuple[str, int]:
         return wallet, window_start
     return None, None
 
-def sign_inference(inference_data: dict, wallet: bt.wallet) -> dict:
-    """Sign an inference using the wallet hotkey"""
-    # Create challenge string from key inference data
-    challenge = f"{inference_data['prompt']}{inference_data['block_hash']}{inference_data['nonce']}"
-    inference_data['challenge'] = challenge
-    inference_data['hotkey'] = wallet.hotkey.ss58_address
-    inference_data['signature'] = wallet.hotkey.sign(data=challenge).hex()
-    return inference_data
+def sign_rollout(rollout_data: dict, wallet: bt.wallet) -> dict:
+    """Sign a SAT rollout using the wallet hotkey"""
+    # Create challenge string from key rollout data
+    sat_seed = rollout_data.get('sat_seed', '')
+    block_hash = rollout_data.get('block_hash', '')
+    nonce = rollout_data.get('nonce', '')
+    challenge = f"{sat_seed}{block_hash}{nonce}"
+    rollout_data['challenge'] = challenge
+    rollout_data['hotkey'] = wallet.hotkey.ss58_address
+    rollout_data['signature'] = wallet.hotkey.sign(data=challenge).hex()
+    return rollout_data
 
-def verify_inference_signature(inference_data: dict) -> bool:
-    """Verify the signature of an inference"""
+def verify_rollout_signature(rollout_data: dict) -> bool:
+    """Verify the signature of a rollout"""
     try:
-        challenge = inference_data.get('challenge')
-        hotkey = inference_data.get('hotkey')
-        signature = inference_data.get('signature')
+        challenge = rollout_data.get('challenge')
+        hotkey = rollout_data.get('hotkey')
+        signature = rollout_data.get('signature')
         
         if not all([challenge, hotkey, signature]):
             return False
@@ -579,35 +641,55 @@ class Trainer:
             
         # Prepare for training
         self.model, self.tokenizer = self.accelerator.prepare(self.model, self.tokenizer)
+    
+    def _check_model_health(self) -> bool:
+        """Check if model has NaN or Inf parameters."""
+        for name, param in self.model.named_parameters():
+            if torch.isnan(param).any() or torch.isinf(param).any():
+                logger.error(f"NaN/Inf detected in parameter: {name}")
+                return True
+        return False
         
     async def train_window(self, hotkey: str, window: int) -> bool:
-        """Train model on SAT rollouts from previous window using GRPO and upload for future window"""
+        """
+        Train model on SAT rollouts from previous window using GRPO and upload for future window.
         
-        # Download valid inferences from the previous window  
-        valid_inferences = await get_valid_inferences(window - WINDOW_LENGTH)
+        IMPORTANT: The trainer only receives rollouts that have already been:
+        1. Verified by validators using verify_rollout() 
+        2. Confirmed to have valid GRAIL proofs (model identity verified)
+        3. Checked for SAT problem/solution correctness
         
-        if not valid_inferences:
-            logger.warning(f"No valid inferences found for window {window - WINDOW_LENGTH}")
+        This ensures we only train on legitimate model-generated rollouts.
+        """
+        
+        # Download valid rollouts from the previous window  
+        # These have already been verified by validators
+        valid_rollouts = await get_valid_rollouts(window - WINDOW_LENGTH)
+        
+        if not valid_rollouts:
+            logger.warning(f"No valid rollouts found for window {window - WINDOW_LENGTH}")
             # Still upload base model state if no training data
             success = await save_model_state(self.model, hotkey, window + WINDOW_LENGTH)
             return success
             
-        logger.info(f"🎓 Training on {len(valid_inferences)} SAT rollouts from window {window - WINDOW_LENGTH}")
+        logger.info(f"🎓 Training on {len(valid_rollouts)} SAT rollouts from window {window - WINDOW_LENGTH}")
         
         # Prepare training data for GRPO
         texts = []
         rewards = []
+        trajectories = []  # Store trajectories for analysis
         successful_count = 0
+        unique_solutions = set()  # Track unique successful solutions
         
-        for inference in valid_inferences:
+        for rollout in valid_rollouts:
             try:
                 # Extract SAT problem and rollout data
-                commit = inference.get('commit', {})
+                commit = rollout.get('commit', {})
                 tokens = commit.get('tokens', [])
-                rollout = commit.get('rollout', {})
+                rollout_data = commit.get('rollout', {})
                 sat_problem = commit.get('sat_problem', {})
                 
-                if not tokens or not rollout:
+                if not tokens or not rollout_data:
                     continue
                 
                 # Decode the full sequence (SAT problem + solution attempt)
@@ -616,24 +698,34 @@ class Trainer:
                 
                 # Calculate reward based on SAT solving performance
                 # GRPO rewards: higher for successful solutions, partial credit for progress
-                if rollout.get('success', False):
+                trajectory = rollout_data.get('trajectory', [])
+                assignment = rollout_data.get('assignment', [])
+                
+                if rollout_data.get('success', False):
                     # High reward for successful solution
                     reward = 1.0
                     successful_count += 1
+                    
+                    # Track unique solutions for bonus rewards
+                    solution_hash = hashlib.sha256(str(assignment).encode()).hexdigest()
+                    if solution_hash not in unique_solutions:
+                        unique_solutions.add(solution_hash)
+                        reward += 0.5  # Bonus for finding unique solution
+                        logger.debug(f"Found unique solution #{len(unique_solutions)}")
                 else:
                     # Partial reward based on satisfied clauses
-                    satisfied = rollout.get('satisfied_clauses', 0)
+                    satisfied = rollout_data.get('satisfied_clauses', 0)
                     total = len(sat_problem.get('clauses', [1]))  # Avoid division by zero
                     reward = -0.5 + (satisfied / total) * 0.5  # Range: [-0.5, 0]
                 
                 # Add trajectory reward (bonus for efficiency)
-                trajectory = rollout.get('trajectory', [])
-                if trajectory and rollout.get('success', False):
+                if trajectory and rollout_data.get('success', False):
                     # Bonus for solving quickly
                     efficiency_bonus = max(0, 0.2 * (1 - len(trajectory) / (sat_problem.get('num_vars', 10) * 2)))
                     reward += efficiency_bonus
                 
                 rewards.append(reward)
+                trajectories.append(trajectory)
                 
             except Exception as e:
                 logger.debug(f"Skipping invalid SAT rollout: {e}")
@@ -645,16 +737,35 @@ class Trainer:
             success = await save_model_state(self.model, hotkey, window + WINDOW_LENGTH)
             return success
             
-        logger.info(f"📚 Training on {len(texts)} SAT rollouts ({successful_count} successful)")
-        logger.info(f"📊 Average reward: {sum(rewards)/len(rewards):.3f}")
+        logger.info(f"📚 Training on {len(texts)} SAT rollouts ({successful_count} successful, {len(unique_solutions)} unique)")
+        logger.info(f"📊 Average reward: {sum(rewards)/len(rewards):.3f}, Max: {max(rewards):.3f}")
         
         # GRPO-style training: reinforce successful trajectories
         try:
-            optimizer = torch.optim.AdamW(self.model.parameters(), lr=5e-6)  # Lower LR for stability
+            # Even lower learning rate for stability
+            base_lr = 2e-6  # Reduced from 5e-6
+            optimizer = torch.optim.AdamW(
+                self.model.parameters(), 
+                lr=base_lr,
+                weight_decay=0.01,  # Add weight decay for regularization
+                eps=1e-8  # Numerical stability
+            )
+            
+            # Learning rate scheduler for warmup
+            scheduler = torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=0.1,  # Start at 10% of base_lr
+                total_iters=10  # Warmup over 10 steps
+            )
             
             for epoch in range(2):  # Two epochs for better learning
                 total_loss = 0
                 batch_size = min(4, len(texts))  # Small batch size
+                
+                # Check model health before training
+                if self._check_model_health():
+                    logger.warning("Model has NaN/Inf parameters before training, skipping training")
+                    break
                 
                 # Sort by rewards to prioritize learning from successful rollouts
                 sorted_indices = sorted(range(len(texts)), key=lambda i: rewards[i], reverse=True)
@@ -698,10 +809,33 @@ class Trainer:
                     optimizer.zero_grad()
                     self.accelerator.backward(weighted_loss)
                     
-                    # Gradient clipping for stability
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    # More aggressive gradient clipping for stability
+                    grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)  # Reduced from 1.0
+                    
+                    # Check for gradient explosion
+                    if grad_norm > 10.0:
+                        logger.warning(f"Large gradient norm detected: {grad_norm:.2f}, skipping batch")
+                        continue
+                    
+                    # Check for NaN/Inf gradients
+                    has_nan_grad = False
+                    for param in self.model.parameters():
+                        if param.grad is not None:
+                            if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                                has_nan_grad = True
+                                break
+                    
+                    if has_nan_grad:
+                        logger.warning("NaN/Inf gradients detected, skipping batch")
+                        continue
                     
                     optimizer.step()
+                    scheduler.step()  # Update learning rate
+                    
+                    # Check model health after update
+                    if self._check_model_health():
+                        logger.error("Model became unhealthy during training, stopping")
+                        break
                     
                     total_loss += weighted_loss.item()
                     
@@ -759,6 +893,7 @@ def mine(use_drand):
     wallet  = bt.wallet(name=coldkey, hotkey=hotkey)
     
     # Initialize model and prover
+    logger.info(f"🔑 Miner hotkey: {wallet.hotkey.ss58_address}")
     logger.info(f"Loading base model: {LLAMA_MODEL}")
     prover = Prover(model_name=LLAMA_MODEL)
     # Set deterministic secret key based on hotkey
@@ -805,12 +940,20 @@ def mine(use_drand):
                     pass
                 
                 logger.info(f"🔥 Starting inference generation for window {window_start}-{window_start + WINDOW_LENGTH - 1}")
+                
+                # Check if we're already past this window
+                current_check = await subtensor.get_current_block()
+                if current_check > window_start + WINDOW_LENGTH - 2:
+                    logger.warning(f"Window {window_start} nearly over (current block: {current_check}), waiting for next window")
+                    last_window_start = window_start
+                    await asyncio.sleep(5)
+                    continue
+                
                 window_block_hash = await subtensor.get_block_hash(window_start)
                 
                 # Get drand randomness for this window if enabled
                 if use_drand:
                     try:
-                        from grail.grail import get_drand_beacon, get_round_at_time
                         drand_round = get_round_at_time(int(time.time()))
                         drand_beacon = get_drand_beacon(drand_round)
                         logger.info(f"🎲 Using drand randomness from round {drand_beacon['round']}")
@@ -836,11 +979,12 @@ def mine(use_drand):
                     
                     # Stop if we've moved to the next window
                     if current_window > window_start:
+                        logger.info(f"Window {window_start} has ended, moving to next window")
                         break
                     
                     try:
                         inference_count += 1
-                        print(f"\r⚡ Generating SAT rollout {inference_count}...", end="", flush=True)
+                        logger.info(f"⚡ Generating SAT rollout {inference_count}...")
                         
                         # Generate unique seed for SAT problem
                         nonce = random.randint(1000, 9999)
@@ -849,13 +993,18 @@ def mine(use_drand):
                         # Generate SAT problem from seed
                         difficulty = min(0.9, 0.3 + (inference_count * 0.01))  # Gradually increase difficulty
                         sat_problem = generate_sat_problem(sat_seed, difficulty)
+                        logger.debug(f"Generated SAT problem: {sat_problem.num_vars} vars, {len(sat_problem.clauses)} clauses")
                         
                         # Generate rollout with GRAIL proof using combined randomness
-                        commit_data = prover.commit_rollout(sat_problem, combined_randomness)
-                        proof_data = prover.open(combined_randomness)
+                        logger.debug(f"Generating rollout with randomness: {combined_randomness[:16]}...")
+                        commit_data = prover.commit_rollout(sat_problem, combined_randomness, difficulty)
+                        logger.debug(f"Rollout complete: success={commit_data['rollout']['success']}")
                         
-                        # Prepare inference data
-                        inference_data = {
+                        proof_data = prover.open(combined_randomness)
+                        logger.debug(f"Proof generated with {len(proof_data['indices'])} indices")
+                        
+                        # Prepare rollout data
+                        rollout_data = {
                             "window_start": window_start,
                             "block": current_block,
                             "nonce": nonce,
@@ -869,14 +1018,14 @@ def mine(use_drand):
                             "timestamp": time.time()
                         }
                         
-                        # Sign the inference
-                        inference_data = sign_inference(inference_data, wallet)
+                        # Sign the rollout
+                        rollout_data = sign_rollout(rollout_data, wallet)
                         
                         # Log successful rollouts
                         if commit_data["rollout"]["success"]:
                             logger.info(f"✅ Successfully solved SAT problem (vars={sat_problem.num_vars}, clauses={len(sat_problem.clauses)})")
                         
-                        inferences.append(inference_data)
+                        inferences.append(rollout_data)
                         
                         # Small delay to prevent overwhelming the system
                         await asyncio.sleep(0.1)
@@ -885,8 +1034,6 @@ def mine(use_drand):
                         logger.warning(f"Failed to generate inference {inference_count}: {e}")
                         continue
                 
-                # Clear the progress line
-                print("\r" + " " * 50 + "\r", end="")
                 
                 elapsed_time = time.time() - start_time
                 logger.info(f"🎯 Generated {len(inferences)} inferences in {elapsed_time:.1f}s for window {window_start}")
@@ -921,12 +1068,14 @@ def mine(use_drand):
 # --------------------------------------------------------------------------- #
 @cli.command("validate")
 @click.option('--use-drand/--no-drand', default=True, help='Verify drand randomness (default: True)')
-def validate(use_drand):
+@click.option('--test-mode/--no-test-mode', default=True, help='Test mode: validate own files (default: True)')
+def validate(use_drand, test_mode):
     coldkey = get_conf("BT_WALLET_COLD", "default")
     hotkey  = get_conf("BT_WALLET_HOT", "default")
     wallet  = bt.wallet(name=coldkey, hotkey=hotkey)
     
     # Initialize verifier
+    logger.info(f"🔑 Validator hotkey: {wallet.hotkey.ss58_address}")
     logger.info(f"Loading base model for validation: {LLAMA_MODEL}")
     verifier = Verifier(model_name=LLAMA_MODEL)
     
@@ -980,26 +1129,38 @@ def validate(use_drand):
                 # Get block hash for the window start
                 target_window_hash = await subtensor.get_block_hash(target_window)
                 
-                # Check for files from active hotkeys only
-                logger.info(f"Checking files for {len(meta.hotkeys)} active hotkeys in window {target_window}")
+                # For testing: just use the validator's own hotkey (same as miner in local testing)
+                # In production, this would iterate through meta.hotkeys
+                test_mode = True  # Set to False for production
                 
-                # Download and process files only from registered hotkeys
-                total_valid_inferences = 0
+                if test_mode:
+                    # Use the wallet's own hotkey for testing
+                    hotkeys_to_check = [wallet.hotkey.ss58_address]
+                    logger.info(f"🧪 TEST MODE: Checking files for own hotkey {wallet.hotkey.ss58_address} in window {target_window}")
+                else:
+                    # Use metagraph hotkeys for production
+                    hotkeys_to_check = meta.hotkeys
+                    logger.info(f"Checking files for {len(meta.hotkeys)} active hotkeys in window {target_window}")
+                
+                # Download and process files
+                total_valid_rollouts = 0
                 window_inference_counts = defaultdict(int)
                 files_found = 0
-                all_valid_inferences = []  # Store all valid inferences for uploading
+                all_valid_rollouts = []  # Store all valid rollouts for uploading
                 
-                for wallet_addr in meta.hotkeys:
+                for wallet_addr in hotkeys_to_check:
                     try:
                         # Construct expected filename for this hotkey and window
                         filename = f"grail/windows/{wallet_addr}-window-{target_window}.json"
                         
                         # Check if file exists before downloading
-                        if not await file_exists(filename):
+                        exists = await file_exists(filename)
+                        if not exists:
+                            logger.debug(f"No file found for {wallet_addr} at {filename}")
                             continue
                         
                         files_found += 1
-                        logger.debug(f"Found file for hotkey {wallet_addr}")
+                        logger.info(f"📁 Found file for hotkey {wallet_addr}")
                         
                         window_data = await get_file(filename)
                         if not window_data:
@@ -1051,7 +1212,7 @@ def validate(use_drand):
                                 nonces_seen.add(nonce)
                                 
                                 # Verify signature
-                                if not verify_inference_signature(inference):
+                                if not verify_rollout_signature(inference):
                                     logger.debug(f"Invalid signature for inference from {wallet_addr}")
                                     continue
                                 
@@ -1061,18 +1222,18 @@ def validate(use_drand):
                                     logger.debug(f"Invalid SAT seed in inference from {wallet_addr}")
                                     continue
                                 
-                                # Verify GRAIL proof and SAT rollout (spot checking for efficiency)
-                                if random.random() < 0.3:  # 30% spot check for SAT problems
-                                    try:
-                                        logger.debug(f"Spot checking SAT rollout from {wallet_addr}")
-                                        prover_secret_key = derive_secret_key(wallet_addr)
-                                        is_valid = verifier.verify_rollout(inference["commit"], inference["proof"], prover_secret_key)
-                                        if not is_valid:
-                                            logger.debug(f"SAT rollout verification failed for {wallet_addr}")
-                                            continue
-                                    except Exception as e:
-                                        logger.debug(f"Rollout verification error for {wallet_addr}: {e}")
+                                # Verify GRAIL proof and SAT rollout
+                                # We must verify ALL rollouts to ensure model identity
+                                try:
+                                    logger.debug(f"Verifying SAT rollout from {wallet_addr}")
+                                    prover_secret_key = derive_secret_key(wallet_addr)
+                                    is_valid = verifier.verify_rollout(inference["commit"], inference["proof"], prover_secret_key)
+                                    if not is_valid:
+                                        logger.warning(f"SAT rollout verification failed for {wallet_addr} - skipping")
                                         continue
+                                except Exception as e:
+                                    logger.warning(f"Rollout verification error for {wallet_addr}: {e}")
+                                    continue
                                 
                                 valid_count += 1
                                 
@@ -1085,8 +1246,8 @@ def validate(use_drand):
                                     solution_hash = hashlib.sha256(str(assignment).encode()).hexdigest()
                                     unique_solutions.add(solution_hash)
                                 
-                                # Add to collection of all valid inferences
-                                all_valid_inferences.append(inference)
+                                # Add to collection of all valid rollouts
+                                all_valid_rollouts.append(inference)
                                 
                             except Exception as e:
                                 logger.debug(f"Error processing inference from {wallet_addr}: {e}")
@@ -1098,7 +1259,7 @@ def validate(use_drand):
                             "successful": successful_rollouts,
                             "unique": len(unique_solutions)
                         }
-                        total_valid_inferences += valid_count
+                        total_valid_rollouts += valid_count
                         
                         logger.info(f"✅ {wallet_addr}: {valid_count} valid, {successful_rollouts} successful, {len(unique_solutions)} unique solutions")
                         
@@ -1107,15 +1268,15 @@ def validate(use_drand):
                         continue
                 
                 logger.info(f"📁 Found {files_found} window files from {len(meta.hotkeys)} active hotkeys")
-                logger.info(f"🏁 Total valid inferences in window {target_window}: {total_valid_inferences}")
+                logger.info(f"🏁 Total valid rollouts in window {target_window}: {total_valid_rollouts}")
                 
-                # Upload all valid inferences for training
-                if all_valid_inferences:
-                    upload_success = await upload_valid_inferences(target_window, all_valid_inferences)
+                # Upload all valid rollouts for training
+                if all_valid_rollouts:
+                    upload_success = await upload_valid_rollouts(target_window, all_valid_rollouts)
                     if upload_success:
-                        logger.info(f"📤 Uploaded {len(all_valid_inferences)} valid inferences for training")
+                        logger.info(f"📤 Uploaded {len(all_valid_rollouts)} valid rollouts for training")
                     else:
-                        logger.warning(f"⚠️ Failed to upload valid inferences for training")
+                        logger.warning(f"⚠️ Failed to upload valid rollouts for training")
                 
                 # Update global inference counts for weight calculation
                 for hotkey, metrics in window_inference_counts.items():

@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "grail"
 version = "0.0.0"
 description = "GRAIL – Guaranteed Rollout Authenticity via Inference Ledger"
-readme = "SPEC.md"
+readme = "README.md"
 license = {text = "MIT"}
 authors = [
     {name = "GRAIL Team"},
@@ -48,6 +48,8 @@ dev = [
     "flake8>=5.0.0",
     "mypy>=1.0.0",
     "pre-commit>=2.20.0",
+    "bittensor-cli",
+    "zstandard>=0.21.0",  # Optional: better compression than gzip
 ]
 experiments = [
     "vllm>=0.2.0",
