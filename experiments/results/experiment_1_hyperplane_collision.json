@@ -1,0 +1,111 @@
+{
+  "collision_probability": [
+    {
+      "dimension": 64,
+      "observed_collision_rate": 0.0,
+      "expected_collision_rate": 3.259629012672058e-09,
+      "ratio": 0.0
+    },
+    {
+      "dimension": 256,
+      "observed_collision_rate": 0.0,
+      "expected_collision_rate": 3.259629012672058e-09,
+      "ratio": 0.0
+    },
+    {
+      "dimension": 768,
+      "observed_collision_rate": 0.0,
+      "expected_collision_rate": 3.259629012672058e-09,
+      "ratio": 0.0
+    },
+    {
+      "dimension": 2048,
+      "observed_collision_rate": 0.0,
+      "expected_collision_rate": 3.259629012672058e-09,
+      "ratio": 0.0
+    }
+  ],
+  "constraint_intersection": [
+    {
+      "dimension": 256,
+      "num_constraints": 1,
+      "optimization_success": false,
+      "iterations": 1000,
+      "estimated_free_dimensions": 0,
+      "reduction_factor": 0.0
+    },
+    {
+      "dimension": 256,
+      "num_constraints": 4,
+      "optimization_success": false,
+      "iterations": 1000,
+      "estimated_free_dimensions": 0,
+      "reduction_factor": 0.0
+    },
+    {
+      "dimension": 256,
+      "num_constraints": 8,
+      "optimization_success": false,
+      "iterations": 1000,
+      "estimated_free_dimensions": 0,
+      "reduction_factor": 0.0
+    },
+    {
+      "dimension": 256,
+      "num_constraints": 16,
+      "optimization_success": false,
+      "iterations": 1000,
+      "estimated_free_dimensions": 0,
+      "reduction_factor": 0.0
+    },
+    {
+      "dimension": 256,
+      "num_constraints": 32,
+      "optimization_success": false,
+      "iterations": 1000,
+      "estimated_free_dimensions": 0,
+      "reduction_factor": 0.0
+    },
+    {
+      "dimension": 768,
+      "num_constraints": 1,
+      "optimization_success": false,
+      "iterations": 1000,
+      "estimated_free_dimensions": 0,
+      "reduction_factor": 0.0
+    },
+    {
+      "dimension": 768,
+      "num_constraints": 4,
+      "optimization_success": false,
+      "iterations": 1000,
+      "estimated_free_dimensions": 0,
+      "reduction_factor": 0.0
+    },
+    {
+      "dimension": 768,
+      "num_constraints": 8,
+      "optimization_success": false,
+      "iterations": 1000,
+      "estimated_free_dimensions": 0,
+      "reduction_factor": 0.0
+    },
+    {
+      "dimension": 768,
+      "num_constraints": 16,
+      "optimization_success": false,
+      "iterations": 1000,
+      "estimated_free_dimensions": 0,
+      "reduction_factor": 0.0
+    },
+    {
+      "dimension": 768,
+      "num_constraints": 32,
+      "optimization_success": false,
+      "iterations": 1000,
+      "estimated_free_dimensions": 0,
+      "reduction_factor": 0.0
+    }
+  ],
+  "hyperplane_distribution": []
+}
