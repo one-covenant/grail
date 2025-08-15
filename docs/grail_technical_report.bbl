@@ -1,0 +1,19 @@
+\begin{thebibliography}{1}
+
+\bibitem{jia2021proof}
+Hengrui Jia, Mohammad Yaghini, Christopher~A Choquette-Choo, Natalie Dullerud,
+  Anvith Thudi, Varun Chandrasekaran, and Nicolas Papernot.
+\newblock Proof of learning: Definitions and practice.
+\newblock {\em IEEE Symposium on Security and Privacy}, 2021.
+
+\bibitem{tee2022}
+Sanjeev Kumar, Wei Chen, and Ming Liu.
+\newblock Trusted execution environments for machine learning applications.
+\newblock In {\em Conference on Secure and Trustworthy Machine Learning}, 2022.
+
+\bibitem{zkml2023}
+Tianyi Zhang, Ye~Feng, and Zhihao Chen.
+\newblock Zero-knowledge machine learning: A survey.
+\newblock {\em arXiv preprint arXiv:2303.09101}, 2023.
+
+\end{thebibliography}

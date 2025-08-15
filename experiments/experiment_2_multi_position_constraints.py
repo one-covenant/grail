@@ -31,7 +31,6 @@ class MultiPositionConstraintExperiment:
         print("Loading model...")
         # Force safetensors to avoid torch.load vulnerability
         try:
-        try:
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_name, use_safetensors=True
             ).to(self.device).eval()
