@@ -28,7 +28,7 @@ from accelerate import Accelerator
 
 __version__ = "0.0.0"
 
-from .grail import Prover, Verifier
+from .grail import Prover, Verifier, SATProblem, SATEnvironment, generate_sat_problem
 
 # --------------------------------------------------------------------------- #
 #                       Constants & global singletons                         #
@@ -579,7 +579,7 @@ class Trainer:
         self.model, self.tokenizer = self.accelerator.prepare(self.model, self.tokenizer)
         
     async def train_window(self, hotkey: str, window: int) -> bool:
-        """Train model on valid inferences from previous window and upload for future window"""
+        """Train model on SAT rollouts from previous window using GRPO and upload for future window"""
         
         # Download valid inferences from the previous window  
         valid_inferences = await get_valid_inferences(window - WINDOW_LENGTH)
@@ -590,29 +590,51 @@ class Trainer:
             success = await save_model_state(self.model, hotkey, window + WINDOW_LENGTH)
             return success
             
-        logger.info(f"🎓 Training on {len(valid_inferences)} valid inferences from window {window - WINDOW_LENGTH}")
+        logger.info(f"🎓 Training on {len(valid_inferences)} SAT rollouts from window {window - WINDOW_LENGTH}")
         
-        # Prepare training data
+        # Prepare training data for GRPO
         texts = []
         rewards = []
+        successful_count = 0
         
         for inference in valid_inferences:
             try:
-                # Extract prompt and generated text from tokens
-                tokens = inference.get('commit', {}).get('tokens', [])
-                if not tokens:
+                # Extract SAT problem and rollout data
+                commit = inference.get('commit', {})
+                tokens = commit.get('tokens', [])
+                rollout = commit.get('rollout', {})
+                sat_problem = commit.get('sat_problem', {})
+                
+                if not tokens or not rollout:
                     continue
-                    
-                # Decode the full sequence
+                
+                # Decode the full sequence (SAT problem + solution attempt)
                 full_text = self.tokenizer.decode(tokens, skip_special_tokens=True)
                 texts.append(full_text)
                 
-                # Assign random reward (GRPO style)
-                reward = random.uniform(-1.0, 1.0)
+                # Calculate reward based on SAT solving performance
+                # GRPO rewards: higher for successful solutions, partial credit for progress
+                if rollout.get('success', False):
+                    # High reward for successful solution
+                    reward = 1.0
+                    successful_count += 1
+                else:
+                    # Partial reward based on satisfied clauses
+                    satisfied = rollout.get('satisfied_clauses', 0)
+                    total = len(sat_problem.get('clauses', [1]))  # Avoid division by zero
+                    reward = -0.5 + (satisfied / total) * 0.5  # Range: [-0.5, 0]
+                
+                # Add trajectory reward (bonus for efficiency)
+                trajectory = rollout.get('trajectory', [])
+                if trajectory and rollout.get('success', False):
+                    # Bonus for solving quickly
+                    efficiency_bonus = max(0, 0.2 * (1 - len(trajectory) / (sat_problem.get('num_vars', 10) * 2)))
+                    reward += efficiency_bonus
+                
                 rewards.append(reward)
                 
             except Exception as e:
-                logger.debug(f"Skipping invalid inference: {e}")
+                logger.debug(f"Skipping invalid SAT rollout: {e}")
                 continue
         
         if not texts:
@@ -621,20 +643,24 @@ class Trainer:
             success = await save_model_state(self.model, hotkey, window + WINDOW_LENGTH)
             return success
             
-        logger.info(f"📚 Training on {len(texts)} text samples with random rewards")
+        logger.info(f"📚 Training on {len(texts)} SAT rollouts ({successful_count} successful)")
+        logger.info(f"📊 Average reward: {sum(rewards)/len(rewards):.3f}")
         
-        # Simple reward-based fine-tuning (simplified GRPO approach)
-        # In practice, you'd want more sophisticated GRPO implementation
+        # GRPO-style training: reinforce successful trajectories
         try:
-            optimizer = torch.optim.AdamW(self.model.parameters(), lr=1e-5)
+            optimizer = torch.optim.AdamW(self.model.parameters(), lr=5e-6)  # Lower LR for stability
             
-            for epoch in range(1):  # Single epoch for efficiency
+            for epoch in range(2):  # Two epochs for better learning
                 total_loss = 0
                 batch_size = min(4, len(texts))  # Small batch size
                 
-                for i in range(0, len(texts), batch_size):
-                    batch_texts = texts[i:i+batch_size]
-                    batch_rewards = rewards[i:i+batch_size]
+                # Sort by rewards to prioritize learning from successful rollouts
+                sorted_indices = sorted(range(len(texts)), key=lambda i: rewards[i], reverse=True)
+                
+                for batch_idx in range(0, len(sorted_indices), batch_size):
+                    batch_indices = sorted_indices[batch_idx:batch_idx+batch_size]
+                    batch_texts = [texts[i] for i in batch_indices]
+                    batch_rewards = [rewards[i] for i in batch_indices]
                     
                     # Tokenize batch
                     inputs = self.tokenizer(
@@ -652,20 +678,33 @@ class Trainer:
                     outputs = self.model(**inputs, labels=inputs["input_ids"])
                     loss = outputs.loss
                     
-                    # Weight loss by reward (simple reward weighting)
-                    avg_reward = sum(batch_rewards) / len(batch_rewards)
-                    reward_weight = max(0.1, 1.0 + avg_reward)  # Scale reward influence
+                    # GRPO reward weighting: emphasize high-reward trajectories
+                    # Normalize rewards to [0, 1] range for this batch
+                    min_reward = min(batch_rewards)
+                    max_reward = max(batch_rewards)
+                    if max_reward > min_reward:
+                        normalized_rewards = [(r - min_reward) / (max_reward - min_reward) for r in batch_rewards]
+                    else:
+                        normalized_rewards = [0.5] * len(batch_rewards)
+                    
+                    # Apply reward-weighted loss
+                    avg_normalized_reward = sum(normalized_rewards) / len(normalized_rewards)
+                    reward_weight = 0.5 + avg_normalized_reward  # Range: [0.5, 1.5]
                     weighted_loss = loss * reward_weight
                     
                     # Backward pass
                     optimizer.zero_grad()
                     self.accelerator.backward(weighted_loss)
+                    
+                    # Gradient clipping for stability
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    
                     optimizer.step()
                     
                     total_loss += weighted_loss.item()
                     
                 avg_loss = total_loss / (len(texts) // batch_size + 1)
-                logger.info(f"Training epoch completed - avg loss: {avg_loss:.4f}")
+                logger.info(f"Epoch {epoch+1} completed - avg loss: {avg_loss:.4f}")
                 
         except Exception as e:
             logger.error(f"Training failed: {e}")
@@ -781,16 +820,18 @@ def mine():
                     
                     try:
                         inference_count += 1
-                        print(f"\r⚡ Generating inference {inference_count}...", end="", flush=True)
+                        print(f"\r⚡ Generating SAT rollout {inference_count}...", end="", flush=True)
                         
-                        # Generate random nonce
+                        # Generate unique seed for SAT problem
                         nonce = random.randint(1000, 9999)
+                        sat_seed = f"{wallet.hotkey.ss58_address}-{window_block_hash}-{nonce}"
                         
-                        # Create prompt in required format
-                        prompt = generate_prompt(wallet.hotkey.ss58_address, window_block_hash, nonce)
+                        # Generate SAT problem from seed
+                        difficulty = min(0.9, 0.3 + (inference_count * 0.01))  # Gradually increase difficulty
+                        sat_problem = generate_sat_problem(sat_seed, difficulty)
                         
-                        # Generate inference and proof using GRAIL with window block hash as randomness
-                        commit_data = prover.commit(prompt, window_block_hash, max_new_tokens=32)
+                        # Generate rollout with GRAIL proof
+                        commit_data = prover.commit_rollout(sat_problem, window_block_hash)
                         proof_data = prover.open(window_block_hash)
                         
                         # Prepare inference data
@@ -798,7 +839,8 @@ def mine():
                             "window_start": window_start,
                             "block": current_block,
                             "nonce": nonce,
-                            "prompt": prompt,
+                            "sat_seed": sat_seed,
+                            "difficulty": difficulty,
                             "block_hash": window_block_hash,
                             "commit": commit_data,
                             "proof": proof_data,
@@ -807,6 +849,11 @@ def mine():
                         
                         # Sign the inference
                         inference_data = sign_inference(inference_data, wallet)
+                        
+                        # Log successful rollouts
+                        if commit_data["rollout"]["success"]:
+                            logger.info(f"✅ Successfully solved SAT problem (vars={sat_problem.num_vars}, clauses={len(sat_problem.clauses)})")
+                        
                         inferences.append(inference_data)
                         
                         # Small delay to prevent overwhelming the system
@@ -949,14 +996,16 @@ def validate():
                             logger.warning(f"Window mismatch in {filename}: expected {target_window}, got {window_start}")
                             continue
                         
-                        # Verify all inferences in the window
+                        # Verify all rollouts in the window
                         valid_count = 0
+                        successful_rollouts = 0
+                        unique_solutions = set()  # Track unique successful solutions
                         nonces_seen = set()
                         
                         for inference in inferences:
                             try:
-                                # Check required fields
-                                required_fields = ["window_start", "nonce", "prompt", "block_hash", "commit", "proof", "challenge", "hotkey", "signature"]
+                                # Check required fields for SAT rollouts
+                                required_fields = ["window_start", "nonce", "sat_seed", "block_hash", "commit", "proof", "challenge", "hotkey", "signature"]
                                 if not all(field in inference for field in required_fields):
                                     logger.debug(f"Missing required fields in inference from {wallet_addr}")
                                     continue
@@ -983,26 +1032,36 @@ def validate():
                                     logger.debug(f"Invalid signature for inference from {wallet_addr}")
                                     continue
                                 
-                                # Check prompt format
-                                expected_prompt = generate_prompt(wallet_addr, target_window_hash, nonce)
-                                if inference["prompt"] != expected_prompt:
-                                    logger.debug(f"Invalid prompt format in inference from {wallet_addr}")
+                                # Verify SAT seed format
+                                expected_seed = f"{wallet_addr}-{target_window_hash}-{nonce}"
+                                if inference.get("sat_seed") != expected_seed:
+                                    logger.debug(f"Invalid SAT seed in inference from {wallet_addr}")
                                     continue
                                 
-                                # Verify GRAIL proof (spot checking for efficiency)
-                                if random.random() < 0.2:  # 20% spot check
+                                # Verify GRAIL proof and SAT rollout (spot checking for efficiency)
+                                if random.random() < 0.3:  # 30% spot check for SAT problems
                                     try:
-                                        logger.debug(f"Spot checking GRAIL proof from {wallet_addr}")
+                                        logger.debug(f"Spot checking SAT rollout from {wallet_addr}")
                                         prover_secret_key = derive_secret_key(wallet_addr)
-                                        is_valid = verifier.verify(inference["commit"], inference["proof"], prover_secret_key)
+                                        is_valid = verifier.verify_rollout(inference["commit"], inference["proof"], prover_secret_key)
                                         if not is_valid:
-                                            logger.debug(f"GRAIL proof verification failed for {wallet_addr}")
+                                            logger.debug(f"SAT rollout verification failed for {wallet_addr}")
                                             continue
                                     except Exception as e:
-                                        logger.debug(f"Proof verification error for {wallet_addr}: {e}")
+                                        logger.debug(f"Rollout verification error for {wallet_addr}: {e}")
                                         continue
                                 
                                 valid_count += 1
+                                
+                                # Track successful unique solutions
+                                rollout = inference.get("commit", {}).get("rollout", {})
+                                if rollout.get("success", False):
+                                    successful_rollouts += 1
+                                    # Create hash of solution for uniqueness
+                                    assignment = rollout.get("assignment", [])
+                                    solution_hash = hashlib.sha256(str(assignment).encode()).hexdigest()
+                                    unique_solutions.add(solution_hash)
+                                
                                 # Add to collection of all valid inferences
                                 all_valid_inferences.append(inference)
                                 
@@ -1010,10 +1069,15 @@ def validate():
                                 logger.debug(f"Error processing inference from {wallet_addr}: {e}")
                                 continue
                         
-                        window_inference_counts[wallet_addr] = valid_count
+                        # Store metrics for this miner
+                        window_inference_counts[wallet_addr] = {
+                            "valid": valid_count,
+                            "successful": successful_rollouts,
+                            "unique": len(unique_solutions)
+                        }
                         total_valid_inferences += valid_count
                         
-                        logger.info(f"✅ {wallet_addr}: {valid_count}/{len(inferences)} valid inferences")
+                        logger.info(f"✅ {wallet_addr}: {valid_count} valid, {successful_rollouts} successful, {len(unique_solutions)} unique solutions")
                         
                     except Exception as e:
                         logger.warning(f"Error processing window file {filename}: {e}")
@@ -1031,20 +1095,36 @@ def validate():
                         logger.warning(f"⚠️ Failed to upload valid inferences for training")
                 
                 # Update global inference counts for weight calculation
-                for hotkey, count in window_inference_counts.items():
-                    inference_counts[hotkey][target_window] = count
+                for hotkey, metrics in window_inference_counts.items():
+                    inference_counts[hotkey][target_window] = metrics
                 
-                # Compute weights based on moving average of inferences per window
+                # Compute weights based on unique successful rollouts
                 weights = []
                 for uid, hotkey in enumerate(meta.hotkeys):
-                    # Calculate moving average over last 3 windows
+                    # Calculate score over last 3 windows
                     recent_windows = range(max(0, target_window - 2*WINDOW_LENGTH), target_window + 1, WINDOW_LENGTH)
-                    total_inferences = sum(inference_counts[hotkey].get(w, 0) for w in recent_windows)
-                    avg_inferences = total_inferences / len(recent_windows)
                     
-                    # Weight based on inference count (normalize to 0-1)
-                    # Assume max 50 inferences per window as reasonable target
-                    weight = min(1.0, avg_inferences / 50.0)
+                    total_unique = 0
+                    total_successful = 0
+                    total_valid = 0
+                    
+                    for w in recent_windows:
+                        metrics = inference_counts[hotkey].get(w, {})
+                        if isinstance(metrics, dict):
+                            total_unique += metrics.get("unique", 0)
+                            total_successful += metrics.get("successful", 0)
+                            total_valid += metrics.get("valid", 0)
+                        else:
+                            # Backward compatibility
+                            total_valid += metrics if isinstance(metrics, (int, float)) else 0
+                    
+                    # Scoring formula: prioritize unique solutions, then successful, then valid
+                    # Weight = 0.6 * unique_ratio + 0.3 * success_ratio + 0.1 * valid_ratio
+                    unique_score = min(1.0, total_unique / 10.0) if total_unique > 0 else 0
+                    success_score = min(1.0, total_successful / 20.0) if total_successful > 0 else 0
+                    valid_score = min(1.0, total_valid / 50.0) if total_valid > 0 else 0
+                    
+                    weight = 0.6 * unique_score + 0.3 * success_score + 0.1 * valid_score
                     weights.append(weight)
                 
                 # Normalize weights
