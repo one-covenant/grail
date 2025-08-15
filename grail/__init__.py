@@ -30,6 +30,8 @@ __version__ = "0.0.0"
 
 from .grail import Prover, Verifier, SATProblem, SATEnvironment, generate_sat_problem
 
+__all__ = ["Prover", "Verifier", "SATProblem", "SATEnvironment", "generate_sat_problem", "main", "cli"]
+
 # --------------------------------------------------------------------------- #
 #                       Constants & global singletons                         #
 # --------------------------------------------------------------------------- #
@@ -732,7 +734,7 @@ class Trainer:
 def cli(verbose):
     """GRAIL CLI"""
     setup_logging(verbose)
-    
+
 # --------------------------------------------------------------------------- #
 #                               Watchdog                                      #
 # --------------------------------------------------------------------------- #
@@ -750,7 +752,8 @@ async def watchdog(timeout: int = 300):
 #                               MINER                                         #
 # --------------------------------------------------------------------------- #
 @cli.command("mine")
-def mine():    
+@click.option('--use-drand/--no-drand', default=True, help='Use drand for randomness (default: True)')
+def mine(use_drand):    
     coldkey = get_conf("BT_WALLET_COLD", "default")
     hotkey  = get_conf("BT_WALLET_HOT", "default")
     wallet  = bt.wallet(name=coldkey, hotkey=hotkey)
@@ -804,6 +807,23 @@ def mine():
                 logger.info(f"🔥 Starting inference generation for window {window_start}-{window_start + WINDOW_LENGTH - 1}")
                 window_block_hash = await subtensor.get_block_hash(window_start)
                 
+                # Get drand randomness for this window if enabled
+                if use_drand:
+                    try:
+                        from grail.grail import get_drand_beacon, get_round_at_time
+                        drand_round = get_round_at_time(int(time.time()))
+                        drand_beacon = get_drand_beacon(drand_round)
+                        logger.info(f"🎲 Using drand randomness from round {drand_beacon['round']}")
+                        # Combine drand with block hash for window randomness
+                        combined_randomness = hashlib.sha256(
+                            (window_block_hash + drand_beacon['randomness']).encode()
+                        ).hexdigest()
+                    except Exception as e:
+                        logger.warning(f"Failed to get drand, using block hash only: {e}")
+                        combined_randomness = window_block_hash
+                else:
+                    combined_randomness = window_block_hash
+                
                 # Generate as many inferences as possible during this window
                 inferences = []
                 start_time = time.time()
@@ -830,9 +850,9 @@ def mine():
                         difficulty = min(0.9, 0.3 + (inference_count * 0.01))  # Gradually increase difficulty
                         sat_problem = generate_sat_problem(sat_seed, difficulty)
                         
-                        # Generate rollout with GRAIL proof
-                        commit_data = prover.commit_rollout(sat_problem, window_block_hash)
-                        proof_data = prover.open(window_block_hash)
+                        # Generate rollout with GRAIL proof using combined randomness
+                        commit_data = prover.commit_rollout(sat_problem, combined_randomness)
+                        proof_data = prover.open(combined_randomness)
                         
                         # Prepare inference data
                         inference_data = {
@@ -842,6 +862,8 @@ def mine():
                             "sat_seed": sat_seed,
                             "difficulty": difficulty,
                             "block_hash": window_block_hash,
+                            "randomness": combined_randomness,
+                            "use_drand": use_drand,
                             "commit": commit_data,
                             "proof": proof_data,
                             "timestamp": time.time()
@@ -898,7 +920,8 @@ def mine():
 #                               Validator                                     #
 # --------------------------------------------------------------------------- #
 @cli.command("validate")
-def validate():
+@click.option('--use-drand/--no-drand', default=True, help='Verify drand randomness (default: True)')
+def validate(use_drand):
     coldkey = get_conf("BT_WALLET_COLD", "default")
     hotkey  = get_conf("BT_WALLET_HOT", "default")
     wallet  = bt.wallet(name=coldkey, hotkey=hotkey)
@@ -1250,3 +1273,10 @@ def train():
         )
     
     asyncio.run(main())
+
+# --------------------------------------------------------------------------- #
+#                          Main Entry Point                                   #
+# --------------------------------------------------------------------------- #
+def main():
+    """Main entry point for the CLI"""
+    cli()
