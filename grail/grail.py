@@ -13,6 +13,8 @@ import hmac
 import torch
 import numpy as np
 import logging
+import requests
+import time
 from typing import List, Tuple, Dict, Optional
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -38,14 +40,96 @@ MIN_CLAUSES = 5
 MAX_CLAUSES = 50
 CLAUSE_LENGTH = 3  # 3-SAT problems
 
-# ────────────────────  MOCK BEACON HELPERS  ──────────────────────────────
+# ────────────────────  DRAND BEACON HELPERS  ──────────────────────────────
 
-def get_beacon(round_id: str = "latest") -> dict:
+# Drand configuration - using League of Entropy mainnet
+DRAND_URLS = [
+    "https://api.drand.sh",
+    "https://drand.cloudflare.com",
+    "https://api.drand.secureweb3.com:6875"
+]
+DRAND_CHAIN_HASH = "8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce"  # quicknet chain
+DRAND_GENESIS_TIME = 1692803367  # quicknet genesis
+DRAND_PERIOD = 3  # 3 seconds per round for quicknet
+
+def get_drand_beacon(round_id: Optional[int] = None, use_fallback: bool = True) -> dict:
+    """
+    Fetch randomness from drand network.
+    
+    Args:
+        round_id: Specific round to fetch, or None for latest
+        use_fallback: If True, falls back to mock beacon on failure
+    
+    Returns:
+        Dictionary with 'round' and 'randomness' keys
+    """
+    endpoint = f"/{DRAND_CHAIN_HASH}/public/{'latest' if round_id is None else round_id}"
+    
+    # Try each drand URL
+    for url in DRAND_URLS:
+        try:
+            response = requests.get(f"{url}{endpoint}", timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                logger.debug(f"[Drand] round={data['round']}, randomness={data['randomness'][:8]}…")
+                return {
+                    "round": data["round"],
+                    "randomness": data["randomness"],
+                    "signature": data.get("signature", ""),
+                    "previous_signature": data.get("previous_signature", "")
+                }
+        except Exception as e:
+            logger.debug(f"[Drand] Failed to fetch from {url}: {e}")
+            continue
+    
+    # Fallback to mock beacon if all URLs fail
+    if use_fallback:
+        logger.warning("[Drand] All URLs failed, using mock beacon")
+        return get_mock_beacon()
+    else:
+        raise Exception("Failed to fetch from any drand URL")
+
+def get_mock_beacon() -> dict:
+    """Fallback mock beacon for testing/development."""
     global BEACON_COUNTER
     BEACON_COUNTER += 1
     rnd = os.urandom(32).hex()
-    logger.debug(f"[Beacon] round={BEACON_COUNTER}, randomness={rnd[:8]}…")
+    logger.debug(f"[MockBeacon] round={BEACON_COUNTER}, randomness={rnd[:8]}…")
     return {"round": BEACON_COUNTER, "randomness": rnd}
+
+def get_beacon(round_id: str = "latest", use_drand: bool = True) -> dict:
+    """
+    Get randomness beacon (drand by default, with fallback).
+    
+    Args:
+        round_id: "latest" or specific round number
+        use_drand: If True, use drand network; if False, use mock
+    """
+    if not use_drand:
+        return get_mock_beacon()
+    
+    try:
+        if round_id == "latest":
+            return get_drand_beacon(None)
+        else:
+            return get_drand_beacon(int(round_id))
+    except:
+        # Fallback to mock on any error
+        return get_mock_beacon()
+
+def get_round_at_time(timestamp: int) -> int:
+    """Calculate drand round number for a given timestamp."""
+    elapsed = timestamp - DRAND_GENESIS_TIME
+    return (elapsed // DRAND_PERIOD) + 1
+
+def verify_drand_signature(beacon: dict) -> bool:
+    """
+    Verify drand beacon signature (requires additional crypto libraries).
+    For now, returns True - implement BLS verification if needed.
+    """
+    # TODO: Implement BLS signature verification
+    # This requires py_ecc or similar library for BLS12-381
+    return True
 
 def prf(label: bytes, *parts: bytes, out_bytes: int) -> bytes:
     h = hashlib.sha256(label + b"||" + b"||".join(parts)).digest()
@@ -304,37 +388,35 @@ class Prover:
         env = SATEnvironment(sat_problem)
         state = env.reset()
         
-        # Convert SAT problem to prompt for LLM
-        prompt = f"Solve this SAT problem step by step:\n{sat_problem.to_text()}\nSolution:"
-        
-        # Generate solution using LLM
-        input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
-        with torch.no_grad():
-            gen = self.model.generate(
-                input_ids,
-                max_new_tokens=sat_problem.num_vars * 10,  # Enough tokens for solution
-                use_cache=True,
-                return_dict_in_generate=True
-            )
-        tokens = gen.sequences[0].tolist()
-        
-        # Execute rollout based on generated tokens
+        # Execute rollout based on LLM decisions
         trajectory = []
         total_reward = 0
         done = False
-        
-        # Parse actions from generated text (simplified - in practice would be more sophisticated)
-        generated_text = self.tokenizer.decode(tokens, skip_special_tokens=True)
+        all_tokens = []
         
         while not done:
-            # Use model to decide action (simplified - extract from generated text)
-            action = 0 if env.current_var % 2 == 0 else 1  # Placeholder logic
+            # Create prompt for current state
+            prompt = self._create_state_prompt(sat_problem, env, trajectory)
             
-            # In a real implementation, we'd parse the LLM output to get actions
-            # For now, using a simple heuristic
-            if "true" in generated_text.lower() and f"x{env.current_var+1}" in generated_text:
-                action = 1
+            # Get LLM's decision for current variable
+            input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
+            with torch.no_grad():
+                gen = self.model.generate(
+                    input_ids,
+                    max_new_tokens=20,  # Short response for single decision
+                    temperature=0.7,
+                    do_sample=True,
+                    pad_token_id=self.tokenizer.eos_token_id
+                )
             
+            # Parse action from generated text
+            generated_text = self.tokenizer.decode(gen[0][len(input_ids[0]):], skip_special_tokens=True)
+            action = self._parse_action(generated_text, env.current_var)
+            
+            # Store tokens for GRAIL proof
+            all_tokens.extend(gen[0].tolist())
+            
+            # Take action in environment
             state, reward, done, info = env.step(action)
             trajectory.append((env.current_var - 1, action, reward))
             total_reward += reward
@@ -343,21 +425,22 @@ class Prover:
         s_vals = []
         hiddens = []
         
-        # Get hidden states for the generated sequence
-        with torch.no_grad():
-            outputs = self.model(torch.tensor([tokens]).to(self.device), output_hidden_states=True)
-            all_hidden = outputs.hidden_states
-            
-            for pos in range(len(tokens)):
-                if pos < len(all_hidden[LAYER_INDEX][0]):
-                    h = all_hidden[LAYER_INDEX][0, pos, :]
-                    hiddens.append(h)
-                    s_val = dot_mod_q(h, self.r_vec)
-                    s_vals.append(s_val)
+        # Get hidden states for all generated tokens
+        if all_tokens:
+            with torch.no_grad():
+                outputs = self.model(torch.tensor([all_tokens]).to(self.device), output_hidden_states=True)
+                all_hidden = outputs.hidden_states
+                
+                for pos in range(len(all_tokens)):
+                    if pos < len(all_hidden[LAYER_INDEX][0]):
+                        h = all_hidden[LAYER_INDEX][0, pos, :]
+                        hiddens.append(h)
+                        s_val = dot_mod_q(h, self.r_vec)
+                        s_vals.append(s_val)
         
         self.s_vals = s_vals
         self.hiddens = hiddens
-        self.tokens = tokens
+        self.tokens = all_tokens
         
         # Sign the s_vals for integrity
         signature = sign_s_vals(s_vals, self.secret_key)
@@ -375,11 +458,46 @@ class Prover:
                 "satisfied_clauses": info.get("satisfied_clauses", 0),
                 "assignment": env.assignment
             },
-            "tokens": tokens,
+            "tokens": all_tokens,
             "s_vals": s_vals,
             "signature": signature.hex(),
             "beacon": self.beacon_R
         }
+    
+    def _create_state_prompt(self, sat_problem: SATProblem, env: SATEnvironment, trajectory: list) -> str:
+        """Create a prompt for the LLM to decide the next variable assignment."""
+        prompt = f"SAT Problem:\n{sat_problem.to_text()}\n"
+        
+        if trajectory:
+            prompt += "\nAssignments so far:\n"
+            for var, action, _ in trajectory:
+                prompt += f"  x{var+1} = {action}\n"
+        
+        prompt += f"\nCurrent state: {env.count_satisfied_clauses()}/{len(sat_problem.clauses)} clauses satisfied\n"
+        prompt += f"Next variable: x{env.current_var+1}\n"
+        prompt += "Should x{} be 0 (false) or 1 (true)? Consider which value satisfies more clauses.\n".format(env.current_var+1)
+        prompt += "Answer with just '0' or '1':"
+        
+        return prompt
+    
+    def _parse_action(self, text: str, var_idx: int) -> int:
+        """Parse the action from LLM output."""
+        text = text.strip().lower()
+        
+        # Look for explicit 0 or 1
+        if '1' in text or 'true' in text:
+            return 1
+        elif '0' in text or 'false' in text:
+            return 0
+        
+        # Check for yes/no style answers
+        if 'yes' in text:
+            return 1
+        elif 'no' in text:
+            return 0
+        
+        # Default to trying true first (can be randomized)
+        return 1 if var_idx % 2 == 0 else 0
     
     def commit(self, prompt: str, randomness_hex: str, max_new_tokens: int = 32) -> dict:
         """Original commit method for backward compatibility."""
