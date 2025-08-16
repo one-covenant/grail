@@ -28,7 +28,8 @@ __version__ = "0.0.0"
 
 from .grail import Prover, Verifier
 from .drand import get_drand_beacon, get_round_at_time
-from .environments import SATProblem, SATEnvironment, generate_sat_problem
+from .environments import SATProblem, SATEnvironment, generate_sat_problem, SATRolloutGenerator
+from .rollout import RolloutGenerator
 from .comms import (
     upload_file_chunked, download_file_chunked, file_exists, list_bucket_files,
     get_file, sink_window_inferences, save_model_state, load_model_state,
