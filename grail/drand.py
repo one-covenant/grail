@@ -3,22 +3,73 @@
 import os
 import logging
 import requests
-from typing import Optional
+from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
-# Drand configuration - using League of Entropy mainnet
+# Drand chain configurations
+DRAND_CHAINS = {
+    "quicknet": {
+        "hash": "8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce",
+        "genesis_time": 1692803367,
+        "period": 3,  # 3 seconds per round
+        "description": "Fast 3-second randomness (recommended)"
+    },
+    "mainnet": {
+        "hash": "84b2234fb34e835dccd048255d7ad3194b81af7d978c3bf157e3469592ae4e02",
+        "genesis_time": 1595431050,
+        "period": 30,  # 30 seconds per round
+        "description": "Original 30-second chain"
+    }
+}
+
+# Default to quicknet for faster randomness
+DEFAULT_CHAIN = "quicknet"
+
+# Drand API endpoints
 DRAND_URLS = [
     "https://api.drand.sh",
     "https://drand.cloudflare.com",
     "https://api.drand.secureweb3.com:6875"
 ]
-DRAND_CHAIN_HASH = "8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce"  # quicknet chain
-DRAND_GENESIS_TIME = 1692803367  # quicknet genesis
-DRAND_PERIOD = 3  # 3 seconds per round for quicknet
+
+# Current chain configuration (can be changed via set_chain)
+_current_chain = DEFAULT_CHAIN
+DRAND_CHAIN_HASH = DRAND_CHAINS[_current_chain]["hash"]
+DRAND_GENESIS_TIME = DRAND_CHAINS[_current_chain]["genesis_time"]
+DRAND_PERIOD = DRAND_CHAINS[_current_chain]["period"]
 
 # Global counter for mock beacons
 BEACON_COUNTER = 0
+
+def set_chain(chain_name: str) -> None:
+    """
+    Switch to a different drand chain.
+    
+    Args:
+        chain_name: Name of the chain ('quicknet' or 'mainnet')
+    
+    Raises:
+        ValueError: If chain_name is not recognized
+    """
+    global _current_chain, DRAND_CHAIN_HASH, DRAND_GENESIS_TIME, DRAND_PERIOD
+    
+    if chain_name not in DRAND_CHAINS:
+        raise ValueError(f"Unknown chain '{chain_name}'. Available chains: {list(DRAND_CHAINS.keys())}")
+    
+    _current_chain = chain_name
+    DRAND_CHAIN_HASH = DRAND_CHAINS[_current_chain]["hash"]
+    DRAND_GENESIS_TIME = DRAND_CHAINS[_current_chain]["genesis_time"]
+    DRAND_PERIOD = DRAND_CHAINS[_current_chain]["period"]
+    
+    logger.info(f"Switched to drand chain '{chain_name}': {DRAND_CHAINS[chain_name]['description']}")
+
+def get_current_chain() -> Dict[str, Any]:
+    """Get information about the currently selected chain."""
+    return {
+        "name": _current_chain,
+        **DRAND_CHAINS[_current_chain]
+    }
 
 def get_drand_beacon(round_id: Optional[int] = None, use_fallback: bool = True) -> dict:
     """
@@ -37,11 +88,11 @@ def get_drand_beacon(round_id: Optional[int] = None, use_fallback: bool = True) 
     for url in DRAND_URLS:
         try:
             full_url = f"{url}{endpoint}"
-            logger.debug(f"[Drand] Fetching from {full_url}")
+            logger.debug(f"[Drand-{_current_chain}] Fetching from {full_url}")
             response = requests.get(full_url, timeout=10)  # Increased timeout
             if response.status_code == 200:
                 data = response.json()
-                logger.info(f"[Drand] Success! round={data['round']}, randomness={data['randomness'][:8]}…")
+                logger.info(f"[Drand-{_current_chain}] Success! round={data['round']}, randomness={data['randomness'][:8]}…")
                 return {
                     "round": data["round"],
                     "randomness": data["randomness"],
@@ -94,11 +145,3 @@ def get_round_at_time(timestamp: int) -> int:
     elapsed = timestamp - DRAND_GENESIS_TIME
     return (elapsed // DRAND_PERIOD) + 1
 
-def verify_drand_signature(beacon: dict) -> bool:
-    """
-    Verify drand beacon signature (requires additional crypto libraries).
-    For now, returns True - implement BLS verification if needed.
-    """
-    # TODO: Implement BLS signature verification
-    # This requires py_ecc or similar library for BLS12-381
-    return True
