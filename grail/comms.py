@@ -1,17 +1,17 @@
 """S3/R2 communication utilities for GRAIL."""
 
 import os
-import json
 import time
+import json
 import gzip
 import asyncio
 import logging
 import tempfile
-from typing import List, Optional, Dict, Any
-from aiobotocore.session import get_session
+from typing import Any, List, Dict, Optional
 from botocore.config import Config
+from aiobotocore.session import get_session
 from transformers import AutoModelForCausalLM
-from safetensors.torch import save_file, load_file
+from safetensors.torch import load_file, save_file
 
 logger = logging.getLogger(__name__)
 
