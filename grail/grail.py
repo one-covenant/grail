@@ -18,6 +18,9 @@ import time
 from typing import List, Tuple, Dict, Optional
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+# Import SAT environment classes
+from .environments import SATProblem, SATEnvironment, generate_sat_problem
+
 # Use the same logger as the main module
 logger = logging.getLogger("grail")
 
@@ -33,12 +36,6 @@ MODEL_NAME   = "sshleifer/tiny-gpt2"
 LAYER_INDEX  = -1
 RNG_LABEL    = {"sketch": b"sketch", "open": b"open", "sat": b"sat"}
 
-# SAT Problem Configuration
-MIN_VARS = 3
-MAX_VARS = 20
-MIN_CLAUSES = 5
-MAX_CLAUSES = 50
-CLAUSE_LENGTH = 3  # 3-SAT problems
 
 # ────────────────────  DRAND BEACON HELPERS  ──────────────────────────────
 
@@ -203,169 +200,6 @@ def hash_s_vals(s_vals: list[int]) -> bytes:
     s_vals_bytes = b''.join(int_to_bytes(val) for val in s_vals)
     return hashlib.sha256(s_vals_bytes).digest()
 
-# ─────────────────────────  SAT PROBLEM GENERATION  ────────────────────────
-
-class SATProblem:
-    """Represents a SAT problem instance."""
-    
-    def __init__(self, num_vars: int, clauses: List[List[int]], seed: str):
-        self.num_vars = num_vars
-        self.clauses = clauses
-        self.seed = seed
-        self.solution = None
-        
-    def to_text(self) -> str:
-        """Convert SAT problem to text format for LLM processing."""
-        text = f"SAT Problem (seed: {self.seed[:8]}...):\n"
-        text += f"Variables: {self.num_vars}\n"
-        text += "Clauses:\n"
-        for i, clause in enumerate(self.clauses):
-            clause_str = " OR ".join([f"{'NOT ' if lit < 0 else ''}x{abs(lit)}" for lit in clause])
-            text += f"  ({clause_str})\n"
-        return text
-    
-    def check_solution(self, assignment: List[bool]) -> bool:
-        """Check if assignment satisfies all clauses."""
-        if len(assignment) != self.num_vars:
-            return False
-        
-        for clause in self.clauses:
-            satisfied = False
-            for lit in clause:
-                var_idx = abs(lit) - 1
-                if lit > 0 and assignment[var_idx]:
-                    satisfied = True
-                    break
-                elif lit < 0 and not assignment[var_idx]:
-                    satisfied = True
-                    break
-            if not satisfied:
-                return False
-        return True
-
-def generate_sat_problem(seed: str, difficulty: float = 0.5) -> SATProblem:
-    """Generate a SAT problem from seed with controlled difficulty."""
-    # Use seed for deterministic generation
-    rng = random.Random(hashlib.sha256(seed.encode()).digest())
-    
-    # Scale problem size based on difficulty
-    num_vars = rng.randint(
-        MIN_VARS + int((MAX_VARS - MIN_VARS) * difficulty * 0.5),
-        MIN_VARS + int((MAX_VARS - MIN_VARS) * difficulty)
-    )
-    num_clauses = rng.randint(
-        MIN_CLAUSES + int((MAX_CLAUSES - MIN_CLAUSES) * difficulty * 0.5),
-        MIN_CLAUSES + int((MAX_CLAUSES - MIN_CLAUSES) * difficulty)
-    )
-    
-    clauses = []
-    for _ in range(num_clauses):
-        clause = []
-        vars_in_clause = rng.sample(range(1, num_vars + 1), min(CLAUSE_LENGTH, num_vars))
-        for var in vars_in_clause:
-            # Randomly negate
-            if rng.random() < 0.5:
-                clause.append(-var)
-            else:
-                clause.append(var)
-        clauses.append(clause)
-    
-    return SATProblem(num_vars, clauses, seed)
-
-# ─────────────────────────  RL ENVIRONMENT  ────────────────────────────
-
-class SATEnvironment:
-    """RL environment for solving SAT problems."""
-    
-    def __init__(self, problem: SATProblem):
-        self.problem = problem
-        self.assignment = [False] * problem.num_vars
-        self.current_var = 0
-        self.steps = 0
-        self.max_steps = problem.num_vars * 2
-        self.trajectory = []
-        
-    def reset(self) -> Dict:
-        """Reset environment to initial state."""
-        self.assignment = [False] * self.problem.num_vars
-        self.current_var = 0
-        self.steps = 0
-        self.trajectory = []
-        return self.get_state()
-    
-    def get_state(self) -> Dict:
-        """Get current state as dict for LLM processing."""
-        return {
-            "problem": self.problem.to_text(),
-            "current_assignment": self.assignment.copy(),
-            "current_var": self.current_var,
-            "steps": self.steps,
-            "satisfied_clauses": self.count_satisfied_clauses()
-        }
-    
-    def count_satisfied_clauses(self) -> int:
-        """Count how many clauses are currently satisfied."""
-        count = 0
-        for clause in self.problem.clauses:
-            for lit in clause:
-                var_idx = abs(lit) - 1
-                if var_idx < len(self.assignment):
-                    if (lit > 0 and self.assignment[var_idx]) or \
-                       (lit < 0 and not self.assignment[var_idx]):
-                        count += 1
-                        break
-        return count
-    
-    def step(self, action: int) -> Tuple[Dict, float, bool, Dict]:
-        """Take action (0=false, 1=true for current variable)."""
-        if self.current_var >= self.problem.num_vars:
-            return self.get_state(), 0, True, {"success": False}
-        
-        # Record action in trajectory
-        self.trajectory.append((self.current_var, action))
-        
-        # Apply action
-        self.assignment[self.current_var] = bool(action)
-        self.current_var += 1
-        self.steps += 1
-        
-        # Calculate reward
-        satisfied = self.count_satisfied_clauses()
-        total_clauses = len(self.problem.clauses)
-        
-        # Check if done
-        done = False
-        success = False
-        
-        if self.current_var >= self.problem.num_vars:
-            # All variables assigned
-            done = True
-            success = self.problem.check_solution(self.assignment)
-            if success:
-                reward = 10.0  # Big reward for solving
-            else:
-                reward = satisfied / total_clauses - 1.0  # Partial credit
-        elif self.steps >= self.max_steps:
-            done = True
-            reward = -1.0  # Penalty for timeout
-        else:
-            # Intermediate reward based on progress
-            reward = (satisfied / total_clauses) * 0.1
-        
-        info = {
-            "success": success,
-            "satisfied_clauses": satisfied,
-            "total_clauses": total_clauses
-        }
-        
-        return self.get_state(), reward, done, info
-    
-    def render_trajectory(self) -> str:
-        """Render trajectory as text for LLM."""
-        text = "Solution trajectory:\n"
-        for var, val in self.trajectory:
-            text += f"  x{var+1} = {val}\n"
-        return text
 
 # ─────────────────────────────  PROVER  ────────────────────────────────
 
@@ -625,7 +459,7 @@ class Verifier:
         - The model that generated this cannot be substituted
         """
         # First verify the GRAIL proof - this proves the model identity
-        if not self.verify_grail_proof(commit, proof_pkg, prover_secret_key):
+        if not self.verify(commit, proof_pkg, prover_secret_key):
             logger.debug("GRAIL proof failed - model identity not verified")
             return False
         
@@ -663,7 +497,7 @@ class Verifier:
         logger.debug("SAT rollout verification successful - model identity confirmed")
         return True
     
-    def verify_grail_proof(self, commit: dict, proof_pkg: dict, prover_secret_key: bytes) -> bool:
+    def verify(self, commit: dict, proof_pkg: dict, prover_secret_key: bytes) -> bool:
         """Verify just the GRAIL proof portion."""
         # Verify s_vals signature for integrity
         signature = bytes.fromhex(commit["signature"])
@@ -716,52 +550,3 @@ class Verifier:
         logger.debug("GRAIL proof verification successful")
         return True
     
-    def verify(self, commit: dict, proof_pkg: dict, prover_secret_key: bytes) -> bool:
-        # Verify s_vals signature for integrity
-        signature = bytes.fromhex(commit["signature"])
-        if not verify_s_vals_signature(commit["s_vals"], signature, prover_secret_key):
-            logger.debug("s_vals signature verification failed")
-            return False
-
-        # Re-derive sketch vector
-        r_vec = r_vec_from_randomness(
-            commit["round_R"]["randomness"],
-            self.model.config.hidden_size
-        )
-
-        # Re-derive and compare indices using tokens (not s_vals)
-        idxs_exp = indices_from_root(
-            commit["tokens"],
-            proof_pkg["round_R1"]["randomness"],
-            len(commit["tokens"]),
-            len(proof_pkg["indices"])
-        )
-        if idxs_exp != proof_pkg["indices"]:
-            logger.debug("Index-selection mismatch")
-            return False
-
-        # Recompute hidden states
-        full_ids = torch.tensor(commit["tokens"], dtype=torch.long,
-                                device=self.device).unsqueeze(0)
-        with torch.no_grad():
-            outs = self.model(full_ids, output_hidden_states=True)
-        h_layer = outs.hidden_states[LAYER_INDEX][0]
-
-        # Check each opened index (tolerance check only now)
-        for i in idxs_exp:
-            committed_s_val = commit["s_vals"][i]
-            
-            # Sketch‐value check with proper modular distance
-            local = dot_mod_q(h_layer[i], r_vec)
-            logger.debug(f"[SketchCheck] idx={i}, committed={committed_s_val}, local={local}")
-            
-            # Calculate minimum distance considering modular arithmetic
-            diff = abs(local - committed_s_val)
-            mod_diff = min(diff, PRIME_Q - diff)  # Handle wraparound
-            
-            if mod_diff > TOLERANCE:
-                logger.debug(f"Sketch mismatch at index {i} ({local} vs {committed_s_val}, diff={mod_diff})")
-                return False
-
-        logger.debug("Verification successful")
-        return True
