@@ -30,9 +30,10 @@ from accelerate import Accelerator
 __version__ = "0.0.0"
 
 from .grail import (
-    Prover, Verifier, SATProblem, SATEnvironment, generate_sat_problem,
+    Prover, Verifier,
     get_drand_beacon, get_round_at_time
 )
+from .environments import SATProblem, SATEnvironment, generate_sat_problem
 
 __all__ = ["Prover", "Verifier", "SATProblem", "SATEnvironment", "generate_sat_problem", "main", "cli"]
 
