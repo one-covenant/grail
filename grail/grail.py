@@ -20,7 +20,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 # Import SAT environment classes
 from .environments import SATProblem, SATEnvironment, generate_sat_problem
 # Import drand randomness beacon functions
-from .drand import get_drand_beacon, get_beacon, get_round_at_time, verify_drand_signature
+from .drand import get_drand_beacon, get_beacon, get_round_at_time
 
 # Use the same logger as the main module
 logger = logging.getLogger("grail")
