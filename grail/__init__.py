@@ -440,9 +440,9 @@ def mine(use_drand):
     # Initialize model and prover
     logger.info(f"🔑 Miner hotkey: {wallet.hotkey.ss58_address}")
     logger.info(f"Loading base model: {LLAMA_MODEL}")
-    prover = Prover(model_name=LLAMA_MODEL)
-    # Set deterministic secret key based on hotkey
-    prover.secret_key = derive_secret_key(wallet.hotkey.ss58_address)
+    # Derive deterministic secret key from hotkey
+    secret_key = derive_secret_key(wallet.hotkey.ss58_address)
+    prover = Prover(model_name=LLAMA_MODEL, secret_key=secret_key)
     
     async def _run():
         subtensor = None

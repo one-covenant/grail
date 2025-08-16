@@ -43,9 +43,24 @@ def prf(label: bytes, *parts: bytes, out_bytes: int) -> bytes:
     return h[:out_bytes]
 
 def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
+    """
+    Generate random projection vector from drand randomness.
+    
+    Takes drand randomness (32 bytes hex) and expands it deterministically
+    into a d_model-dimensional vector using a PRF. This ensures everyone
+    with the same drand value generates the same projection vector.
+    
+    Args:
+        rand_hex: Hex string of drand randomness (typically from drand beacon)
+        d_model: Model hidden dimension size
+    
+    Returns:
+        Random projection vector of shape (d_model,)
+    """
     # Remove 0x prefix if present and ensure we have valid hex
     clean_hex = rand_hex.replace("0x", "").replace("0X", "")
     try:
+        # Use PRF to expand drand randomness into d_model random integers
         raw = prf(RNG_LABEL["sketch"], bytes.fromhex(clean_hex), out_bytes=4*d_model)
     except ValueError as e:
         raise ValueError(f"Invalid hex string for randomness: '{rand_hex}' -> '{clean_hex}': {e}") from e
@@ -70,6 +85,23 @@ def indices_from_root(tokens: list[int], rand_hex: str, seq_len: int, k: int) ->
     return idxs
 
 # ─────────────────────────────  UTILITIES  ─────────────────────────────
+
+def derive_secret_key_from_hotkey(hotkey_address: str) -> bytes:
+    """
+    Derive a deterministic secret key from a hotkey address.
+    
+    This ensures that:
+    1. Each miner has a unique secret key based on their hotkey
+    2. The validator can derive the same key to verify signatures
+    3. The key is deterministic and reproducible
+    
+    Args:
+        hotkey_address: The miner's hotkey address (e.g., ss58 format)
+    
+    Returns:
+        32-byte secret key for HMAC signing
+    """
+    return hashlib.sha256(f"grail_secret_{hotkey_address}".encode()).digest()
 
 def int_to_bytes(i: int) -> bytes:
     return struct.pack(">I", i & 0xFFFFFFFF)
@@ -108,7 +140,7 @@ def hash_s_vals(s_vals: list[int]) -> bytes:
 # ─────────────────────────────  PROVER  ────────────────────────────────
 
 class Prover:
-    def __init__(self, model_name=MODEL_NAME):
+    def __init__(self, model_name=MODEL_NAME, secret_key: Optional[bytes] = None):
         self.device    = "cuda" if torch.cuda.is_available() else "cpu"
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model     = (
@@ -117,8 +149,13 @@ class Prover:
             .to(self.device)
             .eval()
         )
-        # Generate a secret key for signing (in practice this would be securely managed)
-        self.secret_key = os.urandom(32)
+        # Secret key for signing s_vals - MUST be set deterministically before use
+        # In production, this is derived from the miner's hotkey address
+        if secret_key is not None:
+            self.secret_key = secret_key
+        else:
+            # This should never be used - the miner must set a deterministic key
+            raise ValueError("Prover requires a deterministic secret_key. Use derive_secret_key(hotkey_address)")
 
     def commit_rollout(self, sat_problem: SATProblem, randomness_hex: str, difficulty: float = 0.5) -> dict:
         """
