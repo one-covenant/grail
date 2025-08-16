@@ -2,7 +2,8 @@
 
 import random
 import hashlib
-from typing import List, Dict, Tuple
+from ..rollout import RolloutGenerator
+from typing import List, Dict, Tuple, Any
 
 # SAT Problem Configuration
 MIN_VARS = 3
@@ -173,3 +174,76 @@ class SATEnvironment:
         for var, val in self.trajectory:
             text += f"  x{var+1} = {val}\n"
         return text
+
+
+class SATRolloutGenerator(RolloutGenerator):
+    """Generate SAT rollouts using an LLM model."""
+    
+    def create_environment(self, problem: SATProblem) -> SATEnvironment:
+        """Create a SAT environment for the given problem."""
+        return SATEnvironment(problem)
+    
+    def reset_environment(self, env: SATEnvironment) -> Dict:
+        """Reset the SAT environment."""
+        return env.reset()
+    
+    def create_prompt(self, problem: SATProblem, env: SATEnvironment, state: Dict, trajectory: List) -> str:
+        """Create a prompt for the LLM to decide the next variable assignment."""
+        prompt = f"SAT Problem:\n{problem.to_text()}\n"
+        
+        if trajectory:
+            prompt += "\nAssignments so far:\n"
+            for var, action, _ in trajectory:
+                prompt += f"  x{var+1} = {action}\n"
+        
+        prompt += f"\nCurrent state: {env.count_satisfied_clauses()}/{len(problem.clauses)} clauses satisfied\n"
+        prompt += f"Next variable: x{env.current_var+1}\n"
+        prompt += "Should x{} be 0 (false) or 1 (true)? Consider which value satisfies more clauses.\n".format(env.current_var+1)
+        prompt += "Answer with just '0' or '1':"
+        
+        return prompt
+    
+    def parse_action(self, text: str, env: SATEnvironment, state: Dict) -> int:
+        """Parse the action from LLM output."""
+        text = text.strip().lower()
+        
+        # Look for explicit 0 or 1
+        if '1' in text or 'true' in text:
+            return 1
+        elif '0' in text or 'false' in text:
+            return 0
+        
+        # Check for yes/no style answers
+        if 'yes' in text:
+            return 1
+        elif 'no' in text:
+            return 0
+        
+        # Default to trying true first (can be randomized)
+        return 1 if env.current_var % 2 == 0 else 0
+    
+    def step_environment(self, env: SATEnvironment, action: int) -> Tuple[Dict, float, bool, Dict]:
+        """Take a step in the SAT environment."""
+        return env.step(action)
+    
+    def create_trajectory_entry(self, state: Dict, action: int, reward: float, info: Dict) -> Tuple[int, int, float]:
+        """Create a trajectory entry for SAT (variable index, action, reward)."""
+        # Get the variable index from the state (before the action was taken)
+        var_idx = state["current_var"]
+        return (var_idx, action, reward)
+    
+    def get_final_info(self, env: SATEnvironment, trajectory: List, total_reward: float) -> Dict:
+        """Get final SAT-specific information."""
+        # Check if the final assignment satisfies all clauses
+        success = env.problem.check_solution(env.assignment)
+        
+        return {
+            "success": success,
+            "satisfied_clauses": env.count_satisfied_clauses(),
+            "assignment": env.assignment,
+            "sat_problem": {
+                "seed": env.problem.seed,
+                "num_vars": env.problem.num_vars,
+                "clauses": env.problem.clauses
+            }
+        }
