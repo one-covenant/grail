@@ -4,22 +4,20 @@ GRAIL – Guaranteed Rollout Authenticity via Inference Ledger
 Modified for SAT problem generation and RL rollouts
 """
 
-import os
 import io
-import struct
-import hashlib
-import random
+import os
 import hmac
-import torch
-import numpy as np
-import logging
 import time
+import torch
+import random
+import struct
+import logging
+import hashlib
+import numpy as np
 from typing import List, Tuple, Dict, Optional
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# Import SAT environment classes
 from .environments import SATProblem, SATEnvironment, generate_sat_problem
-# Import drand randomness beacon functions
 from .drand import get_drand_beacon, get_beacon, get_round_at_time
 
 # Use the same logger as the main module
