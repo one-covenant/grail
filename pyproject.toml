@@ -38,6 +38,8 @@ dependencies = [
     "accelerate>=0.20.0",
     "pydantic>=2.3,<3.0.0",
     "requests>=2.28.0",
+    "huggingface-hub>=0.20.0",
+    "datasets>=2.14.0",
 ]
 
 [project.optional-dependencies]
