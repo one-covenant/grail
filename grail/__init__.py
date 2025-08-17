@@ -12,6 +12,7 @@ import asyncio
 import logging
 import hashlib
 import traceback
+import math
 import bittensor as bt
 from dotenv import load_dotenv
 from collections import defaultdict
@@ -770,13 +771,58 @@ def validate(use_drand, test_mode):
                             logger.warning(f"Window mismatch in {filename}: expected {target_window}, got {window_start}")
                             continue
                         
-                        # Verify all rollouts in the window
+                        # Spot check configuration
+                        MIN_SAMPLES_PER_MINER = 3      # Minimum rollouts to check
+                        MAX_SAMPLES_PER_MINER = 20     # Maximum rollouts to check  
+                        SAMPLE_RATE = 0.1               # Check 10% of rollouts
+                        FAILURE_THRESHOLD = 0.3         # Stop if >30% failures
+                        BATCH_SIZE = 5                  # Check in batches for early stopping
+                        
+                        # Calculate sample size based on total inferences
+                        total_inferences = len(inferences)
+                        
+                        # Decide whether to spot check or verify all
+                        if total_inferences <= MIN_SAMPLES_PER_MINER:
+                            # If very few rollouts, check them all
+                            sample_size = total_inferences
+                            use_spot_check = False
+                        else:
+                            sample_size = max(MIN_SAMPLES_PER_MINER, 
+                                            min(MAX_SAMPLES_PER_MINER, 
+                                                math.ceil(total_inferences * SAMPLE_RATE)))
+                            use_spot_check = True
+                        
+                        if use_spot_check:
+                            logger.info(f"📊 Spot checking {sample_size}/{total_inferences} rollouts from {wallet_addr} ({SAMPLE_RATE*100:.0f}% sample)")
+                        else:
+                            logger.info(f"🔍 Verifying all {total_inferences} rollouts from {wallet_addr}")
+                        
+                        # Randomly select indices to check
+                        indices_to_check = random.sample(range(total_inferences), min(sample_size, total_inferences))
+                        indices_to_check.sort()  # Process in order for better cache locality
+                        
                         valid_count = 0
+                        checked_count = 0
                         successful_rollouts = 0
                         unique_solutions = set()  # Track unique successful solutions
                         nonces_seen = set()
                         
-                        for inference in inferences:
+                        # Progressive verification with early stopping
+                        should_stop = False
+                        batch_failures = 0
+                        
+                        for idx, inference_idx in enumerate(indices_to_check):
+                            # Early stopping check every BATCH_SIZE verifications
+                            if checked_count > 0 and checked_count % BATCH_SIZE == 0:
+                                failure_rate = (checked_count - valid_count) / checked_count
+                                if failure_rate > FAILURE_THRESHOLD and checked_count >= MIN_SAMPLES_PER_MINER:
+                                    logger.warning(f"⚠️ Early stopping for {wallet_addr}: {failure_rate:.1%} failure rate after {checked_count} checks")
+                                    should_stop = True
+                                    break
+                            
+                            inference = inferences[inference_idx]
+                            checked_count += 1
+                            
                             try:
                                 # Check required fields for SAT rollouts
                                 required_fields = ["window_start", "nonce", "sat_seed", "block_hash", "commit", "proof", "challenge", "hotkey", "signature"]
@@ -843,15 +889,27 @@ def validate(use_drand, test_mode):
                                 logger.debug(f"Error processing inference from {wallet_addr}: {e}")
                                 continue
                         
+                        # Calculate estimated total valid rollouts based on sampling
+                        if should_stop:
+                            # If we stopped early due to failures, assume 0 valid rollouts
+                            estimated_valid = 0
+                        else:
+                            # Extrapolate from sample to estimate total
+                            sample_pass_rate = valid_count / checked_count if checked_count > 0 else 0
+                            estimated_valid = int(total_inferences * sample_pass_rate)
+                        
                         # Store metrics for this miner
                         window_inference_counts[wallet_addr] = {
                             "valid": valid_count,
+                            "checked": checked_count,
+                            "total": total_inferences,
+                            "estimated_valid": estimated_valid,
                             "successful": successful_rollouts,
                             "unique": len(unique_solutions)
                         }
-                        total_valid_rollouts += valid_count
+                        total_valid_rollouts += estimated_valid  # Use estimated for rewards
                         
-                        logger.info(f"✅ {wallet_addr}: {valid_count} valid, {successful_rollouts} successful, {len(unique_solutions)} unique solutions")
+                        logger.info(f"✅ {wallet_addr}: {valid_count}/{checked_count} checked, ~{estimated_valid}/{total_inferences} estimated valid, {successful_rollouts} successful, {len(unique_solutions)} unique")
                         
                     except Exception as e:
                         logger.warning(f"Error processing window file {filename}: {e}")
