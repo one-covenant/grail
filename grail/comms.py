@@ -520,14 +520,14 @@ def login_huggingface():
             logger.info("Already logged into Hugging Face")
             return True
         
-        # Try to get token from environment
-        token = os.getenv("HF_TOKEN")
+        # Try to get token from environment using get_conf pattern
+        token = get_conf("HF_TOKEN", None)
         if token:
             login(token=token, add_to_git_credential=False)
             logger.info("✅ Successfully logged into Hugging Face")
             return True
         else:
-            logger.warning("No HF_TOKEN found in environment. Set HF_TOKEN to enable dataset uploads.")
+            logger.info("No HF_TOKEN found. Set HF_TOKEN to enable dataset uploads.")
             logger.info("Get your token at: https://huggingface.co/settings/tokens")
             return False
             
@@ -554,7 +554,9 @@ async def upload_to_huggingface(rollouts: List[Dict], window: int, version: str 
     if version is None:
         version = PROTOCOL_VERSION
     
-    dataset_name = "grail/sat-rollouts"
+    # Use the HF username from environment or default to a common one
+    hf_username = get_conf("HF_USERNAME", "fatheroffire")
+    dataset_name = f"{hf_username}/grail-sat-rollouts"
     
     try:
         # Prepare rollouts with metadata
@@ -623,14 +625,48 @@ async def upload_to_huggingface(rollouts: List[Dict], window: int, version: str 
                 return False
             token = HfFolder.get_token()
         
+        # Initialize Hugging Face API
+        from huggingface_hub import HfApi, create_repo
+        api = HfApi()
+        
+        # Ensure the repository exists
+        try:
+            # Try to create the repo if it doesn't exist
+            create_repo(
+                repo_id=dataset_name,
+                token=token,
+                private=False,
+                repo_type="dataset",
+                exist_ok=True  # Don't error if it already exists
+            )
+            logger.debug(f"Dataset repository {dataset_name} ready")
+        except Exception as e:
+            logger.debug(f"Repo creation note: {e}")
+        
         # Push to Hugging Face Hub
-        # This will append to existing dataset or create new one
-        dataset.push_to_hub(
-            dataset_name,
-            token=token,
-            private=False,  # Make it public for community access
-            append=True,    # Append to existing dataset
-        )
+        # Try to load existing dataset and append, or create new one
+        try:
+            # Try to load existing dataset
+            from datasets import load_dataset, concatenate_datasets
+            existing_dataset = load_dataset(dataset_name, split="train", token=token)
+            # Append new data to existing
+            combined_dataset = concatenate_datasets([existing_dataset, dataset])
+            combined_dataset.push_to_hub(
+                dataset_name,
+                token=token,
+                private=False,  # Make it public for community access
+                split="train"   # Use main train split
+            )
+            logger.info(f"📤 Appended {len(processed_rollouts)} rollouts to existing HF dataset")
+        except Exception as e:
+            # Dataset doesn't exist yet or error loading, create new one
+            logger.debug(f"Creating new dataset (first upload): {e}")
+            dataset.push_to_hub(
+                dataset_name,
+                token=token,
+                private=False,  # Make it public for community access
+                split="train"   # Use main train split
+            )
         
         logger.info(f"📤 Successfully uploaded {len(processed_rollouts)} rollouts to HF dataset {dataset_name}")
         return True
@@ -651,7 +687,9 @@ async def download_from_huggingface(version: str = None, window: int = None, lim
     Returns:
         List of rollout dictionaries
     """
-    dataset_name = "grail/sat-rollouts"
+    # Use the same dataset name as upload
+    hf_username = get_conf("HF_USERNAME", "fatheroffire")
+    dataset_name = f"{hf_username}/grail-sat-rollouts"
     
     try:
         from datasets import load_dataset
