@@ -21,8 +21,10 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from safetensors.torch import save_file, load_file, save, load
 from safetensors import safe_open
-from trl import PPOTrainer, PPOConfig
-from accelerate import Accelerator
+# TODO(v2): Re-enable training imports
+# from trl import PPOTrainer, PPOConfig
+# TODO(v2): Re-enable for training
+# from accelerate import Accelerator
 
 __version__ = "0.0.0"
 
@@ -32,8 +34,12 @@ from .environments import SATProblem, SATEnvironment, generate_sat_problem, SATR
 from .rollout import RolloutGenerator
 from .comms import (
     upload_file_chunked, download_file_chunked, file_exists, list_bucket_files,
-    get_file, sink_window_inferences, save_model_state, load_model_state,
-    model_state_exists, upload_valid_rollouts, get_valid_rollouts
+    get_file, sink_window_inferences, 
+    # TODO(v2): Re-enable model state management for training
+    # save_model_state, load_model_state, model_state_exists,
+    upload_valid_rollouts, get_valid_rollouts,
+    # NEW: Hugging Face dataset upload
+    upload_to_huggingface, download_from_huggingface, login_huggingface, PROTOCOL_VERSION
 )
 
 __all__ = ["Prover", "Verifier", "SATProblem", "SATEnvironment", "generate_sat_problem", "main", "cli"]
@@ -164,6 +170,12 @@ miner_inference_counts = defaultdict(list)  # track inferences per block for wei
 # --------------------------------------------------------------------------- #
 #                               TRAINER                                       #
 # --------------------------------------------------------------------------- #
+# TODO(v2): Re-enable Trainer class with improved architecture
+# - Async training that doesn't block mining
+# - Optional local fine-tuning by miners  
+# - Federated learning approach
+# - Model checkpointing and versioning
+'''
 class Trainer:
     def __init__(self, model_name=LLAMA_MODEL):
         self.model_name = model_name
@@ -406,6 +418,7 @@ class Trainer:
             logger.error(f"❌ Failed to upload trained model for window {future_window}")
             
         return success
+'''  # End of commented Trainer class
 
 # --------------------------------------------------------------------------- #
 #                               CLI                                           #
@@ -465,26 +478,30 @@ def mine(use_drand):
                     await asyncio.sleep(2)  # Wait for new window
                     continue
                 
+                # TODO(v2): Re-enable model state management for training
                 # Check if model state exists for current window, wait if not
-                model_available = await model_state_exists(wallet.hotkey.ss58_address, window_start)
-                if not model_available:
-                    logger.info(f"⏳ Waiting for model state for window {window_start}...")
-                    await asyncio.sleep(5)  # Wait for model to be uploaded by trainer
-                    continue
+                # model_available = await model_state_exists(wallet.hotkey.ss58_address, window_start)
+                # if not model_available:
+                #     logger.info(f"⏳ Waiting for model state for window {window_start}...")
+                #     await asyncio.sleep(5)  # Wait for model to be uploaded by trainer
+                #     continue
                 
                 # Load model state for current window
-                logger.info(f"📥 Loading model state for window {window_start}")
-                try:
-                    success = await load_model_state(prover.model, wallet.hotkey.ss58_address, window_start)
-                    if success:
-                        logger.info(f"✅ Loaded model state for window {window_start}")
-                        # Update prover with new model state
-                        prover.model.eval()
-                    else:
-                        logger.warning(f"⚠️ Failed to load model state for window {window_start}, using base model")
-                except Exception as e:
-                    logger.warning(f"Error loading model state: {e}, using base model")
-                    pass
+                # logger.info(f"📥 Loading model state for window {window_start}")
+                # try:
+                #     success = await load_model_state(prover.model, wallet.hotkey.ss58_address, window_start)
+                #     if success:
+                #         logger.info(f"✅ Loaded model state for window {window_start}")
+                #         # Update prover with new model state
+                #         prover.model.eval()
+                #     else:
+                #         logger.warning(f"⚠️ Failed to load model state for window {window_start}, using base model")
+                # except Exception as e:
+                #     logger.warning(f"Error loading model state: {e}, using base model")
+                #     pass
+                
+                # v1: Use base model directly without waiting
+                logger.info(f"🚀 Using base model for window {window_start}")
                 
                 logger.info(f"🔥 Starting inference generation for window {window_start}-{window_start + WINDOW_LENGTH - 1}")
                 
@@ -644,6 +661,10 @@ def validate(use_drand, test_mode):
     logger.info(f"Loading base model for validation: {LLAMA_MODEL}")
     verifier = Verifier(model_name=LLAMA_MODEL)
     
+    # Login to Hugging Face for dataset uploads
+    logger.info("🤗 Logging into Hugging Face for dataset uploads...")
+    login_huggingface()
+    
     # Storage for inference counts per miner
     inference_counts = defaultdict(lambda: defaultdict(int))  # {hotkey: {window: count}}
     
@@ -669,27 +690,31 @@ def validate(use_drand, test_mode):
                     await asyncio.sleep(5)  # Wait for new window
                     continue
                 
+                # TODO(v2): Re-enable model state management for training
                 # Check if model state exists for target window, wait if not
-                model_available = await model_state_exists(wallet.hotkey.ss58_address, target_window)
-                if not model_available:
-                    logger.info(f"⏳ Waiting for model state for window {target_window}...")
-                    await asyncio.sleep(5)  # Wait for model to be uploaded by trainer
-                    continue
+                # model_available = await model_state_exists(wallet.hotkey.ss58_address, target_window)
+                # if not model_available:
+                #     logger.info(f"⏳ Waiting for model state for window {target_window}...")
+                #     await asyncio.sleep(5)  # Wait for model to be uploaded by trainer
+                #     continue
                 
                 logger.info(f"🔍 Processing window {target_window}-{target_window + WINDOW_LENGTH - 1}")
                 
                 # Load model state for target window
-                logger.info(f"📥 Loading model state for window {target_window}")
-                try:
-                    success = await load_model_state(verifier.model, wallet.hotkey.ss58_address, target_window)
-                    if success:
-                        logger.info(f"✅ Loaded model state for window {target_window}")
-                        verifier.model.eval()
-                    else:
-                        logger.warning(f"⚠️ Failed to load model state for window {target_window}, using base model")
-                except Exception as e:
-                    logger.warning(f"Error loading model state: {e}, using base model")
-                    pass
+                # logger.info(f"📥 Loading model state for window {target_window}")
+                # try:
+                #     success = await load_model_state(verifier.model, wallet.hotkey.ss58_address, target_window)
+                #     if success:
+                #         logger.info(f"✅ Loaded model state for window {target_window}")
+                #         verifier.model.eval()
+                #     else:
+                #         logger.warning(f"⚠️ Failed to load model state for window {target_window}, using base model")
+                # except Exception as e:
+                #     logger.warning(f"Error loading model state: {e}, using base model")
+                #     pass
+                
+                # v1: Use base model directly without waiting
+                logger.info(f"🚀 Using base model for verification")
                 
                 # Get block hash for the window start
                 target_window_hash = await subtensor.get_block_hash(target_window)
@@ -835,13 +860,24 @@ def validate(use_drand, test_mode):
                 logger.info(f"📁 Found {files_found} window files from {len(meta.hotkeys)} active hotkeys")
                 logger.info(f"🏁 Total valid rollouts in window {target_window}: {total_valid_rollouts}")
                 
-                # Upload all valid rollouts for training
+                # Upload all valid rollouts for training and to Hugging Face
                 if all_valid_rollouts:
+                    # Upload to S3/R2 for immediate access
                     upload_success = await upload_valid_rollouts(target_window, all_valid_rollouts)
                     if upload_success:
                         logger.info(f"📤 Uploaded {len(all_valid_rollouts)} valid rollouts for training")
                     else:
                         logger.warning(f"⚠️ Failed to upload valid rollouts for training")
+                    
+                    # NEW: Upload to Hugging Face dataset for community access
+                    try:
+                        hf_success = await upload_to_huggingface(all_valid_rollouts, target_window, PROTOCOL_VERSION)
+                        if hf_success:
+                            logger.info(f"🤗 Uploaded {len(all_valid_rollouts)} rollouts to Hugging Face dataset")
+                        else:
+                            logger.debug("Failed to upload to Hugging Face (may need HF_TOKEN)")
+                    except Exception as e:
+                        logger.debug(f"Hugging Face upload error: {e}")
                 
                 # Update global inference counts for weight calculation
                 for hotkey, metrics in window_inference_counts.items():
@@ -922,6 +958,8 @@ def validate(use_drand, test_mode):
 # --------------------------------------------------------------------------- #
 #                               TRAINER CLI                                   #
 # --------------------------------------------------------------------------- #
+# TODO(v2): Re-enable train command with improved architecture
+'''
 @cli.command("train")
 def train():
     """Run the training process"""
@@ -999,6 +1037,7 @@ def train():
         )
     
     asyncio.run(main())
+'''  # End of commented train command
 
 # --------------------------------------------------------------------------- #
 #                          Main Entry Point                                   #

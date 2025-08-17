@@ -7,13 +7,20 @@ import gzip
 import asyncio
 import logging
 import tempfile
+import hashlib
+from datetime import datetime
 from typing import Any, List, Dict, Optional
 from botocore.config import Config
 from aiobotocore.session import get_session
 from transformers import AutoModelForCausalLM
 from safetensors.torch import load_file, save_file
+from huggingface_hub import HfApi, HfFolder
+from datasets import Dataset, DatasetDict
 
 logger = logging.getLogger(__name__)
+
+# Protocol version for dataset versioning
+PROTOCOL_VERSION = "v1.0.0"
 
 # --------------------------------------------------------------------------- #
 #                   S3/R2 Configuration                                       #
@@ -363,8 +370,10 @@ async def sink_window_inferences(wallet, window_start: int, inferences: List[dic
     else:
         logger.error(f"❌ Failed to upload window data for window {window_start}")
 
+# TODO(v2): Re-enable model state management for training
+'''
 async def save_model_state(model: AutoModelForCausalLM, hotkey: str, window: int):
-    """Save model state as safetensors to S3 with chunked upload and progress logging"""
+    # Save model state as safetensors to S3 with chunked upload and progress logging
     key = f"grail/models/{hotkey}-{window}.safetensors"
     
     # Create temporary file for safetensors
@@ -438,9 +447,10 @@ async def load_model_state(model: AutoModelForCausalLM, hotkey: str, window: int
         return False
 
 async def model_state_exists(hotkey: str, window: int) -> bool:
-    """Check if model state exists for given hotkey and window"""
+    # Check if model state exists for given hotkey and window
     key = f"grail/models/{hotkey}-{window}.safetensors"
     return await file_exists(key)
+'''  # End of commented model state functions
 
 async def upload_valid_rollouts(window: int, valid_rollouts: List[dict]):
     """Upload validated SAT rollouts for training with chunked upload and progress logging"""
@@ -490,4 +500,192 @@ async def get_valid_rollouts(window: int) -> List[dict]:
         return []
     except Exception:
         logger.debug("No valid rollouts found for window %s", window)
+        return []
+
+# --------------------------------------------------------------------------- #
+#                   Hugging Face Dataset Upload                               #
+# --------------------------------------------------------------------------- #
+
+def login_huggingface():
+    """
+    Login to Hugging Face using token from environment or cache.
+    This should be called once at startup.
+    """
+    try:
+        from huggingface_hub import login, HfFolder
+        
+        # Check if already logged in
+        existing_token = HfFolder.get_token()
+        if existing_token:
+            logger.info("Already logged into Hugging Face")
+            return True
+        
+        # Try to get token from environment
+        token = os.getenv("HF_TOKEN")
+        if token:
+            login(token=token, add_to_git_credential=False)
+            logger.info("✅ Successfully logged into Hugging Face")
+            return True
+        else:
+            logger.warning("No HF_TOKEN found in environment. Set HF_TOKEN to enable dataset uploads.")
+            logger.info("Get your token at: https://huggingface.co/settings/tokens")
+            return False
+            
+    except Exception as e:
+        logger.warning(f"Failed to login to Hugging Face: {e}")
+        return False
+
+async def upload_to_huggingface(rollouts: List[Dict], window: int, version: str = None):
+    """
+    Upload rollouts to unified Hugging Face dataset.
+    
+    Dataset: grail/sat-rollouts (single dataset for all windows)
+    Each rollout is versioned and includes window metadata.
+    
+    Args:
+        rollouts: List of validated rollout dictionaries
+        window: Window number for temporal tracking
+        version: Protocol version (defaults to PROTOCOL_VERSION)
+    """
+    if not rollouts:
+        logger.debug("No rollouts to upload to Hugging Face")
+        return False
+    
+    if version is None:
+        version = PROTOCOL_VERSION
+    
+    dataset_name = "grail/sat-rollouts"
+    
+    try:
+        # Prepare rollouts with metadata
+        processed_rollouts = []
+        for rollout in rollouts:
+            # Generate unique ID for each rollout
+            rollout_id = hashlib.sha256(
+                f"{rollout.get('hotkey', '')}_{window}_{rollout.get('nonce', '')}".encode()
+            ).hexdigest()[:16]
+            
+            # Extract key information
+            commit = rollout.get('commit', {})
+            sat_problem = commit.get('sat_problem', {})
+            rollout_data = commit.get('rollout', {})
+            proof = rollout.get('proof', {})
+            
+            # Create flattened structure for dataset
+            processed_rollout = {
+                "id": rollout_id,
+                "version": version,
+                "window": window,
+                "timestamp": rollout.get('timestamp', time.time()),
+                "uploaded_at": datetime.utcnow().isoformat(),
+                
+                # Miner info
+                "miner": rollout.get('hotkey', ''),
+                "nonce": rollout.get('nonce', 0),
+                
+                # SAT problem
+                "sat_seed": sat_problem.get('seed', ''),
+                "sat_num_vars": sat_problem.get('num_vars', 0),
+                "sat_num_clauses": len(sat_problem.get('clauses', [])),
+                "sat_difficulty": sat_problem.get('difficulty', 0.5),
+                "sat_clauses": json.dumps(sat_problem.get('clauses', [])),  # Store as JSON string
+                
+                # Solution
+                "solution_success": rollout_data.get('success', False),
+                "solution_assignment": json.dumps(rollout_data.get('assignment', [])),
+                "solution_trajectory": json.dumps(rollout_data.get('trajectory', [])),
+                "solution_satisfied_clauses": rollout_data.get('satisfied_clauses', 0),
+                "solution_total_reward": rollout_data.get('total_reward', 0.0),
+                
+                # GRAIL proof (store as JSON strings for complex fields)
+                "grail_tokens": json.dumps(commit.get('tokens', [])),
+                "grail_s_vals": json.dumps(commit.get('s_vals', [])),
+                "grail_signature": commit.get('signature', ''),
+                "grail_beacon": json.dumps(commit.get('beacon', {})),
+                "grail_indices": json.dumps(proof.get('indices', [])),
+                
+                # Metrics
+                "token_count": len(commit.get('tokens', [])),
+                "inference_count": rollout.get('inference_count', 1),
+            }
+            
+            processed_rollouts.append(processed_rollout)
+        
+        # Create dataset from rollouts
+        dataset = Dataset.from_list(processed_rollouts)
+        
+        # Check if we're logged in
+        token = HfFolder.get_token()
+        if not token:
+            # Try to login if not already
+            if not login_huggingface():
+                logger.debug("Cannot upload to Hugging Face without login")
+                return False
+            token = HfFolder.get_token()
+        
+        # Push to Hugging Face Hub
+        # This will append to existing dataset or create new one
+        dataset.push_to_hub(
+            dataset_name,
+            token=token,
+            private=False,  # Make it public for community access
+            append=True,    # Append to existing dataset
+        )
+        
+        logger.info(f"📤 Successfully uploaded {len(processed_rollouts)} rollouts to HF dataset {dataset_name}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to upload to Hugging Face: {e}")
+        return False
+
+async def download_from_huggingface(version: str = None, window: int = None, limit: int = None) -> List[Dict]:
+    """
+    Download rollouts from Hugging Face dataset with optional filtering.
+    
+    Args:
+        version: Filter by protocol version (e.g., "v1.0.0")
+        window: Filter by specific window number
+        limit: Maximum number of rollouts to return
+    
+    Returns:
+        List of rollout dictionaries
+    """
+    dataset_name = "grail/sat-rollouts"
+    
+    try:
+        from datasets import load_dataset
+        
+        # Load dataset
+        dataset = load_dataset(dataset_name, split="train")
+        
+        # Apply filters
+        if version:
+            dataset = dataset.filter(lambda x: x["version"] == version)
+        
+        if window is not None:
+            dataset = dataset.filter(lambda x: x["window"] == window)
+        
+        # Convert to list of dicts
+        rollouts = dataset.to_list()
+        
+        # Apply limit if specified
+        if limit:
+            rollouts = rollouts[:limit]
+        
+        # Decode JSON strings back to objects
+        for rollout in rollouts:
+            rollout["sat_clauses"] = json.loads(rollout.get("sat_clauses", "[]"))
+            rollout["solution_assignment"] = json.loads(rollout.get("solution_assignment", "[]"))
+            rollout["solution_trajectory"] = json.loads(rollout.get("solution_trajectory", "[]"))
+            rollout["grail_tokens"] = json.loads(rollout.get("grail_tokens", "[]"))
+            rollout["grail_s_vals"] = json.loads(rollout.get("grail_s_vals", "[]"))
+            rollout["grail_beacon"] = json.loads(rollout.get("grail_beacon", "{}"))
+            rollout["grail_indices"] = json.loads(rollout.get("grail_indices", "[]"))
+        
+        logger.info(f"Downloaded {len(rollouts)} rollouts from HF dataset")
+        return rollouts
+        
+    except Exception as e:
+        logger.error(f"Failed to download from Hugging Face: {e}")
         return []
