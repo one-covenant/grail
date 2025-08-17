@@ -65,7 +65,7 @@ all = [
 grail = "grail:main"
 
 [project.urls]
-Repository = "https://github.com/your-org/grail"
+Repository = "https://tplr/your-org/grail"
 Documentation = "https://github.com/your-org/grail/blob/main/SPEC.md"
 Issues = "https://github.com/your-org/grail/issues"
 
