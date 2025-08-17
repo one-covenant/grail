@@ -17,6 +17,10 @@ import numpy as np
 from typing import List, Tuple, Dict, Optional
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+# Enable CUDA debugging for better error messages
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+os.environ['TORCH_USE_CUDA_DSA'] = '1'
+
 from .environments import SATProblem, SATEnvironment, generate_sat_problem, SATRolloutGenerator
 from .rollout import RolloutGenerator
 from .drand import get_drand_beacon, get_beacon, get_round_at_time
@@ -146,7 +150,7 @@ class Prover:
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model     = (
             AutoModelForCausalLM
-            .from_pretrained(model_name)
+            .from_pretrained(model_name, use_safetensors=True)
             .to(self.device)
             .eval()
         )
@@ -174,22 +178,65 @@ class Prover:
         Returns:
             Dictionary with GRAIL commitment (s_vals, signature, etc.)
         """
+        # Validate tokens before processing
+        if not tokens:
+            logger.warning("Empty token list provided to commit")
+            return {
+                "beacon": {"round": 1, "randomness": randomness_hex},
+                "tokens": [],
+                "s_vals": [],
+                "signature": b"".hex()
+            }
+        
+        # Check for invalid token IDs
+        vocab_size = self.model.config.vocab_size
+        invalid_tokens = [t for t in tokens if t < 0 or t >= vocab_size]
+        if invalid_tokens:
+            logger.error(f"Invalid token IDs found: {invalid_tokens[:10]}... (vocab_size={vocab_size})")
+            raise ValueError(f"Token IDs must be in range [0, {vocab_size}), found: {min(invalid_tokens)}-{max(invalid_tokens)}")
+        
+        # Check sequence length
+        max_length = self.model.config.max_position_embeddings
+        if len(tokens) > max_length:
+            logger.warning(f"Token sequence ({len(tokens)}) exceeds model max length ({max_length}), truncating")
+            tokens = tokens[:max_length]
+        
         # Set up randomness for sketch computation
         self.beacon_R = {"round": 1, "randomness": randomness_hex}
         self.r_vec = r_vec_from_randomness(randomness_hex, self.model.config.hidden_size)
         
         # Compute sketch values from model hidden states
         s_vals = []
-        if tokens:
+        try:
             with torch.no_grad():
-                token_tensor = torch.tensor([tokens]).to(self.device)
+                # Ensure correct dtype for token tensor
+                token_tensor = torch.tensor([tokens], dtype=torch.long).to(self.device)
+                
+                # Add shape logging for debugging
+                logger.debug(f"Token tensor shape: {token_tensor.shape}, dtype: {token_tensor.dtype}")
+                
                 outputs = self.model(token_tensor, output_hidden_states=True)
+                
+                # Validate LAYER_INDEX
+                num_layers = len(outputs.hidden_states)
+                if LAYER_INDEX >= num_layers or LAYER_INDEX < -num_layers:
+                    raise ValueError(f"LAYER_INDEX {LAYER_INDEX} out of bounds for model with {num_layers} layers")
+                
                 h_layer = outputs.hidden_states[LAYER_INDEX][0]
+                logger.debug(f"Hidden layer shape: {h_layer.shape}")
                 
                 for pos in range(len(tokens)):
                     if pos < h_layer.size(0):
                         s_val = dot_mod_q(h_layer[pos], self.r_vec)
                         s_vals.append(s_val)
+                    else:
+                        logger.warning(f"Position {pos} exceeds hidden layer size {h_layer.size(0)}")
+                        
+        except RuntimeError as e:
+            logger.error(f"CUDA/Runtime error during model inference: {e}")
+            logger.error(f"Tokens sample: {tokens[:10]}..." if len(tokens) > 10 else f"Tokens: {tokens}")
+            logger.error(f"Token range: min={min(tokens)}, max={max(tokens)}")
+            raise
         
         logger.debug(f"[Commit] Generated {len(s_vals)} sketch values for {len(tokens)} tokens")
         
@@ -268,7 +315,7 @@ class Verifier:
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model     = (
             AutoModelForCausalLM
-            .from_pretrained(model_name)
+            .from_pretrained(model_name, use_safetensors=True)
             .to(self.device)
             .eval()
         )

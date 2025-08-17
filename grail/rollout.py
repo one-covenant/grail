@@ -134,6 +134,14 @@ class RolloutGenerator(ABC):
         
         # Extract tokens and parse action
         tokens = gen[0].tolist()
+        
+        # Validate tokens are within vocabulary range
+        vocab_size = len(self.tokenizer)
+        invalid_tokens = [t for t in tokens if t < 0 or t >= vocab_size]
+        if invalid_tokens:
+            logger.warning(f"Found invalid tokens: {invalid_tokens[:5]}... Clamping to valid range")
+            tokens = [max(0, min(t, vocab_size - 1)) for t in tokens]
+        
         generated_text = self.tokenizer.decode(gen[0][len(input_ids[0]):], skip_special_tokens=True)
         action = self.parse_action(generated_text, env, state)
         
