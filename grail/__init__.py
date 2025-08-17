@@ -178,7 +178,8 @@ class Trainer:
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto" if torch.cuda.is_available() else None
+            device_map="auto" if torch.cuda.is_available() else None,
+            use_safetensors=True
         )
         
         # Add padding token if missing
@@ -532,6 +533,11 @@ def mine(use_drand):
                         inference_count += 1
                         logger.info(f"⚡ Generating SAT rollout {inference_count}...")
                         
+                        # Clean up GPU memory periodically  
+                        if inference_count % 10 == 0 and torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                            logger.debug(f"GPU memory allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
+                        
                         # Generate unique seed for SAT problem
                         nonce = random.randint(1000, 9999)
                         sat_seed = f"{wallet.hotkey.ss58_address}-{window_block_hash}-{nonce}"
@@ -576,6 +582,19 @@ def mine(use_drand):
                         # Small delay to prevent overwhelming the system
                         await asyncio.sleep(0.1)
                         
+                    except RuntimeError as e:
+                        if "CUDA" in str(e):
+                            logger.error(f"CUDA error at inference {inference_count}: {e}")
+                            logger.error(f"SAT problem: vars={sat_problem.num_vars if 'sat_problem' in locals() else 'N/A'}, "
+                                       f"clauses={len(sat_problem.clauses) if 'sat_problem' in locals() else 'N/A'}")
+                            logger.error(f"Difficulty: {difficulty if 'difficulty' in locals() else 'N/A'}")
+                            # Try to recover by clearing cache
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                            # Skip this inference and continue
+                            continue
+                        else:
+                            raise
                     except Exception as e:
                         logger.warning(f"Failed to generate inference {inference_count}: {e}")
                         continue
