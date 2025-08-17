@@ -626,47 +626,74 @@ async def upload_to_huggingface(rollouts: List[Dict], window: int, version: str 
             token = HfFolder.get_token()
         
         # Initialize Hugging Face API
-        from huggingface_hub import HfApi, create_repo
+        from huggingface_hub import HfApi, create_repo, repo_exists
         api = HfApi()
         
-        # Ensure the repository exists
+        # Check if repository exists before trying to create it
         try:
-            # Try to create the repo if it doesn't exist
-            create_repo(
-                repo_id=dataset_name,
-                token=token,
-                private=False,
-                repo_type="dataset",
-                exist_ok=True  # Don't error if it already exists
-            )
-            logger.debug(f"Dataset repository {dataset_name} ready")
+            repo_exists_flag = repo_exists(repo_id=dataset_name, repo_type="dataset", token=token)
+            if not repo_exists_flag:
+                # Only create if it doesn't exist
+                logger.debug(f"Creating new dataset repository: {dataset_name}")
+                create_repo(
+                    repo_id=dataset_name,
+                    token=token,
+                    private=False,
+                    repo_type="dataset"
+                )
+                logger.info(f"✅ Created new dataset repository: {dataset_name}")
+            else:
+                logger.debug(f"Dataset repository {dataset_name} already exists")
         except Exception as e:
-            logger.debug(f"Repo creation note: {e}")
+            # If we can't check or create, just continue - the push might still work
+            logger.debug(f"Note about repo check/creation: {e}")
         
         # Push to Hugging Face Hub
-        # Try to load existing dataset and append, or create new one
+        dataset_pushed = False
+        
+        # First, try to just push/overwrite the dataset directly
+        # This works whether the dataset exists or not
         try:
-            # Try to load existing dataset
-            from datasets import load_dataset, concatenate_datasets
-            existing_dataset = load_dataset(dataset_name, split="train", token=token)
-            # Append new data to existing
-            combined_dataset = concatenate_datasets([existing_dataset, dataset])
-            combined_dataset.push_to_hub(
-                dataset_name,
-                token=token,
-                private=False,  # Make it public for community access
-                split="train"   # Use main train split
-            )
-            logger.info(f"📤 Appended {len(processed_rollouts)} rollouts to existing HF dataset")
-        except Exception as e:
-            # Dataset doesn't exist yet or error loading, create new one
-            logger.debug(f"Creating new dataset (first upload): {e}")
+            logger.debug(f"Pushing dataset to: {dataset_name}")
             dataset.push_to_hub(
                 dataset_name,
                 token=token,
                 private=False,  # Make it public for community access
                 split="train"   # Use main train split
             )
+            logger.info(f"📤 Successfully pushed {len(processed_rollouts)} rollouts to HF dataset {dataset_name}")
+            dataset_pushed = True
+        except Exception as push_error:
+            logger.debug(f"Direct push failed, trying append approach: {push_error}")
+            
+            # If direct push fails, try to append to existing dataset
+            try:
+                from datasets import load_dataset, concatenate_datasets
+                logger.debug(f"Attempting to load and append to existing dataset: {dataset_name}")
+                
+                # Try without force_redownload first (use cache if available)
+                try:
+                    existing_dataset = load_dataset(dataset_name, split="train", token=token)
+                except:
+                    # If that fails, try forcing redownload
+                    existing_dataset = load_dataset(dataset_name, split="train", token=token, download_mode="force_redownload")
+                
+                # Append new data to existing
+                combined_dataset = concatenate_datasets([existing_dataset, dataset])
+                combined_dataset.push_to_hub(
+                    dataset_name,
+                    token=token,
+                    private=False,
+                    split="train"
+                )
+                logger.info(f"📤 Appended {len(processed_rollouts)} rollouts to existing HF dataset")
+                dataset_pushed = True
+            except Exception as append_error:
+                logger.error(f"Failed to push dataset via both methods: {append_error}")
+                return False
+        
+        if not dataset_pushed:
+            return False
         
         logger.info(f"📤 Successfully uploaded {len(processed_rollouts)} rollouts to HF dataset {dataset_name}")
         return True
