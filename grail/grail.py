@@ -6,7 +6,6 @@ Modified for SAT problem generation and RL rollouts
 
 import io
 import os
-import hmac
 import time
 import torch
 import random
@@ -15,15 +14,17 @@ import logging
 import hashlib
 import numpy as np
 from typing import List, Tuple, Dict, Optional
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
+
+from .rollout import RolloutGenerator
+from .drand import get_beacon, get_drand_beacon, get_round_at_time
+from .environments import SATProblem, SATEnvironment, generate_sat_problem, SATRolloutGenerator
 
 # Enable CUDA debugging for better error messages
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 os.environ['TORCH_USE_CUDA_DSA'] = '1'
 
-from .environments import SATProblem, SATEnvironment, generate_sat_problem, SATRolloutGenerator
-from .rollout import RolloutGenerator
-from .drand import get_drand_beacon, get_beacon, get_round_at_time
 
 # Use the same logger as the main module
 logger = logging.getLogger("grail")
@@ -42,10 +43,73 @@ RNG_LABEL    = {"sketch": b"sketch", "open": b"open", "sat": b"sat"}
 
 
 def prf(label: bytes, *parts: bytes, out_bytes: int) -> bytes:
-    h = hashlib.sha256(label + b"||" + b"||".join(parts)).digest()
-    while len(h) < out_bytes:
-        h += hashlib.sha256(h).digest()
-    return h[:out_bytes]
+    """
+    Pseudorandom function using SHA-256 in counter mode for arbitrary output length.
+    
+    Args:
+        label: Domain separation label
+        *parts: Variable number of byte strings to include in PRF input
+        out_bytes: Number of output bytes required
+    
+    Returns:
+        Deterministic pseudorandom bytes of length out_bytes
+    
+    Raises:
+        ValueError: If out_bytes is negative or too large
+        TypeError: If inputs are not bytes
+    """
+    # Input validation
+    if out_bytes < 0:
+        raise ValueError(f"out_bytes must be non-negative, got {out_bytes}")
+    if out_bytes > 2**16:  # Reasonable upper limit (64KB)
+        raise ValueError(f"out_bytes too large: {out_bytes} (max 65536)")
+    if out_bytes == 0:
+        return b''
+    
+    if not isinstance(label, bytes):
+        raise TypeError(f"label must be bytes, got {type(label).__name__}")
+    for i, part in enumerate(parts):
+        if not isinstance(part, bytes):
+            raise TypeError(f"parts[{i}] must be bytes, got {type(part).__name__}")
+    
+    # Use SHAKE256 for variable-length output if available (more efficient)
+    try:
+        import hashlib
+        if hasattr(hashlib, 'shake_256'):
+            # SHAKE256 is designed for variable-length output
+            shake = hashlib.shake_256()
+            shake.update(label)
+            shake.update(b"||")
+            for part in parts[:-1] if parts else []:
+                shake.update(part)
+                shake.update(b"||")
+            if parts:
+                shake.update(parts[-1])
+            return shake.digest(out_bytes)
+    except Exception:
+        pass  # Fall back to SHA256 method
+    
+    # Original SHA256-based expansion with optimization
+    # Pre-calculate how many hash outputs we need
+    hash_size = 32  # SHA256 output size
+    num_blocks = (out_bytes + hash_size - 1) // hash_size
+    
+    # Build input once
+    if parts:
+        input_data = label + b"||" + b"||".join(parts)
+    else:
+        input_data = label
+    
+    # Use counter mode for expansion (more standard than chaining)
+    output = bytearray(num_blocks * hash_size)
+    
+    for i in range(num_blocks):
+        # Include counter in each block for better security properties
+        block_input = input_data + i.to_bytes(4, 'big')
+        block_hash = hashlib.sha256(block_input).digest()
+        output[i * hash_size:(i + 1) * hash_size] = block_hash
+    
+    return bytes(output[:out_bytes])
 
 def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
     """
@@ -60,53 +124,133 @@ def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
         d_model: Model hidden dimension size
     
     Returns:
-        Random projection vector of shape (d_model,)
+        Random projection vector of shape (d_model,) with int32 values
+    
+    Raises:
+        ValueError: If rand_hex is invalid or d_model is invalid
+    
+    Note:
+        Uses big-endian byte order for cross-platform consistency
     """
-    # Remove 0x prefix if present and ensure we have valid hex
-    clean_hex = rand_hex.replace("0x", "").replace("0X", "")
+    # Input validation
+    if d_model <= 0:
+        raise ValueError(f"d_model must be positive, got {d_model}")
+    if d_model > 100000:  # Reasonable upper limit
+        raise ValueError(f"d_model too large: {d_model} (max 100000)")
+    if not rand_hex:
+        raise ValueError("rand_hex cannot be empty")
+    
+    # Normalize hex string more robustly
+    clean_hex = rand_hex.strip().replace("0x", "").replace("0X", "")
+    if not clean_hex:
+        raise ValueError(f"Empty randomness hex string after cleaning: '{rand_hex}'")
+    
+    # Pad with leading zero if odd length
+    if len(clean_hex) % 2 != 0:
+        clean_hex = '0' + clean_hex
+    
+    # Cache key for memoization (avoid recomputing for same inputs)
+    cache_key = (clean_hex, d_model)
+    
+    # Check if we've already computed this (useful for repeated calls)
+    if hasattr(r_vec_from_randomness, '_cache'):
+        if cache_key in r_vec_from_randomness._cache:
+            logger.debug(f"[SketchVec] Using cached vector for d_model={d_model}")
+            return r_vec_from_randomness._cache[cache_key].clone()
+    else:
+        r_vec_from_randomness._cache = {}
+    
     try:
         # Use PRF to expand drand randomness into d_model random integers
+        # Using 4 bytes per integer for int32 range
         raw = prf(RNG_LABEL["sketch"], bytes.fromhex(clean_hex), out_bytes=4*d_model)
     except ValueError as e:
         raise ValueError(f"Invalid hex string for randomness: '{rand_hex}' -> '{clean_hex}': {e}") from e
-    ints = struct.unpack(">" + "i"*d_model, raw)
-    logger.debug(f"[SketchVec] first 4 ints: {ints[:4]}")
-    return torch.tensor(ints, dtype=torch.int32)
+    
+    # Use numpy for more efficient unpacking if available
+    try:
+        import numpy as np
+        # More efficient for large d_model
+        ints_array = np.frombuffer(raw, dtype='>i4')  # big-endian int32
+        tensor = torch.from_numpy(ints_array.copy())  # copy to ensure ownership
+    except ImportError:
+        # Fallback to struct.unpack
+        ints = struct.unpack(">" + "i"*d_model, raw)
+        tensor = torch.tensor(ints, dtype=torch.int32)
+    
+    # Optionally normalize to unit variance (commented out to maintain compatibility)
+    # tensor = tensor.float()
+    # tensor = tensor / tensor.std()
+    
+    # Cache the result (limit cache size to prevent memory issues)
+    if len(r_vec_from_randomness._cache) < 100:
+        r_vec_from_randomness._cache[cache_key] = tensor.clone()
+    
+    logger.debug(f"[SketchVec] Generated vector with shape={tensor.shape}, first 4 values: {tensor[:4].tolist()}")
+    return tensor
 
 def indices_from_root(tokens: list[int], rand_hex: str, seq_len: int, k: int) -> list[int]:
-    # Use tokens hash instead of s_vals hash for index derivation
-    # This ensures indices remain stable even when s_vals change within tolerance
+    """
+    Generate deterministic indices for proof verification.
+    
+    Args:
+        tokens: List of token IDs from the model output
+        rand_hex: Randomness hex string (from drand/block hash)
+        seq_len: Sequence length to sample from
+        k: Number of indices to select
+    
+    Returns:
+        Sorted list of k indices sampled deterministically
+    
+    Raises:
+        ValueError: If rand_hex is invalid or k > seq_len
+    """
+    # Validate inputs early
+    if k > seq_len:
+        raise ValueError(f"Cannot sample {k} indices from sequence of length {seq_len}")
+    if k <= 0:
+        raise ValueError(f"k must be positive, got {k}")
+    if not tokens:
+        raise ValueError("tokens list cannot be empty")
+    
+    # Efficient token bytes conversion using bytearray
     tokens_bytes = b''.join(int_to_bytes(token) for token in tokens)
     tokens_hash = hashlib.sha256(tokens_bytes).digest()
-    # Remove 0x prefix if present and ensure we have valid hex
-    clean_hex = rand_hex.replace("0x", "").replace("0X", "")
+    
+    # Normalize hex string more robustly
+    clean_hex = rand_hex.strip().replace("0x", "").replace("0X", "")
+    if not clean_hex:
+        raise ValueError(f"Empty randomness hex string: '{rand_hex}'")
+    
+    # Validate hex string before conversion
+    if len(clean_hex) % 2 != 0:
+        clean_hex = '0' + clean_hex  # Pad with leading zero if odd length
+    
     try:
         material = prf(RNG_LABEL["open"], tokens_hash, bytes.fromhex(clean_hex), out_bytes=32)
     except ValueError as e:
         raise ValueError(f"Invalid hex string for randomness: '{rand_hex}' -> '{clean_hex}': {e}")
+    
+    # Use deterministic sampling with seed
     rnd = random.Random(material)
-    idxs = sorted(rnd.sample(range(seq_len), k))
-    logger.debug(f"[Indices] selected {idxs}")
+    
+    # For small k relative to seq_len, use sample (more efficient)
+    # For large k, use shuffle and slice (avoids rejection sampling overhead)
+    if k < seq_len * 0.1:  # If selecting less than 10% of indices
+        idxs = sorted(rnd.sample(range(seq_len), k))
+    else:
+        # More efficient for large k
+        all_indices = list(range(seq_len))
+        rnd.shuffle(all_indices)
+        idxs = sorted(all_indices[:k])
+    
+    logger.debug(f"[Indices] selected {len(idxs)} indices from seq_len={seq_len}: {idxs[:5]}..." if len(idxs) > 5 else f"[Indices] selected {idxs}")
     return idxs
 
 # ─────────────────────────────  UTILITIES  ─────────────────────────────
 
-def derive_secret_key_from_hotkey(hotkey_address: str) -> bytes:
-    """
-    Derive a deterministic secret key from a hotkey address.
-    
-    This ensures that:
-    1. Each miner has a unique secret key based on their hotkey
-    2. The validator can derive the same key to verify signatures
-    3. The key is deterministic and reproducible
-    
-    Args:
-        hotkey_address: The miner's hotkey address (e.g., ss58 format)
-    
-    Returns:
-        32-byte secret key for HMAC signing
-    """
-    return hashlib.sha256(f"grail_secret_{hotkey_address}".encode()).digest()
+# REMOVED: derive_secret_key_from_hotkey was insecure and has been removed
+# Use wallet.hotkey.sign() for actual cryptographic signatures
 
 def int_to_bytes(i: int) -> bytes:
     return struct.pack(">I", i & 0xFFFFFFFF)
@@ -123,18 +267,57 @@ def dot_mod_q(hidden: torch.Tensor, r_vec: torch.Tensor) -> int:
     # Convert to int and apply modulo
     return int(prod.item()) % PRIME_Q
 
-def sign_s_vals(s_vals: list[int], secret_key: bytes) -> bytes:
-    """Sign the s_vals list for integrity protection."""
+def sign_s_vals(s_vals: list[int], wallet) -> bytes:
+    """
+    Sign the s_vals list using wallet's cryptographic signature.
+    
+    Args:
+        s_vals: List of s_vals to sign
+        wallet: Bittensor wallet object with signing capability
+    
+    Returns:
+        Signature bytes
+    
+    Raises:
+        TypeError: If wallet doesn't have signing capability
+    """
+    if not hasattr(wallet, 'hotkey') or not hasattr(wallet.hotkey, 'sign'):
+        raise TypeError(f"Wallet must have hotkey.sign() method, got {type(wallet)}")
+    
     s_vals_bytes = b''.join(int_to_bytes(val) for val in s_vals)
-    signature = hmac.new(secret_key, s_vals_bytes, hashlib.sha256).digest()
-    logger.debug(f"[Signature] signed {len(s_vals)} s_vals")
+    signature = wallet.hotkey.sign(s_vals_bytes)
+    logger.debug(f"[Signature] signed {len(s_vals)} s_vals with wallet signature")
     return signature
 
-def verify_s_vals_signature(s_vals: list[int], signature: bytes, secret_key: bytes) -> bool:
-    """Verify the signature of s_vals list."""
+def verify_s_vals_signature(s_vals: list[int], signature: bytes, wallet_address: str) -> bool:
+    """
+    Verify the signature of s_vals list using wallet's public key.
+    
+    Args:
+        s_vals: List of s_vals to verify
+        signature: Signature to verify
+        wallet_address: SS58 wallet address for public key verification
+    
+    Returns:
+        True if signature is valid
+    
+    Raises:
+        TypeError: If wallet_address is not a string
+    """
+    if not isinstance(wallet_address, str):
+        raise TypeError(f"wallet_address must be a string SS58 address, got {type(wallet_address)}")
+    
     s_vals_bytes = b''.join(int_to_bytes(val) for val in s_vals)
-    expected_sig = hmac.new(secret_key, s_vals_bytes, hashlib.sha256).digest()
-    return hmac.compare_digest(signature, expected_sig)
+    
+    try:
+        from substrateinterface import Keypair
+        # Create keypair from SS58 address (public key only, no private key)
+        keypair = Keypair(ss58_address=wallet_address)
+        # Verify signature using public key cryptography
+        return keypair.verify(data=s_vals_bytes, signature=signature)
+    except Exception as e:
+        logger.warning(f"Signature verification failed for {wallet_address[:8]}...: {e}")
+        return False
 
 def hash_s_vals(s_vals: list[int]) -> bytes:
     """Compute hash of s_vals for integrity checking."""
@@ -145,7 +328,20 @@ def hash_s_vals(s_vals: list[int]) -> bytes:
 # ─────────────────────────────  PROVER  ────────────────────────────────
 
 class Prover:
-    def __init__(self, model_name=MODEL_NAME, secret_key: Optional[bytes] = None):
+    def __init__(self, model_name=MODEL_NAME, wallet=None):
+        """
+        Initialize Prover with model and wallet for secure signatures.
+        
+        Args:
+            model_name: Name of the model to load
+            wallet: Bittensor wallet for cryptographic signatures (required)
+        
+        Raises:
+            ValueError: If wallet is not provided
+        """
+        if wallet is None:
+            raise ValueError("Prover requires a wallet for secure signatures")
+        
         self.device    = "cuda" if torch.cuda.is_available() else "cpu"
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model     = (
@@ -154,13 +350,8 @@ class Prover:
             .to(self.device)
             .eval()
         )
-        # Secret key for signing s_vals - MUST be set deterministically before use
-        # In production, this is derived from the miner's hotkey address
-        if secret_key is not None:
-            self.secret_key = secret_key
-        else:
-            # This should never be used - the miner must set a deterministic key
-            raise ValueError("Prover requires a deterministic secret_key. Use derive_secret_key(hotkey_address)")
+        self.wallet = wallet
+        logger.debug("Prover initialized with wallet for secure signatures")
 
     
     def commit(self, tokens: list[int], randomness_hex: str) -> dict:
@@ -241,7 +432,7 @@ class Prover:
         logger.debug(f"[Commit] Generated {len(s_vals)} sketch values for {len(tokens)} tokens")
         
         # Sign the s_vals for integrity
-        signature = sign_s_vals(s_vals, self.secret_key)
+        signature = sign_s_vals(s_vals, self.wallet)
         
         # Store state for open() method
         self._state = {
@@ -320,7 +511,7 @@ class Verifier:
             .eval()
         )
 
-    def verify_rollout(self, commit: dict, proof_pkg: dict, prover_secret_key: bytes) -> bool:
+    def verify_rollout(self, commit: dict, proof_pkg: dict, prover_address: str) -> bool:
         """
         Verify SAT rollout with GRAIL proof.
         
@@ -335,7 +526,7 @@ class Verifier:
         - The model that generated this cannot be substituted
         """
         # First verify the GRAIL proof - this proves the model identity
-        if not self.verify(commit, proof_pkg, prover_secret_key):
+        if not self.verify(commit, proof_pkg, prover_address):
             logger.debug("GRAIL proof failed - model identity not verified")
             return False
         
@@ -373,11 +564,21 @@ class Verifier:
         logger.debug("SAT rollout verification successful - model identity confirmed")
         return True
     
-    def verify(self, commit: dict, proof_pkg: dict, prover_secret_key: bytes) -> bool:
-        """Verify just the GRAIL proof portion."""
+    def verify(self, commit: dict, proof_pkg: dict, prover_address: str) -> bool:
+        """
+        Verify just the GRAIL proof portion using public key cryptography.
+        
+        Args:
+            commit: Commitment data with s_vals and signature
+            proof_pkg: Proof package with revealed information
+            prover_address: SS58 wallet address for public key verification
+        
+        Returns:
+            True if proof is valid, False otherwise
+        """
         # Verify s_vals signature for integrity
         signature = bytes.fromhex(commit["signature"])
-        if not verify_s_vals_signature(commit["s_vals"], signature, prover_secret_key):
+        if not verify_s_vals_signature(commit["s_vals"], signature, prover_address):
             logger.debug("s_vals signature verification failed")
             return False
 

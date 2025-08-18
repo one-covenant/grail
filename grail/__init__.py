@@ -161,9 +161,8 @@ def verify_rollout_signature(rollout_data: dict) -> bool:
     except Exception:
         return False
 
-def derive_secret_key(hotkey_address: str) -> bytes:
-    """Derive deterministic secret key from hotkey for verification"""
-    return hashlib.sha256(f"grail_secret_{hotkey_address}".encode()).digest()
+# REMOVED: derive_secret_key was insecure and has been removed
+# The GRAIL proof system now uses wallet signatures for security
 
 # Global storage for miner state
 miner_inference_counts = defaultdict(list)  # track inferences per block for weight calculation
@@ -456,9 +455,8 @@ def mine(use_drand):
     # Initialize model and prover
     logger.info(f"🔑 Miner hotkey: {wallet.hotkey.ss58_address}")
     logger.info(f"Loading base model: {LLAMA_MODEL}")
-    # Derive deterministic secret key from hotkey
-    secret_key = derive_secret_key(wallet.hotkey.ss58_address)
-    prover = Prover(model_name=LLAMA_MODEL, secret_key=secret_key)
+    # Use wallet for secure GRAIL proof signatures
+    prover = Prover(model_name=LLAMA_MODEL, wallet=wallet)
     
     async def _run():
         subtensor = None
@@ -586,7 +584,7 @@ def mine(use_drand):
                         grpo_rollouts = sat_generator.generate_grpo_rollouts(
                             sat_problem, 
                             combined_randomness,
-                            secret_key
+                            wallet  # Use wallet for secure signatures
                         )
                         
                         # Log GRPO statistics
@@ -955,7 +953,6 @@ def validate(use_drand, test_mode):
                                 # We must verify ALL rollouts to ensure model identity
                                 try:
                                     logger.debug(f"Verifying SAT rollout from {wallet_addr}")
-                                    prover_secret_key = derive_secret_key(wallet_addr)
                                     
                                     # For GRPO rollouts, we need to modify the commit data to use the base problem
                                     commit_data = inference["commit"]
@@ -968,7 +965,8 @@ def validate(use_drand, test_mode):
                                         commit_data["sat_problem"]["seed"] = base_sat_seed
                                         # The verifier will regenerate the problem from this seed
                                     
-                                    is_valid = verifier.verify_rollout(commit_data, inference["proof"], prover_secret_key)
+                                    # Use wallet address for signature verification (public key verification)
+                                    is_valid = verifier.verify_rollout(commit_data, inference["proof"], wallet_addr)
                                     if not is_valid:
                                         logger.warning(f"SAT rollout verification failed for {wallet_addr} - skipping")
                                         continue
