@@ -70,7 +70,7 @@ class RolloutGenerator(ABC):
         Args:
             problem: The problem instance (environment-specific)
             randomness_hex: Hex string for GRAIL proof (from drand/block hash)
-            wallet: Bittensor wallet object for cryptographic signatures
+            wallet: Bittensor wallet object (bt.wallet) for cryptographic signatures
         
         Returns:
             List of GRPORollout objects with GRPO advantages computed

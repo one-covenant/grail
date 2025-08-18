@@ -269,29 +269,30 @@ def dot_mod_q(hidden: torch.Tensor, r_vec: torch.Tensor) -> int:
 
 def sign_s_vals(s_vals: list[int], wallet) -> bytes:
     """
-    Sign the s_vals list using wallet's cryptographic signature.
+    Sign the s_vals list using Bittensor wallet's cryptographic signature.
     
     Args:
         s_vals: List of s_vals to sign
-        wallet: Bittensor wallet object with signing capability
+        wallet: Bittensor wallet object (bt.wallet) with signing capability
     
     Returns:
-        Signature bytes
+        Signature bytes from Ed25519 signing
     
     Raises:
         TypeError: If wallet doesn't have signing capability
     """
     if not hasattr(wallet, 'hotkey') or not hasattr(wallet.hotkey, 'sign'):
-        raise TypeError(f"Wallet must have hotkey.sign() method, got {type(wallet)}")
+        raise TypeError(f"Wallet must be a bt.wallet with hotkey.sign() method, got {type(wallet)}")
     
     s_vals_bytes = b''.join(int_to_bytes(val) for val in s_vals)
+    # Use Bittensor wallet's sign method (Ed25519 signature)
     signature = wallet.hotkey.sign(s_vals_bytes)
-    logger.debug(f"[Signature] signed {len(s_vals)} s_vals with wallet signature")
+    logger.debug(f"[Signature] signed {len(s_vals)} s_vals with Bittensor wallet signature")
     return signature
 
 def verify_s_vals_signature(s_vals: list[int], signature: bytes, wallet_address: str) -> bool:
     """
-    Verify the signature of s_vals list using wallet's public key.
+    Verify the signature of s_vals list using Bittensor wallet's public key.
     
     Args:
         s_vals: List of s_vals to verify
@@ -310,13 +311,17 @@ def verify_s_vals_signature(s_vals: list[int], signature: bytes, wallet_address:
     s_vals_bytes = b''.join(int_to_bytes(val) for val in s_vals)
     
     try:
-        from substrateinterface import Keypair
-        # Create keypair from SS58 address (public key only, no private key)
-        keypair = Keypair(ss58_address=wallet_address)
+        import bittensor as bt
+        # Create a keypair from the SS58 address (public key only)
+        # Bittensor uses substrate under the hood but provides a cleaner interface
+        keypair = bt.Keypair(ss58_address=wallet_address)
         # Verify signature using public key cryptography
-        return keypair.verify(data=s_vals_bytes, signature=signature)
+        verified = keypair.verify(data=s_vals_bytes, signature=signature)
+        if not verified:
+            logger.debug(f"Signature verification failed for {wallet_address[:8]}...")
+        return verified
     except Exception as e:
-        logger.warning(f"Signature verification failed for {wallet_address[:8]}...: {e}")
+        logger.warning(f"Signature verification error for {wallet_address[:8]}...: {e}")
         return False
 
 def hash_s_vals(s_vals: list[int]) -> bytes:
@@ -330,17 +335,17 @@ def hash_s_vals(s_vals: list[int]) -> bytes:
 class Prover:
     def __init__(self, model_name=MODEL_NAME, wallet=None):
         """
-        Initialize Prover with model and wallet for secure signatures.
+        Initialize Prover with model and Bittensor wallet for secure signatures.
         
         Args:
             model_name: Name of the model to load
-            wallet: Bittensor wallet for cryptographic signatures (required)
+            wallet: Bittensor wallet object (bt.wallet) for cryptographic signatures (required)
         
         Raises:
             ValueError: If wallet is not provided
         """
         if wallet is None:
-            raise ValueError("Prover requires a wallet for secure signatures")
+            raise ValueError("Prover requires a bt.wallet for secure signatures")
         
         self.device    = "cuda" if torch.cuda.is_available() else "cpu"
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
