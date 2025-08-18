@@ -538,6 +538,7 @@ def mine(use_drand):
                 inference_count = 0
                 
                 # Generate inferences until the window closes
+                problem_count = 0
                 while True:
                     current_block = await subtensor.get_current_block()
                     current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
@@ -547,58 +548,123 @@ def mine(use_drand):
                         logger.info(f"Window {window_start} has ended, moving to next window")
                         break
                     
+                    # Check if we're getting close to window end (leave time for upload)
+                    blocks_remaining = (window_start + WINDOW_LENGTH) - current_block
+                    if blocks_remaining <= 2:  # Leave last 2 blocks for upload
+                        logger.info(f"Approaching window end (blocks remaining: {blocks_remaining}), stopping generation")
+                        break
+                    
                     try:
-                        inference_count += 1
-                        logger.info(f"⚡ Generating SAT rollout {inference_count}...")
+                        problem_count += 1
+                        inference_count += 1  # For logging
+                        logger.info(f"⚡ Generating GRPO rollouts for problem {problem_count} (block {current_block}/{window_start + WINDOW_LENGTH - 1})...")
                         
                         # Clean up GPU memory periodically  
                         if inference_count % 10 == 0 and torch.cuda.is_available():
                             torch.cuda.empty_cache()
                             logger.debug(f"GPU memory allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
                         
-                        # Generate unique seed for SAT problem
-                        nonce = random.randint(1000, 9999)
-                        sat_seed = f"{wallet.hotkey.ss58_address}-{window_block_hash}-{nonce}"
+                        # Generate unique base nonce for problem group
+                        base_nonce = random.randint(1000, 9999)
                         
-                        # Generate SAT problem from seed
+                        # Generate SAT problem from seed (using base nonce)
+                        sat_seed_base = f"{wallet.hotkey.ss58_address}-{window_block_hash}-{base_nonce}"
                         difficulty = min(0.9, 0.3 + (inference_count * 0.01))  # Gradually increase difficulty
-                        sat_problem = generate_sat_problem(sat_seed, difficulty)
+                        sat_problem = generate_sat_problem(sat_seed_base, difficulty)
                         logger.debug(f"Generated SAT problem: {sat_problem.num_vars} vars, {len(sat_problem.clauses)} clauses")
                         
-                        # Generate rollout with GRAIL proof using combined randomness
-                        logger.debug(f"Generating rollout with randomness: {combined_randomness[:16]}...")
-                        commit_data = prover.commit_rollout(sat_problem, combined_randomness, difficulty)
-                        logger.debug(f"Rollout complete: success={commit_data['rollout']['success']}")
+                        # Generate GRPO rollouts (4 per problem)
+                        sat_generator = SATRolloutGenerator(
+                            prover.model, 
+                            prover.tokenizer, 
+                            prover.device,
+                            rollouts_per_problem=4  # GRPO standard
+                        )
                         
-                        proof_data = prover.open(combined_randomness)
-                        logger.debug(f"Proof generated with {len(proof_data['indices'])} indices")
+                        # Generate rollouts with GRAIL proofs
+                        logger.debug(f"Generating GRPO rollouts with randomness: {combined_randomness[:16]}...")
+                        grpo_rollouts = sat_generator.generate_grpo_rollouts(
+                            sat_problem, 
+                            combined_randomness,
+                            secret_key
+                        )
                         
-                        # Prepare rollout data
-                        rollout_data = {
-                            "window_start": window_start,
-                            "block": current_block,
-                            "nonce": nonce,
-                            "sat_seed": sat_seed,
-                            "difficulty": difficulty,
-                            "block_hash": window_block_hash,
-                            "randomness": combined_randomness,
-                            "use_drand": use_drand,
-                            "commit": commit_data,
-                            "proof": proof_data,
-                            "timestamp": time.time()
-                        }
+                        # Log GRPO statistics
+                        successful_count = sum(1 for r in grpo_rollouts if r.success)
+                        mean_reward = sum(r.reward for r in grpo_rollouts) / len(grpo_rollouts) if grpo_rollouts else 0
+                        logger.info(f"GRPO batch: {successful_count}/{len(grpo_rollouts)} successful, mean reward: {mean_reward:.3f}")
                         
-                        # Sign the rollout
-                        rollout_data = sign_rollout(rollout_data, wallet)
+                        # Log progress every 10 problems
+                        if problem_count % 10 == 0:
+                            elapsed = time.time() - start_time
+                            rollouts_per_sec = len(inferences) / elapsed if elapsed > 0 else 0
+                            logger.info(f"📊 Progress: {len(inferences)} rollouts from {problem_count} problems in {elapsed:.1f}s ({rollouts_per_sec:.1f} rollouts/sec)")
                         
-                        # Log successful rollouts
-                        if commit_data["rollout"]["success"]:
-                            logger.info(f"✅ Successfully solved SAT problem (vars={sat_problem.num_vars}, clauses={len(sat_problem.clauses)})")
+                        # Package rollouts for submission
+                        for rollout_idx, rollout in enumerate(grpo_rollouts):
+                            # Create unique nonce for this rollout while maintaining group association
+                            rollout_nonce = base_nonce * 10 + rollout_idx  # e.g., 1234 -> 12340, 12341, 12342, 12343
+                            rollout_sat_seed = f"{wallet.hotkey.ss58_address}-{window_block_hash}-{rollout_nonce}"
+                            
+                            # Set up prover state for open() method
+                            prover._state = {
+                                "tokens": rollout.tokens,
+                                "s_vals": rollout.s_vals,
+                                "seq_len": len(rollout.tokens),
+                                "signature": rollout.signature
+                            }
+                            proof_data = prover.open(combined_randomness)
+                            
+                            rollout_data = {
+                                "window_start": window_start,
+                                "block": current_block,
+                                "nonce": rollout_nonce,  # Unique nonce per rollout
+                                "sat_seed": rollout_sat_seed,  # Unique seed that validator can verify
+                                "difficulty": difficulty,
+                                "block_hash": window_block_hash,
+                                "randomness": combined_randomness,
+                                "use_drand": use_drand,
+                                "rollout_group": base_nonce,  # Group identifier for GRPO rollouts
+                                "rollout_index": rollout_idx,
+                                "total_in_group": len(grpo_rollouts),
+                                "commit": {
+                                    "tokens": rollout.tokens,
+                                    "s_vals": rollout.s_vals,
+                                    "signature": rollout.signature.hex(),
+                                    "beacon": rollout.beacon,
+                                    "sat_problem": {
+                                        "seed": sat_seed_base,  # Use base seed for GRPO group
+                                        "num_vars": sat_problem.num_vars,
+                                        "clauses": sat_problem.clauses,
+                                        "difficulty": difficulty
+                                    },
+                                    "rollout": {
+                                        "trajectory": rollout.trajectory,
+                                        "total_reward": rollout.reward,
+                                        "advantage": rollout.advantage,  # GRPO advantage
+                                        "success": rollout.success,
+                                        "token_logprobs": rollout.token_logprobs,  # For training
+                                        "prompt_length": rollout.prompt_length,
+                                        "completion_length": rollout.completion_length,
+                                        # For backward compatibility
+                                        "satisfied_clauses": len([c for c in sat_problem.clauses if any(
+                                            (lit > 0 and rollout.trajectory[0][1][abs(lit)-1] if len(rollout.trajectory) > 0 and isinstance(rollout.trajectory[0][1], list) and abs(lit)-1 < len(rollout.trajectory[0][1]) else False) or
+                                            (lit < 0 and not rollout.trajectory[0][1][abs(lit)-1] if len(rollout.trajectory) > 0 and isinstance(rollout.trajectory[0][1], list) and abs(lit)-1 < len(rollout.trajectory[0][1]) else False)
+                                            for lit in c
+                                        )]) if rollout.trajectory else 0,
+                                        "assignment": rollout.trajectory[0][1] if rollout.trajectory and isinstance(rollout.trajectory[0][1], list) else []
+                                    }
+                                },
+                                "proof": proof_data,
+                                "timestamp": time.time()
+                            }
+                            
+                            # Sign each rollout
+                            rollout_data = sign_rollout(rollout_data, wallet)
+                            inferences.append(rollout_data)
                         
-                        inferences.append(rollout_data)
-                        
-                        # Small delay to prevent overwhelming the system
-                        await asyncio.sleep(0.1)
+                        # Tiny delay to yield control
+                        await asyncio.sleep(0.01)
                         
                     except RuntimeError as e:
                         if "CUDA" in str(e):
@@ -619,12 +685,17 @@ def mine(use_drand):
                 
                 
                 elapsed_time = time.time() - start_time
-                logger.info(f"🎯 Generated {len(inferences)} inferences in {elapsed_time:.1f}s for window {window_start}")
+                logger.info(f"🎯 Generated {len(inferences)} rollouts in {elapsed_time:.1f}s for window {window_start}")
                 
                 if inferences:
-                    # Upload all inferences as a single window file
-                    await sink_window_inferences(wallet, window_start, inferences)
-                    logger.info(f"📤 Uploaded window {window_start} with {len(inferences)} inferences")
+                    logger.info(f"📤 Uploading {len(inferences)} rollouts to R2 for window {window_start}...")
+                    try:
+                        # Upload all inferences as a single window file
+                        await sink_window_inferences(wallet, window_start, inferences)
+                        logger.info(f"✅ Successfully uploaded window {window_start} with {len(inferences)} rollouts")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to upload window {window_start}: {e}")
+                        logger.error(traceback.format_exc())
                 else:
                     logger.warning(f"No inferences generated for window {window_start}")
                 
@@ -781,31 +852,48 @@ def validate(use_drand, test_mode):
                         # Calculate sample size based on total inferences
                         total_inferences = len(inferences)
                         
+                        # For GRPO, we need to check complete groups
+                        # First, identify all groups in the inferences
+                        groups_map = defaultdict(list)
+                        for idx, inf in enumerate(inferences):
+                            group_id = inf.get("rollout_group")
+                            if group_id is not None:
+                                groups_map[group_id].append(idx)
+                            else:
+                                # Non-GRPO rollout, treat as individual
+                                groups_map[f"single_{idx}"] = [idx]
+                        
                         # Decide whether to spot check or verify all
-                        if total_inferences <= MIN_SAMPLES_PER_MINER:
-                            # If very few rollouts, check them all
-                            sample_size = total_inferences
+                        if total_inferences <= MAX_SAMPLES_PER_MINER:
+                            # If few enough rollouts, check them all
+                            indices_to_check = list(range(total_inferences))
                             use_spot_check = False
-                        else:
-                            sample_size = max(MIN_SAMPLES_PER_MINER, 
-                                            min(MAX_SAMPLES_PER_MINER, 
-                                                math.ceil(total_inferences * SAMPLE_RATE)))
-                            use_spot_check = True
-                        
-                        if use_spot_check:
-                            logger.info(f"📊 Spot checking {sample_size}/{total_inferences} rollouts from {wallet_addr} ({SAMPLE_RATE*100:.0f}% sample)")
-                        else:
                             logger.info(f"🔍 Verifying all {total_inferences} rollouts from {wallet_addr}")
-                        
-                        # Randomly select indices to check
-                        indices_to_check = random.sample(range(total_inferences), min(sample_size, total_inferences))
-                        indices_to_check.sort()  # Process in order for better cache locality
+                        else:
+                            # For spot checking, sample complete GRPO groups
+                            use_spot_check = True
+                            indices_to_check = []
+                            
+                            # Calculate how many groups to check
+                            num_groups = len(groups_map)
+                            groups_to_check = max(1, min(num_groups, int(num_groups * SAMPLE_RATE)))
+                            
+                            # Randomly select groups
+                            selected_groups = random.sample(list(groups_map.keys()), groups_to_check)
+                            
+                            # Add all rollouts from selected groups
+                            for group_id in selected_groups:
+                                indices_to_check.extend(groups_map[group_id])
+                            
+                            indices_to_check.sort()  # Process in order for better cache locality
+                            logger.info(f"📊 Spot checking {len(indices_to_check)}/{total_inferences} rollouts from {groups_to_check}/{num_groups} groups ({SAMPLE_RATE*100:.0f}% of groups)")
                         
                         valid_count = 0
                         checked_count = 0
                         successful_rollouts = 0
                         unique_solutions = set()  # Track unique successful solutions
                         nonces_seen = set()
+                        rollout_groups = defaultdict(list)  # Track GRPO groups
                         
                         # Progressive verification with early stopping
                         should_stop = False
@@ -822,6 +910,11 @@ def validate(use_drand, test_mode):
                             
                             inference = inferences[inference_idx]
                             checked_count += 1
+                            
+                            # Track GRPO groups
+                            rollout_group = inference.get("rollout_group")
+                            if rollout_group:
+                                rollout_groups[rollout_group].append(inference)
                             
                             try:
                                 # Check required fields for SAT rollouts
@@ -855,7 +948,7 @@ def validate(use_drand, test_mode):
                                 # Verify SAT seed format
                                 expected_seed = f"{wallet_addr}-{target_window_hash}-{nonce}"
                                 if inference.get("sat_seed") != expected_seed:
-                                    logger.debug(f"Invalid SAT seed in inference from {wallet_addr}")
+                                    logger.debug(f"Invalid SAT seed in inference from {wallet_addr}: expected {expected_seed}, got {inference.get('sat_seed')}")
                                     continue
                                 
                                 # Verify GRAIL proof and SAT rollout
@@ -863,7 +956,19 @@ def validate(use_drand, test_mode):
                                 try:
                                     logger.debug(f"Verifying SAT rollout from {wallet_addr}")
                                     prover_secret_key = derive_secret_key(wallet_addr)
-                                    is_valid = verifier.verify_rollout(inference["commit"], inference["proof"], prover_secret_key)
+                                    
+                                    # For GRPO rollouts, we need to modify the commit data to use the base problem
+                                    commit_data = inference["commit"]
+                                    rollout_group = inference.get("rollout_group")
+                                    if rollout_group:
+                                        # This is a GRPO rollout - regenerate base problem for verification
+                                        base_sat_seed = f"{wallet_addr}-{target_window_hash}-{rollout_group}"
+                                        base_problem = generate_sat_problem(base_sat_seed, inference.get("difficulty", 0.5))
+                                        # Update commit data with base problem for verification
+                                        commit_data["sat_problem"]["seed"] = base_sat_seed
+                                        # The verifier will regenerate the problem from this seed
+                                    
+                                    is_valid = verifier.verify_rollout(commit_data, inference["proof"], prover_secret_key)
                                     if not is_valid:
                                         logger.warning(f"SAT rollout verification failed for {wallet_addr} - skipping")
                                         continue
@@ -888,6 +993,60 @@ def validate(use_drand, test_mode):
                             except Exception as e:
                                 logger.debug(f"Error processing inference from {wallet_addr}: {e}")
                                 continue
+                        
+                        # Verify GRPO groups after processing checked inferences
+                        grpo_valid_groups = 0
+                        grpo_invalid_groups = 0
+                        grpo_incomplete_groups = 0
+                        
+                        for group_id, group_rollouts in rollout_groups.items():
+                            # Skip single rollout "groups" (non-GRPO)
+                            if str(group_id).startswith("single_"):
+                                continue
+                                
+                            # Verify group has multiple rollouts (GRPO requirement)
+                            if len(group_rollouts) < 2:
+                                logger.debug(f"GRPO group {group_id} has only {len(group_rollouts)} rollouts in checked sample, may be incomplete due to spot-checking")
+                                grpo_incomplete_groups += 1
+                                continue
+                            
+                            # Check if this looks like a complete group (should have 4 rollouts for GRPO)
+                            expected_group_size = 4  # Standard GRPO uses 4 rollouts per problem
+                            if len(group_rollouts) != expected_group_size:
+                                logger.debug(f"GRPO group {group_id} has {len(group_rollouts)} rollouts, expected {expected_group_size}")
+                            
+                            # Verify advantages sum to ~0 (GRPO property)
+                            advantages = []
+                            for r in group_rollouts:
+                                adv = r.get("commit", {}).get("rollout", {}).get("advantage", 0.0)
+                                advantages.append(adv)
+                            
+                            advantage_sum = sum(advantages)
+                            if abs(advantage_sum) > 0.01:  # Allow small floating point errors
+                                logger.debug(f"GRPO group {group_id} advantages don't sum to 0: {advantage_sum} (advantages: {advantages})")
+                                grpo_invalid_groups += 1
+                                continue
+                            
+                            # Verify all rollouts in group have same base problem
+                            # They should all have the same rollout_group and same base sat_problem seed
+                            base_seeds = []
+                            for r in group_rollouts:
+                                sat_problem = r.get("commit", {}).get("sat_problem", {})
+                                base_seeds.append(sat_problem.get("seed"))
+                            
+                            if len(set(base_seeds)) != 1:
+                                logger.debug(f"GRPO group {group_id} has different base problems: {set(base_seeds)}")
+                                grpo_invalid_groups += 1
+                                continue
+                            
+                            logger.debug(f"✅ GRPO group {group_id} verified: {len(group_rollouts)} rollouts, advantages sum to {advantage_sum:.6f}")
+                            grpo_valid_groups += 1
+                        
+                        if rollout_groups:
+                            # Only report on groups we actually checked
+                            total_groups_checked = grpo_valid_groups + grpo_invalid_groups + grpo_incomplete_groups
+                            if total_groups_checked > 0:
+                                logger.info(f"GRPO groups checked: {grpo_valid_groups} valid, {grpo_invalid_groups} invalid, {grpo_incomplete_groups} incomplete (spot-check artifact)")
                         
                         # Calculate estimated total valid rollouts based on sampling
                         if should_stop:
