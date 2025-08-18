@@ -177,7 +177,7 @@ class SATEnvironment:
 
 
 class SATRolloutGenerator(RolloutGenerator):
-    """Generate SAT rollouts using an LLM model."""
+    """SAT-specific GRPO rollout generator."""
     
     def create_environment(self, problem: SATProblem) -> SATEnvironment:
         """Create a SAT environment for the given problem."""
@@ -188,49 +188,71 @@ class SATRolloutGenerator(RolloutGenerator):
         return env.reset()
     
     def create_prompt(self, problem: SATProblem, env: SATEnvironment, state: Dict, trajectory: List) -> str:
-        """Create a prompt for the LLM to decide the next variable assignment."""
+        """Create prompt for SAT solving."""
         prompt = f"SAT Problem:\n{problem.to_text()}\n"
-        
-        if trajectory:
-            prompt += "\nAssignments so far:\n"
-            for var, action, _ in trajectory:
-                prompt += f"  x{var+1} = {action}\n"
-        
-        prompt += f"\nCurrent state: {env.count_satisfied_clauses()}/{len(problem.clauses)} clauses satisfied\n"
-        prompt += f"Next variable: x{env.current_var+1}\n"
-        prompt += "Should x{} be 0 (false) or 1 (true)? Consider which value satisfies more clauses.\n".format(env.current_var+1)
-        prompt += "Answer with just '0' or '1':"
-        
+        prompt += "Assign each variable as 0 (false) or 1 (true).\n"
+        prompt += "Provide all assignments in order. For example: 0 1 0 1 means x1=0, x2=1, x3=0, x4=1\n"
+        prompt += "Solution: "
         return prompt
     
-    def parse_action(self, text: str, env: SATEnvironment, state: Dict) -> int:
-        """Parse the action from LLM output."""
-        text = text.strip().lower()
+    def parse_action(self, text: str, env: SATEnvironment, state: Dict) -> List[int]:
+        """Parse all variable assignments from generated text."""
+        text = text.strip()
+        actions = []
         
-        # Look for explicit 0 or 1
-        if '1' in text or 'true' in text:
-            return 1
-        elif '0' in text or 'false' in text:
-            return 0
+        # Look for sequences of 0s and 1s
+        for char in text:
+            if char in '01':
+                actions.append(int(char))
+                if len(actions) >= env.problem.num_vars:
+                    break
         
-        # Check for yes/no style answers
-        if 'yes' in text:
-            return 1
-        elif 'no' in text:
-            return 0
+        # If we didn't find enough, look for patterns like "x1=0"
+        if len(actions) < env.problem.num_vars:
+            import re
+            pattern = r'x\d+=([01])|variable\s+\d+\s*[:=]\s*([01])'
+            matches = re.findall(pattern, text.lower())
+            for match in matches:
+                value = match[0] if match[0] else match[1]
+                if value:
+                    actions.append(int(value))
         
-        # Default to trying true first (can be randomized)
-        return 1 if env.current_var % 2 == 0 else 0
+        # Pad with 0s if not enough assignments
+        while len(actions) < env.problem.num_vars:
+            actions.append(0)
+        
+        return actions[:env.problem.num_vars]
     
-    def step_environment(self, env: SATEnvironment, action: int) -> Tuple[Dict, float, bool, Dict]:
-        """Take a step in the SAT environment."""
-        return env.step(action)
+    def step_environment(self, env: SATEnvironment, action: Any) -> Tuple[Dict, float, bool, Dict]:
+        """Take steps in the SAT environment."""
+        # If action is a list (from parse_action), apply all assignments
+        if isinstance(action, list):
+            total_reward = 0
+            state = None
+            done = False
+            info = {}
+            
+            for single_action in action:
+                if env.current_var < env.problem.num_vars:
+                    state, reward, done, info = env.step(single_action)
+                    total_reward += reward
+                    if done:
+                        break
+            
+            return state, total_reward, done, info
+        else:
+            # Single action (backward compatibility)
+            return env.step(action)
     
-    def create_trajectory_entry(self, state: Dict, action: int, reward: float, info: Dict) -> Tuple[int, int, float]:
-        """Create a trajectory entry for SAT (variable index, action, reward)."""
-        # Get the variable index from the state (before the action was taken)
-        var_idx = state["current_var"]
-        return (var_idx, action, reward)
+    def create_trajectory_entry(self, state: Dict, action: Any, reward: float, info: Dict) -> Tuple[Any, Any, float]:
+        """Create a trajectory entry for SAT."""
+        # For GRPO, we store the full action list and reward
+        if isinstance(action, list):
+            return (state["current_var"], action, reward)
+        else:
+            # Single action (backward compatibility)
+            var_idx = state["current_var"]
+            return (var_idx, action, reward)
     
     def get_final_info(self, env: SATEnvironment, trajectory: List, total_reward: float) -> Dict:
         """Get final SAT-specific information."""

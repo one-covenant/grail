@@ -1,97 +1,238 @@
-"""Generic rollout generation for GRAIL RL environments."""
+"""Generic rollout generation for GRAIL RL environments - GRPO Version."""
 
 import torch
 import logging
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
+from dataclasses import dataclass
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 logger = logging.getLogger(__name__)
 
+@dataclass
+class GRPORollout:
+    """Single rollout for GRPO training with GRAIL proof support."""
+    # Token data for GRAIL proof
+    tokens: List[int]  # All tokens (prompt + completion)
+    token_logprobs: List[float]  # Logprobs for all tokens
+    
+    # Training masks
+    prompt_length: int  # Where prompt ends and completion begins
+    completion_length: int
+    
+    # Rewards and advantages
+    reward: float
+    advantage: float  # Computed after all rollouts collected
+    
+    # Trajectory for analysis
+    trajectory: List[Tuple[Any, Any, float]]
+    success: bool
+    
+    # GRAIL proof fields (from existing grail.py)
+    s_vals: List[int]
+    signature: bytes
+    beacon: Dict
+
 
 class RolloutGenerator(ABC):
     """
-    Abstract base class for generating rollouts in any environment.
-    
-    This provides the common structure for:
-    1. Interacting with an LLM model
-    2. Collecting tokens for GRAIL proofs
-    3. Tracking trajectories and rewards
-    
-    Subclasses implement environment-specific logic.
+    Updated base class for GRPO rollout generation.
+    Generates multiple rollouts per problem for proper GRPO training.
     """
     
-    def __init__(self, model: AutoModelForCausalLM, tokenizer: AutoTokenizer, device: str = "cuda"):
+    def __init__(self, model: AutoModelForCausalLM, tokenizer: AutoTokenizer, 
+                 device: str = "cuda", rollouts_per_problem: int = 4):
         """
-        Initialize with a model and tokenizer.
+        Initialize with support for multiple rollouts.
         
         Args:
             model: The language model to use for decisions
             tokenizer: The tokenizer for the model
             device: Device to run on (cuda/cpu)
+            rollouts_per_problem: Number of rollouts to generate per problem (default 4 for GRPO)
         """
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
+        self.rollouts_per_problem = rollouts_per_problem
     
-    def generate_rollout(self, problem: Any) -> Dict:
+    def generate_grpo_rollouts(self, problem: Any, randomness_hex: str, 
+                               secret_key: bytes) -> List[GRPORollout]:
         """
-        Generate a complete rollout for the given problem.
+        Generate multiple rollouts for GRPO training with GRAIL proofs.
         
         This is the main entry point that:
-        1. Initializes the environment
-        2. Collects model decisions
-        3. Returns tokens and trajectory
+        1. Generates multiple rollouts per problem
+        2. Collects token-level logprobs
+        3. Computes GRPO advantages
+        4. Integrates with GRAIL proof system
         
         Args:
             problem: The problem instance (environment-specific)
+            randomness_hex: Hex string for GRAIL proof (from drand/block hash)
+            secret_key: Secret key for GRAIL signing
         
         Returns:
-            Dictionary with at minimum:
-            - tokens: List of all token IDs generated
-            - trajectory: List of (state, action, reward) tuples
-            - total_reward: Sum of all rewards
-            - success: Whether the problem was solved
+            List of GRPORollout objects with GRPO advantages computed
         """
-        # Initialize environment
+        rollouts = []
+        
+        for i in range(self.rollouts_per_problem):
+            # Initialize environment
+            env = self.create_environment(problem)
+            state = self.reset_environment(env)
+            
+            # Generate rollout with logprobs tracking
+            rollout = self._generate_single_rollout(
+                problem, env, state, randomness_hex, secret_key
+            )
+            rollouts.append(rollout)
+        
+        # Compute GRPO advantages across the group
+        rewards = [r.reward for r in rollouts]
+        advantages = self._compute_grpo_advantages(rewards)
+        
+        # Update advantages in rollouts
+        for rollout, advantage in zip(rollouts, advantages):
+            rollout.advantage = advantage
+        
+        return rollouts
+    
+    def generate_rollout(self, problem: Any) -> Dict:
+        """Legacy method for backward compatibility - generates single rollout."""
         env = self.create_environment(problem)
         state = self.reset_environment(env)
-        
-        # Execute rollout
         trajectory = []
         total_reward = 0
         done = False
         all_tokens = []
         
         while not done:
-            # Get model's decision
             prompt = self.create_prompt(problem, env, state, trajectory)
             tokens, action = self._get_model_decision(prompt, env, state)
-            
-            # Store tokens for GRAIL proof
             all_tokens.extend(tokens)
-            
-            # Take action in environment
             next_state, reward, done, info = self.step_environment(env, action)
-            
-            # Record trajectory
             trajectory_entry = self.create_trajectory_entry(state, action, reward, info)
             trajectory.append(trajectory_entry)
-            
             total_reward += reward
             state = next_state
         
-        # Get final results from environment
         final_info = self.get_final_info(env, trajectory, total_reward)
-        
-        return {
-            "tokens": all_tokens,
-            "trajectory": trajectory,
-            "total_reward": total_reward,
-            **final_info
-        }
+        return {"tokens": all_tokens, "trajectory": trajectory, "total_reward": total_reward, **final_info}
     
-    def _get_model_decision(self, prompt: str, env: Any, state: Any) -> tuple[List[int], Any]:
+    def _generate_single_rollout(self, problem: Any, env: Any, state: Any,
+                                 randomness_hex: str, secret_key: bytes) -> GRPORollout:
+        """Generate a single rollout with logprob tracking and GRAIL proof."""
+        # Create prompt
+        prompt = self.create_prompt(problem, env, state, [])
+        prompt_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
+        prompt_length = prompt_ids.shape[1]
+        
+        # Generate with logprobs
+        with torch.no_grad():
+            outputs = self.model.generate(
+                prompt_ids,
+                max_new_tokens=self.get_max_tokens(),
+                temperature=self.get_temperature(),
+                do_sample=True,
+                output_scores=True,
+                return_dict_in_generate=True,
+                pad_token_id=self.tokenizer.eos_token_id
+            )
+        
+        # Extract generated tokens and logprobs
+        all_token_ids = outputs.sequences[0].tolist()
+        completion_ids = all_token_ids[prompt_length:]
+        
+        # Extract logprobs for generated tokens
+        logprobs = self._extract_logprobs(outputs.scores, completion_ids)
+        
+        # Full token logprobs (0s for prompt, actual for completion)
+        all_logprobs = [0.0] * prompt_length + logprobs
+        
+        # Parse and execute actions from generated text
+        generated_text = self.tokenizer.decode(completion_ids, skip_special_tokens=True)
+        action = self.parse_action(generated_text, env, state)
+        
+        # Execute trajectory in environment
+        trajectory = []
+        total_reward = 0
+        done = False
+        
+        # Step through environment with parsed action
+        next_state, reward, done, info = self.step_environment(env, action)
+        trajectory_entry = self.create_trajectory_entry(state, action, reward, info)
+        trajectory.append(trajectory_entry)
+        total_reward += reward
+        
+        # Continue stepping if needed (for multi-step environments)
+        state = next_state
+        while not done and len(trajectory) < self.get_max_tokens():
+            # For subsequent steps, we might need to generate more actions
+            # This depends on the environment - for SAT, we usually make all assignments at once
+            break
+        
+        # Check final success
+        final_info = self.get_final_info(env, trajectory, total_reward)
+        success = final_info.get('success', False)
+        
+        # Generate GRAIL proof components (using existing grail.py logic)
+        from .grail import r_vec_from_randomness, dot_mod_q, sign_s_vals
+        
+        # Compute s_vals for GRAIL proof
+        r_vec = r_vec_from_randomness(randomness_hex, self.model.config.hidden_size)
+        s_vals = []
+        
+        with torch.no_grad():
+            token_tensor = torch.tensor([all_token_ids], dtype=torch.long).to(self.device)
+            model_outputs = self.model(token_tensor, output_hidden_states=True)
+            h_layer = model_outputs.hidden_states[-1][0]  # Last layer hidden states
+            
+            for pos in range(len(all_token_ids)):
+                if pos < h_layer.size(0):
+                    s_val = dot_mod_q(h_layer[pos], r_vec)
+                    s_vals.append(s_val)
+        
+        # Sign s_vals
+        signature = sign_s_vals(s_vals, secret_key)
+        
+        return GRPORollout(
+            tokens=all_token_ids,
+            token_logprobs=all_logprobs,
+            prompt_length=prompt_length,
+            completion_length=len(completion_ids),
+            reward=total_reward,
+            advantage=0.0,  # Will be set after all rollouts generated
+            trajectory=trajectory,
+            success=success,
+            s_vals=s_vals,
+            signature=signature,
+            beacon={"randomness": randomness_hex}
+        )
+    
+    def _extract_logprobs(self, scores: List[torch.Tensor], token_ids: List[int]) -> List[float]:
+        """Extract log probabilities for generated tokens."""
+        logprobs = []
+        for i, token_id in enumerate(token_ids):
+            if i < len(scores):
+                score_dist = torch.softmax(scores[i][0], dim=-1)
+                token_logprob = torch.log(score_dist[token_id]).item()
+                logprobs.append(token_logprob)
+            else:
+                logprobs.append(0.0)
+        return logprobs
+    
+    def _compute_grpo_advantages(self, rewards: List[float]) -> List[float]:
+        """
+        Compute GRPO advantages: reward - mean(group_rewards).
+        This is the core of GRPO - advantages sum to zero within each group.
+        """
+        if not rewards:
+            return []
+        mean_reward = sum(rewards) / len(rewards)
+        return [r - mean_reward for r in rewards]
+    
+    def _get_model_decision(self, prompt: str, env: Any, state: Any) -> Tuple[List[int], Any]:
         """
         Get model's decision for the current state.
         
