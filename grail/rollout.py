@@ -57,7 +57,7 @@ class RolloutGenerator(ABC):
         self.rollouts_per_problem = rollouts_per_problem
     
     def generate_grpo_rollouts(self, problem: Any, randomness_hex: str, 
-                               secret_key: bytes) -> List[GRPORollout]:
+                               wallet) -> List[GRPORollout]:
         """
         Generate multiple rollouts for GRPO training with GRAIL proofs.
         
@@ -70,7 +70,7 @@ class RolloutGenerator(ABC):
         Args:
             problem: The problem instance (environment-specific)
             randomness_hex: Hex string for GRAIL proof (from drand/block hash)
-            secret_key: Secret key for GRAIL signing
+            wallet: Bittensor wallet object for cryptographic signatures
         
         Returns:
             List of GRPORollout objects with GRPO advantages computed
@@ -84,7 +84,7 @@ class RolloutGenerator(ABC):
             
             # Generate rollout with logprobs tracking
             rollout = self._generate_single_rollout(
-                problem, env, state, randomness_hex, secret_key
+                problem, env, state, randomness_hex, wallet
             )
             rollouts.append(rollout)
         
@@ -121,7 +121,7 @@ class RolloutGenerator(ABC):
         return {"tokens": all_tokens, "trajectory": trajectory, "total_reward": total_reward, **final_info}
     
     def _generate_single_rollout(self, problem: Any, env: Any, state: Any,
-                                 randomness_hex: str, secret_key: bytes) -> GRPORollout:
+                                 randomness_hex: str, wallet) -> GRPORollout:
         """Generate a single rollout with logprob tracking and GRAIL proof."""
         # Create prompt
         prompt = self.create_prompt(problem, env, state, [])
@@ -193,8 +193,8 @@ class RolloutGenerator(ABC):
                     s_val = dot_mod_q(h_layer[pos], r_vec)
                     s_vals.append(s_val)
         
-        # Sign s_vals
-        signature = sign_s_vals(s_vals, secret_key)
+        # Sign s_vals using wallet
+        signature = sign_s_vals(s_vals, wallet)
         
         return GRPORollout(
             tokens=all_token_ids,
