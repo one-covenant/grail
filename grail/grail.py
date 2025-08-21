@@ -349,6 +349,11 @@ class Prover:
         
         self.device    = "cuda" if torch.cuda.is_available() else "cpu"
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        
+        # Ensure pad_token is properly set to prevent model confusion between padding and content tokens
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        
         self.model     = (
             AutoModelForCausalLM
             .from_pretrained(model_name, use_safetensors=True)
@@ -509,6 +514,11 @@ class Verifier:
     def __init__(self, model_name=MODEL_NAME):
         self.device    = "cuda" if torch.cuda.is_available() else "cpu"
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        
+        # Ensure pad_token is properly set to prevent model confusion between padding and content tokens
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        
         self.model     = (
             AutoModelForCausalLM
             .from_pretrained(model_name, use_safetensors=True)

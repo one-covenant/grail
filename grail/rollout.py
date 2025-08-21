@@ -129,13 +129,17 @@ class RolloutGenerator(ABC):
         """Generate a single rollout with logprob tracking and GRAIL proof."""
         # Create prompt
         prompt = self.create_prompt(problem, env, state, [])
-        prompt_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
+        # Tokenize with explicit attention mask to ensure proper distinction between content and padding tokens
+        tokenized = self.tokenizer(prompt, return_tensors="pt", return_attention_mask=True)
+        prompt_ids = tokenized.input_ids.to(self.device)
+        attention_mask = tokenized.attention_mask.to(self.device)
         prompt_length = prompt_ids.shape[1]
         
         # Generate with logprobs
-        with torch.no_grad():
+        with torch.inference_mode():
             outputs = self.model.generate(
                 prompt_ids,
+                attention_mask=attention_mask,
                 max_new_tokens=self.get_max_tokens(),
                 temperature=self.get_temperature(),
                 do_sample=True,
@@ -248,12 +252,18 @@ class RolloutGenerator(ABC):
         Returns:
             Tuple of (tokens generated, action to take)
         """
-        input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
+        # Tokenize with explicit attention mask to ensure proper distinction between content and padding tokens
+        tokenized = self.tokenizer(
+            prompt, return_tensors="pt", return_attention_mask=True
+        )
+        input_ids = tokenized.input_ids.to(self.device)
+        attention_mask = tokenized.attention_mask.to(self.device)
         
-        with torch.no_grad():
+        with torch.inference_mode():
             try:
                 gen = self.model.generate(
                     input_ids,
+                    attention_mask=attention_mask,
                     max_new_tokens=self.get_max_tokens(),
                     temperature=self.get_temperature(),
                     do_sample=True,
@@ -269,6 +279,7 @@ class RolloutGenerator(ABC):
                     logger.debug(f"Sampling failed, using greedy decoding: {e}")
                     gen = self.model.generate(
                         input_ids,
+                        attention_mask=attention_mask,
                         max_new_tokens=self.get_max_tokens(),
                         do_sample=False,
                         pad_token_id=self.tokenizer.eos_token_id,
