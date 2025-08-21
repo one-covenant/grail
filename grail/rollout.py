@@ -6,8 +6,10 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import bittensor as bt
 
 logger = logging.getLogger(__name__)
+
 
 @dataclass
 class GRPORollout:
@@ -56,8 +58,10 @@ class RolloutGenerator(ABC):
         self.device = device
         self.rollouts_per_problem = rollouts_per_problem
     
-    def generate_grpo_rollouts(self, problem: Any, randomness_hex: str, 
-                               wallet) -> List[GRPORollout]:
+    def generate_grpo_rollouts(self, 
+                               problem: Any, 
+                               randomness_hex: str, 
+                               wallet: bt.wallet) -> List[GRPORollout]:
         """
         Generate multiple rollouts for GRPO training with GRAIL proofs.
         
@@ -106,7 +110,7 @@ class RolloutGenerator(ABC):
         total_reward = 0
         done = False
         all_tokens = []
-        
+
         while not done:
             prompt = self.create_prompt(problem, env, state, trajectory)
             tokens, action = self._get_model_decision(prompt, env, state)
@@ -119,7 +123,7 @@ class RolloutGenerator(ABC):
         
         final_info = self.get_final_info(env, trajectory, total_reward)
         return {"tokens": all_tokens, "trajectory": trajectory, "total_reward": total_reward, **final_info}
-    
+
     def _generate_single_rollout(self, problem: Any, env: Any, state: Any,
                                  randomness_hex: str, wallet) -> GRPORollout:
         """Generate a single rollout with logprob tracking and GRAIL proof."""
@@ -192,10 +196,10 @@ class RolloutGenerator(ABC):
                 if pos < h_layer.size(0):
                     s_val = dot_mod_q(h_layer[pos], r_vec)
                     s_vals.append(s_val)
-        
+
         # Sign s_vals using wallet
         signature = sign_s_vals(s_vals, wallet)
-        
+
         return GRPORollout(
             tokens=all_token_ids,
             token_logprobs=all_logprobs,

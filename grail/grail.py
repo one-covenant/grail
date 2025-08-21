@@ -4,22 +4,21 @@ GRAIL – Guaranteed Rollout Authenticity via Inference Ledger
 Modified for SAT problem generation and RL rollouts
 """
 
-import io
+import hashlib
+import logging
 import os
-import time
-import torch
 import random
 import struct
-import logging
-import hashlib
-import numpy as np
 from typing import List, Tuple, Dict, Optional
+
+import bittensor as bt
+import numpy as np
+import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-
-from .rollout import RolloutGenerator
 from .drand import get_beacon, get_drand_beacon, get_round_at_time
 from .environments import SATProblem, SATEnvironment, generate_sat_problem, SATRolloutGenerator
+from .rollout import RolloutGenerator
 
 # Enable CUDA debugging for better error messages
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
@@ -171,9 +170,10 @@ def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
     try:
         import numpy as np
         # More efficient for large d_model
-        ints_array = np.frombuffer(raw, dtype='>i4')  # big-endian int32
+        ints_array = np.frombuffer(raw, dtype='>i4').astype(np.int32, copy=False)
         tensor = torch.from_numpy(ints_array.copy())  # copy to ensure ownership
-    except ImportError:
+    except ImportError as e:
+        logger.error(f"Error unpacking ints_array: {e}")
         # Fallback to struct.unpack
         ints = struct.unpack(">" + "i"*d_model, raw)
         tensor = torch.tensor(ints, dtype=torch.int32)
@@ -267,7 +267,7 @@ def dot_mod_q(hidden: torch.Tensor, r_vec: torch.Tensor) -> int:
     # Convert to int and apply modulo
     return int(prod.item()) % PRIME_Q
 
-def sign_s_vals(s_vals: list[int], wallet) -> bytes:
+def sign_s_vals(s_vals: list[int], wallet: bt.wallet) -> bytes:
     """
     Sign the s_vals list using Bittensor wallet's cryptographic signature.
     
@@ -333,7 +333,7 @@ def hash_s_vals(s_vals: list[int]) -> bytes:
 # ─────────────────────────────  PROVER  ────────────────────────────────
 
 class Prover:
-    def __init__(self, model_name=MODEL_NAME, wallet=None):
+    def __init__(self, model_name=MODEL_NAME, wallet: bt.wallet = None):
         """
         Initialize Prover with model and Bittensor wallet for secure signatures.
         
