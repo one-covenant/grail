@@ -1,8 +1,8 @@
-# Grail Subnet - Post-Training with Verifiable Inference
+# grail - incentivising intelligence
 
 ## Overview
 
-The **grail subnet** is a Bittensor subnet focused on post-training language models with verifiable inference capabilities. It leverages the **GRAIL protocol** (Guaranteed Rollout Authenticity via Inference Ledger) to ensure cryptographically verifiable model outputs during reinforcement learning rollouts.
+**grail** focuses on post-training language models with verifiable inference capabilities. It leverages the **GRAIL protocol** (Guaranteed Rollout Authenticity via Inference Ledger) to ensure cryptographically verifiable model outputs during reinforcement learning rollouts.
 
 ### Key Distinction: grail vs GRAIL
 
