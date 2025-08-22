@@ -9,7 +9,8 @@ description = "GRAIL – Guaranteed Rollout Authenticity via Inference Ledger"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [
-    {name = "GRAIL Team"},
+    {name = "unconst"},
+    {name = "distriburedstatemachine"},
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
