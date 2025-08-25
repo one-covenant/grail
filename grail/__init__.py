@@ -31,7 +31,14 @@ __version__ = "0.0.0"
 
 from .grail import Prover, Verifier
 from .drand import get_drand_beacon, get_round_at_time
-from .environments import SATProblem, SATEnvironment, generate_sat_problem, SATRolloutGenerator
+from .environments import (
+    # New reward system
+    Parser, RewardVector, SATParser, 
+    sat_correctness_reward, sat_partial_reward, sat_efficiency_reward,
+    create_sat_reward_vector,
+    # Existing classes
+    SATProblem, generate_sat_problem, SATRolloutGenerator
+)
 from .rollout import RolloutGenerator
 from .comms import (
     upload_file_chunked, download_file_chunked, file_exists, list_bucket_files,
@@ -43,7 +50,18 @@ from .comms import (
     upload_to_huggingface, download_from_huggingface, login_huggingface, PROTOCOL_VERSION
 )
 
-__all__ = ["Prover", "Verifier", "SATProblem", "SATEnvironment", "generate_sat_problem", "main", "cli"]
+__all__ = [
+    # Core classes
+    "Prover", "Verifier", 
+    # New reward system
+    "Parser", "RewardVector", "SATParser",
+    "sat_correctness_reward", "sat_partial_reward", "sat_efficiency_reward",
+    "create_sat_reward_vector",
+    # Existing SAT classes
+    "SATProblem", "generate_sat_problem", "SATRolloutGenerator",
+    # Entry points
+    "main", "cli"
+]
 
 # --------------------------------------------------------------------------- #
 #                       Constants & global singletons                         #
@@ -334,13 +352,14 @@ class Trainer:
                     batch_texts = [texts[i] for i in batch_indices]
                     batch_rewards = [rewards[i] for i in batch_indices]
                     
-                    # Tokenize batch
+                    # Tokenize batch with explicit attention mask
                     inputs = self.tokenizer(
                         batch_texts,
                         return_tensors="pt",
                         padding=True,
                         truncation=True,
-                        max_length=512
+                        max_length=512,
+                        return_attention_mask=True
                     )
                     
                     if torch.cuda.is_available():
@@ -570,19 +589,19 @@ def mine(use_drand):
                         difficulty = min(0.9, 0.3 + (inference_count * 0.01))  # Gradually increase difficulty
                         sat_problem = generate_sat_problem(sat_seed_base, difficulty)
                         logger.debug(f"Generated SAT problem: {sat_problem.num_vars} vars, {len(sat_problem.clauses)} clauses")
-                        
+
                         # Generate GRPO rollouts (4 per problem)
                         sat_generator = SATRolloutGenerator(
-                            prover.model, 
-                            prover.tokenizer, 
+                            prover.model,
+                            prover.tokenizer,
                             prover.device,
                             rollouts_per_problem=4  # GRPO standard
                         )
-                        
+
                         # Generate rollouts with GRAIL proofs
                         logger.debug(f"Generating GRPO rollouts with randomness: {combined_randomness[:16]}...")
                         grpo_rollouts = sat_generator.generate_grpo_rollouts(
-                            sat_problem, 
+                            sat_problem,
                             combined_randomness,
                             wallet  # Use wallet for secure signatures
                         )
