@@ -17,7 +17,7 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 from .drand import get_beacon, get_drand_beacon, get_round_at_time
-from .environments import SATProblem, SATEnvironment, generate_sat_problem, SATRolloutGenerator
+from .environments import SATProblem, generate_sat_problem, SATRolloutGenerator
 from .rollout import RolloutGenerator
 
 # Enable CUDA debugging for better error messages
