@@ -174,26 +174,6 @@ def sat_partial_reward(assignment: List[bool], problem: SATProblem) -> float:
             if problem.clauses else 0.0)
 
 
-def sat_efficiency_reward(assignment: List[bool], problem: SATProblem) -> float:
-    """Reward based on efficiency (penalty for longer solutions).
-    
-    Args:
-        assignment: Boolean assignment for variables
-        problem: SAT problem instance
-        
-    Returns:
-        Efficiency bonus if solution is correct, 0 otherwise
-    """
-    if not problem.check_solution(assignment):
-        return 0.0
-    
-    # Bonus for using fewer variables set to True
-    true_count = sum(assignment)
-    max_bonus = 0.2
-    efficiency = 1.0 - (true_count / len(assignment))
-    return max_bonus * efficiency
-
-
 def create_sat_reward_vector(
     correctness_weight: float = 0.7,
     partial_weight: float = 0.2,
@@ -212,10 +192,9 @@ def create_sat_reward_vector(
     from typing import cast
     reward_functions = cast(List[Callable[[Any, Any], float]], [
         sat_correctness_reward,
-        sat_partial_reward,
-        sat_efficiency_reward
+        sat_partial_reward
     ])
-    weights = [correctness_weight, partial_weight, efficiency_weight]
+    weights = [correctness_weight, partial_weight]
     parser = SATParser()
     
     return RewardVector(reward_functions, weights, parser)

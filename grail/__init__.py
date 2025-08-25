@@ -34,7 +34,6 @@ from .drand import get_drand_beacon, get_round_at_time
 from .environments import (
     # New reward system
     Parser, RewardVector, SATParser, 
-    sat_correctness_reward, sat_partial_reward, sat_efficiency_reward,
     create_sat_reward_vector,
     # Existing classes
     SATProblem, generate_sat_problem, SATRolloutGenerator
@@ -55,7 +54,6 @@ __all__ = [
     "Prover", "Verifier", 
     # New reward system
     "Parser", "RewardVector", "SATParser",
-    "sat_correctness_reward", "sat_partial_reward", "sat_efficiency_reward",
     "create_sat_reward_vector",
     # Existing SAT classes
     "SATProblem", "generate_sat_problem", "SATRolloutGenerator",
