@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "grail"
-version = "0.0.0"
+dynamic = ["version"]
 description = "GRAIL – Guaranteed Rollout Authenticity via Inference Ledger"
 readme = "README.md"
 license = {text = "MIT"}
@@ -13,7 +13,7 @@ authors = [
     {name = "distriburedstatemachine"},
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
@@ -30,7 +30,6 @@ dependencies = [
     "transformers>=4.20.0",
     "matplotlib>=3.5.0",
     "safetensors>=0.3.0",
-    "click>=8.0.0",
     "python-dotenv>=0.19.0",
     "aiobotocore>=2.0.0",
     "botocore>=1.24.0",
@@ -41,6 +40,8 @@ dependencies = [
     "requests>=2.28.0",
     "huggingface-hub>=0.20.0",
     "datasets>=2.14.0",
+    "typer==0.16.1",
+    "rich==14.1.0",
 ]
 
 [project.optional-dependencies]
@@ -55,7 +56,7 @@ dev = [
     "zstandard>=0.21.0",  # Optional: better compression than gzip
 ]
 experiments = [
-    "vllm>=0.2.0",
+    "vllm>=0.2.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "jupyter>=1.0.0",
     "notebook>=6.4.0",
     "seaborn>=0.11.0",
@@ -65,12 +66,12 @@ all = [
 ]
 
 [project.scripts]
-grail = "grail:main"
+grail = "grail.cli:main"
 
 [project.urls]
-Repository = "https://tplr/your-org/grail"
-Documentation = "https://github.com/your-org/grail/blob/main/SPEC.md"
-Issues = "https://github.com/your-org/grail/issues"
+Repository = "https://tplr.ai/grail"
+Documentation = "https://github.com/tplr-ai/grail/blob/main/SPEC.md"
+Issues = "https://github.com/tplr-ai/grail/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["grail"]
