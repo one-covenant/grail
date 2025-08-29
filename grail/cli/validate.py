@@ -10,6 +10,7 @@ import asyncio
 import logging
 import hashlib
 import traceback
+import math
 import bittensor as bt
 from dotenv import load_dotenv
 from collections import defaultdict
@@ -46,11 +47,16 @@ logging.addLevelName(TRACE, "TRACE")
 # Model configuration
 LLAMA_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"  # Using TinyLlama 1B model
 
+# Superlinear weighting exponent:
+# For p > 1, w_i ∝ s_i^p amplifies differences and penalizes sybil splitting:
+# splitting into k identities yields k^(1-p) * s^p < s^p.
+SUPERLINEAR_EXPONENT = 1.5
+
 
 # --------------------------------------------------------------------------- #
 #                               Logging                                       #
 # --------------------------------------------------------------------------- #
-def _trace(self, msg, *args, **kwargs):
+def _trace(self, msg: str, *args: Any, **kwargs: Any) -> None:
     if self.isEnabledFor(TRACE):
         self._log(TRACE, msg, args, **kwargs)
 
@@ -661,7 +667,7 @@ def validate(
                     inference_counts[hotkey][target_window] = metrics
 
                 # Compute weights based on unique successful rollouts
-                weights = []
+                raw_scores = []
                 for uid, hotkey in enumerate(meta.hotkeys):
                     # Calculate score over last 3 windows
                     recent_windows = range(
@@ -683,18 +689,22 @@ def validate(
                             total_valid += metrics if isinstance(metrics, (int, float)) else 0
 
                     # Scoring formula: prioritize unique solutions, then successful, then valid
-                    # Weight = 0.6 * unique_ratio + 0.3 * success_ratio + 0.1 * valid_ratio
+                    # Base performance score in [0, 1]
                     unique_score = min(1.0, total_unique / 10.0) if total_unique > 0 else 0
                     success_score = min(1.0, total_successful / 20.0) if total_successful > 0 else 0
                     valid_score = min(1.0, total_valid / 50.0) if total_valid > 0 else 0
 
-                    weight = 0.6 * unique_score + 0.3 * success_score + 0.1 * valid_score
-                    weights.append(weight)
+                    base_score = 0.6 * unique_score + 0.0 * success_score + 0.4 * valid_score
+                    base_score = max(0.0, min(1.0, base_score))
+
+                    # Apply superlinear curve: emphasizes higher performers and penalizes splitting
+                    superlinear_score = base_score ** SUPERLINEAR_EXPONENT
+                    raw_scores.append(superlinear_score)
 
                 # Normalize weights
-                total_weight = sum(weights)
-                if total_weight > 0:
-                    weights = [w / total_weight for w in weights]
+                denom = math.fsum(raw_scores)
+                if denom > 0.0:
+                    weights = [score / denom for score in raw_scores]
                 else:
                     weights = [0.0] * len(meta.hotkeys)
 
