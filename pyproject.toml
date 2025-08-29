@@ -80,7 +80,7 @@ packages = ["grail"]
 path = "grail/__init__.py"
 
 [tool.black]
-line-length = 88
+line-length = 100
 target-version = ['py39', 'py310', 'py311']
 include = '\.pyi?$'
 extend-exclude = '''
@@ -159,3 +159,7 @@ exclude_lines = [
     "class .*\\bProtocol\\):",
     "@(abc\\.)?abstractmethod",
 ] 
+
+[tool.flake8]
+max-line-length = 100
+extend-ignore = ["E203", "W503"]
