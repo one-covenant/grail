@@ -533,6 +533,10 @@ class Verifier:
             .eval()
         )
 
+        # Cache from most recent proof verification forward pass
+        self._last_tokens_hash: Optional[str] = None
+        self._last_step_logits: Optional[torch.Tensor] = None
+
     def verify_rollout(self, commit: dict, proof_pkg: dict, prover_address: str) -> bool:
         """
         Verify SAT rollout with GRAIL proof.
@@ -571,6 +575,14 @@ class Verifier:
             logger.debug(f"  Seed: {sat_data['seed']}, Difficulty: {difficulty}")
             return False
         
+        # Enforce termination check before solution validation
+        if not self._passes_termination_check(commit):
+            logger.debug(
+                "Termination check failed: sequence neither reached max context length "
+                "nor ended with EOS token having probability >= 0.1"
+            )
+            return False
+
         # The GRAIL proof has already verified that these tokens (including the SAT problem)
         # were processed by the claimed model - no other model could produce matching sketches
         
@@ -626,9 +638,27 @@ class Verifier:
         # Recompute hidden states
         full_ids = torch.tensor(commit["tokens"], dtype=torch.long,
                                 device=self.device).unsqueeze(0)
-        with torch.no_grad():
+        with torch.inference_mode():
             outs = self.model(full_ids, output_hidden_states=True)
         h_layer = outs.hidden_states[LAYER_INDEX][0]
+
+        # Cache single-step logits corresponding to last generated token
+        try:
+            seq_len = outs.logits.size(1)
+            if seq_len >= 2:
+                # Logits at position t predict token at t+1
+                step_logits = outs.logits[0, seq_len - 2, :].detach().to("cpu")
+                # Hash current tokens to associate cache entries
+                tokens_bytes = b''.join(int_to_bytes(t) for t in commit["tokens"]) 
+                self._last_tokens_hash = hashlib.sha256(tokens_bytes).hexdigest()
+                self._last_step_logits = step_logits
+            else:
+                self._last_tokens_hash = None
+                self._last_step_logits = None
+        except Exception as e:
+            logger.debug(f"Unable to cache step logits for termination check: {e}")
+            self._last_tokens_hash = None
+            self._last_step_logits = None
 
         # Check each opened index (tolerance check only now)
         for i in idxs_exp:
@@ -648,4 +678,89 @@ class Verifier:
 
         logger.debug("GRAIL proof verification successful")
         return True
+
+    def _passes_termination_check(self, commit: dict) -> bool:
+        """
+        Enforce termination integrity:
+        - Accept if the completion reached the configured generation max length
+          used by miners (max_new_tokens from rollout generation).
+        - Else, accept only if it ends with EOS and P(EOS) >= 0.1 at the last step.
+
+        Also performs a sanity check comparing miner-provided last-token logprob to
+        validator-computed probability (logged only; does not affect acceptance).
+        """
+        try:
+            tokens = commit.get("tokens", [])
+            if not tokens:
+                return False
+
+            # Determine expected generation max_new_tokens (default aligns with RolloutGenerator)
+            # Allow override via environment variable if needed
+            try:
+                expected_max_new = int(os.getenv("GRAIL_MAX_NEW_TOKENS", "20"))
+            except Exception:
+                expected_max_new = 20
+
+            rollout = commit.get("rollout", {})
+            completion_length = rollout.get("completion_length")
+            if isinstance(completion_length, int) and completion_length >= expected_max_new:
+                logger.debug(
+                    f"Termination via generation max length: completion_length={completion_length} "
+                    f">= expected_max_new={expected_max_new}"
+                )
+                return True
+
+            # Require EOS with sufficient probability otherwise
+            eos_id = self.tokenizer.eos_token_id
+            last_token = tokens[-1]
+            if last_token != eos_id:
+                logger.debug("Termination check: last token is not EOS and max length not reached")
+                return False
+
+            # Try to use cached logits from the proof verification pass
+            step_logits = None
+            try:
+                tokens_bytes = b''.join(int_to_bytes(t) for t in tokens)
+                cur_hash = hashlib.sha256(tokens_bytes).hexdigest()
+                if self._last_tokens_hash == cur_hash and self._last_step_logits is not None:
+                    step_logits = self._last_step_logits
+            except Exception:
+                step_logits = None
+
+            # If cache miss, run a minimal forward pass to get the needed step logits
+            if step_logits is None:
+                full_ids = torch.tensor(tokens, dtype=torch.long, device=self.device).unsqueeze(0)
+                with torch.inference_mode():
+                    outs = self.model(full_ids)
+                if outs.logits.size(1) < 2:
+                    logger.debug("Not enough timesteps to compute last-step logits")
+                    return False
+                step_logits = outs.logits[0, outs.logits.size(1) - 2, :].detach().to("cpu")
+
+            probs = torch.softmax(step_logits, dim=-1)
+            p_eos = float(probs[eos_id].item())
+
+            # Sanity check against miner-provided logprobs if available
+            miner_logprobs = rollout.get("token_logprobs")
+            if isinstance(miner_logprobs, list) and len(miner_logprobs) > 0:
+                try:
+                    p_last = float(probs[last_token].item())
+                    miner_p_last = float(torch.exp(torch.tensor(miner_logprobs[-1])).item())
+                    drift = abs(p_last - miner_p_last)
+                    if drift > 0.1:
+                        logger.debug(
+                            f"Logprob sanity: validator p_last={p_last:.4f} vs miner {miner_p_last:.4f}"
+                        )
+                except Exception:
+                    pass
+
+            if p_eos >= 0.1:
+                logger.debug(f"Termination via EOS with p={p_eos:.4f} >= 0.1")
+                return True
+
+            logger.debug(f"EOS probability too low for termination: p={p_eos:.4f} < 0.1")
+            return False
+        except Exception as e:
+            logger.debug(f"Termination check error: {e}")
+            return False
     
