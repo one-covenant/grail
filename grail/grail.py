@@ -39,6 +39,11 @@ MODEL_NAME   = "sshleifer/tiny-gpt2"
 LAYER_INDEX  = -1
 RNG_LABEL    = {"sketch": b"sketch", "open": b"open", "sat": b"sat"}
 
+# Termination validation hyperparameters
+DEFAULT_MAX_NEW_TOKENS = 20  # Must match rollout generator default
+MIN_EOS_PROBABILITY = 0.1    # Minimum probability for valid EOS termination
+SANITY_CHECK_DRIFT_THRESHOLD = 0.1  # Max acceptable drift between miner/validator logprobs
+
 
 
 def prf(label: bytes, *parts: bytes, out_bytes: int) -> bytes:
@@ -679,87 +684,127 @@ class Verifier:
         logger.debug("GRAIL proof verification successful")
         return True
 
+    def _check_max_length_termination(self, commit: dict) -> bool:
+        """Check if completion reached the configured generation max length."""
+        try:
+            expected_max_new = int(os.getenv("GRAIL_MAX_NEW_TOKENS", str(DEFAULT_MAX_NEW_TOKENS)))
+        except Exception:
+            expected_max_new = DEFAULT_MAX_NEW_TOKENS
+
+        rollout = commit.get("rollout", {})
+        completion_length = rollout.get("completion_length")
+        
+        if isinstance(completion_length, int) and completion_length >= expected_max_new:
+            logger.debug(
+                f"Termination via max length: completion_length={completion_length} "
+                f">= expected_max_new={expected_max_new}"
+            )
+            return True
+        return False
+
+    def _check_eos_termination(self, commit: dict, step_logits: torch.Tensor) -> bool:
+        """Check if sequence terminated with sufficient EOS probability."""
+        tokens = commit.get("tokens", [])
+        if not tokens:
+            return False
+
+        eos_id = self.tokenizer.eos_token_id
+        last_token = tokens[-1]
+        
+        if last_token != eos_id:
+            return False
+
+        # Compute EOS probability from validator's logits
+        probs = torch.softmax(step_logits, dim=-1)
+        p_eos = float(probs[eos_id].item())
+
+        if p_eos >= MIN_EOS_PROBABILITY:
+            logger.debug(f"Termination via EOS with p={p_eos:.4f} >= {MIN_EOS_PROBABILITY}")
+            return True
+
+        logger.debug(f"EOS probability too low: p={p_eos:.4f} < {MIN_EOS_PROBABILITY}")
+        return False
+
+    def _run_sanity_check(self, commit: dict, step_logits: torch.Tensor) -> None:
+        """Compare miner vs validator logprobs (logging only, does not affect validation)."""
+        try:
+            tokens = commit.get("tokens", [])
+            rollout = commit.get("rollout", {})
+            miner_logprobs = rollout.get("token_logprobs")
+            
+            if not isinstance(miner_logprobs, list) or len(miner_logprobs) == 0:
+                return
+
+            last_token = tokens[-1]
+            probs = torch.softmax(step_logits, dim=-1)
+            p_last = float(probs[last_token].item())
+            miner_p_last = float(torch.exp(torch.tensor(miner_logprobs[-1])).item())
+            drift = abs(p_last - miner_p_last)
+            
+            if drift > SANITY_CHECK_DRIFT_THRESHOLD:
+                logger.debug(
+                    f"Logprob drift detected: validator={p_last:.4f} vs miner={miner_p_last:.4f} "
+                    f"(drift={drift:.4f} > {SANITY_CHECK_DRIFT_THRESHOLD})"
+                )
+        except Exception as e:
+            logger.debug(f"Sanity check failed: {e}")
+
+    def _get_step_logits(self, tokens: List[int]) -> Optional[torch.Tensor]:
+        """Get logits for the last generation step, using cache when possible."""
+        # Try to use cached logits from the proof verification pass
+        try:
+            tokens_bytes = b''.join(int_to_bytes(t) for t in tokens)
+            cur_hash = hashlib.sha256(tokens_bytes).hexdigest()
+            if self._last_tokens_hash == cur_hash and self._last_step_logits is not None:
+                return self._last_step_logits
+        except Exception:
+            pass
+
+        # Cache miss: run minimal forward pass
+        try:
+            full_ids = torch.tensor(tokens, dtype=torch.long, device=self.device).unsqueeze(0)
+            with torch.inference_mode():
+                outs = self.model(full_ids)
+            if outs.logits.size(1) < 2:
+                logger.debug("Not enough timesteps to compute last-step logits")
+                return None
+            return outs.logits[0, outs.logits.size(1) - 2, :].detach().to("cpu")
+        except Exception as e:
+            logger.debug(f"Failed to compute step logits: {e}")
+            return None
+
     def _passes_termination_check(self, commit: dict) -> bool:
         """
-        Enforce termination integrity:
-        - Accept if the completion reached the configured generation max length
-          used by miners (max_new_tokens from rollout generation).
-        - Else, accept only if it ends with EOS and P(EOS) >= 0.1 at the last step.
-
-        Also performs a sanity check comparing miner-provided last-token logprob to
-        validator-computed probability (logged only; does not affect acceptance).
+        Orchestrate termination validation with proper separation of concerns.
+        
+        Returns True if either:
+        1. Completion reached max generation length, OR  
+        2. Sequence ended with EOS token having sufficient probability
         """
         try:
             tokens = commit.get("tokens", [])
             if not tokens:
                 return False
 
-            # Determine expected generation max_new_tokens (default aligns with RolloutGenerator)
-            # Allow override via environment variable if needed
-            try:
-                expected_max_new = int(os.getenv("GRAIL_MAX_NEW_TOKENS", "20"))
-            except Exception:
-                expected_max_new = 20
-
-            rollout = commit.get("rollout", {})
-            completion_length = rollout.get("completion_length")
-            if isinstance(completion_length, int) and completion_length >= expected_max_new:
-                logger.debug(
-                    f"Termination via generation max length: completion_length={completion_length} "
-                    f">= expected_max_new={expected_max_new}"
-                )
+            # Check max length termination first (most efficient)
+            if self._check_max_length_termination(commit):
                 return True
 
-            # Require EOS with sufficient probability otherwise
-            eos_id = self.tokenizer.eos_token_id
-            last_token = tokens[-1]
-            if last_token != eos_id:
-                logger.debug("Termination check: last token is not EOS and max length not reached")
+            # For EOS termination, we need logits
+            step_logits = self._get_step_logits(tokens)
+            if step_logits is None:
+                logger.debug("Cannot verify EOS termination: no logits available")
                 return False
 
-            # Try to use cached logits from the proof verification pass
-            step_logits = None
-            try:
-                tokens_bytes = b''.join(int_to_bytes(t) for t in tokens)
-                cur_hash = hashlib.sha256(tokens_bytes).hexdigest()
-                if self._last_tokens_hash == cur_hash and self._last_step_logits is not None:
-                    step_logits = self._last_step_logits
-            except Exception:
-                step_logits = None
-
-            # If cache miss, run a minimal forward pass to get the needed step logits
-            if step_logits is None:
-                full_ids = torch.tensor(tokens, dtype=torch.long, device=self.device).unsqueeze(0)
-                with torch.inference_mode():
-                    outs = self.model(full_ids)
-                if outs.logits.size(1) < 2:
-                    logger.debug("Not enough timesteps to compute last-step logits")
-                    return False
-                step_logits = outs.logits[0, outs.logits.size(1) - 2, :].detach().to("cpu")
-
-            probs = torch.softmax(step_logits, dim=-1)
-            p_eos = float(probs[eos_id].item())
-
-            # Sanity check against miner-provided logprobs if available
-            miner_logprobs = rollout.get("token_logprobs")
-            if isinstance(miner_logprobs, list) and len(miner_logprobs) > 0:
-                try:
-                    p_last = float(probs[last_token].item())
-                    miner_p_last = float(torch.exp(torch.tensor(miner_logprobs[-1])).item())
-                    drift = abs(p_last - miner_p_last)
-                    if drift > 0.1:
-                        logger.debug(
-                            f"Logprob sanity: validator p_last={p_last:.4f} vs miner {miner_p_last:.4f}"
-                        )
-                except Exception:
-                    pass
-
-            if p_eos >= 0.1:
-                logger.debug(f"Termination via EOS with p={p_eos:.4f} >= 0.1")
+            # Check EOS termination
+            if self._check_eos_termination(commit, step_logits):
+                # Run sanity check when EOS termination succeeds
+                self._run_sanity_check(commit, step_logits)
                 return True
 
-            logger.debug(f"EOS probability too low for termination: p={p_eos:.4f} < 0.1")
+            logger.debug("Termination check failed: neither max length nor valid EOS termination")
             return False
+
         except Exception as e:
             logger.debug(f"Termination check error: {e}")
             return False
