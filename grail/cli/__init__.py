@@ -28,9 +28,13 @@ def configure_logging(verbosity: int) -> None:
 
     Levels: 0 -> CRITICAL+1 (silent), 1 -> INFO, 2 -> DEBUG, >=3 -> TRACE
     """
-    level = TRACE if verbosity >= 3 else (
-        logging.DEBUG if verbosity == 2 else (
-            logging.INFO if verbosity == 1 else logging.CRITICAL + 1
+    level = (
+        TRACE
+        if verbosity >= 3
+        else (
+            logging.DEBUG
+            if verbosity == 2
+            else (logging.INFO if verbosity == 1 else logging.CRITICAL + 1)
         )
     )
 
@@ -126,9 +130,7 @@ def _register_subcommands() -> None:
         "grail.cli.train",
     ):
         module = importlib.import_module(mod_name)
-        register: Optional[Callable[[typer.Typer], None]] = getattr(
-            module, "register", None
-        )
+        register: Optional[Callable[[typer.Typer], None]] = getattr(module, "register", None)
         if callable(register):
             register(app)
 

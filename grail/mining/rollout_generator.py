@@ -216,7 +216,7 @@ class RolloutGenerator(ABC):
         success = final_info.get('success', False)
 
         # Generate GRAIL proof components (using existing grail.py logic)
-        from .grail import r_vec_from_randomness, dot_mod_q, sign_s_vals
+        from ..grail import r_vec_from_randomness, dot_mod_q, sign_s_vals
 
         # Compute s_vals for GRAIL proof
         r_vec = r_vec_from_randomness(

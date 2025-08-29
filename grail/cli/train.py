@@ -3,75 +3,36 @@
 #                             Imports                                         #
 # --------------------------------------------------------------------------- #
 import os
-import sys
-import json
 import time
 import typer
-import random
 import asyncio
 import logging
-import hashlib
 import traceback
-import math
 import bittensor as bt
 from dotenv import load_dotenv
+from typing import Any, Tuple
 from collections import defaultdict
-from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Union, Tuple, Sequence
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from safetensors.torch import save_file, load_file, save, load
-from safetensors import safe_open
+
 # TODO(v2): Re-enable training imports
 # from trl import PPOTrainer, PPOConfig
 # TODO(v2): Re-enable for training
 # from accelerate import Accelerator
 
-__version__ = "0.0.0"
 
-from ..grail import Prover, Verifier
 from . import console
-from ..drand import get_drand_beacon, get_round_at_time
-from ..environments import (
-    # New reward system
-    Parser, RewardVector, SATParser, 
-    create_sat_reward_vector,
-    # Existing classes
-    SATProblem, generate_sat_problem, SATRolloutGenerator
-)
-from ..rollout import RolloutGenerator
-from ..comms import (
-    upload_file_chunked, download_file_chunked, file_exists, list_bucket_files,
-    get_file, sink_window_inferences, 
-    # TODO(v2): Re-enable model state management for training
-    # save_model_state, load_model_state, model_state_exists,
-    upload_valid_rollouts, get_valid_rollouts,
-    # NEW: Hugging Face dataset upload
-    upload_to_huggingface, download_from_huggingface, login_huggingface, PROTOCOL_VERSION
-)
 
-__all__ = [
-    # Core classes
-    "Prover", "Verifier", 
-    # New reward system
-    "Parser", "RewardVector", "SATParser",
-    "create_sat_reward_vector",
-    # Existing SAT classes
-    "SATProblem", "generate_sat_problem", "SATRolloutGenerator",
-    # Entry points
-    "main"
-]
 
 # --------------------------------------------------------------------------- #
 #                       Constants & global singletons                         #
 # --------------------------------------------------------------------------- #
 NETUID = 81
 WINDOW_LENGTH = 20  # Generate inferences every 20 blocks (increased for model downloads)
-TRACE  = 5
+TRACE = 5
 logging.addLevelName(TRACE, "TRACE")
 
 # Model configuration
 LLAMA_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"  # Using TinyLlama 1B model
+
 
 # --------------------------------------------------------------------------- #
 #                               Logging                                       #
@@ -79,6 +40,8 @@ LLAMA_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"  # Using TinyLlama 1B model
 def _trace(self, msg, *args, **kwargs):
     if self.isEnabledFor(TRACE):
         self._log(TRACE, msg, args, **kwargs)
+
+
 logging.Logger.trace = _trace
 logger = logging.getLogger("grail")
 
@@ -86,20 +49,25 @@ logger = logging.getLogger("grail")
 #                             Utility helpers                                 #
 # --------------------------------------------------------------------------- #
 load_dotenv(override=True)
-def get_conf(key, default=None) -> Any:
+
+
+def get_conf(key: str, default: Any = None) -> Any:
     v = os.getenv(key)
     if not v and default is None:
         console.print(f"[red]{key} not set.[/red]\nRun:\n    af set {key} <value>")
         raise typer.Exit(code=1)
     return v or default
 
+
 # --------------------------------------------------------------------------- #
 #                               Subtensor                                     #
 # --------------------------------------------------------------------------- #
 SUBTENSOR = None
+
+
 async def get_subtensor():
     global SUBTENSOR
-    if SUBTENSOR == None:
+    if SUBTENSOR is None:
         logger.trace("Making Bittensor connection...")
         SUBTENSOR = bt.async_subtensor()
         await SUBTENSOR.initialize()
@@ -109,6 +77,7 @@ async def get_subtensor():
 
 # S3/R2 communication functions are now imported from comms.py
 
+
 # --------------------------------------------------------------------------- #
 #                        Helper Functions                                     #
 # --------------------------------------------------------------------------- #
@@ -116,11 +85,12 @@ def generate_prompt(hotkey_address: str, block_hash: str, nonce: int) -> str:
     """Generate prompt in the required format"""
     return f"Hey my name is {hotkey_address} it is currently {block_hash} days since friday and my fav number is {nonce}, tell me a story about these three facts"
 
+
 def parse_filename(filename: str) -> Tuple[str, int, int]:
     """Parse filename to extract wallet, block, nonce"""
     # Remove prefix and extension
-    basename = filename.split('/')[-1].replace('.json', '')
-    parts = basename.split('-')
+    basename = filename.split("/")[-1].replace(".json", "")
+    parts = basename.split("-")
     if len(parts) >= 3:
         wallet = parts[0]
         block = int(parts[1])
@@ -128,44 +98,48 @@ def parse_filename(filename: str) -> Tuple[str, int, int]:
         return wallet, block, nonce
     return None, None, None
 
+
 def parse_window_filename(filename: str) -> Tuple[str, int]:
     """Parse window filename to extract wallet and window_start"""
     # Remove prefix and extension
-    basename = filename.split('/')[-1].replace('.json', '')
+    basename = filename.split("/")[-1].replace(".json", "")
     # Format: {wallet}-window-{window_start}
-    parts = basename.split('-')
-    if len(parts) >= 3 and parts[1] == 'window':
+    parts = basename.split("-")
+    if len(parts) >= 3 and parts[1] == "window":
         wallet = parts[0]
         window_start = int(parts[2])
         return wallet, window_start
     return None, None
 
+
 def sign_rollout(rollout_data: dict, wallet: bt.wallet) -> dict:
     """Sign a SAT rollout using the wallet hotkey"""
     # Create challenge string from key rollout data
-    sat_seed = rollout_data.get('sat_seed', '')
-    block_hash = rollout_data.get('block_hash', '')
-    nonce = rollout_data.get('nonce', '')
+    sat_seed = rollout_data.get("sat_seed", "")
+    block_hash = rollout_data.get("block_hash", "")
+    nonce = rollout_data.get("nonce", "")
     challenge = f"{sat_seed}{block_hash}{nonce}"
-    rollout_data['challenge'] = challenge
-    rollout_data['hotkey'] = wallet.hotkey.ss58_address
-    rollout_data['signature'] = wallet.hotkey.sign(data=challenge).hex()
+    rollout_data["challenge"] = challenge
+    rollout_data["hotkey"] = wallet.hotkey.ss58_address
+    rollout_data["signature"] = wallet.hotkey.sign(data=challenge).hex()
     return rollout_data
+
 
 def verify_rollout_signature(rollout_data: dict) -> bool:
     """Verify the signature of a rollout"""
     try:
-        challenge = rollout_data.get('challenge')
-        hotkey = rollout_data.get('hotkey')
-        signature = rollout_data.get('signature')
-        
+        challenge = rollout_data.get("challenge")
+        hotkey = rollout_data.get("hotkey")
+        signature = rollout_data.get("signature")
+
         if not all([challenge, hotkey, signature]):
             return False
-            
+
         keypair = bt.Keypair(ss58_address=hotkey)
         return keypair.verify(data=challenge, signature=bytes.fromhex(signature))
     except Exception:
         return False
+
 
 # REMOVED: derive_secret_key was insecure and has been removed
 # The GRAIL proof system now uses wallet signatures for security
@@ -178,10 +152,10 @@ miner_inference_counts = defaultdict(list)  # track inferences per block for wei
 # --------------------------------------------------------------------------- #
 # TODO(v2): Re-enable Trainer class with improved architecture
 # - Async training that doesn't block mining
-# - Optional local fine-tuning by miners  
+# - Optional local fine-tuning by miners
 # - Federated learning approach
 # - Model checkpointing and versioning
-'''
+
 class Trainer:
     def __init__(self, model_name=LLAMA_MODEL):
         self.model_name = model_name
@@ -425,7 +399,7 @@ class Trainer:
             logger.error(f"❌ Failed to upload trained model for window {future_window}")
             
         return success
-'''  # End of commented Trainer class
+
 
 # --------------------------------------------------------------------------- #
 #                               CLI                                           #
@@ -433,11 +407,14 @@ class Trainer:
 def register(app: typer.Typer) -> None:
     app.command("train")(train)
 
+
 # --------------------------------------------------------------------------- #
 #                               Watchdog                                      #
 # --------------------------------------------------------------------------- #
 HEARTBEAT = time.monotonic()
-async def watchdog(timeout: int = 300):
+
+
+async def watchdog(timeout: int = 300) -> None:
     global HEARTBEAT
     while True:
         await asyncio.sleep(timeout // 3)
@@ -445,36 +422,38 @@ async def watchdog(timeout: int = 300):
         if elapsed > timeout:
             logging.error(f"[WATCHDOG] Process stalled {elapsed:.0f}s — exiting process.")
             os._exit(1)
-            
+
+
 # --------------------------------------------------------------------------- #
 #                               TRAINER CLI                                   #
 # --------------------------------------------------------------------------- #
 # TODO(v2): Re-enable train command with improved architecture
 
+
 def train() -> None:
     """Run the training process"""
     coldkey = get_conf("BT_WALLET_COLD", "default")
-    hotkey  = get_conf("BT_WALLET_HOT", "default")
-    wallet  = bt.wallet(name=coldkey, hotkey=hotkey)
-    
+    hotkey = get_conf("BT_WALLET_HOT", "default")
+    wallet = bt.wallet(name=coldkey, hotkey=hotkey)
+
     # Initialize trainer
     logger.info(f"Initializing trainer with model: {LLAMA_MODEL}")
     trainer = Trainer(model_name=LLAMA_MODEL)
-    
-    async def _run():
+
+    async def _run() -> None:
         subtensor = None
         last_processed_window = -1
-        
+
         # Upload initial base model state on startup
         logger.info("🏁 Uploading initial base model state...")
         current_block = 0
         if subtensor is None:
             subtensor = await get_subtensor()
             current_block = await subtensor.get_current_block()
-        
+
         current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
         initial_window = current_window + WINDOW_LENGTH
-        
+
         # Upload base model for the next window
         success = await save_model_state(trainer.model, wallet.hotkey.ss58_address, initial_window)
         if success:
@@ -482,36 +461,37 @@ def train() -> None:
         else:
             logger.error("❌ Failed to upload initial model state")
             return
-        
+
         while True:
             try:
-                global HEARTBEAT; HEARTBEAT = time.monotonic()
-                if subtensor is None: 
+                global HEARTBEAT
+                HEARTBEAT = time.monotonic()
+                if subtensor is None:
                     subtensor = await get_subtensor()
-                    
+
                 current_block = await subtensor.get_current_block()
                 current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
-                
+
                 # Process previous complete window for training
                 target_window = current_window - WINDOW_LENGTH
-                
+
                 if target_window <= last_processed_window or target_window < 0:
                     await asyncio.sleep(10)  # Wait for new window
                     continue
-                
+
                 logger.info(f"🎓 Processing training for window {target_window}")
-                
+
                 # Train on previous window's valid inferences and upload for future window
                 success = await trainer.train_window(wallet.hotkey.ss58_address, target_window)
-                
+
                 if success:
                     logger.info(f"✅ Completed training cycle for window {target_window}")
                 else:
                     logger.warning(f"⚠️ Training cycle had issues for window {target_window}")
-                
+
                 last_processed_window = target_window
-                
-            except asyncio.CancelledError: 
+
+            except asyncio.CancelledError:
                 break
             except Exception as e:
                 traceback.print_exc()
@@ -519,13 +499,10 @@ def train() -> None:
                 subtensor = None  # Force reconnection on next iteration
                 await asyncio.sleep(30)  # Wait before retrying
                 continue
-    
+
     async def _main():
-        await asyncio.gather(
-            _run(),
-            watchdog(timeout=(60 * 15))  # 15 minute timeout for training
-        )
-    
+        await asyncio.gather(_run(), watchdog(timeout=(60 * 15)))  # 15 minute timeout for training
+
     asyncio.run(_main())
 
 

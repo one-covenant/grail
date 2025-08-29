@@ -16,6 +16,7 @@ from transformers import AutoModelForCausalLM
 from safetensors.torch import load_file, save_file
 from huggingface_hub import HfApi, HfFolder
 from datasets import Dataset, DatasetDict
+import bittensor as bt
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ def get_conf(key, default=None) -> Any:
     if not v and default is None:
         raise ValueError(f"{key} not set. Please set the environment variable.")
     return v or default
+
 
 get_client_ctx = lambda: get_session().create_client(
     "s3",
@@ -145,6 +147,7 @@ async def upload_file_chunked(key: str, data: bytes, chunk_size: int = 100 * 102
         logger.error(f"❌ Upload failed for {key}: {e}")
         return False
 
+
 async def _upload_single_chunk(key: str, data: bytes, progress: TransferProgress, max_retries: int) -> bool:
     """Upload single chunk with retry logic"""
     for attempt in range(max_retries):
@@ -162,7 +165,17 @@ async def _upload_single_chunk(key: str, data: bytes, progress: TransferProgress
                 logger.error(f"Upload failed after {max_retries} attempts for {key}: {e}")
     return False
 
-async def _upload_chunk_with_semaphore(semaphore, client, key: str, upload_id: str, part_number: int, data: bytes, progress: TransferProgress, max_retries: int):
+
+async def _upload_chunk_with_semaphore(
+        semaphore: asyncio.Semaphore,
+        client: Any,
+        key: str,
+        upload_id: str,
+        part_number: int,
+        data: bytes,
+        progress: TransferProgress,
+        max_retries: int
+    ) -> Optional[Dict[str, Any]]:
     """Upload a single chunk with concurrency control and retry logic"""
     async with semaphore:
         for attempt in range(max_retries):
@@ -186,6 +199,7 @@ async def _upload_chunk_with_semaphore(semaphore, client, key: str, upload_id: s
                     await asyncio.sleep(wait_time)
                 else:
                     raise e
+    return None
 
 # --------------------------------------------------------------------------- #
 #                   Download Functions                                        #
@@ -272,9 +286,20 @@ async def download_file_chunked(key: str, max_retries: int = 3) -> Optional[byte
                 await asyncio.sleep(wait_time)
             else:
                 logger.error(f"Download failed after {max_retries} attempts for {key}: {e}")
-                return None
+    
+    # If all retries failed, return None
+    return None
 
-async def _download_chunk_with_semaphore(semaphore, client, key: str, start: int, end: int, progress: TransferProgress, max_retries: int):
+
+async def _download_chunk_with_semaphore(
+        semaphore: asyncio.Semaphore,
+        client: Any,
+        key: str,
+        start: int,
+        end: int,
+        progress: TransferProgress,
+        max_retries: int
+    ) -> Optional[bytes]:
     """Download a single chunk with concurrency control and retry logic"""
     async with semaphore:
         for attempt in range(max_retries):
@@ -317,6 +342,7 @@ async def file_exists(key: str) -> bool:
     except Exception:
         return False
 
+
 async def list_bucket_files(prefix: str) -> List[str]:
     """List files in bucket with given prefix"""
     try:
@@ -331,6 +357,7 @@ async def list_bucket_files(prefix: str) -> List[str]:
     except Exception:
         logger.error("Failed to list bucket files with prefix %s", prefix, exc_info=True)
         return []
+
 
 async def get_file(key: str) -> Optional[Dict[str, Any]]:
     """Download and parse JSON file with improved error handling"""
@@ -347,7 +374,7 @@ async def get_file(key: str) -> Optional[Dict[str, Any]]:
 #                   GRAIL-specific Storage Functions                          #
 # --------------------------------------------------------------------------- #
 
-async def sink_window_inferences(wallet, window_start: int, inferences: List[dict]):
+async def sink_window_inferences(wallet: bt.wallet, window_start: int, inferences: List[dict]) -> None:
     """Upload window of inferences to S3 with improved logging"""
     key = f"grail/windows/{wallet.hotkey.ss58_address}-window-{window_start}.json"
     

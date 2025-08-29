@@ -16,9 +16,9 @@ import numpy as np
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-from .drand import get_beacon, get_drand_beacon, get_round_at_time
+from .infrastructure.drand import get_beacon, get_drand_beacon, get_round_at_time
 from .environments import SATProblem, generate_sat_problem, SATRolloutGenerator
-from .rollout import RolloutGenerator
+from .mining.rollout_generator import RolloutGenerator
 
 # Enable CUDA debugging for better error messages
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
@@ -109,6 +109,7 @@ def prf(label: bytes, *parts: bytes, out_bytes: int) -> bytes:
         output[i * hash_size:(i + 1) * hash_size] = block_hash
     
     return bytes(output[:out_bytes])
+
 
 def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
     """
@@ -290,6 +291,7 @@ def sign_s_vals(s_vals: list[int], wallet: bt.wallet) -> bytes:
     logger.debug(f"[Signature] signed {len(s_vals)} s_vals with Bittensor wallet signature")
     return signature
 
+
 def verify_s_vals_signature(s_vals: list[int], signature: bytes, wallet_address: str) -> bool:
     """
     Verify the signature of s_vals list using Bittensor wallet's public key.
@@ -333,7 +335,7 @@ def hash_s_vals(s_vals: list[int]) -> bytes:
 # ─────────────────────────────  PROVER  ────────────────────────────────
 
 class Prover:
-    def __init__(self, model_name=MODEL_NAME, wallet: bt.wallet = None):
+    def __init__(self, model_name: str = MODEL_NAME, wallet: bt.wallet = None) -> None:
         """
         Initialize Prover with model and Bittensor wallet for secure signatures.
         
@@ -459,7 +461,11 @@ class Prover:
             "signature": signature.hex()
         }
     
-    def commit_rollout(self, sat_problem: SATProblem, randomness_hex: str, difficulty: float = 0.5) -> dict:
+    def commit_rollout(self, 
+                       sat_problem: SATProblem, 
+                       randomness_hex: str, 
+                       difficulty: float = 0.5
+    ) -> dict:
         """
         Generate SAT rollout and create GRAIL proof.
         
@@ -510,8 +516,9 @@ class Prover:
 
 # ─────────────────────────────  VERIFIER  ──────────────────────────────
 
+
 class Verifier:
-    def __init__(self, model_name=MODEL_NAME):
+    def __init__(self, model_name: str = MODEL_NAME) -> None:
         self.device    = "cuda" if torch.cuda.is_available() else "cpu"
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         

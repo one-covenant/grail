@@ -2,7 +2,7 @@
 __version__ = "0.1.0.dev0"
 
 from .grail import Prover, Verifier
-from .drand import get_drand_beacon, get_round_at_time
+from .infrastructure.drand import get_drand_beacon, get_round_at_time
 from .environments import (
     # New reward system
     Parser, RewardVector, SATParser, 
@@ -10,8 +10,8 @@ from .environments import (
     # Existing classes
     SATProblem, generate_sat_problem, SATRolloutGenerator
 )
-from .rollout import RolloutGenerator
-from .comms import (
+from .mining.rollout_generator import RolloutGenerator
+from .infrastructure.comms import (
     upload_file_chunked, download_file_chunked, file_exists, list_bucket_files,
     get_file, sink_window_inferences, 
     # TODO(v2): Re-enable model state management for training

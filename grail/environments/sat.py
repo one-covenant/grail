@@ -9,7 +9,7 @@ import bittensor as bt
 import torch
 
 from .base import Parser, RewardVector
-from ..rollout import RolloutGenerator
+from ..mining.rollout_generator import RolloutGenerator
 
 # SAT Problem Configuration
 MIN_VARS = 3
