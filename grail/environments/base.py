@@ -6,7 +6,7 @@ from typing import Any, List, Callable, Optional
 
 class Parser(ABC):
     """Base class for parsing completions into structured outputs."""
-    
+
     @abstractmethod
     def parse(self, completion: str, context: Any) -> Any:
         """Parse completion text into structured output.
@@ -23,11 +23,13 @@ class Parser(ABC):
 
 class RewardVector:
     """Combines multiple reward functions with weights."""
-    
-    def __init__(self,
-                 reward_functions: List[Callable[[Any, Any], float]],
-                 weights: List[float],
-                 parser: Optional[Parser] = None):
+
+    def __init__(
+        self,
+        reward_functions: List[Callable[[Any, Any], float]],
+        weights: List[float],
+        parser: Optional[Parser] = None,
+    ):
         """Initialize reward vector.
 
         Args:
@@ -38,9 +40,7 @@ class RewardVector:
                    computation
         """
         if len(reward_functions) != len(weights):
-            raise ValueError(
-                "Number of reward functions must match number of weights"
-            )
+            raise ValueError("Number of reward functions must match number of weights")
 
         self.reward_functions = reward_functions
         self.weights = weights
@@ -68,8 +68,7 @@ class RewardVector:
 
         return total_reward
 
-    def compute_individual_rewards(self, completion: str,
-                                   context: Any) -> List[float]:
+    def compute_individual_rewards(self, completion: str, context: Any) -> List[float]:
         """Compute individual rewards from each function (useful for analysis).
 
         Args:

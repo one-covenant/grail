@@ -13,7 +13,7 @@ import traceback
 import bittensor as bt
 import torch
 import typer
-from collections import defaultdict
+
 from dotenv import load_dotenv
 from typing import Any, Optional, Tuple
 
@@ -45,7 +45,7 @@ LLAMA_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"  # Using TinyLlama 1B model
 # --------------------------------------------------------------------------- #
 #                               Logging                                       #
 # --------------------------------------------------------------------------- #
-def _trace(self, msg, *args, **kwargs):
+def _trace(self: Any, msg: str, *args: Any, **kwargs: Any) -> None:
     if self.isEnabledFor(TRACE):
         self._log(TRACE, msg, args, **kwargs)
 
@@ -91,10 +91,13 @@ async def get_subtensor() -> bt.subtensor:
 # --------------------------------------------------------------------------- #
 def generate_prompt(hotkey_address: str, block_hash: str, nonce: int) -> str:
     """Generate prompt in the required format"""
-    return f"Hey my name is {hotkey_address} it is currently {block_hash} days since friday and my fav number is {nonce}, tell me a story about these three facts"
+    return (
+        f"Hey my name is {hotkey_address} it is currently {block_hash} days since friday "
+        f"and my fav number is {nonce}, tell me a story about these three facts"
+    )
 
 
-def parse_filename(filename: str) -> Tuple[str, int, int]:
+def parse_filename(filename: str) -> Tuple[Optional[str], Optional[int], Optional[int]]:
     """Parse filename to extract wallet, block, nonce"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -107,7 +110,7 @@ def parse_filename(filename: str) -> Tuple[str, int, int]:
     return None, None, None
 
 
-def parse_window_filename(filename: str) -> Tuple[str, int]:
+def parse_window_filename(filename: str) -> Tuple[Optional[str], Optional[int]]:
     """Parse window filename to extract wallet and window_start"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -271,7 +274,7 @@ def mine(
                     combined_randomness = window_block_hash
 
                 # Generate as many inferences as possible during this window
-                inferences = []
+                inferences: list = []
                 start_time = time.time()
                 inference_count = 0
 
@@ -298,7 +301,8 @@ def mine(
                         problem_count += 1
                         inference_count += 1  # For logging
                         logger.info(
-                            f"⚡ Generating GRPO rollouts for problem {problem_count} (block {current_block}/{window_start + WINDOW_LENGTH - 1})..."
+                            f"⚡ Generating GRPO rollouts for problem {problem_count} "
+                            f"(block {current_block}/{window_start + WINDOW_LENGTH - 1})..."
                         )
 
                         # Clean up GPU memory periodically
@@ -321,7 +325,7 @@ def mine(
                         sat_problem = generate_sat_problem(sat_seed_base, difficulty)
                         logger.debug(
                             f"Generated SAT problem: {sat_problem.num_vars} vars, {len(sat_problem.clauses)} clauses"
-                        ) 
+                        )
 
                         # Generate GRPO rollouts (4 per problem)
                         sat_generator = SATRolloutGenerator(
@@ -357,7 +361,8 @@ def mine(
                             elapsed = time.time() - start_time
                             rollouts_per_sec = len(inferences) / elapsed if elapsed > 0 else 0
                             logger.info(
-                                f"📊 Progress: {len(inferences)} rollouts from {problem_count} problems in {elapsed:.1f}s ({rollouts_per_sec:.1f} rollouts/sec)"
+                                f"📊 Progress: {len(inferences)} rollouts from {problem_count} problems "
+                                f"in {elapsed:.1f}s ({rollouts_per_sec:.1f} rollouts/sec)"
                             )
 
                         # Package rollouts for submission

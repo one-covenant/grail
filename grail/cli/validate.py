@@ -14,7 +14,7 @@ import math
 import bittensor as bt
 from dotenv import load_dotenv
 from collections import defaultdict
-from typing import Any, Tuple
+from typing import Any, Tuple, Optional
 
 # TODO(v2): Re-enable training imports
 # from trl import PPOTrainer, PPOConfig
@@ -56,7 +56,7 @@ SUPERLINEAR_EXPONENT = 1.5
 # --------------------------------------------------------------------------- #
 #                               Logging                                       #
 # --------------------------------------------------------------------------- #
-def _trace(self, msg: str, *args: Any, **kwargs: Any) -> None:
+def _trace(self: Any, msg: str, *args: Any, **kwargs: Any) -> None:
     if self.isEnabledFor(TRACE):
         self._log(TRACE, msg, args, **kwargs)
 
@@ -84,7 +84,7 @@ def get_conf(key: str, default: Any = None) -> Any:
 SUBTENSOR = None
 
 
-async def get_subtensor():
+async def get_subtensor() -> bt.subtensor:
     global SUBTENSOR
     if SUBTENSOR is None:
         logger.trace("Making Bittensor connection...")
@@ -102,10 +102,13 @@ async def get_subtensor():
 # --------------------------------------------------------------------------- #
 def generate_prompt(hotkey_address: str, block_hash: str, nonce: int) -> str:
     """Generate prompt in the required format"""
-    return f"Hey my name is {hotkey_address} it is currently {block_hash} days since friday and my fav number is {nonce}, tell me a story about these three facts"
+    return (
+        f"Hey my name is {hotkey_address} it is currently {block_hash} days since friday "
+        f"and my fav number is {nonce}, tell me a story about these three facts"
+    )
 
 
-def parse_filename(filename: str) -> Tuple[str, int, int]:
+def parse_filename(filename: str) -> Tuple[Optional[str], Optional[int], Optional[int]]:
     """Parse filename to extract wallet, block, nonce"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -118,7 +121,7 @@ def parse_filename(filename: str) -> Tuple[str, int, int]:
     return None, None, None
 
 
-def parse_window_filename(filename: str) -> Tuple[str, int]:
+def parse_window_filename(filename: str) -> Tuple[Optional[str], Optional[int]]:
     """Parse window filename to extract wallet and window_start"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -164,7 +167,9 @@ def verify_rollout_signature(rollout_data: dict) -> bool:
 # The GRAIL proof system now uses wallet signatures for security
 
 # Global storage for miner state
-miner_inference_counts = defaultdict(list)  # track inferences per block for weight calculation
+miner_inference_counts: defaultdict[str, list] = defaultdict(
+    list
+)  # track inferences per block for weight calculation
 
 
 # --------------------------------------------------------------------------- #
@@ -221,7 +226,9 @@ def validate(
     login_huggingface()
 
     # Storage for inference counts per miner
-    inference_counts = defaultdict(lambda: defaultdict(int))  # {hotkey: {window: count}}
+    inference_counts: defaultdict[str, defaultdict[int, int]] = defaultdict(
+        lambda: defaultdict(int)
+    )  # {hotkey: {window: count}}
 
     async def _run() -> None:
         subtensor = None
@@ -272,7 +279,7 @@ def validate(
                 #     pass
 
                 # v1: Use base model directly without waiting
-                logger.info(f"🚀 Using base model for verification")
+                logger.info("🚀 Using base model for verification")
 
                 # Get block hash for the window start
                 target_window_hash = await subtensor.get_block_hash(target_window)
@@ -364,7 +371,7 @@ def validate(
                             use_spot_check = False
                             logger.info(
                                 f"🔍 Verifying all {total_inferences} rollouts from {wallet_addr}"
-                            ) 
+                            )
                         else:
                             # For spot checking, sample complete GRPO groups
                             use_spot_check = True
@@ -646,7 +653,7 @@ def validate(
                             f"📤 Uploaded {len(all_valid_rollouts)} valid rollouts for training"
                         )
                     else:
-                        logger.warning(f"⚠️ Failed to upload valid rollouts for training")
+                        logger.warning("⚠️ Failed to upload valid rollouts for training")
 
                     # NEW: Upload to Hugging Face dataset for community access
                     try:
@@ -655,7 +662,9 @@ def validate(
                         )
                         if hf_success:
                             logger.info(
-                                f"🤗 Uploaded {len(all_valid_rollouts)} rollouts to Hugging Face dataset"
+                                "🤗 Uploaded {} rollouts to Hugging Face dataset".format(
+                                    len(all_valid_rollouts)
+                                )
                             )
                         else:
                             logger.debug("Failed to upload to Hugging Face (may need HF_TOKEN)")
@@ -698,7 +707,7 @@ def validate(
                     base_score = max(0.0, min(1.0, base_score))
 
                     # Apply superlinear curve: emphasizes higher performers and penalizes splitting
-                    superlinear_score = base_score ** SUPERLINEAR_EXPONENT
+                    superlinear_score = base_score**SUPERLINEAR_EXPONENT
                     raw_scores.append(superlinear_score)
 
                 # Normalize weights
@@ -739,7 +748,7 @@ def validate(
                 await asyncio.sleep(10)  # Wait before retrying
                 continue
 
-    async def _main():
+    async def _main() -> None:
         await asyncio.gather(_run(), watchdog(timeout=(60 * 10)))
 
     asyncio.run(_main())
