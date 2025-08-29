@@ -1,5 +1,29 @@
 """GRAIL Environments - Scalable RL environments for various tasks."""
 
-from .sat import SATProblem, SATEnvironment, generate_sat_problem, SATRolloutGenerator
+# Import base classes
+from .base import Parser, RewardVector
 
-__all__ = ['SATProblem', 'SATEnvironment', 'generate_sat_problem', 'SATRolloutGenerator']
+# Import SAT-specific implementations
+from .sat import (
+    SATProblem,
+    SATParser,
+    generate_sat_problem,
+    sat_correctness_reward,
+    sat_partial_reward,
+    create_sat_reward_vector,
+    SATRolloutGenerator,
+)
+
+__all__ = [
+    # Base classes
+    'Parser',
+    'RewardVector',
+    # SAT implementations
+    'SATProblem',
+    'SATParser',
+    'generate_sat_problem',
+    'sat_correctness_reward',
+    'sat_partial_reward',
+    'create_sat_reward_vector',
+    'SATRolloutGenerator',
+]

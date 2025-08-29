@@ -1,9 +1,15 @@
-"""SAT Problem Environment for GRAIL RL System."""
+"""SAT Problem Solver for GRAIL RL System."""
 
+from typing import List, Dict, Tuple, Any, Callable, Optional
+import re
 import random
 import hashlib
+
+import bittensor as bt
+import torch
+
+from .base import Parser, RewardVector
 from ..rollout import RolloutGenerator
-from typing import List, Dict, Tuple, Any
 
 # SAT Problem Configuration
 MIN_VARS = 3
@@ -28,10 +34,11 @@ class SATProblem:
         text += f"Variables: {self.num_vars}\n"
         text += "Clauses:\n"
         for i, clause in enumerate(self.clauses):
-            clause_str = " OR ".join([f"{'NOT ' if lit < 0 else ''}x{abs(lit)}" for lit in clause])
+            clause_str = " OR ".join([
+                f"{'NOT ' if lit < 0 else ''}x{abs(lit)}" for lit in clause
+            ])
             text += f"  ({clause_str})\n"
         return text
-    
     def check_solution(self, assignment: List[bool]) -> bool:
         """Check if assignment satisfies all clauses."""
         if len(assignment) != self.num_vars:
@@ -70,7 +77,9 @@ def generate_sat_problem(seed: str, difficulty: float = 0.5) -> SATProblem:
     clauses = []
     for _ in range(num_clauses):
         clause = []
-        vars_in_clause = rng.sample(range(1, num_vars + 1), min(CLAUSE_LENGTH, num_vars))
+        vars_in_clause = rng.sample(
+            range(1, num_vars + 1), min(CLAUSE_LENGTH, num_vars)
+        )
         for var in vars_in_clause:
             # Randomly negate
             if rng.random() < 0.5:
@@ -82,134 +91,31 @@ def generate_sat_problem(seed: str, difficulty: float = 0.5) -> SATProblem:
     return SATProblem(num_vars, clauses, seed)
 
 
-class SATEnvironment:
-    """RL environment for solving SAT problems."""
+class SATParser(Parser):
+    """Parser for extracting boolean assignments from SAT completion text."""
     
-    def __init__(self, problem: SATProblem):
-        self.problem = problem
-        self.assignment = [False] * problem.num_vars
-        self.current_var = 0
-        self.steps = 0
-        self.max_steps = problem.num_vars * 2
-        self.trajectory = []
+    def parse(self, completion: str, problem: SATProblem) -> List[bool]:
+        """Extract boolean assignment from completion text.
         
-    def reset(self) -> Dict:
-        """Reset environment to initial state."""
-        self.assignment = [False] * self.problem.num_vars
-        self.current_var = 0
-        self.steps = 0
-        self.trajectory = []
-        return self.get_state()
-    
-    def get_state(self) -> Dict:
-        """Get current state as dict for LLM processing."""
-        return {
-            "problem": self.problem.to_text(),
-            "current_assignment": self.assignment.copy(),
-            "current_var": self.current_var,
-            "steps": self.steps,
-            "satisfied_clauses": self.count_satisfied_clauses()
-        }
-    
-    def count_satisfied_clauses(self) -> int:
-        """Count how many clauses are currently satisfied."""
-        count = 0
-        for clause in self.problem.clauses:
-            for lit in clause:
-                var_idx = abs(lit) - 1
-                if var_idx < len(self.assignment):
-                    if (lit > 0 and self.assignment[var_idx]) or \
-                       (lit < 0 and not self.assignment[var_idx]):
-                        count += 1
-                        break
-        return count
-    
-    def step(self, action: int) -> Tuple[Dict, float, bool, Dict]:
-        """Take action (0=false, 1=true for current variable)."""
-        if self.current_var >= self.problem.num_vars:
-            return self.get_state(), 0, True, {"success": False}
-        
-        # Record action in trajectory
-        self.trajectory.append((self.current_var, action))
-        
-        # Apply action
-        self.assignment[self.current_var] = bool(action)
-        self.current_var += 1
-        self.steps += 1
-        
-        # Calculate reward
-        satisfied = self.count_satisfied_clauses()
-        total_clauses = len(self.problem.clauses)
-        
-        # Check if done
-        done = False
-        success = False
-        
-        if self.current_var >= self.problem.num_vars:
-            # All variables assigned
-            done = True
-            success = self.problem.check_solution(self.assignment)
-            if success:
-                reward = 10.0  # Big reward for solving
-            else:
-                reward = satisfied / total_clauses - 1.0  # Partial credit
-        elif self.steps >= self.max_steps:
-            done = True
-            reward = -1.0  # Penalty for timeout
-        else:
-            # Intermediate reward based on progress
-            reward = (satisfied / total_clauses) * 0.1
-        
-        info = {
-            "success": success,
-            "satisfied_clauses": satisfied,
-            "total_clauses": total_clauses
-        }
-        
-        return self.get_state(), reward, done, info
-    
-    def render_trajectory(self) -> str:
-        """Render trajectory as text for LLM."""
-        text = "Solution trajectory:\n"
-        for var, val in self.trajectory:
-            text += f"  x{var+1} = {val}\n"
-        return text
-
-
-class SATRolloutGenerator(RolloutGenerator):
-    """SAT-specific GRPO rollout generator."""
-    
-    def create_environment(self, problem: SATProblem) -> SATEnvironment:
-        """Create a SAT environment for the given problem."""
-        return SATEnvironment(problem)
-    
-    def reset_environment(self, env: SATEnvironment) -> Dict:
-        """Reset the SAT environment."""
-        return env.reset()
-    
-    def create_prompt(self, problem: SATProblem, env: SATEnvironment, state: Dict, trajectory: List) -> str:
-        """Create prompt for SAT solving."""
-        prompt = f"SAT Problem:\n{problem.to_text()}\n"
-        prompt += "Assign each variable as 0 (false) or 1 (true).\n"
-        prompt += "Provide all assignments in order. For example: 0 1 0 1 means x1=0, x2=1, x3=0, x4=1\n"
-        prompt += "Solution: "
-        return prompt
-    
-    def parse_action(self, text: str, env: SATEnvironment, state: Dict) -> List[int]:
-        """Parse all variable assignments from generated text."""
-        text = text.strip()
+        Args:
+            completion: Raw completion text from model
+            problem: SAT problem instance for context
+            
+        Returns:
+            List of boolean values representing variable assignments
+        """
+        text = completion.strip()
         actions = []
         
         # Look for sequences of 0s and 1s
         for char in text:
             if char in '01':
                 actions.append(int(char))
-                if len(actions) >= env.problem.num_vars:
+                if len(actions) >= problem.num_vars:
                     break
         
         # If we didn't find enough, look for patterns like "x1=0"
-        if len(actions) < env.problem.num_vars:
-            import re
+        if len(actions) < problem.num_vars:
             pattern = r'x\d+=([01])|variable\s+\d+\s*[:=]\s*([01])'
             matches = re.findall(pattern, text.lower())
             for match in matches:
@@ -218,54 +124,212 @@ class SATRolloutGenerator(RolloutGenerator):
                     actions.append(int(value))
         
         # Pad with 0s if not enough assignments
-        while len(actions) < env.problem.num_vars:
+        while len(actions) < problem.num_vars:
             actions.append(0)
         
-        return actions[:env.problem.num_vars]
+        # Convert to boolean and return only required number
+        return [bool(x) for x in actions[:problem.num_vars]]
+
+
+def sat_correctness_reward(assignment: List[bool], problem: SATProblem) -> float:
+    """Reward based on whether assignment satisfies all clauses.
+
+    Args:
+        assignment: Boolean assignment for variables
+        problem: SAT problem instance
+
+    Returns:
+        10.0 if solution is correct, -1.0 otherwise
+    """
+    if problem.check_solution(assignment):
+        return 10.0
+    else:
+        return -1.0
+
+
+def sat_partial_reward(assignment: List[bool], problem: SATProblem) -> float:
+    """Reward based on fraction of clauses satisfied.
+
+    Args:
+        assignment: Boolean assignment for variables
+        problem: SAT problem instance
+
+    Returns:
+        Float between 0 and 1 representing fraction of satisfied clauses
+    """
+    if len(assignment) != problem.num_vars:
+        return 0.0
     
-    def step_environment(self, env: SATEnvironment, action: Any) -> Tuple[Dict, float, bool, Dict]:
-        """Take steps in the SAT environment."""
-        # If action is a list (from parse_action), apply all assignments
-        if isinstance(action, list):
-            total_reward = 0
-            state = None
-            done = False
-            info = {}
-            
-            for single_action in action:
-                if env.current_var < env.problem.num_vars:
-                    state, reward, done, info = env.step(single_action)
-                    total_reward += reward
-                    if done:
+    satisfied_count = 0
+    for clause in problem.clauses:
+        for lit in clause:
+            var_idx = abs(lit) - 1
+            if var_idx < len(assignment):
+                if ((lit > 0 and assignment[var_idx]) or
+                    (lit < 0 and not assignment[var_idx])):
+                    satisfied_count += 1
+                    break
+    
+    return (satisfied_count / len(problem.clauses) 
+            if problem.clauses else 0.0)
+
+
+def create_sat_reward_vector(
+    correctness_weight: float = 0.7,
+    partial_weight: float = 0.2,
+    efficiency_weight: float = 0.1
+) -> RewardVector:
+    """Create a standard SAT reward vector with common reward functions.
+    
+    Args:
+        correctness_weight: Weight for correctness reward (default: 0.7)
+        partial_weight: Weight for partial satisfaction reward (default: 0.2)
+        efficiency_weight: Weight for efficiency reward (default: 0.1)
+        
+    Returns:
+        RewardVector configured for SAT solving
+    """
+    from typing import cast
+    reward_functions = cast(List[Callable[[Any, Any], float]], [
+        sat_correctness_reward,
+        sat_partial_reward
+    ])
+    weights = [correctness_weight, partial_weight]
+    parser = SATParser()
+    
+    return RewardVector(reward_functions, weights, parser)
+
+
+
+class SATRolloutGenerator(RolloutGenerator):
+    """SAT-specific rollout generator using RewardVector instead of environment."""
+    
+    def __init__(self, model, tokenizer, device: str = "cuda", 
+                 rollouts_per_problem: int = 4,
+                 reward_vector: Optional[RewardVector] = None):
+        """Initialize SAT rollout generator.
+        
+        Args:
+            model: Language model for generation
+            tokenizer: Tokenizer for the model
+            device: Device to run on
+            rollouts_per_problem: Number of rollouts per problem for GRPO
+            reward_vector: Custom reward vector, creates default if None
+        """
+        super().__init__(model, tokenizer, device, rollouts_per_problem)
+        self.reward_vector = reward_vector or create_sat_reward_vector()
+        # Create a dummy environment for compatibility
+        self._current_problem = None
+    
+    # Required abstract methods from RolloutGenerator
+    def create_environment(self, problem: SATProblem) -> SATProblem:
+        """Return the problem itself as 'environment' - no separate env needed."""
+        self._current_problem = problem
+        return problem
+    
+    def reset_environment(self, env: SATProblem) -> Dict[str, Any]:
+        """Return initial state - just the problem description."""
+        return {
+            "problem": env.to_text(),
+            "num_vars": env.num_vars,
+            "clauses": env.clauses
+        }
+    
+    def create_prompt(self, problem: SATProblem, env: SATProblem, 
+                      state: Dict[str, Any], trajectory: List) -> str:
+        """Create prompt for SAT solving."""
+        prompt = f"SAT Problem:\n{problem.to_text()}\n"
+        prompt += "Assign each variable as 0 (false) or 1 (true).\n"
+        prompt += ("Provide all assignments in order. For example: "
+                   "0 1 0 1 means x1=0, x2=1, x3=0, x4=1\n")
+        prompt += "Solution: "
+        return prompt
+    
+    def parse_action(self, text: str, env: SATProblem, 
+                     state: Dict[str, Any]) -> List[bool]:
+        """Parse completion text into boolean assignment using the reward vector's parser."""
+        if self.reward_vector.parser:
+            return self.reward_vector.parser.parse(text, env)
+        else:
+            # Fallback parsing
+            parser = SATParser()
+            return parser.parse(text, env)
+    
+    def step_environment(self, env: SATProblem, action: List[bool]) -> Tuple[
+        Dict[str, Any], float, bool, Dict[str, Any]
+    ]:
+        """Single-shot evaluation using reward vector."""
+        # Reconstruct completion text for reward computation
+        completion = " ".join("1" if val else "0" for val in action)
+        
+        # Compute reward using reward vector
+        reward = self.reward_vector.compute_reward(completion, env)
+        
+        # Check success
+        success = env.check_solution(action)
+        
+        # Count satisfied clauses
+        satisfied_clauses = 0
+        if len(action) == env.num_vars:
+            for clause in env.clauses:
+                for lit in clause:
+                    var_idx = abs(lit) - 1
+                    if ((lit > 0 and action[var_idx]) or
+                        (lit < 0 and not action[var_idx])):
+                        satisfied_clauses += 1
                         break
-            
-            return state, total_reward, done, info
-        else:
-            # Single action (backward compatibility)
-            return env.step(action)
+        
+        state = {
+            "problem": env.to_text(),
+            "assignment": action,
+            "success": success
+        }
+        
+        info = {
+            "success": success,
+            "satisfied_clauses": satisfied_clauses,
+            "total_clauses": len(env.clauses),
+            "assignment": action
+        }
+        
+        return state, reward, True, info  # Always done after one step
     
-    def create_trajectory_entry(self, state: Dict, action: Any, reward: float, info: Dict) -> Tuple[Any, Any, float]:
-        """Create a trajectory entry for SAT."""
-        # For GRPO, we store the full action list and reward
-        if isinstance(action, list):
-            return (state["current_var"], action, reward)
-        else:
-            # Single action (backward compatibility)
-            var_idx = state["current_var"]
-            return (var_idx, action, reward)
+    def create_trajectory_entry(self, state: Dict[str, Any], action: List[bool], 
+                                reward: float, info: Dict[str, Any]) -> Tuple[
+        int, List[bool], float
+    ]:
+        """Create trajectory entry."""
+        return (0, action, reward)  # Simple: step 0, assignment, reward
     
-    def get_final_info(self, env: SATEnvironment, trajectory: List, total_reward: float) -> Dict:
+    def get_final_info(self, env: SATProblem, trajectory: List, 
+                       total_reward: float) -> Dict[str, Any]:
         """Get final SAT-specific information."""
-        # Check if the final assignment satisfies all clauses
-        success = env.problem.check_solution(env.assignment)
+        if trajectory:
+            _, assignment, _ = trajectory[-1]
+            success = env.check_solution(assignment)
+            satisfied_clauses = 0
+            if len(assignment) == env.num_vars:
+                for clause in env.clauses:
+                    for lit in clause:
+                        var_idx = abs(lit) - 1
+                        if ((lit > 0 and assignment[var_idx]) or
+                            (lit < 0 and not assignment[var_idx])):
+                            satisfied_clauses += 1
+                            break
+        else:
+            assignment = [False] * env.num_vars
+            success = False
+            satisfied_clauses = 0
         
         return {
             "success": success,
-            "satisfied_clauses": env.count_satisfied_clauses(),
-            "assignment": env.assignment,
+            "satisfied_clauses": satisfied_clauses,
+            "assignment": assignment,
             "sat_problem": {
-                "seed": env.problem.seed,
-                "num_vars": env.problem.num_vars,
-                "clauses": env.problem.clauses
+                "seed": env.seed,
+                "num_vars": env.num_vars,
+                "clauses": env.clauses
             }
         }
+    
+
