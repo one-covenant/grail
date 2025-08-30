@@ -41,6 +41,15 @@ DEFAULT_MAX_NEW_TOKENS = 20  # Must match rollout generator default
 MIN_EOS_PROBABILITY = 0.1  # Minimum probability for valid EOS termination
 SANITY_CHECK_DRIFT_THRESHOLD = 0.1  # Max acceptable drift between miner/validator logprobs
 
+# Token sampling distribution check hyperparameters
+SAMPLING_MIN_STEPS = 8
+SAMPLING_LOW_P = 0.10
+SAMPLING_HIGH_P = 0.90
+SAMPLING_LOW_FRAC_MIN = 0.20
+SAMPLING_HIGH_FRAC_MIN = 0.50
+SAMPLING_MID_FRAC_MAX = 0.40
+SAMPLING_BC_THRESHOLD = 0.58
+
 
 def prf(label: bytes, *parts: bytes, out_bytes: int) -> bytes:
     """
@@ -618,6 +627,15 @@ class Verifier:
             )
             return False
 
+        # Token sampling distribution shape check
+        ok_sampling, sampling_stats = self._token_sampling_shape_check(commit)
+        if not ok_sampling:
+            logger.debug(
+                f"Token sampling shape check failed: {sampling_stats}"
+            )
+            return False
+        logger.debug(f"Token sampling shape check passed: {sampling_stats}")
+
         # The GRAIL proof has already verified that these tokens (including the SAT problem)
         # were processed by the claimed model - no other model could produce matching sketches
 
@@ -711,6 +729,135 @@ class Verifier:
 
         logger.debug("GRAIL proof verification successful")
         return True
+
+    def _collect_chosen_token_probs(self, commit: dict) -> Optional[list[float]]:
+        """Collect validator probabilities of chosen tokens over completion tokens.
+
+        Uses a single forward pass. For token at index t, predictive logits are at t-1.
+        """
+        try:
+            tokens = commit.get("tokens", [])
+            rollout = commit.get("rollout", {})
+            if not isinstance(tokens, list) or len(tokens) < 2:
+                return None
+
+            prompt_len = int(rollout.get("prompt_length", 0) or 0)
+            completion_len = int(rollout.get("completion_length", 0) or 0)
+
+            if completion_len <= 0:
+                # Fallback: assume everything after first token is completion
+                prompt_len = max(1, prompt_len)
+                completion_len = max(0, len(tokens) - prompt_len)
+
+            if prompt_len <= 0 or completion_len <= 0:
+                return None
+
+            full_ids = torch.tensor(tokens, dtype=torch.long, device=self.device)
+            full_ids = full_ids.unsqueeze(0)
+            with torch.inference_mode():
+                outs = self.model(full_ids)
+            logits = outs.logits[0]  # [T, V]
+
+            start_t = max(1, prompt_len)
+            end_t = min(start_t + completion_len, logits.size(0))
+
+            probs_list: list[float] = []
+            for t in range(start_t, end_t):
+                step_logits = logits[t - 1]
+                step_probs = torch.softmax(step_logits, dim=-1)
+                tok_id = int(tokens[t])
+                probs_list.append(float(step_probs[tok_id].item()))
+            return probs_list
+        except Exception as e:
+            logger.debug(f"Failed to collect chosen-token probs: {e}")
+            return None
+
+    def _bimodality_metrics(self, probs: list[float]) -> dict:
+        """Compute fractions at extremes and bimodality coefficient from moments."""
+        try:
+            try:
+                import numpy as np
+            except Exception:
+                np = None
+
+            x_list = probs
+            if np is not None:
+                x = np.asarray(x_list, dtype=np.float64)
+                n = float(x.size)
+                low_frac = float((x <= SAMPLING_LOW_P).mean())
+                high_frac = float((x >= SAMPLING_HIGH_P).mean())
+                mid_frac = max(0.0, 1.0 - low_frac - high_frac)
+                m = float(x.mean())
+                d = x - m
+                s2 = float((d * d).mean())
+                if s2 <= 1e-12:
+                    skew = 0.0
+                    kurt = 3.0
+                else:
+                    m3 = float((d ** 3).mean())
+                    m4 = float((d ** 4).mean())
+                    skew = m3 / (s2 ** 1.5 + 1e-12)
+                    kurt = m4 / (s2 ** 2 + 1e-12)
+            else:
+                # Torch fallback without numpy
+                tx = torch.tensor(x_list, dtype=torch.float64)
+                n = float(tx.numel())
+                low_frac = float((tx <= SAMPLING_LOW_P).to(torch.float64).mean().item())
+                high_frac = float((tx >= SAMPLING_HIGH_P).to(torch.float64).mean().item())
+                mid_frac = max(0.0, 1.0 - low_frac - high_frac)
+                m = float(tx.mean().item())
+                d = tx - m
+                s2_t = (d * d).mean()
+                s2 = float(s2_t.item())
+                if s2 <= 1e-12:
+                    skew = 0.0
+                    kurt = 3.0
+                else:
+                    m3 = float((d.pow(3).mean()).item())
+                    m4 = float((d.pow(4).mean()).item())
+                    skew = m3 / (s2 ** 1.5 + 1e-12)
+                    kurt = m4 / (s2 ** 2 + 1e-12)
+
+            bc = (skew * skew + 1.0) / max(kurt, 1e-6)
+            return {
+                "n": n,
+                "mean": m,
+                "low_frac": low_frac,
+                "high_frac": high_frac,
+                "mid_frac": mid_frac,
+                "skew": skew,
+                "kurtosis": kurt,
+                "bc": bc,
+            }
+        except Exception as e:
+            logger.debug(f"Failed to compute bimodality metrics: {e}")
+            return {
+                "n": 0.0,
+                "mean": 0.0,
+                "low_frac": 0.0,
+                "high_frac": 0.0,
+                "mid_frac": 0.0,
+                "skew": 0.0,
+                "kurtosis": 3.0,
+                "bc": 0.0,
+            }
+
+    def _token_sampling_shape_check(self, commit: dict) -> tuple[bool, dict]:
+        """Return (ok, stats) where ok=False indicates suspicious bimodality."""
+        probs = self._collect_chosen_token_probs(commit)
+        n = 0 if probs is None else len(probs)
+        if probs is None or n < SAMPLING_MIN_STEPS:
+            return True, {"n": float(n), "reason": "insufficient"}
+
+        metrics = self._bimodality_metrics(probs)
+
+        low_ok = metrics["low_frac"] >= SAMPLING_LOW_FRAC_MIN
+        high_ok = metrics["high_frac"] >= SAMPLING_HIGH_FRAC_MIN
+        mid_ok = metrics["mid_frac"] <= SAMPLING_MID_FRAC_MAX
+        bc_ok = metrics["bc"] >= SAMPLING_BC_THRESHOLD
+
+        suspicious = low_ok and high_ok and mid_ok and bc_ok
+        return (not suspicious), metrics
 
     def _check_max_length_termination(self, commit: dict) -> bool:
         """Check if completion reached the configured generation max length."""
