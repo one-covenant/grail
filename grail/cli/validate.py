@@ -25,7 +25,7 @@ from typing import Any, Tuple, Optional
 from ..grail import Verifier
 from . import console
 
-from ..environments import generate_sat_problem
+from ..environments import generate_sat_problem, create_sat_reward_vector
 from ..infrastructure.comms import (
     file_exists,
     get_file,
@@ -229,6 +229,14 @@ def validate(
     inference_counts: defaultdict[str, defaultdict[int, int]] = defaultdict(
         lambda: defaultdict(int)
     )  # {hotkey: {window: count}}
+
+    # Declarative SAT reward bounds (composed from per-function bounds)
+    try:
+        _sat_rv = create_sat_reward_vector()
+        SAT_REWARD_LOW, SAT_REWARD_HIGH = _sat_rv.reward_bounds()
+    except Exception:
+        # Fallback to permissive bounds if vector is unavailable
+        SAT_REWARD_LOW, SAT_REWARD_HIGH = float("-inf"), float("inf")
 
     async def _run() -> None:
         subtensor = None
@@ -490,6 +498,26 @@ def validate(
 
                                     # For GRPO rollouts, we need to modify the commit data to use the base problem
                                     commit_data = inference["commit"]
+                                    # Reward bounds check (pre-proof; fast filter)
+                                    try:
+                                        rollout_meta = commit_data.get("rollout", {})
+                                        total_reward = rollout_meta.get("total_reward", None)
+                                        if not isinstance(total_reward, (int, float)):
+                                            logger.debug("Missing or invalid total_reward; skipping inference")
+                                            continue
+                                        if (
+                                            total_reward < SAT_REWARD_LOW
+                                            or total_reward > SAT_REWARD_HIGH
+                                        ):
+                                            logger.debug(
+                                                "total_reward %.4f outside bounds [%.4f, %.4f]",
+                                                total_reward,
+                                                SAT_REWARD_LOW,
+                                                SAT_REWARD_HIGH,
+                                            )
+                                            continue
+                                    except Exception:
+                                        pass
                                     rollout_group = inference.get("rollout_group")
                                     if rollout_group:
                                         # This is a GRPO rollout - regenerate base problem for verification

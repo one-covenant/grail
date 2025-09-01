@@ -1,6 +1,6 @@
 """SAT Problem Solver for GRAIL RL System."""
 
-from typing import List, Dict, Tuple, Any, Callable, Optional
+from typing import List, Dict, Tuple, Any, Callable, Optional, cast
 import re
 import random
 import hashlib
@@ -187,11 +187,21 @@ def create_sat_reward_vector(
     weights = [correctness_weight, partial_weight]
     parser = SATParser()
 
-    return RewardVector(reward_functions, weights, parser)
+    # Declarative per-function bounds
+    SAT_CORRECTNESS_BOUNDS = (-1.0, 10.0)
+    SAT_PARTIAL_BOUNDS = (0.0, 1.0)
+
+    return RewardVector(
+        reward_functions,
+        weights,
+        parser,
+        bounds=[SAT_CORRECTNESS_BOUNDS, SAT_PARTIAL_BOUNDS],
+    )
 
 
 class SATRolloutGenerator(RolloutGenerator):
     """SAT-specific rollout generator using RewardVector instead of environment."""
+    _current_problem: Optional[SATProblem]
 
     def __init__(
         self,
@@ -241,7 +251,14 @@ class SATRolloutGenerator(RolloutGenerator):
     def parse_action(self, text: str, env: SATProblem, state: Dict[str, Any]) -> List[bool]:
         """Parse completion text into boolean assignment using the reward vector's parser."""
         if self.reward_vector.parser:
-            return self.reward_vector.parser.parse(text, env)
+            parsed = self.reward_vector.parser.parse(text, env)
+            # Ensure we return a concrete List[bool]
+            try:
+                assignment: List[bool] = [bool(x) for x in cast(List[Any], parsed)]
+            except Exception:
+                parser = SATParser()
+                assignment = parser.parse(text, env)
+            return assignment
         else:
             # Fallback parsing
             parser = SATParser()
@@ -256,6 +273,23 @@ class SATRolloutGenerator(RolloutGenerator):
 
         # Compute reward using reward vector
         reward = self.reward_vector.compute_reward(completion, env)
+        # Optional: warn if reward outside declarative bounds
+        try:
+            if hasattr(self.reward_vector, "has_bounds") and self.reward_vector.has_bounds():
+                low, high = self.reward_vector.reward_bounds()
+                if reward < low or reward > high:
+                    # Lazy import to avoid circular logger config
+                    import logging
+
+                    logging.getLogger(__name__).warning(
+                        "SAT reward %.4f outside composed bounds [%.4f, %.4f]",
+                        reward,
+                        low,
+                        high,
+                    )
+        except Exception:
+            # Non-fatal: continue without bounds warning
+            pass
 
         # Check success
         success = env.check_solution(action)
