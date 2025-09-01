@@ -141,61 +141,33 @@ def sat_correctness_reward(assignment: List[bool], problem: SATProblem) -> float
         return -1.0
 
 
-def sat_partial_reward(assignment: List[bool], problem: SATProblem) -> float:
-    """Reward based on fraction of clauses satisfied.
-
-    Args:
-        assignment: Boolean assignment for variables
-        problem: SAT problem instance
-
-    Returns:
-        Float between 0 and 1 representing fraction of satisfied clauses
-    """
-    if len(assignment) != problem.num_vars:
-        return 0.0
-
-    satisfied_count = 0
-    for clause in problem.clauses:
-        for lit in clause:
-            var_idx = abs(lit) - 1
-            if var_idx < len(assignment):
-                if (lit > 0 and assignment[var_idx]) or (lit < 0 and not assignment[var_idx]):
-                    satisfied_count += 1
-                    break
-
-    return satisfied_count / len(problem.clauses) if problem.clauses else 0.0
-
-
 def create_sat_reward_vector(
-    correctness_weight: float = 0.7, partial_weight: float = 0.2, efficiency_weight: float = 0.1
+    correctness_weight: float = 1.0, partial_weight: float = 0.0, efficiency_weight: float = 0.0
 ) -> RewardVector:
     """Create a standard SAT reward vector with common reward functions.
 
     Args:
-        correctness_weight: Weight for correctness reward (default: 0.7)
-        partial_weight: Weight for partial satisfaction reward (default: 0.2)
-        efficiency_weight: Weight for efficiency reward (default: 0.1)
+        correctness_weight: Weight for correctness reward (default: 1.0)
+        partial_weight: Unused (kept for compatibility)
+        efficiency_weight: Unused (kept for compatibility)
 
     Returns:
         RewardVector configured for SAT solving
     """
     from typing import cast
 
-    reward_functions = cast(
-        List[Callable[[Any, Any], float]], [sat_correctness_reward, sat_partial_reward]
-    )
-    weights = [correctness_weight, partial_weight]
+    reward_functions = cast(List[Callable[[Any, Any], float]], [sat_correctness_reward])
+    weights = [correctness_weight]
     parser = SATParser()
 
     # Declarative per-function bounds
     SAT_CORRECTNESS_BOUNDS = (-1.0, 10.0)
-    SAT_PARTIAL_BOUNDS = (0.0, 1.0)
 
     return RewardVector(
         reward_functions,
         weights,
         parser,
-        bounds=[SAT_CORRECTNESS_BOUNDS, SAT_PARTIAL_BOUNDS],
+        bounds=[SAT_CORRECTNESS_BOUNDS],
     )
 
 

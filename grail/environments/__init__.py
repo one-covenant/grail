@@ -9,7 +9,6 @@ from .sat import (
     SATParser,
     generate_sat_problem,
     sat_correctness_reward,
-    sat_partial_reward,
     create_sat_reward_vector,
     SATRolloutGenerator,
 )
@@ -23,7 +22,6 @@ __all__ = [
     "SATParser",
     "generate_sat_problem",
     "sat_correctness_reward",
-    "sat_partial_reward",
     "create_sat_reward_vector",
     "SATRolloutGenerator",
 ]
