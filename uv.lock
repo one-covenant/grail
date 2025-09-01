@@ -1577,6 +1577,11 @@ experiments = [
     { name = "vllm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "flake8" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "accelerate", specifier = ">=0.20.0" },
@@ -1622,6 +1627,9 @@ requires-dist = [
     { name = "zstandard", marker = "extra == 'dev'", specifier = ">=0.21.0" },
 ]
 provides-extras = ["all", "dev", "experiments"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "flake8", specifier = "==7.3.0" }]
 
 [[package]]
 name = "h11"
