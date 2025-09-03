@@ -14,6 +14,9 @@ import typer
 from rich.console import Console
 from rich.logging import RichHandler
 
+from ..monitoring import initialize_monitoring
+from ..monitoring.config import MonitoringConfig
+
 
 console = Console()
 
@@ -72,6 +75,52 @@ def configure_logging(verbosity: int) -> None:
     # GRAIL debug details only visible with -vv or higher
     if verbosity < 2:
         logging.getLogger("grail").setLevel(logging.INFO)
+    
+    # Initialize monitoring system based on environment
+    _initialize_monitoring(verbosity)
+
+
+def _initialize_monitoring(verbosity: int) -> None:
+    """Initialize monitoring system based on environment configuration.
+    
+    Args:
+        verbosity: CLI verbosity level
+    """
+    try:
+        # Check if monitoring is enabled
+        if not MonitoringConfig.is_monitoring_enabled():
+            logging.getLogger(__name__).debug("Monitoring disabled by configuration")
+            return
+            
+        # Get base configuration from environment
+        config = MonitoringConfig.from_environment()
+        
+        # Adjust configuration based on verbosity
+        if verbosity >= 3:
+            # High verbosity - use debug configuration
+            debug_config = MonitoringConfig.get_debug_config()
+            config.update(debug_config)
+        elif verbosity == 0:
+            # Silent mode - but still allow monitoring if explicitly enabled
+            if not MonitoringConfig.is_monitoring_enabled():
+                config["backend_type"] = "null"
+        
+        # Validate configuration
+        errors = MonitoringConfig.validate_config(config)
+        if errors:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Invalid monitoring configuration: {errors}")
+            config["backend_type"] = "null"  # Fall back to null backend
+        
+        # Initialize monitoring
+        backend_type = config.pop("backend_type", "wandb")
+        initialize_monitoring(backend_type, **config)
+        
+        logging.getLogger(__name__).info(f"Monitoring initialized with {backend_type} backend")
+        
+    except Exception as e:
+        # Don't let monitoring failures break the CLI
+        logging.getLogger(__name__).warning(f"Failed to initialize monitoring: {e}")
 
 
 app = typer.Typer(

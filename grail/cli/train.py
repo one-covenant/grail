@@ -25,18 +25,16 @@ from accelerate import Accelerator
 
 
 from . import console
+from ..shared.constants import WINDOW_LENGTH, TRACE, MODEL_NAME
+from ..monitoring import get_monitoring_manager
+from ..monitoring.config import MonitoringConfig
 
 
 # --------------------------------------------------------------------------- #
 #                       Constants & global singletons                         #
 # --------------------------------------------------------------------------- #
-NETUID = 81
-WINDOW_LENGTH = 20  # Generate inferences every 20 blocks (increased for model downloads)
-TRACE = 5
+# Constants are now imported from ..shared.constants
 logging.addLevelName(TRACE, "TRACE")
-
-# Model configuration
-LLAMA_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"  # Using TinyLlama 1B model
 
 
 # --------------------------------------------------------------------------- #
@@ -168,7 +166,7 @@ miner_inference_counts: defaultdict[str, list] = defaultdict(
 
 
 class Trainer:
-    def __init__(self, model_name: str = LLAMA_MODEL) -> None:
+    def __init__(self, model_name: str = MODEL_NAME) -> None:
         self.model_name = model_name
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -211,6 +209,7 @@ class Trainer:
 
         This ensures we only train on legitimate model-generated rollouts.
         """
+        monitor = get_monitoring_manager()
 
         # Download valid rollouts from the previous window
         # These have already been verified by validators
@@ -406,6 +405,17 @@ class Trainer:
 
                 avg_loss = total_loss / (len(texts) // batch_size + 1)
                 logger.info(f"Epoch {epoch+1} completed - avg loss: {avg_loss:.4f}")
+                
+                # Log training metrics
+                if monitor:
+                    await monitor.log_gauge("training.epoch_loss", avg_loss)
+                    await monitor.log_counter("training.epochs_completed")
+                    await monitor.log_gauge("training.gradient_norm", float(grad_norm))
+                    await monitor.log_gauge("training.successful_solutions", successful_count)
+                    await monitor.log_gauge("training.total_rollouts", len(texts))
+                    if len(texts) > 0:
+                        success_rate = successful_count / len(texts)
+                        await monitor.log_gauge("training.training_success_rate", success_rate)
 
         except Exception as e:
             logger.error(f"Training failed: {e}")
@@ -462,12 +472,20 @@ def train() -> None:
     wallet = bt.wallet(name=coldkey, hotkey=hotkey)
 
     # Initialize trainer
-    logger.info(f"Initializing trainer with model: {LLAMA_MODEL}")
-    trainer = Trainer(model_name=LLAMA_MODEL)
+    logger.info(f"Initializing trainer with model: {MODEL_NAME}")
+    trainer = Trainer(model_name=MODEL_NAME)
 
     async def _run() -> None:
         subtensor = None
         last_processed_window = -1
+        
+        # Initialize monitoring for training operations
+        monitor = get_monitoring_manager()
+        if monitor:
+            # Start a training run with wallet-specific configuration
+            training_config = MonitoringConfig.for_training(wallet.name)
+            run_id = await monitor.start_run(f"training_{wallet.name}", training_config.get("hyperparameters", {}))
+            logger.info(f"Started monitoring run: {run_id}")
 
         # Upload initial base model state on startup
         logger.info("🏁 Uploading initial base model state...")
@@ -507,12 +525,20 @@ def train() -> None:
                 logger.info(f"🎓 Processing training for window {target_window}")
 
                 # Train on previous window's valid inferences and upload for future window
-                success = await trainer.train_window(wallet.hotkey.ss58_address, target_window)
+                if monitor:
+                    with monitor.timer("training.window_duration"):
+                        success = await trainer.train_window(wallet.hotkey.ss58_address, target_window)
+                else:
+                    success = await trainer.train_window(wallet.hotkey.ss58_address, target_window)
 
                 if success:
                     logger.info(f"✅ Completed training cycle for window {target_window}")
+                    if monitor:
+                        await monitor.log_counter("training.successful_windows")
                 else:
                     logger.warning(f"⚠️ Training cycle had issues for window {target_window}")
+                    if monitor:
+                        await monitor.log_counter("training.failed_windows")
 
                 last_processed_window = target_window
 

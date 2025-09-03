@@ -34,23 +34,16 @@ from ..infrastructure.comms import (
     login_huggingface,
     PROTOCOL_VERSION,
 )
+from ..shared.constants import NETUID, WINDOW_LENGTH, TRACE, MODEL_NAME, SUPERLINEAR_EXPONENT
+from ..monitoring import get_monitoring_manager
+from ..monitoring.config import MonitoringConfig
 
 
 # --------------------------------------------------------------------------- #
 #                       Constants & global singletons                         #
 # --------------------------------------------------------------------------- #
-NETUID = 81
-WINDOW_LENGTH = 20  # Generate inferences every 20 blocks (increased for model downloads)
-TRACE = 5
+# Constants are now imported from ..shared.constants
 logging.addLevelName(TRACE, "TRACE")
-
-# Model configuration
-LLAMA_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"  # Using TinyLlama 1B model
-
-# Superlinear weighting exponent:
-# For p > 1, w_i ∝ s_i^p amplifies differences and penalizes sybil splitting:
-# splitting into k identities yields k^(1-p) * s^p < s^p.
-SUPERLINEAR_EXPONENT = 1.5
 
 
 # --------------------------------------------------------------------------- #
@@ -218,8 +211,8 @@ def validate(
 
     # Initialize verifier
     logger.info(f"🔑 Validator hotkey: {wallet.hotkey.ss58_address}")
-    logger.info(f"Loading base model for validation: {LLAMA_MODEL}")
-    verifier = Verifier(model_name=LLAMA_MODEL)
+    logger.info(f"Loading base model for validation: {MODEL_NAME}")
+    verifier = Verifier(model_name=MODEL_NAME)
 
     # Login to Hugging Face for dataset uploads
     logger.info("🤗 Logging into Hugging Face for dataset uploads...")
@@ -240,6 +233,14 @@ def validate(
 
     async def _run() -> None:
         subtensor = None
+        
+        # Initialize monitoring for validation operations
+        monitor = get_monitoring_manager()
+        if monitor:
+            # Start a validation run with wallet-specific configuration
+            validation_config = MonitoringConfig.for_validation(wallet.name)
+            run_id = await monitor.start_run(f"validation_{wallet.name}", validation_config.get("hyperparameters", {}))
+            logger.info(f"Started monitoring run: {run_id}")
         last_processed_window = -1
 
         while True:
@@ -272,6 +273,10 @@ def validate(
                 logger.info(
                     f"🔍 Processing window {target_window}-{target_window + WINDOW_LENGTH - 1}"
                 )
+                
+                # Set block context for monitoring
+                if monitor:
+                    monitor.set_block_context(current_block, target_window)
 
                 # Load model state for target window
                 # logger.info(f"📥 Loading model state for window {target_window}")
@@ -314,6 +319,12 @@ def validate(
                 window_inference_counts: defaultdict[str, int] = defaultdict(int)
                 files_found = 0
                 all_valid_rollouts = []  # Store all valid rollouts for uploading
+                
+                # Track validation metrics
+                total_rollouts_processed = 0
+                invalid_signatures = 0
+                invalid_proofs = 0
+                processing_errors = 0
 
                 for wallet_addr in hotkeys_to_check:
                     try:
@@ -481,6 +492,7 @@ def validate(
                                     logger.debug(
                                         f"Invalid signature for inference from {wallet_addr}"
                                     )
+                                    invalid_signatures += 1
                                     continue
 
                                 # Verify SAT seed format
@@ -532,13 +544,22 @@ def validate(
                                         # The verifier will regenerate the problem from this seed
 
                                     # Use wallet address for signature verification (public key verification)
-                                    is_valid = verifier.verify_rollout(
-                                        commit_data, inference["proof"], wallet_addr
-                                    )
+                                    if monitor:
+                                        with monitor.timer("validation.rollout_verification"):
+                                            is_valid = verifier.verify_rollout(
+                                                commit_data, inference["proof"], wallet_addr
+                                            )
+                                    else:
+                                        is_valid = verifier.verify_rollout(
+                                            commit_data, inference["proof"], wallet_addr
+                                        )
+                                    
+                                    total_rollouts_processed += 1
                                     if not is_valid:
                                         logger.warning(
                                             f"SAT rollout verification failed for {wallet_addr} - skipping"
                                         )
+                                        invalid_proofs += 1
                                         continue
                                 except Exception as e:
                                     logger.warning(
@@ -564,6 +585,7 @@ def validate(
 
                             except Exception as e:
                                 logger.debug(f"Error processing inference from {wallet_addr}: {e}")
+                                processing_errors += 1
                                 continue
 
                         # Verify GRPO groups after processing checked inferences
@@ -671,6 +693,20 @@ def validate(
                 logger.info(
                     f"🏁 Total valid rollouts in window {target_window}: {total_valid_rollouts}"
                 )
+                
+                # Log validation metrics with block context already set
+                if monitor:
+                    await monitor.log_counter("validation.windows_processed")
+                    await monitor.log_gauge("validation.total_rollouts_processed", total_rollouts_processed)
+                    await monitor.log_gauge("validation.valid_rollouts", total_valid_rollouts)
+                    await monitor.log_gauge("validation.invalid_signatures", invalid_signatures)
+                    await monitor.log_gauge("validation.invalid_proofs", invalid_proofs)
+                    await monitor.log_gauge("validation.processing_errors", processing_errors)
+                    await monitor.log_gauge("validation.files_found", files_found)
+                    
+                    if total_rollouts_processed > 0:
+                        validation_success_rate = total_valid_rollouts / total_rollouts_processed
+                        await monitor.log_gauge("validation.success_rate", validation_success_rate)
 
                 # Upload all valid rollouts for training and to Hugging Face
                 if all_valid_rollouts:
@@ -755,6 +791,16 @@ def validate(
                         logger.info(f"   {hotkey}: {weight:.4f}")
                 else:
                     logger.info("⚖️  No miners received weights this window")
+                
+                # Log weight distribution metrics
+                if monitor:
+                    await monitor.log_gauge("validation.miners_with_weights", len(non_zero_weights))
+                    await monitor.log_gauge("validation.total_miners", len(meta.hotkeys))
+                    if weights:
+                        max_weight = max(weights)
+                        avg_weight = sum(weights) / len(weights)
+                        await monitor.log_gauge("validation.max_weight", max_weight)
+                        await monitor.log_gauge("validation.average_weight", avg_weight)
 
                 # Set weights on network
                 await subtensor.set_weights(

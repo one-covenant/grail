@@ -28,18 +28,16 @@ from . import console
 from ..infrastructure.drand import get_drand_beacon, get_round_at_time
 from ..environments import generate_sat_problem, SATRolloutGenerator
 from ..infrastructure.comms import sink_window_inferences
+from ..shared.constants import WINDOW_LENGTH, TRACE, MODEL_NAME
+from ..monitoring import get_monitoring_manager
+from ..monitoring.config import MonitoringConfig
 
 
 # --------------------------------------------------------------------------- #
 #                       Constants & global singletons                         #
 # --------------------------------------------------------------------------- #
-NETUID = 81
-WINDOW_LENGTH = 20  # Generate inferences every 20 blocks (increased for model downloads)
-TRACE = 5
+# Constants are now imported from ..shared.constants
 logging.addLevelName(TRACE, "TRACE")
-
-# Model configuration
-LLAMA_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"  # Using TinyLlama 1B model
 
 
 # --------------------------------------------------------------------------- #
@@ -192,13 +190,21 @@ def mine(
 
     # Initialize model and prover
     logger.info(f"🔑 Miner hotkey: {wallet.hotkey.ss58_address}")
-    logger.info(f"Loading base model: {LLAMA_MODEL}")
+    logger.info(f"Loading base model: {MODEL_NAME}")
     # Use wallet for secure GRAIL proof signatures
-    prover = Prover(model_name=LLAMA_MODEL, wallet=wallet)
+    prover = Prover(model_name=MODEL_NAME, wallet=wallet)
 
     async def _run() -> None:
         subtensor = None
         last_window_start = -1
+        
+        # Initialize monitoring for mining operations
+        monitor = get_monitoring_manager()
+        if monitor:
+            # Start a mining run with wallet-specific configuration
+            mining_config = MonitoringConfig.for_mining(wallet.name)
+            run_id = await monitor.start_run(f"mining_{wallet.name}", mining_config.get("hyperparameters", {}))
+            logger.info(f"Started monitoring run: {run_id}")
 
         while True:
             try:
@@ -277,6 +283,11 @@ def mine(
                 inferences: list = []
                 start_time = time.time()
                 inference_count = 0
+                
+                # Track mining metrics
+                successful_rollouts = 0
+                failed_rollouts = 0
+                total_reward = 0.0
 
                 # Generate inferences until the window closes
                 problem_count = 0
@@ -364,6 +375,15 @@ def mine(
                                 f"📊 Progress: {len(inferences)} rollouts from {problem_count} problems "
                                 f"in {elapsed:.1f}s ({rollouts_per_sec:.1f} rollouts/sec)"
                             )
+                            
+                            # Log mining metrics
+                            if monitor:
+                                await monitor.log_gauge("mining.rollouts_generated", len(inferences))
+                                await monitor.log_gauge("mining.problems_processed", problem_count)
+                                await monitor.log_gauge("mining.rollouts_per_second", rollouts_per_sec)
+                                if successful_rollouts + failed_rollouts > 0:
+                                    success_rate = successful_rollouts / (successful_rollouts + failed_rollouts)
+                                    await monitor.log_gauge("mining.success_rate", success_rate)
 
                         # Package rollouts for submission
                         for rollout_idx, rollout in enumerate(grpo_rollouts):
@@ -470,6 +490,18 @@ def mine(
                             # Sign each rollout
                             rollout_data = sign_rollout(rollout_data, wallet)
                             inferences.append(rollout_data)
+                            
+                            # Track rollout metrics
+                            if rollout.success:
+                                successful_rollouts += 1
+                                total_reward += rollout.reward
+                                if monitor:
+                                    await monitor.log_counter("mining.successful_rollouts")
+                                    await monitor.log_histogram("mining.reward_distribution", rollout.reward)
+                            else:
+                                failed_rollouts += 1
+                                if monitor:
+                                    await monitor.log_counter("mining.failed_rollouts")
 
                         # Tiny delay to yield control
                         await asyncio.sleep(0.01)
@@ -499,22 +531,46 @@ def mine(
                 logger.info(
                     f"🎯 Generated {len(inferences)} rollouts in {elapsed_time:.1f}s for window {window_start}"
                 )
+                
+                # Log final window metrics
+                if monitor:
+                    await monitor.log_counter("mining.windows_completed")
+                    await monitor.log_gauge("mining.window_duration", elapsed_time)
+                    await monitor.log_gauge("mining.total_rollouts_in_window", len(inferences))
+                    if successful_rollouts + failed_rollouts > 0:
+                        final_success_rate = successful_rollouts / (successful_rollouts + failed_rollouts)
+                        await monitor.log_gauge("mining.final_success_rate", final_success_rate)
+                    if successful_rollouts > 0:
+                        avg_reward = total_reward / successful_rollouts
+                        await monitor.log_gauge("mining.average_reward", avg_reward)
 
                 if inferences:
                     logger.info(
                         f"📤 Uploading {len(inferences)} rollouts to R2 for window {window_start}..."
                     )
                     try:
-                        # Upload all inferences as a single window file
-                        await sink_window_inferences(wallet, window_start, inferences)
+                        if monitor:
+                            with monitor.timer("mining.upload_duration"):
+                                await sink_window_inferences(wallet, window_start, inferences)
+                        else:
+                            await sink_window_inferences(wallet, window_start, inferences)
+                            
                         logger.info(
                             f"✅ Successfully uploaded window {window_start} with {len(inferences)} rollouts"
                         )
+                        if monitor:
+                            await monitor.log_counter("mining.successful_uploads")
+                            await monitor.log_gauge("mining.uploaded_rollouts", len(inferences))
+                            
                     except Exception as e:
                         logger.error(f"❌ Failed to upload window {window_start}: {e}")
                         logger.error(traceback.format_exc())
+                        if monitor:
+                            await monitor.log_counter("mining.failed_uploads")
                 else:
                     logger.warning(f"No inferences generated for window {window_start}")
+                    if monitor:
+                        await monitor.log_counter("mining.empty_windows")
 
                 last_window_start = window_start
 
