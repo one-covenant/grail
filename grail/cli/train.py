@@ -434,7 +434,7 @@ def register(app: typer.Typer) -> None:
 HEARTBEAT = time.monotonic()
 
 
-async def watchdog(timeout: int = 300) -> None:
+async def watchdog(timeout: int = 600) -> None:
     global HEARTBEAT
     while True:
         await asyncio.sleep(timeout // 3)

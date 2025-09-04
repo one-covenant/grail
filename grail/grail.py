@@ -40,7 +40,7 @@ os.environ["TORCH_USE_CUDA_DSA"] = "1"
 
 
 # Use the same logger as the main module
-logger = logging.getLogger("grail")
+logger = logging.getLogger(__name__)
 
 # ──────────────────────────  CONFIGURATION  ─────────────────────────────
 #  Constants are now imported from .shared.constants
@@ -899,7 +899,7 @@ class Verifier:
         suspicious_bimodal = allow_bc and (metrics.get("bc", 0.0) >= SAMPLING_BC_THRESHOLD)
         suspicious = suspicious_unimodal_low or suspicious_bimodal
 
-        # Verbose-mode monitoring: log histogram of chosen-token probabilities to help tune thresholds
+        # Verbose-mode monitoring: log histogram of chosen-token probabilities 
         self._log_verbose_monitoring_metrics(probs, metrics)
 
         return (not suspicious), metrics
@@ -916,57 +916,58 @@ class Verifier:
             if not monitor:
                 return
                 
-            import logging as _logging
-            root_level = _logging.getLogger().getEffectiveLevel()
-            if root_level > _logging.DEBUG:
+            root_level = logger.getEffectiveLevel()
+
+            if root_level > logging.DEBUG:
                 return
                 
             import asyncio as _asyncio
             try:
+                
                 loop = _asyncio.get_event_loop()
+                
                 if not loop.is_running():
                     return
-                    
+                
                 # Log the histogram using the more reliable approach
                 _asyncio.create_task(
-                    monitor.log_histogram("sampling_shape_check.hist", probs)
+                    monitor.log_histogram("sampling_shape_check/hist", probs)
                 )
                 # Summary statistics under the sampling_shape_check prefix for easier navigation
                 _asyncio.create_task(
-                    monitor.log_gauge("sampling_shape_check.mean", metrics["mean"])
+                    monitor.log_gauge("sampling_shape_check/mean", metrics["mean"])
                 )
                 _asyncio.create_task(
-                    monitor.log_gauge("sampling_shape_check.median", metrics.get("median", 0.0))
+                    monitor.log_gauge("sampling_shape_check/median", metrics.get("median", 0.0))
                 )
                 _asyncio.create_task(
-                    monitor.log_gauge("sampling_shape_check.q10", metrics.get("q10", 0.0))
+                    monitor.log_gauge("sampling_shape_check/q10", metrics.get("q10", 0.0))
                 )
                 _asyncio.create_task(
-                    monitor.log_gauge("sampling_shape_check.low_frac", metrics["low_frac"])
+                    monitor.log_gauge("sampling_shape_check/low_frac", metrics["low_frac"])
                 )
                 _asyncio.create_task(
-                    monitor.log_gauge("sampling_shape_check.high_frac", metrics["high_frac"])
+                    monitor.log_gauge("sampling_shape_check/high_frac", metrics["high_frac"])
                 )
                 _asyncio.create_task(
-                    monitor.log_gauge("sampling_shape_check.mid_frac", metrics["mid_frac"])
+                    monitor.log_gauge("sampling_shape_check/mid_frac", metrics["mid_frac"])
                 )
                 _asyncio.create_task(
-                    monitor.log_gauge("sampling_shape_check.bc", metrics["bc"])
+                    monitor.log_gauge("sampling_shape_check/bc", metrics["bc"])
                 )
                 _asyncio.create_task(
-                    monitor.log_gauge("sampling_shape_check.n", metrics["n"])
+                    monitor.log_gauge("sampling_shape_check/n", metrics["n"])
                 )
+                logger.debug("-------- log_verbose_monitoring_metrics finished--------")
             except RuntimeError:
+                logger.debug("-------- log_verbose_monitoring_metrics failed--------")
                 pass
         except Exception:
             pass
 
     def _check_max_length_termination(self, commit: dict) -> bool:
         """Check if completion reached the configured generation max length."""
-        try:
-            expected_max_new = int(os.getenv("GRAIL_MAX_NEW_TOKENS", str(DEFAULT_MAX_NEW_TOKENS)))
-        except Exception:
-            expected_max_new = DEFAULT_MAX_NEW_TOKENS
+        expected_max_new = int(DEFAULT_MAX_NEW_TOKENS)
 
         rollout = commit.get("rollout", {})
         completion_length = rollout.get("completion_length")

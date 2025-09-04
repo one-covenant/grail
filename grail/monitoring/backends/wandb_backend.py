@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from typing import Any, Dict, Generator, List, Optional
 
 from ..base import MonitoringBackend, MetricData, MetricType
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,9 @@ class WandBBackend(MonitoringBackend):
         self._initialized = False
         self._wandb_module: Any = None
         self._wandb_run_started = False
+        self._start_time: Optional[float] = None
+        # Cache of persistent tables by name to allow incremental row appends
+        self._tables: Dict[str, Any] = {}
         
     def initialize(self, config: Dict[str, Any]) -> None:
         """Initialize wandb backend synchronously (no network calls).
@@ -198,8 +202,9 @@ class WandBBackend(MonitoringBackend):
                 metric_data = self._prepare_metric_data(metric)
                 data.update(metric_data)
                 # Track the latest timestamp
-                if (latest_timestamp is None or 
-                    (metric.timestamp and metric.timestamp > latest_timestamp)):
+                if latest_timestamp is None or (
+                    metric.timestamp and metric.timestamp > latest_timestamp
+                ):
                     latest_timestamp = metric.timestamp
             
             # Include temporal context using the latest metric
@@ -232,15 +237,64 @@ class WandBBackend(MonitoringBackend):
             name = f"{metric.name}_{'_'.join(tag_parts)}"
         
         # Ensure value is properly typed for wandb
-        # Convert to Python native types to avoid wandb serialization issues
         value = metric.value
-        if hasattr(value, 'item'):  # Handle numpy/torch scalars
-            value = value.item()
-        elif isinstance(value, (int, float)):
-            # Ensure it's a Python native type, not numpy
-            value = float(value) if isinstance(value, float) else int(value)
+        if metric.metric_type == MetricType.HISTOGRAM:
+            # Wrap arrays/lists as a wandb.Histogram media object
+            value = self._to_wandb_histogram(value)
+        else:
+            # Convert to Python native types to avoid wandb serialization issues
+            if hasattr(value, 'item'):  # Handle numpy/torch scalars
+                value = value.item()
+            elif isinstance(value, (int, float)):
+                # Ensure it's a Python native type, not numpy
+                value = float(value) if isinstance(value, float) else int(value)
         
         return {name: value}
+
+    def _to_wandb_histogram(self, value: Any) -> Any:
+        """Convert arbitrary value into a wandb.Histogram when possible.
+        
+        Falls back to the original value if conversion fails or wandb is unavailable.
+        """
+        if self._wandb_module is None:
+            return value
+        try:
+            # Normalize to a 1D numpy array
+            array_like: Optional[np.ndarray] = None
+            # Handle torch tensors without importing torch explicitly
+            if hasattr(value, 'detach') and hasattr(value, 'cpu') and hasattr(value, 'numpy'):
+                try:
+                    array_like = value.detach().cpu().numpy().ravel()
+                except Exception:
+                    array_like = None
+            if array_like is None:
+                try:
+                    array_like = np.asarray(value).ravel()
+                except Exception:
+                    array_like = None
+            if array_like is None:
+                return value
+            # Create wandb Histogram from sequence of values
+            return self._wandb_module.Histogram(array_like)
+        except Exception as exc:
+            logger.debug(f"Failed to convert value to wandb.Histogram: {exc}")
+            return value
+    
+    def _to_optional_float(self, value: Any) -> Optional[float]:
+        """Best-effort conversion to float with None passthrough.
+        
+        Args:
+            value: Arbitrary input that might represent a numeric value
+        
+        Returns:
+            A float if conversion succeeds, otherwise None.
+        """
+        if value is None:
+            return None
+        try:
+            return float(value)  # Accepts int, float, and numeric strings
+        except Exception:
+            return None
     
     def _add_temporal_context(self, data: Dict[str, Any], metric: MetricData) -> None:
         """Add temporal context to the data for better visualization.
@@ -322,6 +376,53 @@ class WandBBackend(MonitoringBackend):
                 await asyncio.get_event_loop().run_in_executor(
                     None, self._wandb_module.save, data
                 )
+            elif artifact_type == "text":
+                # Represent text samples as a wandb.Table for consistent rendering
+                # across dashboards and to avoid media-vs-string key conflicts.
+                await self._ensure_wandb_run()
+                if not self._wandb_run_started:
+                    return
+
+                # Prefer a stable schema; missing fields will be None.
+                base_columns = [
+                    "window",
+                    "wallet",
+                    "group",
+                    "nonce",
+                    "reward",
+                    "advantage",
+                    "success",
+                    "text",
+                ]
+
+                # Use a persistent table per name so rows accumulate
+                if isinstance(data, dict):
+                    row = [
+                        data.get("window"),
+                        data.get("wallet"),
+                        data.get("group"),
+                        data.get("nonce"),
+                        self._to_optional_float(data.get("reward")),
+                        self._to_optional_float(data.get("advantage")),
+                        bool(data.get("success")) if data.get("success") is not None else None,
+                        str(data.get("text") or ""),
+                    ]
+                    table = self._tables.get(name)
+                    if table is None:
+                        table = self._wandb_module.Table(columns=base_columns)
+                        self._tables[name] = table
+                    table.add_data(*row)
+                else:
+                    table = self._tables.get(name)
+                    if table is None:
+                        table = self._wandb_module.Table(columns=["text"])
+                        self._tables[name] = table
+                    table.add_data(str(data))
+
+                await asyncio.get_event_loop().run_in_executor(
+                    None, self._wandb_module.log, {name: table}
+                )
+                return
             else:
                 # Default: try to log as data
                 await asyncio.get_event_loop().run_in_executor(

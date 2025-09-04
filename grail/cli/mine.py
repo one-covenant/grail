@@ -128,8 +128,12 @@ def verify_rollout_signature(rollout_data: dict) -> bool:
         if not all([challenge, hotkey, signature]):
             return False
 
+        if not isinstance(signature, str):
+            return False
+
         keypair = bt.Keypair(ss58_address=hotkey)
-        return keypair.verify(data=challenge, signature=bytes.fromhex(signature))
+        result = keypair.verify(data=challenge, signature=bytes.fromhex(signature))
+        return bool(result)
     except Exception:
         return False
 
@@ -147,7 +151,7 @@ def register(app: typer.Typer) -> None:
 HEARTBEAT = time.monotonic()
 
 
-async def watchdog(timeout: int = 300) -> None:
+async def watchdog(timeout: int = 600) -> None:
     global HEARTBEAT
     while True:
         await asyncio.sleep(timeout // 3)
@@ -273,11 +277,16 @@ def mine(
                 successful_rollouts = 0
                 failed_rollouts = 0
                 total_reward = 0.0
+                # Debug text logging limits (only used when -vv)
+                TEXT_LOG_LIMIT_PER_WINDOW = 5
+                text_logs_emitted = 0
 
                 # Generate inferences until the window closes
                 problem_count = 0
                 while True:
                     current_block = await subtensor.get_current_block()
+                    # Refresh watchdog heartbeat during long-running inner loop
+                    HEARTBEAT = time.monotonic()
                     current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
 
                     # Stop if we've moved to the next window
@@ -335,11 +344,63 @@ def mine(
                         logger.debug(
                             f"Generating GRPO rollouts with randomness: {combined_randomness[:16]}..."
                         )
+                        # Refresh heartbeat before potentially long generation
+                        HEARTBEAT = time.monotonic()
                         grpo_rollouts = sat_generator.generate_grpo_rollouts(
                             sat_problem,
                             combined_randomness,
                             wallet,  # Use wallet for secure signatures
                         )
+                        # Refresh after generation completes
+                        HEARTBEAT = time.monotonic()
+
+                        # Debug-only: sample and log a small subset of generated texts
+                        if (
+                            logger.isEnabledFor(logging.DEBUG)
+                            and text_logs_emitted < TEXT_LOG_LIMIT_PER_WINDOW
+                            and grpo_rollouts
+                        ):
+                            try:
+                                sample = grpo_rollouts[0]
+                                prompt_len = int(getattr(sample, "prompt_length", 0) or 0)
+                                completion_len = int(getattr(sample, "completion_length", 0) or 0)
+                                if completion_len > 0 and prompt_len >= 0:
+                                    completion_ids = sample.tokens[prompt_len: prompt_len + completion_len]
+                                else:
+                                    completion_ids = sample.tokens[prompt_len:]
+                                sample_text = prover.tokenizer.decode(
+                                    completion_ids, skip_special_tokens=False
+                                )
+                                sample_nonce = base_nonce * 10
+                                logger.debug(
+                                    "TEXT[mine] window=%s group=%s nonce=%s reward=%.3f adv=%.3f "
+                                    "success=%s text=%s",
+                                    window_start,
+                                    base_nonce,
+                                    sample_nonce,
+                                    float(sample.reward),
+                                    float(sample.advantage),
+                                    bool(sample.success),
+                                    sample_text,
+                                )
+                                if monitor:
+                                    await monitor.log_artifact(
+                                        "mining/sample_text",
+                                        {
+                                            "window": window_start,
+                                            "group": base_nonce,
+                                            "nonce": sample_nonce,
+                                            "reward": float(sample.reward),
+                                            "advantage": float(sample.advantage),
+                                            "success": bool(sample.success),
+                                            "text": sample_text,
+                                        },
+                                        "text",
+                                    )
+                                text_logs_emitted += 1
+                            except Exception:
+                                # Do not disrupt mining on debug logging errors
+                                pass
 
                         # Log GRPO statistics
                         successful_count = sum(1 for r in grpo_rollouts if r.success)
@@ -490,6 +551,7 @@ def mine(
 
                         # Tiny delay to yield control
                         await asyncio.sleep(0.01)
+                        HEARTBEAT = time.monotonic()
 
                     except RuntimeError as e:
                         if "CUDA" in str(e):
@@ -543,6 +605,7 @@ def mine(
                         logger.info(
                             f"✅ Successfully uploaded window {window_start} with {len(inferences)} rollouts"
                         )
+                        HEARTBEAT = time.monotonic()
                         if monitor:
                             await monitor.log_counter("mining.successful_uploads")
                             await monitor.log_gauge("mining.uploaded_rollouts", len(inferences))

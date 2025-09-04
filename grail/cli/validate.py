@@ -135,8 +135,12 @@ def verify_rollout_signature(rollout_data: dict) -> bool:
         if not all([challenge, hotkey, signature]):
             return False
 
+        if not isinstance(signature, str):
+            return False
+
         keypair = bt.Keypair(ss58_address=hotkey)
-        return keypair.verify(data=challenge, signature=bytes.fromhex(signature))
+        result = keypair.verify(data=challenge, signature=bytes.fromhex(signature))
+        return bool(result)
     except Exception:
         return False
 
@@ -163,7 +167,7 @@ def register(app: typer.Typer) -> None:
 HEARTBEAT = time.monotonic()
 
 
-async def watchdog(timeout: int = 300) -> None:
+async def watchdog(timeout: int = 600) -> None:
     global HEARTBEAT
     while True:
         await asyncio.sleep(timeout // 3)
@@ -304,6 +308,9 @@ def validate(
                 window_inference_counts: DefaultDict[str, int] = defaultdict(int)
                 files_found = 0
                 all_valid_rollouts = []  # Store all valid rollouts for uploading
+                # Debug text logging limits (only used when -vv)
+                TEXT_LOG_LIMIT_PER_WALLET = 5
+                text_logs_emitted_by_wallet: DefaultDict[str, int] = defaultdict(int)
                 
                 # Track validation metrics
                 total_rollouts_processed = 0
@@ -553,6 +560,56 @@ def validate(
                                     continue
 
                                 valid_count += 1
+
+                                # Debug-only: log a small subset of validated texts with rewards
+                                if logger.isEnabledFor(logging.DEBUG) and text_logs_emitted_by_wallet[wallet_addr] < TEXT_LOG_LIMIT_PER_WALLET:
+                                    try:
+                                        tokens = commit_data.get("tokens", [])
+                                        if isinstance(tokens, list) and tokens:
+                                            rollout_meta = commit_data.get("rollout", {})
+                                            prompt_len = int(rollout_meta.get("prompt_length", 0) or 0)
+                                            completion_len = int(rollout_meta.get("completion_length", 0) or 0)
+
+                                            # Select only the generated completion tokens
+                                            if completion_len > 0 and prompt_len >= 0:
+                                                completion_ids = tokens[prompt_len: prompt_len + completion_len]
+                                            else:
+                                                completion_ids = tokens[prompt_len:]
+
+                                            text = verifier.tokenizer.decode(
+                                                completion_ids, skip_special_tokens=False
+                                            )
+                                            reward_val = rollout_meta.get("total_reward", float("nan"))
+                                            adv_val = rollout_meta.get("advantage", float("nan"))
+                                            success_val = rollout_meta.get("success", False)
+                                            logger.debug(
+                                                "TEXT[validate] window=%s wallet=%s nonce=%s reward=%.3f adv=%.3f "
+                                                "success=%s text=%s",
+                                                target_window,
+                                                wallet_addr,
+                                                nonce,
+                                                float(reward_val),
+                                                float(adv_val),
+                                                bool(success_val),
+                                                text,
+                                            )
+                                            if monitor:
+                                                await monitor.log_artifact(
+                                                    "validation/sample_text",
+                                                    {
+                                                        "window": target_window,
+                                                        "wallet": wallet_addr,
+                                                        "nonce": nonce,
+                                                        "reward": float(reward_val),
+                                                        "advantage": float(adv_val),
+                                                        "success": bool(success_val),
+                                                        "text": text,
+                                                    },
+                                                    "text",
+                                                )
+                                            text_logs_emitted_by_wallet[wallet_addr] += 1
+                                    except Exception:
+                                        pass
 
                                 # Track successful unique solutions
                                 rollout = inference.get("commit", {}).get("rollout", {})
