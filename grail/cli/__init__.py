@@ -13,9 +13,19 @@ import logging
 import typer
 from rich.console import Console
 from rich.logging import RichHandler
+from dotenv import load_dotenv
 
 from ..monitoring import initialize_monitoring
+from ..shared.constants import NETWORK, NETUID
 from ..monitoring.config import MonitoringConfig
+
+# Load environment variables once for the whole CLI at import time so that
+# modules imported during subcommand registration can read them.
+try:
+    load_dotenv(override=True)
+except Exception:
+    # Safe to ignore dotenv issues; continue with system env
+    pass
 
 
 console = Console()
@@ -75,14 +85,22 @@ def configure_logging(verbosity: int) -> None:
     # GRAIL debug details only visible with -vv or higher
     if verbosity < 2:
         logging.getLogger("grail").setLevel(logging.INFO)
-    
+
+    # Log selected network at startup
+    def _network_label(n: str) -> str:
+        return "public testnet" if n == "test" else ("mainnet" if n == "finney" else "custom")
+
+    logging.getLogger(__name__).info(
+        f"Network: {NETWORK} ({_network_label(NETWORK)}), NETUID={NETUID}"
+    )
+
     # Initialize monitoring system based on environment
     _initialize_monitoring(verbosity)
 
 
 def _initialize_monitoring(verbosity: int) -> None:
     """Initialize monitoring system based on environment configuration.
-    
+
     Args:
         verbosity: CLI verbosity level
     """
@@ -91,10 +109,10 @@ def _initialize_monitoring(verbosity: int) -> None:
         if not MonitoringConfig.is_monitoring_enabled():
             logging.getLogger(__name__).debug("Monitoring disabled by configuration")
             return
-            
+
         # Get base configuration from environment
         config = MonitoringConfig.from_environment()
-        
+
         # Adjust configuration based on verbosity
         if verbosity >= 3:
             # High verbosity - use debug configuration
@@ -104,20 +122,20 @@ def _initialize_monitoring(verbosity: int) -> None:
             # Silent mode - but still allow monitoring if explicitly enabled
             if not MonitoringConfig.is_monitoring_enabled():
                 config["backend_type"] = "null"
-        
+
         # Validate configuration
         errors = MonitoringConfig.validate_config(config)
         if errors:
             logger = logging.getLogger(__name__)
             logger.warning(f"Invalid monitoring configuration: {errors}")
             config["backend_type"] = "null"  # Fall back to null backend
-        
+
         # Initialize monitoring
         backend_type = config.pop("backend_type", "wandb")
         initialize_monitoring(backend_type, **config)
-        
+
         logging.getLogger(__name__).info(f"Monitoring initialized with {backend_type} backend")
-        
+
     except Exception as e:
         # Don't let monitoring failures break the CLI
         logging.getLogger(__name__).warning(f"Failed to initialize monitoring: {e}")

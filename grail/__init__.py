@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 __version__ = "0.1.0.dev0"
 
+from dotenv import load_dotenv
+
+# Load environment variables as early as possible so any module-level
+# reads (e.g., in shared.constants) see updated values from .env.
+try:
+    load_dotenv(override=True)
+except Exception:
+    pass
+
 from .grail import Prover, Verifier
 from .infrastructure.drand import get_drand_beacon, get_round_at_time
 from .environments import (
