@@ -37,12 +37,42 @@ def get_conf(key: str, default: Optional[str] = None) -> str:
 
 
 def get_client_ctx() -> Any:
+    """Create an S3 client for Cloudflare R2 or a compatible endpoint.
+
+    Environment overrides for hermetic/integration tests:
+      - R2_ENDPOINT_URL: full endpoint (e.g., http://s3:9000 for MinIO)
+      - R2_REGION: region name (default: us-east-1)
+      - R2_FORCE_PATH_STYLE: "true" to force path-style addressing for MinIO
+    """
+    # Resolve endpoint
+    endpoint_url = os.getenv("R2_ENDPOINT_URL")
+    if not endpoint_url:
+        account_id = get_conf("R2_ACCOUNT_ID")
+        endpoint_url = f"https://{account_id}.r2.cloudflarestorage.com"
+
+    region_name = os.getenv("R2_REGION", "us-east-1")
+    force_path_style = (
+        os.getenv("R2_FORCE_PATH_STYLE", "false").strip().lower()
+        in {"1", "true", "yes"}
+    )
+
+    s3_config: dict = {}
+    if force_path_style:
+        s3_config["addressing_style"] = "path"
+
+    config = Config(
+        max_pool_connections=256,
+        region_name=region_name,
+        signature_version="s3v4",
+        s3=s3_config or None,
+    )
+
     return get_session().create_client(
         "s3",
-        endpoint_url=f"https://{get_conf('R2_ACCOUNT_ID')}.r2.cloudflarestorage.com",
+        endpoint_url=endpoint_url,
         aws_access_key_id=get_conf("R2_WRITE_ACCESS_KEY_ID"),
         aws_secret_access_key=get_conf("R2_WRITE_SECRET_ACCESS_KEY"),
-        config=Config(max_pool_connections=256),
+        config=config,
     )
 
 

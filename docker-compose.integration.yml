@@ -1,0 +1,103 @@
+version: "3.9"
+
+services:
+  s3:
+    image: minio/minio:RELEASE.2024-08-17T01-24-54Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - minio-data:/data
+
+  # One-time job to create the bucket used in tests
+  s3-setup:
+    image: minio/mc:RELEASE.2024-08-17T01-24-54Z
+    depends_on:
+      s3:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "mc alias set local http://s3:9000 minioadmin minioadmin && \
+       mc mb -p local/grail || true"
+
+  miner-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      s3-setup:
+        condition: service_completed_successfully
+    environment:
+      BT_NETWORK: test
+      BT_WALLET_COLD: minerA
+      BT_WALLET_HOT: hotA
+      GRAIL_MODEL_NAME: sshleifer/tiny-gpt2
+      GRAIL_MONITORING_BACKEND: null
+      WANDB_MODE: disabled
+      R2_ENDPOINT_URL: http://s3:9000
+      R2_FORCE_PATH_STYLE: "true"
+      R2_BUCKET_ID: grail
+      R2_WRITE_ACCESS_KEY_ID: minioadmin
+      R2_WRITE_SECRET_ACCESS_KEY: minioadmin
+      GRAIL_WINDOW_LENGTH: "3"
+    command: ["mine", "--no-drand", "-v"]
+
+  miner-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      s3-setup:
+        condition: service_completed_successfully
+    environment:
+      BT_NETWORK: test
+      BT_WALLET_COLD: minerB
+      BT_WALLET_HOT: hotB
+      GRAIL_MODEL_NAME: sshleifer/tiny-gpt2
+      GRAIL_MONITORING_BACKEND: null
+      WANDB_MODE: disabled
+      R2_ENDPOINT_URL: http://s3:9000
+      R2_FORCE_PATH_STYLE: "true"
+      R2_BUCKET_ID: grail
+      R2_WRITE_ACCESS_KEY_ID: minioadmin
+      R2_WRITE_SECRET_ACCESS_KEY: minioadmin
+      GRAIL_WINDOW_LENGTH: "3"
+    command: ["mine", "--no-drand", "-v"]
+
+  validator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      miner-1:
+        condition: service_started
+      miner-2:
+        condition: service_started
+    environment:
+      BT_NETWORK: test
+      BT_WALLET_COLD: validator
+      BT_WALLET_HOT: hotV
+      GRAIL_MODEL_NAME: sshleifer/tiny-gpt2
+      GRAIL_MONITORING_BACKEND: null
+      WANDB_MODE: disabled
+      R2_ENDPOINT_URL: http://s3:9000
+      R2_FORCE_PATH_STYLE: "true"
+      R2_BUCKET_ID: grail
+      R2_WRITE_ACCESS_KEY_ID: minioadmin
+      R2_WRITE_SECRET_ACCESS_KEY: minioadmin
+      GRAIL_WINDOW_LENGTH: "3"
+    command: ["validate", "--no-drand", "-v"]
+
+volumes:
+  minio-data: {}
+
+
