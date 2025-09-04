@@ -25,7 +25,12 @@ def _read_netuid() -> int:
 # Get the network from environment (default to mainnet)
 NETWORK = os.getenv("BT_NETWORK") or os.getenv("GRAIL_NETWORK") or "finney"
 NETUID = _read_netuid()
-WINDOW_LENGTH = 20  # Generate inferences every 20 blocks (increased for model downloads)
+# Allow test override for CI/integration via environment
+try:
+    _override = os.getenv("GRAIL_WINDOW_LENGTH")
+    WINDOW_LENGTH = int(_override) if _override else 20
+except Exception:
+    WINDOW_LENGTH = 20
 
 # ──────────────────────────  MODEL CONFIGURATION  ─────────────────────────────
 
