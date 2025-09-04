@@ -2,13 +2,20 @@
 
 import os
 import logging
-import requests
-from typing import Any, Dict, Optional
+import requests  # type: ignore[import]
+from typing import Any, Dict, Optional, TypedDict
 
 logger = logging.getLogger(__name__)
 
+class ChainConfig(TypedDict):
+    hash: str
+    genesis_time: int
+    period: int
+    description: str
+
+
 # Drand chain configurations
-DRAND_CHAINS = {
+DRAND_CHAINS: Dict[str, ChainConfig] = {
     "quicknet": {
         "hash": "8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce",
         "genesis_time": 1692803367,
@@ -35,9 +42,9 @@ DRAND_URLS = [
 
 # Current chain configuration (can be changed via set_chain)
 _current_chain: str = DEFAULT_CHAIN
-DRAND_CHAIN_HASH: str = str(DRAND_CHAINS[_current_chain]["hash"])  # type: ignore
-DRAND_GENESIS_TIME: int = int(DRAND_CHAINS[_current_chain]["genesis_time"])  # type: ignore
-DRAND_PERIOD: int = int(DRAND_CHAINS[_current_chain]["period"])  # type: ignore
+DRAND_CHAIN_HASH: str = DRAND_CHAINS[_current_chain]["hash"]
+DRAND_GENESIS_TIME: int = DRAND_CHAINS[_current_chain]["genesis_time"]
+DRAND_PERIOD: int = DRAND_CHAINS[_current_chain]["period"]
 
 # Global counter for mock beacons
 BEACON_COUNTER = 0
@@ -61,9 +68,9 @@ def set_chain(chain_name: str) -> None:
         )
 
     _current_chain = chain_name
-    DRAND_CHAIN_HASH = str(DRAND_CHAINS[_current_chain]["hash"])  # type: ignore
-    DRAND_GENESIS_TIME = int(DRAND_CHAINS[_current_chain]["genesis_time"])  # type: ignore
-    DRAND_PERIOD = int(DRAND_CHAINS[_current_chain]["period"])  # type: ignore
+    DRAND_CHAIN_HASH = DRAND_CHAINS[_current_chain]["hash"]
+    DRAND_GENESIS_TIME = DRAND_CHAINS[_current_chain]["genesis_time"]
+    DRAND_PERIOD = DRAND_CHAINS[_current_chain]["period"]
 
     logger.info(
         f"Switched to drand chain '{chain_name}': {DRAND_CHAINS[chain_name]['description']}"
@@ -86,7 +93,9 @@ def get_drand_beacon(round_id: Optional[int] = None, use_fallback: bool = True) 
     Returns:
         Dictionary with 'round' and 'randomness' keys
     """
-    endpoint = f"/{DRAND_CHAIN_HASH}/public/{'latest' if round_id is None else round_id}"
+    # Drand HTTP API path: /<chain-hash>/public/<latest|round>
+    round_part = "latest" if round_id is None else str(round_id)
+    endpoint = f"/{DRAND_CHAIN_HASH}/public/{round_part}"
 
     # Try each drand URL
     for url in DRAND_URLS:
@@ -96,9 +105,11 @@ def get_drand_beacon(round_id: Optional[int] = None, use_fallback: bool = True) 
             response = requests.get(full_url, timeout=10)  # Increased timeout
             if response.status_code == 200:
                 data = response.json()
-                logger.info(
-                    f"[Drand-{_current_chain}] Success! round={data['round']}, randomness={data['randomness'][:8]}…"
+                msg_prefix = f"[Drand-{_current_chain}] Success!"
+                msg_detail = (
+                    f" round={data['round']}, randomness={data['randomness'][:8]}…"
                 )
+                logger.info(msg_prefix + msg_detail)
                 return {
                     "round": data["round"],
                     "randomness": data["randomness"],
@@ -106,7 +117,14 @@ def get_drand_beacon(round_id: Optional[int] = None, use_fallback: bool = True) 
                     "previous_signature": data.get("previous_signature", ""),
                 }
             else:
-                logger.debug(f"[Drand] Got status {response.status_code} from {url}")
+                try:
+                    err_text = response.text[:200]
+                except Exception:
+                    err_text = "<no body>"
+                logger.debug(
+                    f"[Drand] Got status {response.status_code} from {url} for {endpoint} "
+                    f"body={err_text}"
+                )
         except Exception as e:
             logger.debug(f"[Drand] Failed to fetch from {url}: {e}")
             continue
