@@ -409,13 +409,13 @@ class WandBBackend(MonitoringBackend):
                     ]
                     table = self._tables.get(name)
                     if table is None:
-                        table = self._wandb_module.Table(columns=base_columns)
+                        table = self._wandb_module.Table(columns=base_columns, log_mode="MUTABLE")
                         self._tables[name] = table
                     table.add_data(*row)
                 else:
                     table = self._tables.get(name)
                     if table is None:
-                        table = self._wandb_module.Table(columns=["text"])
+                        table = self._wandb_module.Table(columns=["text"], log_mode="MUTABLE")
                         self._tables[name] = table
                     table.add_data(str(data))
 
