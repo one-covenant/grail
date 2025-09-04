@@ -9,13 +9,13 @@ import asyncio
 import logging
 import traceback
 import bittensor as bt
-from dotenv import load_dotenv
 from typing import Any, Tuple, Optional
 from collections import defaultdict
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import hashlib
 from ..infrastructure.comms import get_valid_rollouts, save_model_state
+from ..infrastructure.network import create_subtensor
 
 # TODO(v2): Re-enable training imports
 # from trl import PPOTrainer, PPOConfig
@@ -51,7 +51,6 @@ logger = logging.getLogger("grail")
 # --------------------------------------------------------------------------- #
 #                             Utility helpers                                 #
 # --------------------------------------------------------------------------- #
-load_dotenv(override=True)
 
 
 def get_conf(key: str, default: Any = None) -> Any:
@@ -72,8 +71,7 @@ async def get_subtensor() -> bt.subtensor:
     global SUBTENSOR
     if SUBTENSOR is None:
         logger.trace("Making Bittensor connection...")
-        SUBTENSOR = bt.async_subtensor()
-        await SUBTENSOR.initialize()
+        SUBTENSOR = await create_subtensor()
         logger.trace("Connected")
     return SUBTENSOR
 

@@ -13,8 +13,6 @@ import traceback
 import bittensor as bt
 import torch
 import typer
-
-from dotenv import load_dotenv
 from typing import Any, Optional, Tuple
 
 # TODO(v2): Re-enable training imports
@@ -25,7 +23,8 @@ from typing import Any, Optional, Tuple
 
 from ..grail import Prover
 from . import console
-from ..infrastructure.drand import get_drand_beacon, get_round_at_time
+from ..infrastructure.drand import get_drand_beacon
+from ..infrastructure.network import create_subtensor
 from ..environments import generate_sat_problem, SATRolloutGenerator
 from ..infrastructure.comms import sink_window_inferences
 from ..shared.constants import WINDOW_LENGTH, TRACE, MODEL_NAME
@@ -54,7 +53,6 @@ logger = logging.getLogger("grail")
 # --------------------------------------------------------------------------- #
 #                             Utility helpers                                 #
 # --------------------------------------------------------------------------- #
-load_dotenv(override=True)
 
 
 def get_conf(key: str, default: Any = None) -> Any:
@@ -75,8 +73,7 @@ async def get_subtensor() -> bt.subtensor:
     global SUBTENSOR
     if SUBTENSOR is None:
         logger.trace("Making Bittensor connection...")
-        SUBTENSOR = bt.async_subtensor()
-        await SUBTENSOR.initialize()
+        SUBTENSOR = await create_subtensor()
         logger.trace("Connected")
     return SUBTENSOR
 
@@ -266,9 +263,10 @@ def mine(
                 # Get drand randomness for this window if enabled
                 if use_drand:
                     try:
-                        drand_round = get_round_at_time(int(time.time()))
-                        drand_beacon = get_drand_beacon(drand_round)
-                        logger.info(f"🎲 Using drand randomness from round {drand_beacon['round']}")
+                        drand_beacon = get_drand_beacon(None)
+                        logger.info(
+                            f"🎲 Using drand randomness from round {drand_beacon['round']}"
+                        )
                         # Combine drand with block hash for window randomness
                         combined_randomness = hashlib.sha256(
                             (window_block_hash + drand_beacon["randomness"]).encode()

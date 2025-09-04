@@ -12,7 +12,6 @@ import hashlib
 import traceback
 import math
 import bittensor as bt
-from dotenv import load_dotenv
 from collections import defaultdict
 from typing import Any, Tuple, Optional
 
@@ -26,6 +25,7 @@ from ..grail import Verifier
 from . import console
 
 from ..environments import generate_sat_problem, create_sat_reward_vector
+from ..infrastructure.network import create_subtensor
 from ..infrastructure.comms import (
     file_exists,
     get_file,
@@ -60,7 +60,6 @@ logger = logging.getLogger("grail")
 # --------------------------------------------------------------------------- #
 #                             Utility helpers                                 #
 # --------------------------------------------------------------------------- #
-load_dotenv(override=True)
 
 
 def get_conf(key: str, default: Any = None) -> Any:
@@ -81,8 +80,7 @@ async def get_subtensor() -> bt.subtensor:
     global SUBTENSOR
     if SUBTENSOR is None:
         logger.trace("Making Bittensor connection...")
-        SUBTENSOR = bt.async_subtensor()
-        await SUBTENSOR.initialize()
+        SUBTENSOR = await create_subtensor()
         logger.trace("Connected")
     return SUBTENSOR
 
