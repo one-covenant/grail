@@ -29,7 +29,7 @@ WINDOW_LENGTH = 20  # Generate inferences every 20 blocks (increased for model d
 
 # ──────────────────────────  MODEL CONFIGURATION  ─────────────────────────────
 
-MODEL_NAME = "google/gemma-3-1b-it"
+MODEL_NAME = os.getenv("GRAIL_MODEL_NAME", "google/gemma-3-1b-it")
 LAYER_INDEX = -1
 
 # ──────────────────────────  LOGGING  ─────────────────────────────
