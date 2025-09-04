@@ -9,7 +9,7 @@ import asyncio
 import logging
 import traceback
 import bittensor as bt
-from typing import Any, Tuple, Optional
+from typing import Any, Tuple, Optional, DefaultDict
 from collections import defaultdict
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -25,7 +25,7 @@ from accelerate import Accelerator
 
 
 from . import console
-from ..shared.constants import WINDOW_LENGTH, TRACE, MODEL_NAME
+from ..shared.constants import WINDOW_LENGTH, MODEL_NAME
 from ..monitoring import get_monitoring_manager
 from ..monitoring.config import MonitoringConfig
 
@@ -33,19 +33,6 @@ from ..monitoring.config import MonitoringConfig
 # --------------------------------------------------------------------------- #
 #                       Constants & global singletons                         #
 # --------------------------------------------------------------------------- #
-# Constants are now imported from ..shared.constants
-logging.addLevelName(TRACE, "TRACE")
-
-
-# --------------------------------------------------------------------------- #
-#                               Logging                                       #
-# --------------------------------------------------------------------------- #
-def _trace(self: Any, msg: str, *args: Any, **kwargs: Any) -> None:
-    if self.isEnabledFor(TRACE):
-        self._log(TRACE, msg, args, **kwargs)
-
-
-logging.Logger.trace = _trace
 logger = logging.getLogger("grail")
 
 # --------------------------------------------------------------------------- #
@@ -70,9 +57,9 @@ SUBTENSOR = None
 async def get_subtensor() -> bt.subtensor:
     global SUBTENSOR
     if SUBTENSOR is None:
-        logger.trace("Making Bittensor connection...")
+        logger.info("Making Bittensor connection...")
         SUBTENSOR = await create_subtensor()
-        logger.trace("Connected")
+        logger.info("Connected")
     return SUBTENSOR
 
 
@@ -149,7 +136,7 @@ def verify_rollout_signature(rollout_data: dict) -> bool:
 # The GRAIL proof system now uses wallet signatures for security
 
 # Global storage for miner state
-miner_inference_counts: defaultdict[str, list] = defaultdict(
+miner_inference_counts: DefaultDict[str, list] = defaultdict(
     list
 )  # track inferences per block for weight calculation
 

@@ -27,7 +27,7 @@ from ..infrastructure.drand import get_drand_beacon
 from ..infrastructure.network import create_subtensor
 from ..environments import generate_sat_problem, SATRolloutGenerator
 from ..infrastructure.comms import sink_window_inferences
-from ..shared.constants import WINDOW_LENGTH, TRACE, MODEL_NAME
+from ..shared.constants import WINDOW_LENGTH, MODEL_NAME
 from ..monitoring import get_monitoring_manager
 from ..monitoring.config import MonitoringConfig
 
@@ -35,19 +35,6 @@ from ..monitoring.config import MonitoringConfig
 # --------------------------------------------------------------------------- #
 #                       Constants & global singletons                         #
 # --------------------------------------------------------------------------- #
-# Constants are now imported from ..shared.constants
-logging.addLevelName(TRACE, "TRACE")
-
-
-# --------------------------------------------------------------------------- #
-#                               Logging                                       #
-# --------------------------------------------------------------------------- #
-def _trace(self: Any, msg: str, *args: Any, **kwargs: Any) -> None:
-    if self.isEnabledFor(TRACE):
-        self._log(TRACE, msg, args, **kwargs)
-
-
-logging.Logger.trace = _trace
 logger = logging.getLogger("grail")
 
 # --------------------------------------------------------------------------- #
@@ -72,9 +59,9 @@ SUBTENSOR: Optional[bt.subtensor] = None
 async def get_subtensor() -> bt.subtensor:
     global SUBTENSOR
     if SUBTENSOR is None:
-        logger.trace("Making Bittensor connection...")
+        logger.info("Making Bittensor connection...")
         SUBTENSOR = await create_subtensor()
-        logger.trace("Connected")
+        logger.info("Connected")
     return SUBTENSOR
 
 

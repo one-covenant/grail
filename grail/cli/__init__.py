@@ -31,24 +31,13 @@ except Exception:
 console = Console()
 
 
-# Custom TRACE level consistent with existing modules
-TRACE = 5
-logging.addLevelName(TRACE, "TRACE")
-
-
 def configure_logging(verbosity: int) -> None:
     """Configure root logger using Rich based on -v count.
 
-    Levels: 0 -> CRITICAL+1 (silent), 1 -> INFO, 2 -> DEBUG, >=3 -> TRACE
+    Levels: 0 -> CRITICAL+1 (silent), 1 -> INFO, >=2 -> DEBUG
     """
     level = (
-        TRACE
-        if verbosity >= 3
-        else (
-            logging.DEBUG
-            if verbosity == 2
-            else (logging.INFO if verbosity == 1 else logging.CRITICAL + 1)
-        )
+        logging.DEBUG if verbosity >= 2 else (logging.INFO if verbosity == 1 else logging.CRITICAL + 1)
     )
 
     # Quiet noisy libraries
@@ -156,7 +145,7 @@ def _main_callback(
         "-v",
         "--verbose",
         count=True,
-        help="Increase verbosity (-v INFO, -vv DEBUG, -vvv TRACE)",
+        help="Increase verbosity (-v INFO, -vv DEBUG)",
     )
 ) -> None:
     """Configure logging once for all subcommands."""

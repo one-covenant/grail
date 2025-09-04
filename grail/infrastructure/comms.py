@@ -325,7 +325,7 @@ async def download_file_chunked(key: str, max_retries: int = 3) -> Optional[byte
                 if is_compressed:
                     data = gzip.decompress(data)
                     logger.debug(f"🗜️ Decompressed to {len(data)} bytes")
-                return data  # type: ignore[return-value]
+                return data
 
         except Exception as e:
             if attempt < max_retries - 1:
@@ -414,7 +414,12 @@ async def get_file(key: str) -> Optional[Dict[str, Any]]:
     try:
         data = await download_file_chunked(key)
         if data:
-            return json.loads(data.decode())  # type: ignore[return-value]
+            loaded: Any = json.loads(data.decode())
+            if isinstance(loaded, dict):
+                return loaded
+            else:
+                logger.debug(f"Expected dict JSON in {key}, found {type(loaded).__name__}")
+                return None
         return None
     except Exception as e:
         logger.debug(f"Failed to get file {key}: {e}")

@@ -10,9 +10,9 @@ try:
 except Exception:
     pass
 
-from .grail import Prover, Verifier
-from .infrastructure.drand import get_drand_beacon, get_round_at_time
-from .environments import (
+from .grail import Prover, Verifier  # noqa: F401
+from .infrastructure.drand import get_drand_beacon, get_round_at_time  # noqa: F401
+from .environments import (  # noqa: F401
     # New reward system
     Parser,
     RewardVector,
@@ -23,8 +23,8 @@ from .environments import (
     generate_sat_problem,
     SATRolloutGenerator,
 )
-from .mining.rollout_generator import RolloutGenerator
-from .infrastructure.comms import (
+from .mining.rollout_generator import RolloutGenerator  # noqa: F401
+from .infrastructure.comms import (  # noqa: F401
     upload_file_chunked,
     download_file_chunked,
     file_exists,

@@ -120,7 +120,8 @@ def prf(label: bytes, *parts: bytes, out_bytes: int) -> bytes:
 def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
     # Add cache attribute to function
     if not hasattr(r_vec_from_randomness, "_cache"):
-        r_vec_from_randomness._cache: dict = {}
+        # Initialize a simple dict cache; attribute added dynamically
+        r_vec_from_randomness._cache = {}  # type: ignore[attr-defined]
     """
     Generate random projection vector from drand randomness.
 
@@ -162,12 +163,10 @@ def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
     cache_key = (clean_hex, d_model)
 
     # Check if we've already computed this (useful for repeated calls)
-    if hasattr(r_vec_from_randomness, "_cache"):
-        if cache_key in r_vec_from_randomness._cache:
-            logger.debug(f"[SketchVec] Using cached vector for d_model={d_model}")
-            return r_vec_from_randomness._cache[cache_key].clone()
-    else:
-        r_vec_from_randomness._cache = {}
+    cache: dict = getattr(r_vec_from_randomness, "_cache", {})  # type: ignore[attr-defined]
+    if cache_key in cache:
+        logger.debug(f"[SketchVec] Using cached vector for d_model={d_model}")
+        return cache[cache_key].clone()
 
     try:
         # Use PRF to expand drand randomness into d_model random integers
@@ -196,8 +195,9 @@ def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
     # tensor = tensor / tensor.std()
 
     # Cache the result (limit cache size to prevent memory issues)
-    if len(r_vec_from_randomness._cache) < 100:
-        r_vec_from_randomness._cache[cache_key] = tensor.clone()
+    if len(cache) < 100:
+        cache[cache_key] = tensor.clone()
+        setattr(r_vec_from_randomness, "_cache", cache)
 
     logger.debug(
         f"[SketchVec] Generated vector with shape={tensor.shape}, first 4 values: {tensor[:4].tolist()}"

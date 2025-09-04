@@ -13,7 +13,7 @@ import traceback
 import math
 import bittensor as bt
 from collections import defaultdict
-from typing import Any, Tuple, Optional
+from typing import Any, Tuple, Optional, DefaultDict
 
 # TODO(v2): Re-enable training imports
 # from trl import PPOTrainer, PPOConfig
@@ -34,7 +34,7 @@ from ..infrastructure.comms import (
     login_huggingface,
     PROTOCOL_VERSION,
 )
-from ..shared.constants import NETUID, WINDOW_LENGTH, TRACE, MODEL_NAME, SUPERLINEAR_EXPONENT
+from ..shared.constants import NETUID, WINDOW_LENGTH, MODEL_NAME, SUPERLINEAR_EXPONENT
 from ..monitoring import get_monitoring_manager
 from ..monitoring.config import MonitoringConfig
 
@@ -42,19 +42,6 @@ from ..monitoring.config import MonitoringConfig
 # --------------------------------------------------------------------------- #
 #                       Constants & global singletons                         #
 # --------------------------------------------------------------------------- #
-# Constants are now imported from ..shared.constants
-logging.addLevelName(TRACE, "TRACE")
-
-
-# --------------------------------------------------------------------------- #
-#                               Logging                                       #
-# --------------------------------------------------------------------------- #
-def _trace(self: Any, msg: str, *args: Any, **kwargs: Any) -> None:
-    if self.isEnabledFor(TRACE):
-        self._log(TRACE, msg, args, **kwargs)
-
-
-logging.Logger.trace = _trace
 logger = logging.getLogger("grail")
 
 # --------------------------------------------------------------------------- #
@@ -79,9 +66,9 @@ SUBTENSOR = None
 async def get_subtensor() -> bt.subtensor:
     global SUBTENSOR
     if SUBTENSOR is None:
-        logger.trace("Making Bittensor connection...")
+        logger.info("Making Bittensor connection...")
         SUBTENSOR = await create_subtensor()
-        logger.trace("Connected")
+        logger.info("Connected")
     return SUBTENSOR
 
 
@@ -158,7 +145,7 @@ def verify_rollout_signature(rollout_data: dict) -> bool:
 # The GRAIL proof system now uses wallet signatures for security
 
 # Global storage for miner state
-miner_inference_counts: defaultdict[str, list] = defaultdict(
+miner_inference_counts: DefaultDict[str, list] = defaultdict(
     list
 )  # track inferences per block for weight calculation
 
@@ -217,7 +204,7 @@ def validate(
     login_huggingface()
 
     # Storage for inference counts per miner
-    inference_counts: defaultdict[str, defaultdict[int, int]] = defaultdict(
+    inference_counts: DefaultDict[str, DefaultDict[int, int]] = defaultdict(
         lambda: defaultdict(int)
     )  # {hotkey: {window: count}}
 
@@ -314,7 +301,7 @@ def validate(
 
                 # Download and process files
                 total_valid_rollouts = 0
-                window_inference_counts: defaultdict[str, int] = defaultdict(int)
+                window_inference_counts: DefaultDict[str, int] = defaultdict(int)
                 files_found = 0
                 all_valid_rollouts = []  # Store all valid rollouts for uploading
                 
