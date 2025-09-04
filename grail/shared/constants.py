@@ -45,7 +45,13 @@ RNG_LABEL = {"sketch": b"sketch", "open": b"open", "sat": b"sat"}
 
 # ──────────────────────────  TERMINATION VALIDATION HPs  ─────────────────────────────
 
-DEFAULT_MAX_NEW_TOKENS = 20  # Must match rollout generator default
+# Parse once as int; environment can override via GRAIL_MAX_NEW_TOKENS
+try:
+    DEFAULT_MAX_NEW_TOKENS = int(os.getenv("GRAIL_MAX_NEW_TOKENS", "256"))
+except Exception:
+    DEFAULT_MAX_NEW_TOKENS = 256
+
+# Must match rollout generator default
 MIN_EOS_PROBABILITY = 0.1  # Minimum probability for valid EOS termination
 SANITY_CHECK_DRIFT_THRESHOLD = 0.1  # Max acceptable drift between miner/validator
 

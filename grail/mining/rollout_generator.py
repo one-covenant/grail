@@ -11,6 +11,12 @@ import bittensor as bt
 
 logger = logging.getLogger(__name__)
 
+try:
+    # Import default decoding controls shared across miner/validator
+    from ..shared.constants import DEFAULT_MAX_NEW_TOKENS
+except Exception:
+    DEFAULT_MAX_NEW_TOKENS = 256  # Fallback to sane default if constants unavailable
+
 
 @dataclass
 class GRPORollout:
@@ -157,9 +163,13 @@ class RolloutGenerator(ABC):
                 max_new_tokens=self.get_max_tokens(),
                 temperature=self.get_temperature(),
                 do_sample=True,
+                top_p=0.95,
+                top_k=50,
+                repetition_penalty=1.1,
                 output_scores=True,
                 return_dict_in_generate=True,
                 pad_token_id=self.tokenizer.eos_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
             )
 
         # Extract generated tokens and logprobs
@@ -364,7 +374,7 @@ class RolloutGenerator(ABC):
 
     def get_max_tokens(self) -> int:
         """Maximum new tokens to generate per decision."""
-        return 20
+        return int(DEFAULT_MAX_NEW_TOKENS)
 
     def get_temperature(self) -> float:
         """Temperature for sampling."""
