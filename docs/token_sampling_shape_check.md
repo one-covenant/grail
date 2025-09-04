@@ -93,13 +93,14 @@ Numerical stability note: if $\sigma^2 \approx 0$, we set $\gamma_1=0$, $\kappa=
 We require a minimum number of completion tokens to have a reliable signal:
 - $n \ge 8$. Otherwise we report "insufficient evidence" and do not reject.
 
-If $n \ge 8$, we flag as suspicious (reject) when all of these hold:
-- $\text{low\_frac} \ge 0.20$
-- $\text{high\_frac} \ge 0.50$
-- $\text{mid\_frac} \le 0.40$
-- $\text{BC} \ge 0.58$
+If $n \ge 8$, we flag as suspicious (reject) when either condition holds:
+- Unimodal‑low: $\text{median}(p) \le 0.20$.
+- Bimodal: $q_{10}(p) \le 0.20$ and $\text{BC} \ge 0.58$.
 
-These defaults balance sensitivity and false positives for typical language modeling scenarios and are configurable.
+Why this works:
+- Same‑model sampling tends to have high median and BC below the bimodality threshold.
+- Unimodal‑low (validator finds many tokens unlikely) is caught by a low median.
+- We only trust BC when there is a genuine low tail (gated by $q_{10}$) to avoid false positives on unimodal‑high outputs.
 
 ---
 
@@ -108,11 +109,24 @@ These defaults balance sensitivity and false positives for typical language mode
 1. Run the validator model on the full sequence to get logits for every position.
 2. For completion tokens (indices $t=\text{prompt\_length},\dots$), take predictive logits at $t-1$,
    convert to probabilities with softmax, and record $p_t$ for the chosen token.
-3. Compute `low_frac`, `high_frac`, `mid_frac`, $\gamma_1$, $\kappa$, and $\text{BC}$.
+3. Compute summary statistics: median(p), q10(p), $\gamma_1$ (skewness), $\kappa$ (kurtosis), and $\text{BC}$. Optionally also compute `low_frac`, `high_frac`, `mid_frac` as descriptive stats.
 4. If $n < 8$: return "insufficient evidence".
-5. Otherwise, apply the thresholds above. If all satisfied, reject as suspicious; else pass.
+5. Otherwise, apply the thresholds above. If any condition holds, reject as suspicious; else pass.
 
 Performance: one forward pass; no extra dependencies (NumPy is optional for speed).
+
+---
+
+## Monitoring and logging
+
+For easier debugging, metrics are logged to Weights & Biases under the `sampling_shape_check.*` namespace:
+
+- `sampling_shape_check.hist`: histogram of chosen-token probabilities
+- `sampling_shape_check.mean`, `sampling_shape_check.median`, `sampling_shape_check.q10`
+- `sampling_shape_check.low_frac`, `sampling_shape_check.high_frac`, `sampling_shape_check.mid_frac`
+- `sampling_shape_check.bc`, `sampling_shape_check.n`
+
+These complement the decision rule (median and q10-gated BC) and help tune thresholds if needed.
 
 ---
 
@@ -142,12 +156,8 @@ Performance: one forward pass; no extra dependencies (NumPy is optional for spee
 ## Configuration (environment variables)
 
 - `GRAIL_SAMPLING_MIN_STEPS` (default 8)
-- `GRAIL_SAMPLING_LOW_P` (default 0.10)
-- `GRAIL_SAMPLING_HIGH_P` (default 0.90)
-- `GRAIL_SAMPLING_LOW_FRAC_MIN` (default 0.20)
-- `GRAIL_SAMPLING_HIGH_FRAC_MIN` (default 0.50)
-- `GRAIL_SAMPLING_MID_FRAC_MAX` (default 0.40)
 - `GRAIL_SAMPLING_BC_THRESHOLD` (default 0.58)
+- `GRAIL_SAMPLING_MEDIAN_LOW_MAX` (default 0.20)
 
 If unset, defaults are used.
 
@@ -158,7 +168,7 @@ If unset, defaults are used.
 The check is implemented in `grail/grail.py` in the `Verifier` class:
 
 - `_collect_chosen_token_probs()`: Extracts validator probabilities for chosen tokens
-- `_bimodality_metrics()`: Computes statistical measures (fractions, skewness, kurtosis, BC)
-- `_token_sampling_shape_check()`: Applies decision rule and returns (pass/fail, metrics)
+- `_bimodality_metrics()`: Computes median, q10, skewness, kurtosis, BC (and descriptive fractions)
+- `_token_sampling_shape_check()`: Applies the simplified decision rule and returns (pass/fail, metrics)
 
 The check runs automatically during rollout verification, after GRAIL proof validation and termination checks but before solution validation.

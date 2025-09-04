@@ -29,10 +29,8 @@ from .shared.constants import (
     SAMPLING_MIN_STEPS,
     SAMPLING_LOW_P,
     SAMPLING_HIGH_P,
-    SAMPLING_LOW_FRAC_MIN,
-    SAMPLING_HIGH_FRAC_MIN,
-    SAMPLING_MID_FRAC_MAX,
     SAMPLING_BC_THRESHOLD,
+    SAMPLING_MEDIAN_LOW_MAX,
 )
 from .monitoring import get_monitoring_manager
 
@@ -657,9 +655,6 @@ class Verifier:
             return False
         logger.debug(f"Token sampling shape check passed: {sampling_stats}")
 
-        # The GRAIL proof has already verified that these tokens (including the SAT problem)
-        # were processed by the claimed model - no other model could produce matching sketches
-
         # Verify the solution if claimed successful
         rollout = commit.get("rollout", {})
         if rollout.get("success", False):
@@ -817,6 +812,12 @@ class Verifier:
                 high_frac = float((x >= SAMPLING_HIGH_P).mean())
                 mid_frac = max(0.0, 1.0 - low_frac - high_frac)
                 m = float(x.mean())
+                # Robust location stats
+                med = float(np.median(x))
+                try:
+                    q10 = float(np.quantile(x, 0.10))
+                except Exception:
+                    q10 = float(np.percentile(x, 10))
                 d = x - m
                 s2 = float((d * d).mean())
                 if s2 <= 1e-12:
@@ -835,6 +836,14 @@ class Verifier:
                 high_frac = float((tx >= SAMPLING_HIGH_P).to(torch.float64).mean().item())
                 mid_frac = max(0.0, 1.0 - low_frac - high_frac)
                 m = float(tx.mean().item())
+                # Robust location stats
+                med = float(tx.median().item())
+                try:
+                    q10 = float(torch.quantile(tx, torch.tensor(0.10, dtype=torch.float64)).item())
+                except Exception:
+                    sorted_tx = torch.sort(tx).values
+                    idx = max(0, min(sorted_tx.numel() - 1, int(0.10 * (sorted_tx.numel() - 1))))
+                    q10 = float(sorted_tx[idx].item())
                 d = tx - m
                 s2_t = (d * d).mean()
                 s2 = float(s2_t.item())
@@ -851,6 +860,8 @@ class Verifier:
             return {
                 "n": n,
                 "mean": m,
+                "median": med,
+                "q10": q10,
                 "low_frac": low_frac,
                 "high_frac": high_frac,
                 "mid_frac": mid_frac,
@@ -863,6 +874,8 @@ class Verifier:
             return {
                 "n": 0.0,
                 "mean": 0.0,
+                "median": 0.0,
+                "q10": 0.0,
                 "low_frac": 0.0,
                 "high_frac": 0.0,
                 "mid_frac": 0.0,
@@ -872,7 +885,7 @@ class Verifier:
             }
 
     def _token_sampling_shape_check(self, commit: dict) -> tuple[bool, dict]:
-        """Return (ok, stats) where ok=False indicates suspicious bimodality."""
+        """Return (ok, stats) where ok=False indicates suspicious distribution"""
         probs = self._collect_chosen_token_probs(commit)
         n = 0 if probs is None else len(probs)
         if probs is None or n < SAMPLING_MIN_STEPS:
@@ -880,13 +893,73 @@ class Verifier:
 
         metrics = self._bimodality_metrics(probs)
 
-        low_ok = metrics["low_frac"] >= SAMPLING_LOW_FRAC_MIN
-        high_ok = metrics["high_frac"] >= SAMPLING_HIGH_FRAC_MIN
-        mid_ok = metrics["mid_frac"] <= SAMPLING_MID_FRAC_MAX
-        bc_ok = metrics["bc"] >= SAMPLING_BC_THRESHOLD
+        # Simplified decision: unimodal-low via median; bimodal via BC gated by q10
+        suspicious_unimodal_low = metrics.get("median", 1.0) <= SAMPLING_MEDIAN_LOW_MAX
+        allow_bc = metrics.get("q10", 1.0) <= SAMPLING_MEDIAN_LOW_MAX
+        suspicious_bimodal = allow_bc and (metrics.get("bc", 0.0) >= SAMPLING_BC_THRESHOLD)
+        suspicious = suspicious_unimodal_low or suspicious_bimodal
 
-        suspicious = low_ok and high_ok and mid_ok and bc_ok
+        # Verbose-mode monitoring: log histogram of chosen-token probabilities to help tune thresholds
+        self._log_verbose_monitoring_metrics(probs, metrics)
+
         return (not suspicious), metrics
+
+    def _log_verbose_monitoring_metrics(self, probs: list[float], metrics: dict) -> None:
+        """Log verbose monitoring metrics for debugging and threshold tuning.
+        
+        Args:
+            probs: List of chosen token probabilities
+            metrics: Dictionary containing computed bimodality metrics
+        """
+        try:
+            monitor = get_monitoring_manager()
+            if not monitor:
+                return
+                
+            import logging as _logging
+            root_level = _logging.getLogger().getEffectiveLevel()
+            if root_level > _logging.DEBUG:
+                return
+                
+            import asyncio as _asyncio
+            try:
+                loop = _asyncio.get_event_loop()
+                if not loop.is_running():
+                    return
+                    
+                # Log the histogram using the more reliable approach
+                _asyncio.create_task(
+                    monitor.log_histogram("sampling_shape_check.hist", probs)
+                )
+                # Summary statistics under the sampling_shape_check prefix for easier navigation
+                _asyncio.create_task(
+                    monitor.log_gauge("sampling_shape_check.mean", metrics["mean"])
+                )
+                _asyncio.create_task(
+                    monitor.log_gauge("sampling_shape_check.median", metrics.get("median", 0.0))
+                )
+                _asyncio.create_task(
+                    monitor.log_gauge("sampling_shape_check.q10", metrics.get("q10", 0.0))
+                )
+                _asyncio.create_task(
+                    monitor.log_gauge("sampling_shape_check.low_frac", metrics["low_frac"])
+                )
+                _asyncio.create_task(
+                    monitor.log_gauge("sampling_shape_check.high_frac", metrics["high_frac"])
+                )
+                _asyncio.create_task(
+                    monitor.log_gauge("sampling_shape_check.mid_frac", metrics["mid_frac"])
+                )
+                _asyncio.create_task(
+                    monitor.log_gauge("sampling_shape_check.bc", metrics["bc"])
+                )
+                _asyncio.create_task(
+                    monitor.log_gauge("sampling_shape_check.n", metrics["n"])
+                )
+            except RuntimeError:
+                pass
+        except Exception:
+            pass
 
     def _check_max_length_termination(self, commit: dict) -> bool:
         """Check if completion reached the configured generation max length."""
