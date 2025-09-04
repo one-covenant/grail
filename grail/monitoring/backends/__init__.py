@@ -5,8 +5,7 @@ This package contains concrete implementations of the MonitoringBackend interfac
 for various telemetry and observability platforms.
 """
 
-from .wandb_backend import WandBBackend
-from .null_backend import NullBackend
+from .wandb_backend import WandBBackend  # noqa: F401
+from .null_backend import NullBackend  # noqa: F401
 
 __all__ = ["WandBBackend", "NullBackend"]
-
