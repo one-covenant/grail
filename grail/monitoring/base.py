@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Generator, List, Optional, Union
+from typing import Any, Dict, Generator, List, Optional
 
 
 class MetricType(Enum):
@@ -29,7 +29,7 @@ class MetricData:
     """Container for metric data with metadata."""
     
     name: str
-    value: Union[int, float, str]
+    value: Any
     metric_type: MetricType
     tags: Optional[Dict[str, str]] = None
     timestamp: Optional[float] = None

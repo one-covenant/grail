@@ -6,84 +6,25 @@ Centralized configuration constants used across the GRAIL codebase.
 """
 
 import os
-import json
-import subprocess
-from typing import Optional
 
 # ──────────────────────────  NETWORK & BLOCKCHAIN  ─────────────────────────────
 
-def get_netuid(network: str = "finney") -> int:
+
+def _read_netuid() -> int:
+    """Read NETUID from environment with sensible defaults.
+
+    Supports both NETUID and legacy GRAIL_NETUID.
     """
-    Get NETUID from environment variable or auto-discover grail subnet.
-    
-    Args:
-        network: Network to search ('finney' for mainnet, 'test' for testnet)
-        
-    Returns:
-        NETUID for grail subnet
-        
-    Environment Variables:
-        GRAIL_NETUID: Override netuid (e.g., "81" for mainnet, "165" for testnet)
-        GRAIL_NETWORK: Network to use ('finney' or 'test')
-    """
-    # First check for explicit override
-    netuid_override = os.getenv("GRAIL_NETUID")
-    if netuid_override is not None:
-        return int(netuid_override)
-    
-    # Auto-discover by subnet name
-    discovered_netuid = discover_grail_netuid(network)
-    if discovered_netuid is not None:
-        return discovered_netuid
-    
-    # Fallback to mainnet default
+    for key in ("NETUID", "GRAIL_NETUID"):
+        v = os.getenv(key)
+        if v and str(v).strip():
+            return int(v)
     return 81
 
 
-def discover_grail_netuid(network: str = "finney") -> Optional[int]:
-    """
-    Auto-discover grail subnet NETUID by name using btcli.
-    
-    Args:
-        network: 'finney' for mainnet, 'test' for testnet
-        
-    Returns:
-        NETUID if found, None otherwise
-    """
-    try:
-        # Try to find btcli in the venv first, then fallback to PATH
-        import sys
-        import os
-        
-        btcli_path = "btcli"
-        if hasattr(sys, 'prefix'):
-            venv_btcli = os.path.join(sys.prefix, "bin", "btcli")
-            if os.path.exists(venv_btcli):
-                btcli_path = venv_btcli
-        
-        cmd = [btcli_path, "subnets", "list", "--subtensor.network", network, "--json-output"]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        
-        if result.returncode != 0:
-            return None
-            
-        subnets = json.loads(result.stdout)
-        
-        # Search for subnet with name "grail" (case-insensitive)
-        for subnet in subnets:
-            if subnet.get("name", "").lower() == "grail":
-                return int(subnet["netuid"])
-                
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, 
-            json.JSONDecodeError, KeyError, ValueError, FileNotFoundError):
-        pass
-    
-    return None
-
-
 # Get the network from environment (default to mainnet)
-NETWORK = os.getenv("GRAIL_NETWORK", "finney")
-NETUID = get_netuid(NETWORK)
+NETWORK = os.getenv("BT_NETWORK") or os.getenv("GRAIL_NETWORK") or "finney"
+NETUID = _read_netuid()
 WINDOW_LENGTH = 20  # Generate inferences every 20 blocks (increased for model downloads)
 
 # ──────────────────────────  MODEL CONFIGURATION  ─────────────────────────────
@@ -117,6 +58,9 @@ SAMPLING_LOW_FRAC_MIN = 0.20
 SAMPLING_HIGH_FRAC_MIN = 0.50
 SAMPLING_MID_FRAC_MAX = 0.40
 SAMPLING_BC_THRESHOLD = 0.58
+
+# Minimal sampling shape hyperparameters (median gate for unimodal-low)
+SAMPLING_MEDIAN_LOW_MAX = 0.20
 
 # ──────────────────────────  VALIDATOR-SPECIFIC CONSTANTS  ─────────────────────────────
 

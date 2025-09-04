@@ -75,7 +75,6 @@ class MonitoringManager:
         """Ensure async components are initialized (lazy initialization)."""
         if self._shutdown_event is None:
             self._shutdown_event = asyncio.Event()
-        
         if self._flush_task is None or self._flush_task.done():
             self._flush_task = asyncio.create_task(self._periodic_flush())
     
@@ -162,13 +161,13 @@ class MonitoringManager:
         except Exception as e:
             logger.warning(f"Failed to log gauge {name}: {e}")
     
-    async def log_histogram(self, name: str, value: Union[int, float],
+    async def log_histogram(self, name: str, value: Any,
                             tags: Optional[Dict[str, str]] = None) -> None:
         """Log a histogram metric.
         
         Args:
             name: Name of the histogram
-            value: Value to record
+            value: Value to record (number or list/array for distributions)
             tags: Optional tags to attach
         """
         if not self._initialized:
@@ -292,7 +291,8 @@ class MonitoringManager:
         logger.info("Shutting down monitoring manager...")
         
         # Signal shutdown to background tasks
-        self._shutdown_event.set()
+        if self._shutdown_event is not None:
+            self._shutdown_event.set()
         
         # Cancel flush task
         if self._flush_task and not self._flush_task.done():
@@ -346,7 +346,7 @@ def initialize_monitoring(backend_type: str = "wandb", **config: Any) -> None:
     
     # Create backend instance
     if backend_type == "wandb":
-        backend = WandBBackend()
+        backend: MonitoringBackend = WandBBackend()
     elif backend_type == "null":
         backend = NullBackend()
     else:
