@@ -197,3 +197,6 @@ config.local.*
 *.tmp
 *.temp
 .tmp/ 
+
+# monitoring files
+wandb/
