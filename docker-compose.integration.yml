@@ -75,6 +75,8 @@ services:
       # Testing ergonomics
       GRAIL_WINDOW_LENGTH: "3"
       CUDA_VISIBLE_DEVICES: "0"
+    devices:
+      - "nvidia.com/gpu=0"
     command: ["-vv", "mine", "--no-drand"]
 
   miner-2:
@@ -124,7 +126,9 @@ services:
       GRAIL_METRIC_FLUSH_INTERVAL: ${GRAIL_METRIC_FLUSH_INTERVAL:-30.0}
       # Testing ergonomics
       GRAIL_WINDOW_LENGTH: "3"
-      CUDA_VISIBLE_DEVICES: "1"
+      CUDA_VISIBLE_DEVICES: "0"
+    devices:
+      - "nvidia.com/gpu=1"
     command: ["-vv", "mine", "--no-drand"]
 
   validator:
@@ -176,7 +180,9 @@ services:
       GRAIL_METRIC_FLUSH_INTERVAL: ${GRAIL_METRIC_FLUSH_INTERVAL:-30.0}
       # Testing ergonomics
       GRAIL_WINDOW_LENGTH: "3"
-      CUDA_VISIBLE_DEVICES: "2"
+      CUDA_VISIBLE_DEVICES: "0"
+    devices:
+      - "nvidia.com/gpu=2"
     command: ["-vv", "validate", "--no-drand"]
 
 volumes:
