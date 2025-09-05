@@ -115,7 +115,25 @@ strict_equality = true
 
 [[tool.mypy.overrides]]
 module = [
+    # External libs commonly present at runtime but not in type-check env
+    "bittensor",
     "bittensor.*",
+    "torch",
+    "transformers",
+    "datasets",
+    "huggingface_hub",
+    "aiobotocore",
+    "aiobotocore.*",
+    "botocore",
+    "botocore.*",
+    "safetensors",
+    "safetensors.*",
+    "rich",
+    "rich.*",
+    "typer",
+    "dotenv",
+    "wandb",
+    "requests",
     "trl.*",
     "accelerate.*",
     "vllm.*",
