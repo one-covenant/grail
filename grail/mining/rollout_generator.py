@@ -15,7 +15,8 @@ try:
     # Import default decoding controls shared across miner/validator
     from ..shared.constants import DEFAULT_MAX_NEW_TOKENS
 except Exception:
-    DEFAULT_MAX_NEW_TOKENS = 256  # Fallback to sane default if constants unavailable
+    # Fallback to sane default if constants unavailable
+    DEFAULT_MAX_NEW_TOKENS = 256
 
 
 @dataclass
@@ -101,7 +102,9 @@ class RolloutGenerator(ABC):
             state = self.reset_environment(env)
 
             # Generate rollout with logprobs tracking
-            rollout = self._generate_single_rollout(problem, env, state, randomness_hex, wallet)
+            rollout = self._generate_single_rollout(
+                problem, env, state, randomness_hex, wallet
+            )
             rollouts.append(rollout)
 
         # Compute GRPO advantages across the group
@@ -129,7 +132,9 @@ class RolloutGenerator(ABC):
             tokens, action = self._get_model_decision(prompt, env, state)
             all_tokens.extend(tokens)
             next_state, reward, done, info = self.step_environment(env, action)
-            trajectory_entry = self.create_trajectory_entry(state, action, reward, info)
+            trajectory_entry = self.create_trajectory_entry(
+                state, action, reward, info
+            )
             trajectory.append(trajectory_entry)
             total_reward += reward
             state = next_state
@@ -143,14 +148,28 @@ class RolloutGenerator(ABC):
         }
 
     def _generate_single_rollout(
-        self, problem: Any, env: Any, state: Any, randomness_hex: str, wallet: bt.wallet
+        self,
+        problem: Any,
+        env: Any,
+        state: Any,
+        randomness_hex: str,
+        wallet: bt.wallet,
     ) -> GRPORollout:
         """Generate a single rollout with logprob tracking and GRAIL proof."""
         # Create prompt
         prompt = self.create_prompt(problem, env, state, [])
-        # Tokenize with explicit attention mask to ensure proper
-        # distinction between content and padding tokens
-        tokenized = self.tokenizer(prompt, return_tensors="pt", return_attention_mask=True)
+
+        # Apply chat template if available
+        messages = [{"role": "user", "content": prompt}]
+        prompt_with_template = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        tokenized = self.tokenizer(
+            prompt_with_template,
+            return_tensors="pt",
+            return_attention_mask=True,
+        )
+
         prompt_ids = tokenized.input_ids.to(self.device)
         attention_mask = tokenized.attention_mask.to(self.device)
         prompt_length = prompt_ids.shape[1]
@@ -183,7 +202,9 @@ class RolloutGenerator(ABC):
         all_logprobs = [0.0] * prompt_length + logprobs
 
         # Parse and execute actions from generated text
-        generated_text = self.tokenizer.decode(completion_ids, skip_special_tokens=True)
+        generated_text = self.tokenizer.decode(
+            completion_ids, skip_special_tokens=True
+        )
         action = self.parse_action(generated_text, env, state)
 
         # Execute trajectory in environment
@@ -193,7 +214,9 @@ class RolloutGenerator(ABC):
 
         # Step through environment with parsed action
         next_state, reward, done, info = self.step_environment(env, action)
-        trajectory_entry = self.create_trajectory_entry(state, action, reward, info)
+        trajectory_entry = self.create_trajectory_entry(
+            state, action, reward, info
+        )
         trajectory.append(trajectory_entry)
         total_reward += reward
 
@@ -213,11 +236,15 @@ class RolloutGenerator(ABC):
         from ..grail import r_vec_from_randomness, dot_mod_q, sign_s_vals
 
         # Compute s_vals for GRAIL proof
-        r_vec = r_vec_from_randomness(randomness_hex, self.model.config.hidden_size)
+        r_vec = r_vec_from_randomness(
+            randomness_hex, self.model.config.hidden_size
+        )
         s_vals = []
 
         with torch.inference_mode():
-            token_tensor = torch.tensor([all_token_ids], dtype=torch.long).to(self.device)
+            token_tensor = torch.tensor(
+                [all_token_ids], dtype=torch.long
+            ).to(self.device)
             model_outputs = self.model(token_tensor, output_hidden_states=True)
             # Last layer hidden states
             h_layer = model_outputs.hidden_states[-1][0]
@@ -244,7 +271,9 @@ class RolloutGenerator(ABC):
             beacon={"randomness": randomness_hex},
         )
 
-    def _extract_logprobs(self, scores: List[torch.Tensor], token_ids: List[int]) -> List[float]:
+    def _extract_logprobs(
+        self, scores: List[torch.Tensor], token_ids: List[int]
+    ) -> List[float]:
         """Extract log probabilities for generated tokens."""
         logprobs = []
         for i, token_id in enumerate(token_ids):
@@ -266,7 +295,9 @@ class RolloutGenerator(ABC):
         mean_reward = sum(rewards) / len(rewards)
         return [r - mean_reward for r in rewards]
 
-    def _get_model_decision(self, prompt: str, env: Any, state: Any) -> Tuple[List[int], Any]:
+    def _get_model_decision(
+        self, prompt: str, env: Any, state: Any
+    ) -> Tuple[List[int], Any]:
         """
         Get model's decision for the current state.
 
@@ -278,9 +309,17 @@ class RolloutGenerator(ABC):
         Returns:
             Tuple of (tokens generated, action to take)
         """
-        # Tokenize with explicit attention mask to ensure proper
-        # distinction between content and padding tokens
-        tokenized = self.tokenizer(prompt, return_tensors="pt", return_attention_mask=True)
+        # Apply chat template
+        messages = [{"role": "user", "content": prompt}]
+        prompt_with_template = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        tokenized = self.tokenizer(
+            prompt_with_template,
+            return_tensors="pt",
+            return_attention_mask=True,
+        )
+
         input_ids = tokenized.input_ids.to(self.device)
         attention_mask = tokenized.attention_mask.to(self.device)
 
@@ -301,7 +340,9 @@ class RolloutGenerator(ABC):
             except RuntimeError as e:
                 if "inf" in str(e) or "nan" in str(e):
                     # Fallback to greedy decoding if sampling fails
-                    logger.debug(f"Sampling failed, using greedy decoding: {e}")
+                    logger.debug(
+                        f"Sampling failed, using greedy decoding: {e}"
+                    )
                     gen = self.model.generate(
                         input_ids,
                         attention_mask=attention_mask,
@@ -321,12 +362,13 @@ class RolloutGenerator(ABC):
         invalid_tokens = [t for t in tokens if t < 0 or t >= vocab_size]
         if invalid_tokens:
             logger.warning(
-                f"Found invalid tokens: {invalid_tokens[:5]}... " "Clamping to valid range"
+                f"Found invalid tokens: {invalid_tokens[:5]}... "
+                "Clamping to valid range"
             )
             tokens = [max(0, min(t, vocab_size - 1)) for t in tokens]
 
         generated_text = self.tokenizer.decode(
-            gen[0][len(input_ids[0]) :], skip_special_tokens=True
+            gen[0][len(input_ids[0]):], skip_special_tokens=True
         )
         action = self.parse_action(generated_text, env, state)
 
@@ -345,7 +387,9 @@ class RolloutGenerator(ABC):
         pass
 
     @abstractmethod
-    def create_prompt(self, problem: Any, env: Any, state: Any, trajectory: List) -> str:
+    def create_prompt(
+        self, problem: Any, env: Any, state: Any, trajectory: List
+    ) -> str:
         """Create a prompt for the model based on current state."""
         pass
 
@@ -361,12 +405,16 @@ class RolloutGenerator(ABC):
         pass
 
     @abstractmethod
-    def create_trajectory_entry(self, state: Any, action: Any, reward: float, info: Dict) -> Any:
+    def create_trajectory_entry(
+        self, state: Any, action: Any, reward: float, info: Dict
+    ) -> Any:
         """Create an entry for the trajectory list."""
         pass
 
     @abstractmethod
-    def get_final_info(self, env: Any, trajectory: List, total_reward: float) -> Dict:
+    def get_final_info(
+        self, env: Any, trajectory: List, total_reward: float
+    ) -> Dict:
         """Get final information to include in the rollout result."""
         pass
 
