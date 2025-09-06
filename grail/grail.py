@@ -584,6 +584,8 @@ class Verifier:
         # Cache from most recent proof verification forward pass
         self._last_tokens_hash: Optional[str] = None
         self._last_step_logits: Optional[torch.Tensor] = None
+        # Current prover wallet for namespacing verbose metrics
+        self._current_wallet: Optional[str] = None
 
     def verify_rollout(self, commit: dict, proof_pkg: dict, prover_address: str) -> bool:
         """
@@ -600,6 +602,8 @@ class Verifier:
         - The model that generated this cannot be substituted
         """
         monitor = get_monitoring_manager()
+        # Record current wallet for namespaced debug metrics
+        self._current_wallet = prover_address
         # First verify the GRAIL proof - this proves the model identity
         if not self.verify(commit, proof_pkg, prover_address):
             logger.debug("GRAIL proof failed - model identity not verified")
@@ -929,34 +933,41 @@ class Verifier:
                 if not loop.is_running():
                     return
                 
+                # Namespace metrics per-wallet to create separate tabs in W&B
+                wallet_ns = (
+                    f"sampling_shape_check/{self._current_wallet}"
+                    if getattr(self, "_current_wallet", None)
+                    else "sampling_shape_check"
+                )
+
                 # Log the histogram using the more reliable approach
                 _asyncio.create_task(
-                    monitor.log_histogram("sampling_shape_check/hist", probs)
+                    monitor.log_histogram(f"{wallet_ns}/hist", probs)
                 )
                 # Summary statistics under the sampling_shape_check prefix for easier navigation
                 _asyncio.create_task(
-                    monitor.log_gauge("sampling_shape_check/mean", metrics["mean"])
+                    monitor.log_gauge(f"{wallet_ns}/mean", metrics["mean"])
                 )
                 _asyncio.create_task(
-                    monitor.log_gauge("sampling_shape_check/median", metrics.get("median", 0.0))
+                    monitor.log_gauge(f"{wallet_ns}/median", metrics.get("median", 0.0))
                 )
                 _asyncio.create_task(
-                    monitor.log_gauge("sampling_shape_check/q10", metrics.get("q10", 0.0))
+                    monitor.log_gauge(f"{wallet_ns}/q10", metrics.get("q10", 0.0))
                 )
                 _asyncio.create_task(
-                    monitor.log_gauge("sampling_shape_check/low_frac", metrics["low_frac"])
+                    monitor.log_gauge(f"{wallet_ns}/low_frac", metrics["low_frac"])
                 )
                 _asyncio.create_task(
-                    monitor.log_gauge("sampling_shape_check/high_frac", metrics["high_frac"])
+                    monitor.log_gauge(f"{wallet_ns}/high_frac", metrics["high_frac"])
                 )
                 _asyncio.create_task(
-                    monitor.log_gauge("sampling_shape_check/mid_frac", metrics["mid_frac"])
+                    monitor.log_gauge(f"{wallet_ns}/mid_frac", metrics["mid_frac"])
                 )
                 _asyncio.create_task(
-                    monitor.log_gauge("sampling_shape_check/bc", metrics["bc"])
+                    monitor.log_gauge(f"{wallet_ns}/bc", metrics["bc"])
                 )
                 _asyncio.create_task(
-                    monitor.log_gauge("sampling_shape_check/n", metrics["n"])
+                    monitor.log_gauge(f"{wallet_ns}/n", metrics["n"])
                 )
                 logger.debug("-------- log_verbose_monitoring_metrics finished--------")
             except RuntimeError:

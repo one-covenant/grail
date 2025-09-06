@@ -288,7 +288,7 @@ def validate(
 
                 # For testing: just use the validator's own hotkey (same as miner in local testing)
                 # In production, this would iterate through meta.hotkeys
-                test_mode = True  # Set to False for production
+                # Use the test_mode parameter passed to the function instead of hardcoding
 
                 if test_mode:
                     # Use the wallet's own hotkey for testing
@@ -302,6 +302,7 @@ def validate(
                     logger.info(
                         f"Checking files for {len(meta.hotkeys)} active hotkeys in window {target_window}"
                     )
+                    logger.info(f"Active hotkeys: {meta.hotkeys}")
 
                 # Download and process files
                 total_valid_rollouts = 0
@@ -595,7 +596,7 @@ def validate(
                                             )
                                             if monitor:
                                                 await monitor.log_artifact(
-                                                    "validation/sample_text",
+                                                    f"validation/{wallet_addr}/sample_text",
                                                     {
                                                         "window": target_window,
                                                         "wallet": wallet_addr,
