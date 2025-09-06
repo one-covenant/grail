@@ -33,7 +33,7 @@ dependencies = [
     "python-dotenv>=0.19.0",
     "aiobotocore>=2.0.0",
     "botocore>=1.24.0",
-    "bittensor>=7.0.0",
+    "bittensor==9.10.1",
     "trl>=0.7.0",
     "accelerate>=0.20.0",
     "pydantic>=2.3,<3.0.0",
@@ -43,6 +43,7 @@ dependencies = [
     "typer==0.16.1",
     "rich==14.1.0",
     "wandb>=0.21.3",
+    "bittensor-cli>=9.10.2",
 ]
 
 [project.optional-dependencies]
