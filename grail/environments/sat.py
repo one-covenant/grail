@@ -413,14 +413,11 @@ class SATRolloutGenerator(RolloutGenerator):
         """Create prompt for SAT solving with reasoning and answer tags."""
         instructions = (
             "Instructions:\n"
-            "- Put your reasoning in <thinking>...</thinking>.\n"
-            "- Put ONLY the final assignment (x1..xN) in <answer> as space-separated 0/1.\n"
-            "- Example: 0 1 0 1 means x1=0, x2=1, x3=0, x4=1.\n\n"
+            "- First, think about the problem and provide your reasoning. Place it between <thinking> and </thinking>.\n"
+            "- Then, provide your solution between <answer> and </answer>. The solution should be a space-separated list of 0/1 values, representing the assignment of each variable (x1..xN).\n"
+            "- Example: <answer>0 1 0 1</answer> means x1=0, x2=1, x3=0, x4=1.\n\n"
         )
         prompt = f"SAT Problem:\n{problem.to_text()}\n{instructions}"
-        # Start generation inside <thinking>; model should produce </thinking>
-        # then <answer>... </answer>
-        prompt += "<thinking>\n"
         return prompt
 
     def parse_action(self, text: str, env: SATProblem, state: Dict[str, Any]) -> List[bool]:
