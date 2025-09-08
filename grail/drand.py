@@ -17,7 +17,6 @@ import random
 import logging
 import requests
 from threading import Lock
-
 from typing import Any, Dict, Optional, Tuple
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
