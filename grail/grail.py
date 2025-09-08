@@ -4,21 +4,16 @@ GRAIL – Guaranteed Rollout Authenticity via Inference Ledger
 Modified for SAT problem generation and RL rollouts
 """
 
-import hashlib
-import logging
 import os
-import random
-import struct
-from typing import List, Tuple, Dict, Optional
-
-import bittensor as bt
-import numpy as np
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+import struct
+import random
+import logging
+import hashlib
+import bittensor as bt
 
-from .drand import get_beacon, get_drand_beacon, get_round_at_time
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from .environments import SATProblem, generate_sat_problem, SATRolloutGenerator
-from .rollout import RolloutGenerator
 
 # Enable CUDA debugging for better error messages
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
@@ -38,6 +33,7 @@ TOLERANCE    = 3
 MODEL_NAME   = "sshleifer/tiny-gpt2"
 LAYER_INDEX  = -1
 RNG_LABEL    = {"sketch": b"sketch", "open": b"open", "sat": b"sat"}
+COMMIT_DOMAIN = b"grail-commit-v1"
 
 
 
@@ -178,9 +174,6 @@ def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
         ints = struct.unpack(">" + "i"*d_model, raw)
         tensor = torch.tensor(ints, dtype=torch.int32)
     
-    # Optionally normalize to unit variance (commented out to maintain compatibility)
-    # tensor = tensor.float()
-    # tensor = tensor / tensor.std()
     
     # Cache the result (limit cache size to prevent memory issues)
     if len(r_vec_from_randomness._cache) < 100:
@@ -249,8 +242,6 @@ def indices_from_root(tokens: list[int], rand_hex: str, seq_len: int, k: int) ->
 
 # ─────────────────────────────  UTILITIES  ─────────────────────────────
 
-# REMOVED: derive_secret_key_from_hotkey was insecure and has been removed
-# Use wallet.hotkey.sign() for actual cryptographic signatures
 
 def int_to_bytes(i: int) -> bytes:
     return struct.pack(">I", i & 0xFFFFFFFF)
@@ -313,7 +304,6 @@ def verify_s_vals_signature(s_vals: list[int], signature: bytes, wallet_address:
     try:
         import bittensor as bt
         # Create a keypair from the SS58 address (public key only)
-        # Bittensor uses substrate under the hood but provides a cleaner interface
         keypair = bt.Keypair(ss58_address=wallet_address)
         # Verify signature using public key cryptography
         verified = keypair.verify(data=s_vals_bytes, signature=signature)
@@ -328,6 +318,61 @@ def hash_s_vals(s_vals: list[int]) -> bytes:
     """Compute hash of s_vals for integrity checking."""
     s_vals_bytes = b''.join(int_to_bytes(val) for val in s_vals)
     return hashlib.sha256(s_vals_bytes).digest()
+
+def hash_tokens(tokens: list[int]) -> bytes:
+    """Compute hash of tokens for integrity checking."""
+    tokens_bytes = b''.join(int_to_bytes(t) for t in tokens)
+    return hashlib.sha256(tokens_bytes).digest()
+
+def build_commit_binding(tokens: list[int], randomness_hex: str, model_name: str, layer_index: int, s_vals: list[int]) -> bytes:
+    """Build domain-separated commit binding to be signed.
+
+    Format: SHA256(COMMIT_DOMAIN || len(x)||x for each x in [tokens_hash, rand_bytes, model_name_bytes, layer_index_be, s_vals_hash]).
+    """
+    def _len_bytes(b: bytes) -> bytes:
+        return len(b).to_bytes(4, 'big')
+
+    rand_clean = randomness_hex.strip().replace("0x", "").replace("0X", "")
+    if len(rand_clean) % 2 != 0:
+        rand_clean = '0' + rand_clean
+    rand_bytes = bytes.fromhex(rand_clean)
+    tokens_h = hash_tokens(tokens)
+    svals_h = hash_s_vals(s_vals)
+    model_b = (model_name or "").encode('utf-8')
+    layer_b = int(layer_index).to_bytes(4, 'big', signed=True)
+
+    h = hashlib.sha256()
+    h.update(COMMIT_DOMAIN)
+    for part in (tokens_h, rand_bytes, model_b, layer_b, svals_h):
+        h.update(_len_bytes(part)); h.update(part)
+    return h.digest()
+
+def sign_commit_binding(tokens: list[int], randomness_hex: str, model_name: str, layer_index: int, s_vals: list[int], wallet: bt.wallet) -> bytes:
+    """Sign the commit-binding message with wallet hotkey."""
+    if not hasattr(wallet, 'hotkey') or not hasattr(wallet.hotkey, 'sign'):
+        raise TypeError("Wallet must provide hotkey.sign()")
+    msg = build_commit_binding(tokens, randomness_hex, model_name, layer_index, s_vals)
+    return wallet.hotkey.sign(msg)
+
+def verify_commit_signature(commit: dict, wallet_address: str) -> bool:
+    """Verify commit signature binding tokens, randomness, model, layer, and s_vals."""
+    try:
+        tokens = commit["tokens"]
+        s_vals = commit["s_vals"]
+        beacon = commit.get("beacon", commit.get("round_R", {}))
+        randomness = beacon["randomness"]
+        model_info = commit.get("model", {})
+        model_name = model_info.get("name", "")
+        layer_index = int(model_info.get("layer_index"))
+        sig = bytes.fromhex(commit["signature"])
+    except Exception:
+        return False
+    msg = build_commit_binding(tokens, randomness, model_name, layer_index, s_vals)
+    try:
+        keypair = bt.Keypair(ss58_address=wallet_address)
+        return keypair.verify(data=msg, signature=sig)
+    except Exception:
+        return False
 
 
 # ─────────────────────────────  PROVER  ────────────────────────────────
@@ -361,6 +406,7 @@ class Prover:
             .eval()
         )
         self.wallet = wallet
+        self.model_name = model_name
         logger.debug("Prover initialized with wallet for secure signatures")
 
     
@@ -441,8 +487,9 @@ class Prover:
         
         logger.debug(f"[Commit] Generated {len(s_vals)} sketch values for {len(tokens)} tokens")
         
-        # Sign the s_vals for integrity
-        signature = sign_s_vals(s_vals, self.wallet)
+        # Sign the binding: tokens + randomness + model + layer + s_vals
+        model_id = getattr(self.model, "name_or_path", self.model_name)
+        signature = sign_commit_binding(tokens, randomness_hex, model_id, LAYER_INDEX, s_vals, self.wallet)
         
         # Store state for open() method
         self._state = {
@@ -454,6 +501,7 @@ class Prover:
         
         return {
             "beacon": self.beacon_R,
+            "model": {"name": model_id, "layer_index": LAYER_INDEX},
             "tokens": tokens,
             "s_vals": s_vals,
             "signature": signature.hex()
@@ -526,7 +574,7 @@ class Verifier:
             .eval()
         )
 
-    def verify_rollout(self, commit: dict, proof_pkg: dict, prover_address: str) -> bool:
+    def verify_rollout(self, commit: dict, proof_pkg: dict, prover_address: str, *, challenge_randomness: str, min_k: int = CHALLENGE_K) -> bool:
         """
         Verify SAT rollout with GRAIL proof.
         
@@ -541,7 +589,7 @@ class Verifier:
         - The model that generated this cannot be substituted
         """
         # First verify the GRAIL proof - this proves the model identity
-        if not self.verify(commit, proof_pkg, prover_address):
+        if not self.verify(commit, proof_pkg, prover_address, challenge_randomness=challenge_randomness, min_k=min_k):
             logger.debug("GRAIL proof failed - model identity not verified")
             return False
         
@@ -579,7 +627,7 @@ class Verifier:
         logger.debug("SAT rollout verification successful - model identity confirmed")
         return True
     
-    def verify(self, commit: dict, proof_pkg: dict, prover_address: str) -> bool:
+    def verify(self, commit: dict, proof_pkg: dict, prover_address: str, *, challenge_randomness: str, min_k: int = CHALLENGE_K) -> bool:
         """
         Verify just the GRAIL proof portion using public key cryptography.
         
@@ -587,37 +635,84 @@ class Verifier:
             commit: Commitment data with s_vals and signature
             proof_pkg: Proof package with revealed information
             prover_address: SS58 wallet address for public key verification
+            challenge_randomness: Use this randomness for index selection (verifier-chosen; required)
+            min_k: Enforce a verifier-side minimum number of opened indices
         
         Returns:
             True if proof is valid, False otherwise
         """
-        # Verify s_vals signature for integrity
-        signature = bytes.fromhex(commit["signature"])
-        if not verify_s_vals_signature(commit["s_vals"], signature, prover_address):
-            logger.debug("s_vals signature verification failed")
+        # Basic input validation
+        try:
+            tokens = commit["tokens"]
+            s_vals = commit["s_vals"]
+        except Exception:
+            logger.debug("Missing tokens or s_vals in commit")
             return False
 
-        # Re-derive sketch vector
+        if not isinstance(tokens, list) or not tokens:
+            logger.debug("Invalid or empty tokens list")
+            return False
+        if not isinstance(s_vals, list) or not s_vals:
+            logger.debug("Invalid or empty s_vals list")
+            return False
+        if len(tokens) != len(s_vals):
+            logger.debug("tokens and s_vals length mismatch")
+            return False
+        # Token bounds
+        vocab = self.model.config.vocab_size
+        if any((t < 0 or t >= vocab) for t in tokens):
+            logger.debug("Token out of range for model vocab")
+            return False
+        # Enforce minimum coverage
+        seq_len = len(tokens)
+        if seq_len < int(min_k):
+            logger.debug(f"Sequence too short for minimum challenge: len={seq_len}, min_k={min_k}")
+            return False
+
+        # Verify commit signature binding
+        if not verify_commit_signature(commit, prover_address):
+            logger.debug("Commit signature verification failed")
+            return False
+
+        # Check model/layer binding and re-derive sketch vector
         beacon = commit.get("beacon", commit.get("round_R", {}))
-        r_vec = r_vec_from_randomness(
-            beacon["randomness"],
-            self.model.config.hidden_size
-        )
-
-        # Re-derive and compare indices using tokens (not s_vals)
-        proof_beacon = proof_pkg.get("beacon", proof_pkg.get("round_R1", {}))
-        idxs_exp = indices_from_root(
-            commit["tokens"],
-            proof_beacon["randomness"],
-            len(commit["tokens"]),
-            len(proof_pkg["indices"])
-        )
-        if idxs_exp != proof_pkg["indices"]:
-            logger.debug("Index-selection mismatch")
+        model_info = commit.get("model", {})
+        expected_model_name = getattr(self.model, "name_or_path", MODEL_NAME)
+        if model_info.get("name") != expected_model_name:
+            logger.debug("Model name mismatch in commit")
             return False
+        try:
+            layer_index_claim = int(model_info.get("layer_index"))
+        except Exception:
+            return False
+        if layer_index_claim != LAYER_INDEX:
+            logger.debug("Layer index mismatch in commit")
+            return False
+        r_vec = r_vec_from_randomness(beacon["randomness"], self.model.config.hidden_size)
+
+        # Determine number of indices to open (enforce minimum)
+        provided_indices = proof_pkg.get("indices", [])
+        try:
+            provided_k = len(provided_indices)
+        except Exception:
+            provided_k = 0
+        k = max(int(min_k), int(provided_k)) if provided_k else int(min_k)
+
+        # Use verifier-supplied randomness exclusively (no prover fallback)
+        open_rand = challenge_randomness
+
+        # Re-derive indices deterministically from tokens and chosen randomness
+        try:
+            idxs_exp = indices_from_root(tokens, open_rand, seq_len, k)
+        except Exception as e:
+            logger.debug(f"Index derivation failed: {e}")
+            return False
+
+        # Ignore prover-supplied indices entirely when verifier controls the challenge
+        # (kept for backward compatibility of packet shape, but not used for verification)
 
         # Recompute hidden states
-        full_ids = torch.tensor(commit["tokens"], dtype=torch.long,
+        full_ids = torch.tensor(tokens, dtype=torch.long,
                                 device=self.device).unsqueeze(0)
         with torch.no_grad():
             outs = self.model(full_ids, output_hidden_states=True)
@@ -625,7 +720,11 @@ class Verifier:
 
         # Check each opened index (tolerance check only now)
         for i in idxs_exp:
-            committed_s_val = commit["s_vals"][i]
+            # Guard against malformed s_vals length
+            if i >= len(s_vals):
+                logger.debug("Index out of range for s_vals")
+                return False
+            committed_s_val = s_vals[i]
             
             # Sketch‐value check with proper modular distance
             local = dot_mod_q(h_layer[i], r_vec)
