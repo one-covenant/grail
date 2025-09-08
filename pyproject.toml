@@ -42,8 +42,7 @@ dependencies = [
     "datasets>=2.14.0",
     "typer==0.16.1",
     "rich==14.1.0",
-    "wandb>=0.21.3",
-    "bittensor-cli>=9.10.2",
+    "wandb>=0.21.3"
 ]
 
 [project.optional-dependencies]
@@ -54,6 +53,7 @@ dev = [
     "flake8>=5.0.0",
     "mypy>=1.0.0",
     "pre-commit>=2.20.0",
+    "bittensor-cli>=9.10.2",
     "zstandard>=0.21.0",  # Optional: better compression than gzip
 ]
 experiments = [
