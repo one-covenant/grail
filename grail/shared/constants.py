@@ -68,10 +68,13 @@ SAMPLING_HIGH_P = 0.90
 SAMPLING_LOW_FRAC_MIN = 0.20
 SAMPLING_HIGH_FRAC_MIN = 0.50
 SAMPLING_MID_FRAC_MAX = 0.40
-SAMPLING_BC_THRESHOLD = 0.58
+# NOTE: this parameter so far hasn't been a good indicator of bimodality
+SAMPLING_BC_THRESHOLD = 0.58 
 
 # Minimal sampling shape hyperparameters (median gate for unimodal-low)
-SAMPLING_MEDIAN_LOW_MAX = 0.20
+SAMPLING_MEDIAN_LOW_MAX = 0.30
+# NOTE: this parameter so far has been a good indicator of bimodality
+SAMPLING_LOW_Q10_MAX = 0.20
 
 # ──────────────────────────  VALIDATOR-SPECIFIC CONSTANTS  ─────────────────────────────
 

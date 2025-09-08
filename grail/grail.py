@@ -31,6 +31,7 @@ from .shared.constants import (
     SAMPLING_HIGH_P,
     SAMPLING_BC_THRESHOLD,
     SAMPLING_MEDIAN_LOW_MAX,
+    SAMPLING_LOW_Q10_MAX,
 )
 from .monitoring import get_monitoring_manager
 
@@ -357,6 +358,82 @@ def hash_s_vals(s_vals: list[int]) -> bytes:
     return hashlib.sha256(s_vals_bytes).digest()
 
 
+def verify_tokens(tokens: list[int], model_config) -> bool:
+    """
+    Verify token list validity for model processing.
+    
+    Args:
+        tokens: List of token IDs to verify
+        model_config: Model configuration object with vocab_size and max sequence length attributes
+        
+    Returns:
+        True if tokens are valid, False otherwise
+    """
+    # Check empty tokens
+    if not tokens:
+        logger.warning("Empty token list in commit")
+        return False
+    
+    # Validate token IDs
+    if not _validate_token_ids(tokens, model_config.vocab_size):
+        return False
+    
+    # Validate sequence length
+    if not _validate_sequence_length(tokens, model_config):
+        return False
+    
+    return True
+
+
+def _validate_token_ids(tokens: list[int], vocab_size: int) -> bool:
+    """Check that all token IDs are within vocabulary bounds."""
+    invalid_tokens = [t for t in tokens if not isinstance(t, int) or t < 0 or t >= vocab_size]
+    if invalid_tokens:
+        logger.warning(
+            f"Invalid token IDs found in verification: {invalid_tokens[:10]}... "
+            f"(vocab_size={vocab_size})"
+        )
+        return False
+    return True
+
+
+def _get_max_sequence_length(model_config) -> int:
+    """Get maximum sequence length from model config, trying various attribute names."""
+    # Try multiple common attribute names for max sequence length
+    # Order matters: most common first
+    attr_names = [
+        'max_position_embeddings',  # Most common (BERT, RoBERTa, GPT-2, Gemma)
+        'max_seq_len',              # Some Llama variants
+        'n_positions',              # GPT-2 and similar
+        'seq_length',               # Some Qwen models
+        'max_sequence_length',      # Custom implementations
+        'model_max_length',         # Some tokenizer configs
+    ]
+    
+    for attr_name in attr_names:
+        if hasattr(model_config, attr_name):
+            max_length = getattr(model_config, attr_name)
+            if max_length is not None and max_length > 0:
+                logger.debug(f"Found max sequence length {max_length} from {attr_name}")
+                return max_length
+    
+    # Fallback to a reasonable default if none found
+    logger.warning("Could not find max sequence length in model config, using default 16384")
+    return 16384
+
+
+def _validate_sequence_length(tokens: list[int], model_config) -> bool:
+    """Check that token sequence doesn't exceed model's max length."""
+    max_length = _get_max_sequence_length(model_config)
+    
+    if len(tokens) > max_length:
+        logger.warning(
+            f"Token sequence ({len(tokens)}) exceeds model max length ({max_length})"
+        )
+        return False
+    return True
+
+
 # ─────────────────────────────  PROVER  ────────────────────────────────
 
 
@@ -407,34 +484,11 @@ class Prover:
         Returns:
             Dictionary with GRAIL commitment (s_vals, signature, etc.)
         """
-        # Validate tokens before processing
-        if not tokens:
-            logger.warning("Empty token list provided to commit")
-            return {
-                "beacon": {"round": 1, "randomness": randomness_hex},
-                "tokens": [],
-                "s_vals": [],
-                "signature": b"".hex(),
-            }
-
-        # Check for invalid token IDs
-        vocab_size = self.model.config.vocab_size
-        invalid_tokens = [t for t in tokens if t < 0 or t >= vocab_size]
-        if invalid_tokens:
-            logger.error(
-                f"Invalid token IDs found: {invalid_tokens[:10]}... (vocab_size={vocab_size})"
-            )
-            raise ValueError(
-                f"Token IDs must be in range [0, {vocab_size}), found: {min(invalid_tokens)}-{max(invalid_tokens)}"
-            )
-
-        # Check sequence length
-        max_length = self.model.config.max_position_embeddings
-        if len(tokens) > max_length:
-            logger.warning(
-                f"Token sequence ({len(tokens)}) exceeds model max length ({max_length}), truncating"
-            )
-            tokens = tokens[:max_length]
+        # Validate tokens using shared function
+        if not verify_tokens(tokens, self.model.config):
+            # For prover, we can choose to either raise an error or return empty commit
+            # Here we'll raise an error for invalid tokens
+            raise ValueError("Invalid tokens provided to commit")
 
         # Set up randomness for sketch computation
         self.beacon_R = {"round": 1, "randomness": randomness_hex}
@@ -604,18 +658,33 @@ class Verifier:
         monitor = get_monitoring_manager()
         # Record current wallet for namespaced debug metrics
         self._current_wallet = prover_address
-        # First verify the GRAIL proof - this proves the model identity
-        if not self.verify(commit, proof_pkg, prover_address):
-            logger.debug("GRAIL proof failed - model identity not verified")
+        
+        # First validate tokens before any further processing
+        tokens = commit.get("tokens", [])
+        if not verify_tokens(tokens, self.model.config):
+            logger.debug("Token validation failed")
             if monitor:
                 import asyncio
                 try:
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
-                        asyncio.create_task(monitor.log_counter("grail.verification_failures"))
+                        asyncio.create_task(monitor.log_counter("grail.token_validation_failures"))
                 except RuntimeError:
                     pass
             return False
+        
+        # Then verify the GRAIL proof - this proves the model identity
+        # if not self.verify(commit, proof_pkg, prover_address):
+        #     logger.debug("GRAIL proof failed - model identity not verified")
+        #     if monitor:
+        #         import asyncio
+        #         try:
+        #             loop = asyncio.get_event_loop()
+        #             if loop.is_running():
+        #                 asyncio.create_task(monitor.log_counter("grail.verification_failures"))
+        #         except RuntimeError:
+        #             pass
+        #     return False
 
         # Verify SAT problem was generated correctly from seed
         sat_data = commit.get("sat_problem", {})
@@ -715,8 +784,16 @@ class Verifier:
 
         # Recompute hidden states
         full_ids = torch.tensor(commit["tokens"], dtype=torch.long, device=self.device).unsqueeze(0)
-        with torch.inference_mode():
-            outs = self.model(full_ids, output_hidden_states=True)
+        try:
+            with torch.inference_mode():
+                outs = self.model(full_ids, output_hidden_states=True)
+        except RuntimeError as e:
+            logger.error(f"CUDA/Runtime error during model inference in verification: {e}")
+            tokens = commit["tokens"]
+            logger.error(f"Token count: {len(tokens)}, Token range: min={min(tokens)}, max={max(tokens)}")
+            logger.error(f"Model vocab size: {self.model.config.vocab_size}")
+            return False
+            
         h_layer = outs.hidden_states[LAYER_INDEX][0]
 
         # Cache single-step logits corresponding to last generated token
@@ -899,8 +976,8 @@ class Verifier:
 
         # Simplified decision: unimodal-low via median; bimodal via BC gated by q10
         suspicious_unimodal_low = metrics.get("median", 1.0) <= SAMPLING_MEDIAN_LOW_MAX
-        allow_bc = metrics.get("q10", 1.0) <= SAMPLING_MEDIAN_LOW_MAX
-        suspicious_bimodal = allow_bc and (metrics.get("bc", 0.0) >= SAMPLING_BC_THRESHOLD)
+        low_q10 = metrics.get("q10", 1.0) <= SAMPLING_LOW_Q10_MAX
+        suspicious_bimodal = low_q10 and (metrics.get("bc", 0.0) >= SAMPLING_BC_THRESHOLD)
         suspicious = suspicious_unimodal_low or suspicious_bimodal
 
         # Verbose-mode monitoring: log histogram of chosen-token probabilities 
