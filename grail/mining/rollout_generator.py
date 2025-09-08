@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import bittensor as bt
 
 from ..shared.constants import MAX_NEW_TOKENS
+from ..shared.hf_compat import resolve_hidden_size
 
 
 logger = logging.getLogger(__name__)
@@ -233,7 +234,7 @@ class RolloutGenerator(ABC):
 
         # Compute s_vals for GRAIL proof
         r_vec = r_vec_from_randomness(
-            randomness_hex, self.model.config.hidden_size
+            randomness_hex, resolve_hidden_size(self.model)
         )
         s_vals = []
 

@@ -9,11 +9,17 @@ import logging
 import os
 import random
 import struct
-from typing import List, Optional
+from typing import List, Optional, Any, Union, Tuple, Dict, cast
 
 import bittensor as bt
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import PreTrainedModel, PretrainedConfig
+from .shared.hf_compat import (
+    resolve_hidden_size,
+    resolve_vocab_size,
+    resolve_max_context_length,
+)
 
 from .environments import SATProblem, generate_sat_problem, SATRolloutGenerator
 from .shared.constants import (
@@ -164,7 +170,9 @@ def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
     cache_key = (clean_hex, d_model)
 
     # Check if we've already computed this (useful for repeated calls)
-    cache: dict = getattr(r_vec_from_randomness, "_cache", {})  # type: ignore[attr-defined]
+    cache: Dict[Tuple[str, int], torch.Tensor] = cast(
+        Dict[Tuple[str, int], torch.Tensor], getattr(r_vec_from_randomness, "_cache", {})
+    )
     if cache_key in cache:
         logger.debug(f"[SketchVec] Using cached vector for d_model={d_model}")
         return cache[cache_key].clone()
@@ -358,7 +366,7 @@ def hash_s_vals(s_vals: list[int]) -> bytes:
     return hashlib.sha256(s_vals_bytes).digest()
 
 
-def verify_tokens(tokens: list[int], model_config) -> bool:
+def verify_tokens(tokens: list[int], model_config: Union[PretrainedConfig, Any]) -> bool:
     """
     Verify token list validity for model processing.
     
@@ -374,9 +382,13 @@ def verify_tokens(tokens: list[int], model_config) -> bool:
         logger.warning("Empty token list in commit")
         return False
     
-    # Validate token IDs
-    if not _validate_token_ids(tokens, model_config.vocab_size):
-        return False
+    # Validate token IDs (best-effort if vocab size available)
+    vocab_size = resolve_vocab_size(model_config)
+    if vocab_size is not None:
+        if not _validate_token_ids(tokens, vocab_size):
+            return False
+    else:
+        logger.debug("Model config lacks vocab_size; skipping token-id bounds check")
     
     # Validate sequence length
     if not _validate_sequence_length(tokens, model_config):
@@ -397,34 +409,9 @@ def _validate_token_ids(tokens: list[int], vocab_size: int) -> bool:
     return True
 
 
-def _get_max_sequence_length(model_config) -> int:
-    """Get maximum sequence length from model config, trying various attribute names."""
-    # Try multiple common attribute names for max sequence length
-    # Order matters: most common first
-    attr_names = [
-        'max_position_embeddings',  # Most common (BERT, RoBERTa, GPT-2, Gemma)
-        'max_seq_len',              # Some Llama variants
-        'n_positions',              # GPT-2 and similar
-        'seq_length',               # Some Qwen models
-        'max_sequence_length',      # Custom implementations
-        'model_max_length',         # Some tokenizer configs
-    ]
-    
-    for attr_name in attr_names:
-        if hasattr(model_config, attr_name):
-            max_length = getattr(model_config, attr_name)
-            if max_length is not None and max_length > 0:
-                logger.debug(f"Found max sequence length {max_length} from {attr_name}")
-                return max_length
-    
-    # Fallback to a reasonable default if none found
-    logger.warning("Could not find max sequence length in model config, using default 16384")
-    return 16384
-
-
-def _validate_sequence_length(tokens: list[int], model_config) -> bool:
+def _validate_sequence_length(tokens: list[int], model_config: Union[PretrainedConfig, Any]) -> bool:
     """Check that token sequence doesn't exceed model's max length."""
-    max_length = _get_max_sequence_length(model_config)
+    max_length = resolve_max_context_length(model_config)
     
     if len(tokens) > max_length:
         logger.warning(
@@ -492,7 +479,7 @@ class Prover:
 
         # Set up randomness for sketch computation
         self.beacon_R = {"round": 1, "randomness": randomness_hex}
-        self.r_vec = r_vec_from_randomness(randomness_hex, self.model.config.hidden_size)
+        self.r_vec = r_vec_from_randomness(randomness_hex, resolve_hidden_size(self.model))
 
         # Compute sketch values from model hidden states
         s_vals = []
@@ -768,7 +755,7 @@ class Verifier:
 
         # Re-derive sketch vector
         beacon = commit.get("beacon", commit.get("round_R", {}))
-        r_vec = r_vec_from_randomness(beacon["randomness"], self.model.config.hidden_size)
+        r_vec = r_vec_from_randomness(beacon["randomness"], resolve_hidden_size(self.model))
 
         # Re-derive and compare indices using tokens (not s_vals)
         proof_beacon = proof_pkg.get("beacon", proof_pkg.get("round_R1", {}))
@@ -791,7 +778,8 @@ class Verifier:
             logger.error(f"CUDA/Runtime error during model inference in verification: {e}")
             tokens = commit["tokens"]
             logger.error(f"Token count: {len(tokens)}, Token range: min={min(tokens)}, max={max(tokens)}")
-            logger.error(f"Model vocab size: {self.model.config.vocab_size}")
+            _vsz = _get_vocab_size_from_config(self.model.config)
+            logger.error(f"Model vocab size: {_vsz if _vsz is not None else 'unknown'}")
             return False
             
         h_layer = outs.hidden_states[LAYER_INDEX][0]
