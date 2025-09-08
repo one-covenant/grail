@@ -23,7 +23,7 @@ from .shared.constants import (
     MODEL_NAME,
     LAYER_INDEX,
     RNG_LABEL,
-    DEFAULT_MAX_NEW_TOKENS,
+    MAX_NEW_TOKENS,
     MIN_EOS_PROBABILITY,
     SANITY_CHECK_DRIFT_THRESHOLD,
     SAMPLING_MIN_STEPS,
@@ -1055,7 +1055,7 @@ class Verifier:
 
     def _check_max_length_termination(self, commit: dict) -> bool:
         """Check if completion reached the configured generation max length."""
-        expected_max_new = int(DEFAULT_MAX_NEW_TOKENS)
+        expected_max_new = int(MAX_NEW_TOKENS)
 
         rollout = commit.get("rollout", {})
         completion_length = rollout.get("completion_length")

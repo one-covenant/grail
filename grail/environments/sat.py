@@ -8,7 +8,7 @@ import logging
 
 from .base import Parser, RewardVector
 from ..mining.rollout_generator import RolloutGenerator
-from ..shared.constants import DEFAULT_MAX_NEW_TOKENS
+from ..shared.constants import MAX_NEW_TOKENS
 
 # SAT Problem Configuration
 MIN_VARS = 3
@@ -543,4 +543,4 @@ class SATRolloutGenerator(RolloutGenerator):
     # Decoding controls
     def get_max_tokens(self) -> int:
         # Use project-wide default; can be overridden via GRAIL_MAX_NEW_TOKENS
-        return int(DEFAULT_MAX_NEW_TOKENS)
+        return int(MAX_NEW_TOKENS)

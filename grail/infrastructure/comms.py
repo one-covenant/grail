@@ -18,6 +18,8 @@ from transformers import AutoModelForCausalLM
 from safetensors.torch import load_file, save_file
 import bittensor as bt
 
+from ..shared.constants import WINDOW_LENGTH
+
 logger = logging.getLogger(__name__)
 
 # Protocol version for dataset versioning
@@ -471,7 +473,7 @@ async def sink_window_inferences(
     window_data = {
         "wallet": wallet.hotkey.ss58_address,
         "window_start": window_start,
-        "window_length": 20,  # WINDOW_LENGTH constant
+        "window_length": WINDOW_LENGTH,
         "inference_count": len(inferences),
         "inferences": inferences,
         "timestamp": time.time(),

@@ -9,14 +9,10 @@ from dataclasses import dataclass
 # Imports for type hints only - actual types are Any in method signatures
 import bittensor as bt
 
-logger = logging.getLogger(__name__)
+from ..shared.constants import MAX_NEW_TOKENS
 
-try:
-    # Import default decoding controls shared across miner/validator
-    from ..shared.constants import DEFAULT_MAX_NEW_TOKENS
-except Exception:
-    # Fallback to sane default if constants unavailable
-    DEFAULT_MAX_NEW_TOKENS = 256
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -422,7 +418,7 @@ class RolloutGenerator(ABC):
 
     def get_max_tokens(self) -> int:
         """Maximum new tokens to generate per decision."""
-        return int(DEFAULT_MAX_NEW_TOKENS)
+        return int(MAX_NEW_TOKENS)
 
     def get_temperature(self) -> float:
         """Temperature for sampling."""
