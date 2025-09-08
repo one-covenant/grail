@@ -111,36 +111,6 @@ class RolloutGenerator(ABC):
 
         return rollouts
 
-    def generate_rollout(self, problem: Any) -> Dict:
-        """Legacy method for backward compatibility - generates single
-        rollout."""
-        env = self.create_environment(problem)
-        state = self.reset_environment(env)
-        trajectory: List[Any] = []
-        total_reward = 0
-        done = False
-        all_tokens = []
-
-        while not done:
-            prompt = self.create_prompt(problem, env, state, trajectory)
-            tokens, action = self._get_model_decision(prompt, env, state)
-            all_tokens.extend(tokens)
-            next_state, reward, done, info = self.step_environment(env, action)
-            trajectory_entry = self.create_trajectory_entry(
-                state, action, reward, info
-            )
-            trajectory.append(trajectory_entry)
-            total_reward += reward
-            state = next_state
-
-        final_info = self.get_final_info(env, trajectory, total_reward)
-        return {
-            "tokens": all_tokens,
-            "trajectory": trajectory,
-            "total_reward": total_reward,
-            **final_info
-        }
-
     def _generate_single_rollout(
         self,
         problem: Any,
@@ -216,7 +186,7 @@ class RolloutGenerator(ABC):
         success = final_info.get('success', False)
 
         # Generate GRAIL proof components (using existing grail.py logic)
-        from .grail import r_vec_from_randomness, dot_mod_q, sign_s_vals
+        from .grail import r_vec_from_randomness, dot_mod_q, sign_commit_binding, LAYER_INDEX
 
         # Compute s_vals for GRAIL proof
         r_vec = r_vec_from_randomness(
@@ -237,8 +207,9 @@ class RolloutGenerator(ABC):
                     s_val = dot_mod_q(h_layer[pos], r_vec)
                     s_vals.append(s_val)
 
-        # Sign s_vals using wallet
-        signature = sign_s_vals(s_vals, wallet)
+        # Sign commit binding using wallet
+        model_id = getattr(self.model, "name_or_path", "unknown")
+        signature = sign_commit_binding(all_token_ids, randomness_hex, model_id, LAYER_INDEX, s_vals, wallet)
 
         return GRPORollout(
             tokens=all_token_ids,

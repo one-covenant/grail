@@ -9,24 +9,6 @@ Features:
 - Robust networking (Session, retries, shuffled relays, sensible timeouts)
 - Uniform schema for real & mock beacons
 """
-
-import os
-import json
-import random
-import logging
-import requests
-from threading import Lock
-#!/usr/bin/env python3
-"""
-Drand distributed randomness beacon integration for GRAIL.
-
-Features:
-- v2-first HTTP API with v1 fallbacks
-- Correct chain hashes (quicknet=3s, default=30s)
-- Programmatic fetch of chain info (genesis_time, period) with caching
-- Robust networking (Session, retries, shuffled relays, sensible timeouts)
-- Uniform schema for real & mock beacons
-"""
 from __future__ import annotations
 
 import os
@@ -35,7 +17,6 @@ import random
 import logging
 import requests
 from threading import Lock
-from typing import Any, Dict, Optional, Tuple
 from typing import Any, Dict, Optional, Tuple
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
