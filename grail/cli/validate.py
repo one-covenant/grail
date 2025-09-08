@@ -249,6 +249,7 @@ def validate(
 
                 if target_window <= last_processed_window or target_window < 0:
                     await asyncio.sleep(5)  # Wait for new window
+                    logger.debug(f"Waiting for new window {target_window}")
                     continue
 
                 # TODO(v2): Re-enable model state management for training
