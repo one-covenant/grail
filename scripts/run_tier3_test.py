@@ -30,7 +30,7 @@ import time
 import argparse
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, IO
 import logging
 
 # Configure logging
@@ -51,6 +51,9 @@ class Tier3TestRunner:
         self.gpu_assignments: Dict[str, int] = {}  # Track GPU assignments
         self.next_gpu = start_gpu  # Next GPU to assign
         self.start_gpu = start_gpu  # Remember starting GPU
+        self.log_dir: Path = self._init_log_dir()
+        self.log_files: Dict[str, IO[str]] = {}
+        self.log_locks: Dict[str, threading.Lock] = {}
 
         # Handle signals for clean shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -75,6 +78,32 @@ class Tier3TestRunner:
 
         return env
 
+    def _init_log_dir(self) -> Path:
+        """Create a timestamped log directory for this test run."""
+        root_dir = Path(__file__).parent.parent
+        logs_root = root_dir / 'logs' / 'tier3'
+        timestamp = time.strftime('%Y%m%d-%H%M%S')
+        run_dir = logs_root / timestamp
+        run_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Log directory: {run_dir}")
+        return run_dir
+
+    def _ensure_log_file(self, name: str) -> Path:
+        """Ensure a log file and lock exist for a given process name."""
+        if name not in self.log_files:
+            log_path = self.log_dir / f"{name}.log"
+            f = open(log_path, 'a', encoding='utf-8')
+            self.log_files[name] = f
+            self.log_locks[name] = threading.Lock()
+            f.write(
+                f"==== {name} log started at "
+                f"{time.strftime('%Y-%m-%d %H:%M:%S')} ===="
+                "\n"
+            )
+            f.flush()
+            logger.info(f"{name} log file: {log_path}")
+        return self.log_dir / f"{name}.log"
+
     def _signal_handler(self, signum: int, frame: Any) -> None:
         """Handle shutdown signals."""
         logger.info("\nReceived shutdown signal, stopping all services...")
@@ -94,7 +123,18 @@ class Tier3TestRunner:
             try:
                 for line in iter(stream.readline, b''):
                     if line and self.running:
-                        print(f"[{name}] {line.decode().rstrip()}")
+                        text = line.decode(errors='replace')
+                        print(f"[{name}] {text.rstrip()}")
+                        # Write to per-process log file
+                        if name in self.log_files:
+                            lock = self.log_locks.get(name)
+                            if lock:
+                                with lock:
+                                    ts = time.strftime('%Y-%m-%d %H:%M:%S')
+                                    self.log_files[name].write(
+                                        f"{ts} [{prefix}] {text}"
+                                    )
+                                    self.log_files[name].flush()
             except Exception as e:
                 if self.running:
                     logger.error(f"Error reading {prefix} for {name}: {e}")
@@ -143,6 +183,12 @@ class Tier3TestRunner:
         logger.info(
             f"Starting {name} with model: {model_name} on GPU {gpu_id}"
             + hotkey_info
+        )
+
+        # Ensure per-process log file exists and announce its path
+        miner_log_path = self._ensure_log_file(name)
+        logger.info(
+            f"Logging output for {name} to {miner_log_path}"
         )
 
         process = subprocess.Popen(
@@ -197,6 +243,12 @@ class Tier3TestRunner:
             f"Starting {name} with model: {model_name} on GPU {gpu_id}"
         )
 
+        # Ensure per-process log file exists and announce its path
+        validator_log_path = self._ensure_log_file(name)
+        logger.info(
+            f"Logging output for {name} to {validator_log_path}"
+        )
+
         process = subprocess.Popen(
             cmd,
             env=env,
@@ -225,6 +277,15 @@ class Tier3TestRunner:
 
         self.processes.clear()
         logger.info("All services stopped")
+        # Close log files
+        for f in self.log_files.values():
+            try:
+                f.flush()
+                f.close()
+            except Exception:
+                pass
+        self.log_files.clear()
+        self.log_locks.clear()
 
     def run(
         self,
