@@ -111,36 +111,6 @@ class RolloutGenerator(ABC):
 
         return rollouts
 
-    def generate_rollout(self, problem: Any) -> Dict:
-        """Legacy method for backward compatibility - generates single
-        rollout."""
-        env = self.create_environment(problem)
-        state = self.reset_environment(env)
-        trajectory: List[Any] = []
-        total_reward = 0
-        done = False
-        all_tokens = []
-
-        while not done:
-            prompt = self.create_prompt(problem, env, state, trajectory)
-            tokens, action = self._get_model_decision(prompt, env, state)
-            all_tokens.extend(tokens)
-            next_state, reward, done, info = self.step_environment(env, action)
-            trajectory_entry = self.create_trajectory_entry(
-                state, action, reward, info
-            )
-            trajectory.append(trajectory_entry)
-            total_reward += reward
-            state = next_state
-
-        final_info = self.get_final_info(env, trajectory, total_reward)
-        return {
-            "tokens": all_tokens,
-            "trajectory": trajectory,
-            "total_reward": total_reward,
-            **final_info
-        }
-
     def _generate_single_rollout(
         self,
         problem: Any,

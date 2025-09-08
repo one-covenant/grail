@@ -982,8 +982,25 @@ def validate(use_drand, test_mode):
                                         commit_data["sat_problem"]["seed"] = base_sat_seed
                                         # The verifier will regenerate the problem from this seed
                                     
+                                    # Use drand-derived challenge randomness mixed with window hash
+                                    import time
+                                    try:
+                                        drand_round = get_round_at_time(int(time.time()))
+                                        drand_beacon = get_drand_beacon(drand_round)
+                                        challenge_rand = hashlib.sha256(
+                                            (target_window_hash + drand_beacon['randomness']).encode()
+                                        ).hexdigest()
+                                    except Exception:
+                                        # Fallback to window hash if drand unavailable
+                                        challenge_rand = hashlib.sha256(target_window_hash.encode()).hexdigest()
+
                                     # Use wallet address for signature verification (public key verification)
-                                    is_valid = verifier.verify_rollout(commit_data, inference["proof"], wallet_addr)
+                                    is_valid = verifier.verify_rollout(
+                                        commit_data,
+                                        inference["proof"],
+                                        wallet_addr,
+                                        challenge_randomness=challenge_rand,
+                                    )
                                     if not is_valid:
                                         logger.warning(f"SAT rollout verification failed for {wallet_addr} - skipping")
                                         continue

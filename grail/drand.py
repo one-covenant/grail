@@ -9,6 +9,7 @@ Features:
 - Robust networking (Session, retries, shuffled relays, sensible timeouts)
 - Uniform schema for real & mock beacons
 """
+from __future__ import annotations
 
 import os
 import json
@@ -16,7 +17,7 @@ import random
 import logging
 import requests
 from threading import Lock
-from __future__ import annotations
+
 from typing import Any, Dict, Optional, Tuple
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
