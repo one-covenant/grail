@@ -9,7 +9,7 @@ underscoring the need to bind LAYER_INDEX in the signature.
 def main():
     import grail.grail as gg
 
-    gg.verify_s_vals_signature = lambda s, sig, addr: True
+    gg.verify_commit_signature = lambda commit, addr: True
     verifier = gg.Verifier(model_name=gg.MODEL_NAME)
 
     tokens = [10, 20, 30, 40]
@@ -22,7 +22,8 @@ def main():
     h_layer = outs.hidden_states[gg.LAYER_INDEX][0]
     s_vals = [gg.dot_mod_q(h_layer[i], r_vec) for i in range(len(tokens))]
 
-    commit = {"beacon": {"round": 1, "randomness": commit_rand}, "tokens": tokens, "s_vals": s_vals, "signature": "00"}
+    model_name = getattr(verifier.model, "name_or_path", gg.MODEL_NAME)
+    commit = {"beacon": {"round": 1, "randomness": commit_rand}, "model": {"name": model_name, "layer_index": gg.LAYER_INDEX}, "tokens": tokens, "s_vals": s_vals, "signature": "00"}
     open_rand = "aa"
     k = 3
     indices = gg.indices_from_root(tokens, open_rand, len(tokens), k)
@@ -49,8 +50,14 @@ def main():
     finally:
         gg.LAYER_INDEX = old
 
-    print("Exploit: model/layer ambiguity ->", "PASS" if (ok_default and not ok_other) else "FAIL")
-    print("Same commit passes for layer -1, fails for layer -2")
+    # With proper binding, commit should verify only on the bound layer
+    # Treat that as exploit blocked -> FAIL
+    print("Exploit: model/layer ambiguity ->", "FAIL" if (ok_default and not ok_other) else "PASS")
+    print(
+        "Observed: passes only on bound layer (-1) and fails on -2"
+        if (ok_default and not ok_other)
+        else f"Observed: ok_default={ok_default}, ok_other={ok_other}"
+    )
 
 
 if __name__ == "__main__":

@@ -186,7 +186,7 @@ class RolloutGenerator(ABC):
         success = final_info.get('success', False)
 
         # Generate GRAIL proof components (using existing grail.py logic)
-        from .grail import r_vec_from_randomness, dot_mod_q, sign_s_vals
+        from .grail import r_vec_from_randomness, dot_mod_q, sign_commit_binding, LAYER_INDEX
 
         # Compute s_vals for GRAIL proof
         r_vec = r_vec_from_randomness(
@@ -207,8 +207,9 @@ class RolloutGenerator(ABC):
                     s_val = dot_mod_q(h_layer[pos], r_vec)
                     s_vals.append(s_val)
 
-        # Sign s_vals using wallet
-        signature = sign_s_vals(s_vals, wallet)
+        # Sign commit binding using wallet
+        model_id = getattr(self.model, "name_or_path", "unknown")
+        signature = sign_commit_binding(all_token_ids, randomness_hex, model_id, LAYER_INDEX, s_vals, wallet)
 
         return GRPORollout(
             tokens=all_token_ids,

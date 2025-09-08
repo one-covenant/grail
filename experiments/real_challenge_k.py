@@ -12,7 +12,7 @@ def main():
 
     logging.getLogger("grail").setLevel(logging.INFO)
     # Bypass signature verification to isolate protocol behavior
-    gg.verify_s_vals_signature = lambda s, sig, addr: True
+    gg.verify_commit_signature = lambda commit, addr: True
 
     verifier = gg.Verifier(model_name=gg.MODEL_NAME)
 
@@ -39,8 +39,10 @@ def main():
     for i in indices:
         s_cheat[i] = s_true[i]
 
+    model_name = getattr(verifier.model, "name_or_path", gg.MODEL_NAME)
     commit = {
         "beacon": {"round": 1, "randomness": commit_rand},
+        "model": {"name": model_name, "layer_index": gg.LAYER_INDEX},
         "tokens": tokens,
         "s_vals": s_cheat,
         "signature": "00",
