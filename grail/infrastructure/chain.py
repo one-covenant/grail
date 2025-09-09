@@ -45,11 +45,9 @@ class GrailChainManager:
         chain_endpoint = os.getenv("BT_CHAIN_ENDPOINT") or os.getenv("GRAIL_CHAIN_ENDPOINT")
         
         if chain_endpoint:
-            # Create a config for the subtensor with the chain endpoint
-            subtensor_config = bt.subtensor.config()
-            subtensor_config.subtensor.chain_endpoint = chain_endpoint
-            subtensor_config.subtensor.network = network
-            self.subtensor = bt.subtensor(config=subtensor_config)
+            # When using a custom chain endpoint, pass it as the network parameter
+            # This preserves the hostname (e.g., ws://alice:9944) in Docker environments
+            self.subtensor = bt.subtensor(network=chain_endpoint)
         else:
             self.subtensor = bt.subtensor(network=network)
         
