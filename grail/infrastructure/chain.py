@@ -45,7 +45,11 @@ class GrailChainManager:
         chain_endpoint = os.getenv("BT_CHAIN_ENDPOINT") or os.getenv("GRAIL_CHAIN_ENDPOINT")
         
         if chain_endpoint:
-            self.subtensor = bt.subtensor(subtensor_address=chain_endpoint)
+            # Create a config for the subtensor with the chain endpoint
+            subtensor_config = bt.subtensor.config()
+            subtensor_config.subtensor.chain_endpoint = chain_endpoint
+            subtensor_config.subtensor.network = network
+            self.subtensor = bt.subtensor(config=subtensor_config)
         else:
             self.subtensor = bt.subtensor(network=network)
         
