@@ -34,6 +34,8 @@ from ..infrastructure.comms import (
     login_huggingface,
     PROTOCOL_VERSION,
 )
+from ..infrastructure.credentials import load_r2_credentials
+from ..infrastructure.chain import GrailChainManager
 from ..shared.constants import NETUID, WINDOW_LENGTH, MODEL_NAME, SUPERLINEAR_EXPONENT
 from ..monitoring import get_monitoring_manager
 from ..monitoring.config import MonitoringConfig
@@ -223,6 +225,21 @@ def validate(
     async def _run() -> None:
         subtensor = None
         
+        # Load R2 credentials
+        try:
+            credentials = load_r2_credentials()
+            logger.info("✅ Loaded R2 credentials")
+        except Exception as e:
+            logger.error(f"Failed to load R2 credentials: {e}")
+            raise
+        
+        # Initialize chain manager for credential commitments
+        config = bt.config()
+        config.netuid = NETUID
+        chain_manager = GrailChainManager(config, wallet, credentials)
+        await chain_manager.initialize()
+        logger.info("✅ Initialized chain manager and committed read credentials")
+        
         # Initialize monitoring for validation operations
         monitor = get_monitoring_manager()
         if monitor:
@@ -325,8 +342,12 @@ def validate(
                         # Construct expected filename for this hotkey and window
                         filename = f"grail/windows/{wallet_addr}-window-{target_window}.json"
 
+                        # Get miner's read credentials from chain
+                        miner_bucket = chain_manager.get_bucket_for_hotkey(wallet_addr)
+                        
                         # Check if file exists before downloading
-                        exists = await file_exists(filename)
+                        # Use miner's read credentials if available, otherwise use our own
+                        exists = await file_exists(filename, credentials=miner_bucket if miner_bucket else credentials, use_write=False)
                         if not exists:
                             logger.debug(f"No file found for {wallet_addr} at {filename}")
                             continue
@@ -334,7 +355,8 @@ def validate(
                         files_found += 1
                         logger.info(f"📁 Found file for hotkey {wallet_addr}")
 
-                        window_data = await get_file(filename)
+                        # Download using appropriate credentials
+                        window_data = await get_file(filename, credentials=miner_bucket if miner_bucket else credentials, use_write=False)
                         if not window_data:
                             logger.warning(f"Could not download {filename}")
                             continue
@@ -755,7 +777,7 @@ def validate(
                 # Upload all valid rollouts for training and to Hugging Face
                 if all_valid_rollouts:
                     # Upload to S3/R2 for immediate access
-                    upload_success = await upload_valid_rollouts(target_window, all_valid_rollouts)
+                    upload_success = await upload_valid_rollouts(target_window, all_valid_rollouts, credentials)
                     if upload_success:
                         logger.info(
                             f"📤 Uploaded {len(all_valid_rollouts)} valid rollouts for training"

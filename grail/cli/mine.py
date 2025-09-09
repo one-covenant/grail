@@ -27,6 +27,8 @@ from ..infrastructure.drand import get_drand_beacon
 from ..infrastructure.network import create_subtensor
 from ..environments import generate_sat_problem, SATRolloutGenerator
 from ..infrastructure.comms import sink_window_inferences
+from ..infrastructure.credentials import load_r2_credentials
+from ..infrastructure.chain import GrailChainManager
 from ..shared.constants import WINDOW_LENGTH, MODEL_NAME
 from ..monitoring import get_monitoring_manager
 from ..monitoring.config import MonitoringConfig
@@ -185,6 +187,21 @@ def mine(
     async def _run() -> None:
         subtensor = None
         last_window_start = -1
+        
+        # Load R2 credentials
+        try:
+            credentials = load_r2_credentials()
+            logger.info("✅ Loaded R2 credentials")
+        except Exception as e:
+            logger.error(f"Failed to load R2 credentials: {e}")
+            raise
+        
+        # Initialize chain manager for credential commitments
+        config = bt.config()
+        config.netuid = int(get_conf("BT_NETUID", 200))  # Default to netuid 200
+        chain_manager = GrailChainManager(config, wallet, credentials)
+        await chain_manager.initialize()
+        logger.info("✅ Initialized chain manager and committed read credentials")
         
         # Initialize monitoring for mining operations
         monitor = get_monitoring_manager()
@@ -598,9 +615,9 @@ def mine(
                     try:
                         if monitor:
                             with monitor.timer("mining.upload_duration"):
-                                await sink_window_inferences(wallet, window_start, inferences)
+                                await sink_window_inferences(wallet, window_start, inferences, credentials)
                         else:
-                            await sink_window_inferences(wallet, window_start, inferences)
+                            await sink_window_inferences(wallet, window_start, inferences, credentials)
                             
                         logger.info(
                             f"✅ Successfully uploaded window {window_start} with {len(inferences)} rollouts"

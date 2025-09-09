@@ -9,7 +9,7 @@ import logging
 import hashlib
 import tempfile
 from datetime import datetime
-from typing import Any, List, Dict, Optional
+from typing import Any, List, Dict, Optional, Union
 from botocore.config import Config
 from aiobotocore.session import get_session
 from huggingface_hub import HfFolder
@@ -19,6 +19,7 @@ from safetensors.torch import load_file, save_file
 import bittensor as bt
 
 from ..shared.constants import WINDOW_LENGTH
+from ..shared.schemas import BucketCredentials, Bucket
 
 logger = logging.getLogger(__name__)
 
@@ -38,18 +39,74 @@ def get_conf(key: str, default: Optional[str] = None) -> str:
     return v or default or ""
 
 
-def get_client_ctx() -> Any:
+def get_client_ctx(credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None, use_write: bool = True) -> Any:
     """Create an S3 client for Cloudflare R2 or a compatible endpoint.
-
+    
+    Args:
+        credentials: Either BucketCredentials, Bucket, or dict with credential fields.
+                    If None, falls back to environment variables (backwards compatibility).
+        use_write: If True and credentials is BucketCredentials, use write creds.
+                  Ignored for Bucket/dict types.
+    
     Environment overrides for hermetic/integration tests:
       - R2_ENDPOINT_URL: full endpoint (e.g., http://s3:9000 for MinIO)
       - R2_REGION: region name (default: us-east-1)
       - R2_FORCE_PATH_STYLE: "true" to force path-style addressing for MinIO
     """
+    # Determine credentials to use
+    if credentials is not None:
+        if isinstance(credentials, BucketCredentials):
+            # Same account and bucket, different access keys
+            account_id = credentials.account_id
+            bucket_name = credentials.bucket_name
+            if use_write:
+                access_key = credentials.write_access_key_id
+                secret_key = credentials.write_secret_access_key
+            else:
+                access_key = credentials.read_access_key_id
+                secret_key = credentials.read_secret_access_key
+        elif isinstance(credentials, Bucket):
+            # Bucket objects are typically read credentials from chain
+            account_id = credentials.account_id.strip()
+            access_key = credentials.access_key_id.strip()
+            secret_key = credentials.secret_access_key.strip()
+            bucket_name = credentials.name.strip()
+        elif isinstance(credentials, dict):
+            # Handle dict format (from chain commitments or legacy)
+            account_id = credentials.get('account_id', '').strip()
+            access_key = credentials.get('access_key_id', '').strip()
+            secret_key = credentials.get('secret_access_key', '').strip()
+            bucket_name = credentials.get('name', credentials.get('bucket_name', '')).strip()
+        else:
+            raise ValueError(f"Unsupported credentials type: {type(credentials)}")
+    else:
+        # Fall back to environment variables (backwards compatibility)
+        account_id = get_conf("R2_ACCOUNT_ID", None)
+        if account_id:
+            # Old single-credential mode
+            access_key = get_conf("R2_WRITE_ACCESS_KEY_ID")
+            secret_key = get_conf("R2_WRITE_SECRET_ACCESS_KEY")
+            bucket_name = get_conf("R2_BUCKET_ID")
+        else:
+            # Try new dual-credential mode (same bucket/account, different keys)
+            account_id = get_conf("R2_ACCOUNT_ID")
+            bucket_name = get_conf("R2_BUCKET_ID")
+            if use_write:
+                access_key = get_conf("R2_WRITE_ACCESS_KEY_ID")
+                secret_key = get_conf("R2_WRITE_SECRET_ACCESS_KEY")
+            else:
+                # Try read credentials first, fall back to write if not found
+                try:
+                    access_key = get_conf("R2_READ_ACCESS_KEY_ID")
+                    secret_key = get_conf("R2_READ_SECRET_ACCESS_KEY")
+                except ValueError:
+                    # Fall back to write credentials for backwards compatibility
+                    access_key = get_conf("R2_WRITE_ACCESS_KEY_ID")
+                    secret_key = get_conf("R2_WRITE_SECRET_ACCESS_KEY")
+    
     # Resolve endpoint
     endpoint_url = os.getenv("R2_ENDPOINT_URL")
     if not endpoint_url:
-        account_id = get_conf("R2_ACCOUNT_ID")
         endpoint_url = f"https://{account_id}.r2.cloudflarestorage.com"
 
     region_name = os.getenv("R2_REGION", "us-east-1")
@@ -72,10 +129,30 @@ def get_client_ctx() -> Any:
     return get_session().create_client(
         "s3",
         endpoint_url=endpoint_url,
-        aws_access_key_id=get_conf("R2_WRITE_ACCESS_KEY_ID"),
-        aws_secret_access_key=get_conf("R2_WRITE_SECRET_ACCESS_KEY"),
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
         config=config,
     )
+
+
+def get_bucket_id(credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None, use_write: bool = True) -> str:
+    """Get the bucket ID from credentials or environment.
+    
+    Note: Since we use the same bucket for both read and write operations,
+    the use_write parameter doesn't affect the bucket ID, only the access keys.
+    """
+    if credentials is not None:
+        if isinstance(credentials, BucketCredentials):
+            return credentials.bucket_name
+        elif isinstance(credentials, Bucket):
+            return credentials.name.strip()
+        elif isinstance(credentials, dict):
+            name = credentials.get('name', credentials.get('bucket_name', '')).strip()
+            if name:
+                return name
+    
+    # Fall back to environment variable (same bucket for read and write)
+    return get_conf("R2_BUCKET_ID")
 
 
 # --------------------------------------------------------------------------- #
@@ -139,7 +216,7 @@ async def upload_file_chunked(
     # For small files, use single upload
     if total_size <= chunk_size:
         logger.info(f"📤 Uploading {key} ({total_size} bytes)")
-        return await _upload_single_chunk(key, data, progress, max_retries)
+        return await _upload_single_chunk(key, data, progress, max_retries, credentials, use_write)
 
     # For large files, use multipart upload
     logger.info(
@@ -147,10 +224,11 @@ async def upload_file_chunked(
     )
 
     try:
-        async with get_client_ctx() as client:
+        async with get_client_ctx(credentials, use_write) as client:
             # Initiate multipart upload
+            bucket_id = get_bucket_id(credentials, use_write)
             response = await client.create_multipart_upload(
-                Bucket=get_conf("R2_BUCKET_ID"), Key=key
+                Bucket=bucket_id, Key=key
             )
             upload_id = response["UploadId"]
 
@@ -170,6 +248,8 @@ async def upload_file_chunked(
                     chunk_data,
                     progress,
                     max_retries,
+                    credentials,
+                    use_write,
                 )
                 tasks.append(task)
 
@@ -181,15 +261,17 @@ async def upload_file_chunked(
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
                     logger.error(f"Chunk {i+1} failed: {result}")
+                    bucket_id = get_bucket_id(credentials, use_write)
                     await client.abort_multipart_upload(
-                        Bucket=get_conf("R2_BUCKET_ID"), Key=key, UploadId=upload_id
+                        Bucket=bucket_id, Key=key, UploadId=upload_id
                     )
                     return False
                 parts.append(result)
 
             # Complete multipart upload
+            bucket_id = get_bucket_id(credentials, use_write)
             await client.complete_multipart_upload(
-                Bucket=get_conf("R2_BUCKET_ID"),
+                Bucket=bucket_id,
                 Key=key,
                 UploadId=upload_id,
                 MultipartUpload={"Parts": parts},
@@ -208,13 +290,16 @@ async def upload_file_chunked(
 
 
 async def _upload_single_chunk(
-    key: str, data: bytes, progress: TransferProgress, max_retries: int
+    key: str, data: bytes, progress: TransferProgress, max_retries: int,
+    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    use_write: bool = True,
 ) -> bool:
     """Upload single chunk with retry logic"""
     for attempt in range(max_retries):
         try:
-            async with get_client_ctx() as client:
-                await client.put_object(Bucket=get_conf("R2_BUCKET_ID"), Key=key, Body=data)
+            async with get_client_ctx(credentials, use_write) as client:
+                bucket_id = get_bucket_id(credentials, use_write)
+                await client.put_object(Bucket=bucket_id, Key=key, Body=data)
             progress.update(len(data))
             return True
         except Exception as e:
@@ -238,13 +323,16 @@ async def _upload_chunk_with_semaphore(
     data: bytes,
     progress: TransferProgress,
     max_retries: int,
+    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    use_write: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """Upload a single chunk with concurrency control and retry logic"""
     async with semaphore:
         for attempt in range(max_retries):
             try:
+                bucket_id = get_bucket_id(credentials, use_write)
                 response = await client.upload_part(
-                    Bucket=get_conf("R2_BUCKET_ID"),
+                    Bucket=bucket_id,
                     Key=key,
                     PartNumber=part_number,
                     UploadId=upload_id,
@@ -269,33 +357,41 @@ async def _upload_chunk_with_semaphore(
 # --------------------------------------------------------------------------- #
 
 
-async def download_file_chunked(key: str, max_retries: int = 3) -> Optional[bytes]:
+async def download_file_chunked(
+    key: str, 
+    max_retries: int = 3,
+    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    use_write: bool = False,
+) -> Optional[bytes]:
     """Download file in chunks with automatic decompression"""
     actual_key = key
     is_compressed = False
 
     for attempt in range(max_retries):
         try:
-            async with get_client_ctx() as client:
+            async with get_client_ctx(credentials, use_write) as client:
                 # Try compressed version first if not already .gz
                 if not key.endswith(".gz"):
                     try:
                         compressed_key = key + ".gz"
+                        bucket_id = get_bucket_id(credentials, use_write)
                         head_response = await client.head_object(
-                            Bucket=get_conf("R2_BUCKET_ID"), Key=compressed_key
+                            Bucket=bucket_id, Key=compressed_key
                         )
                         actual_key = compressed_key
                         is_compressed = True
                         logger.debug(f"Found compressed version: {compressed_key}")
                     except Exception:
                         # Fallback to uncompressed
+                        bucket_id = get_bucket_id(credentials, use_write)
                         head_response = await client.head_object(
-                            Bucket=get_conf("R2_BUCKET_ID"), Key=key
+                            Bucket=bucket_id, Key=key
                         )
                         actual_key = key
                 else:
+                    bucket_id = get_bucket_id(credentials, use_write)
                     head_response = await client.head_object(
-                        Bucket=get_conf("R2_BUCKET_ID"), Key=key
+                        Bucket=bucket_id, Key=key
                     )
                     is_compressed = key.endswith(".gz")
                 total_size = head_response["ContentLength"]
@@ -308,8 +404,9 @@ async def download_file_chunked(key: str, max_retries: int = 3) -> Optional[byte
                 # For small files, download in one go
                 chunk_size = 100 * 1024 * 1024  # 100MB chunks for H100 bandwidth
                 if total_size <= chunk_size:
+                    bucket_id = get_bucket_id(credentials, use_write)
                     response = await client.get_object(
-                        Bucket=get_conf("R2_BUCKET_ID"), Key=actual_key
+                        Bucket=bucket_id, Key=actual_key
                     )
                     data = await response["Body"].read()
                     progress.update(len(data))
@@ -332,7 +429,8 @@ async def download_file_chunked(key: str, max_retries: int = 3) -> Optional[byte
                 for start in range(0, total_size, chunk_size):
                     end = min(start + chunk_size - 1, total_size - 1)
                     task = _download_chunk_with_semaphore(
-                        semaphore, client, actual_key, start, end, progress, max_retries
+                        semaphore, client, actual_key, start, end, progress, max_retries,
+                        credentials, use_write
                     )
                     tasks.append(task)
 
@@ -381,13 +479,16 @@ async def _download_chunk_with_semaphore(
     end: int,
     progress: TransferProgress,
     max_retries: int,
+    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    use_write: bool = False,
 ) -> Optional[bytes]:
     """Download a single chunk with concurrency control and retry logic"""
     async with semaphore:
         for attempt in range(max_retries):
             try:
+                bucket_id = get_bucket_id(credentials, use_write)
                 response = await client.get_object(
-                    Bucket=get_conf("R2_BUCKET_ID"), Key=key, Range=f"bytes={start}-{end}"
+                    Bucket=bucket_id, Key=key, Range=f"bytes={start}-{end}"
                 )
                 data = await response["Body"].read()
                 progress.update(len(data))
@@ -409,30 +510,41 @@ async def _download_chunk_with_semaphore(
 # --------------------------------------------------------------------------- #
 
 
-async def file_exists(key: str) -> bool:
+async def file_exists(
+    key: str,
+    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    use_write: bool = False,
+) -> bool:
     """Check if a file exists in the bucket (checks both compressed and uncompressed)"""
     try:
-        async with get_client_ctx() as client:
+        async with get_client_ctx(credentials, use_write) as client:
             # Check for compressed version first
             if not key.endswith(".gz"):
                 try:
-                    await client.head_object(Bucket=get_conf("R2_BUCKET_ID"), Key=key + ".gz")
+                    bucket_id = get_bucket_id(credentials, use_write)
+                    await client.head_object(Bucket=bucket_id, Key=key + ".gz")
                     return True
                 except Exception:
                     pass
 
             # Check for original key
-            await client.head_object(Bucket=get_conf("R2_BUCKET_ID"), Key=key)
+            bucket_id = get_bucket_id(credentials, use_write)
+            await client.head_object(Bucket=bucket_id, Key=key)
             return True
     except Exception:
         return False
 
 
-async def list_bucket_files(prefix: str) -> List[str]:
+async def list_bucket_files(
+    prefix: str,
+    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    use_write: bool = False,
+) -> List[str]:
     """List files in bucket with given prefix"""
     try:
-        async with get_client_ctx() as client:
-            response = await client.list_objects_v2(Bucket=get_conf("R2_BUCKET_ID"), Prefix=prefix)
+        async with get_client_ctx(credentials, use_write) as client:
+            bucket_id = get_bucket_id(credentials, use_write)
+            response = await client.list_objects_v2(Bucket=bucket_id, Prefix=prefix)
             if "Contents" in response:
                 return [obj["Key"] for obj in response["Contents"]]
             return []
@@ -441,10 +553,14 @@ async def list_bucket_files(prefix: str) -> List[str]:
         return []
 
 
-async def get_file(key: str) -> Optional[Dict[str, Any]]:
+async def get_file(
+    key: str,
+    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    use_write: bool = False,
+) -> Optional[Dict[str, Any]]:
     """Download and parse JSON file with improved error handling"""
     try:
-        data = await download_file_chunked(key)
+        data = await download_file_chunked(key, credentials=credentials, use_write=use_write)
         if data:
             loaded: Any = json.loads(data.decode())
             if isinstance(loaded, dict):
@@ -464,7 +580,8 @@ async def get_file(key: str) -> Optional[Dict[str, Any]]:
 
 
 async def sink_window_inferences(
-    wallet: bt.wallet, window_start: int, inferences: List[dict]
+    wallet: bt.wallet, window_start: int, inferences: List[dict],
+    credentials: Optional[BucketCredentials] = None,
 ) -> None:
     """Upload window of inferences to S3 with improved logging"""
     key = f"grail/windows/{wallet.hotkey.ss58_address}-window-{window_start}.json"
@@ -482,7 +599,7 @@ async def sink_window_inferences(
     body = json.dumps(window_data).encode()
     logger.debug(f"[SINK] window={window_start} count={len(inferences)} → key={key}")
 
-    success = await upload_file_chunked(key, body)
+    success = await upload_file_chunked(key, body, credentials=credentials, use_write=True)
     if success:
         logger.info(
             f"📤 Uploaded window data for window {window_start} ({len(inferences)} inferences)"
@@ -492,7 +609,10 @@ async def sink_window_inferences(
 
 
 # TODO(v2): Re-enable model state management for training
-async def save_model_state(model: AutoModelForCausalLM, hotkey: str, window: int) -> bool:
+async def save_model_state(
+    model: AutoModelForCausalLM, hotkey: str, window: int,
+    credentials: Optional[BucketCredentials] = None,
+) -> bool:
     # Save model state as safetensors to S3 with chunked upload and progress logging
     key = f"grail/models/{hotkey}-{window}.safetensors"
 
@@ -520,7 +640,7 @@ async def save_model_state(model: AutoModelForCausalLM, hotkey: str, window: int
     logger.debug(f"[MODEL] Saving model state for {hotkey} window {window} → {key}")
 
     # Use chunked upload with retry logic
-    success = await upload_file_chunked(key, body)
+    success = await upload_file_chunked(key, body, credentials=credentials, use_write=True)
 
     if success:
         logger.info(f"✅ Successfully uploaded model state for window {window}")
@@ -530,14 +650,18 @@ async def save_model_state(model: AutoModelForCausalLM, hotkey: str, window: int
     return success
 
 
-async def load_model_state(model: AutoModelForCausalLM, hotkey: str, window: int) -> bool:
+async def load_model_state(
+    model: AutoModelForCausalLM, hotkey: str, window: int,
+    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    use_write: bool = False,
+) -> bool:
     """Load model state from S3 with chunked download and progress logging"""
     key = f"grail/models/{hotkey}-{window}.safetensors"
 
     logger.info(f"🔍 Loading model state for {hotkey} window {window}")
 
     # Use chunked download with retry logic
-    data = await download_file_chunked(key)
+    data = await download_file_chunked(key, credentials=credentials, use_write=use_write)
 
     if data is None:
         logger.debug(f"Model state not found for {key}")
@@ -570,13 +694,20 @@ async def load_model_state(model: AutoModelForCausalLM, hotkey: str, window: int
         return False
 
 
-async def model_state_exists(hotkey: str, window: int) -> bool:
+async def model_state_exists(
+    hotkey: str, window: int,
+    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    use_write: bool = False,
+) -> bool:
     # Check if model state exists for given hotkey and window
     key = f"grail/models/{hotkey}-{window}.safetensors"
-    return await file_exists(key)
+    return await file_exists(key, credentials=credentials, use_write=use_write)
 
 
-async def upload_valid_rollouts(window: int, valid_rollouts: List[dict]) -> bool:
+async def upload_valid_rollouts(
+    window: int, valid_rollouts: List[dict],
+    credentials: Optional[BucketCredentials] = None,
+) -> bool:
     """Upload validated SAT rollouts for training with chunked upload and progress logging"""
     key = f"grail/valid_rollouts/{window}.json"
 
@@ -590,7 +721,7 @@ async def upload_valid_rollouts(window: int, valid_rollouts: List[dict]) -> bool
     body = json.dumps(data).encode()
     logger.debug(f"[VALID] Uploading {len(valid_rollouts)} valid rollouts for window {window}")
 
-    success = await upload_file_chunked(key, body)
+    success = await upload_file_chunked(key, body, credentials=credentials, use_write=True)
 
     if success:
         logger.info(f"📤 Uploaded {len(valid_rollouts)} valid rollouts for window {window}")
@@ -600,7 +731,11 @@ async def upload_valid_rollouts(window: int, valid_rollouts: List[dict]) -> bool
     return success
 
 
-async def get_valid_rollouts(window: int) -> List[dict]:
+async def get_valid_rollouts(
+    window: int,
+    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    use_write: bool = False,
+) -> List[dict]:
     """
     Download valid SAT rollouts for training.
 
@@ -614,7 +749,7 @@ async def get_valid_rollouts(window: int) -> List[dict]:
     key = f"grail/valid_rollouts/{window}.json"
 
     try:
-        data = await get_file(key)
+        data = await get_file(key, credentials=credentials, use_write=use_write)
         if data and "rollouts" in data:
             logger.info(f"Downloaded {len(data['rollouts'])} verified rollouts for window {window}")
             return data["rollouts"]
