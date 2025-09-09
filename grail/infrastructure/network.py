@@ -35,12 +35,12 @@ async def create_subtensor() -> bt.subtensor:
 
     label = "public testnet" if network == "test" else ("mainnet" if network == "finney" else "custom")
     if chain_endpoint:
-        # Best practice: let the SDK read BT_CHAIN_ENDPOINT from env
-        # and construct AsyncSubtensor without unsupported kwargs.
+        # Pass the chain endpoint directly as the network parameter
+        # This preserves the hostname (e.g., ws://alice:9944) in Docker environments
         logger.info(
             f"Connecting to Bittensor custom endpoint: {chain_endpoint} (BT_NETWORK={network}, {label})"
         )
-        subtensor = bt.async_subtensor()
+        subtensor = bt.async_subtensor(network=chain_endpoint)
     else:
         # Supported labels in this codebase: 'finney' (mainnet), 'test' (public testnet)
         if network not in {"finney", "test"}:
