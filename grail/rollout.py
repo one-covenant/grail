@@ -5,6 +5,8 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Tuple
 from dataclasses import dataclass
+import numpy as np
+
 # Imports for type hints only - actual types are Any in method signatures
 import bittensor as bt
 
@@ -239,15 +241,17 @@ class RolloutGenerator(ABC):
                 logprobs.append(0.0)
         return logprobs
 
-    def _compute_grpo_advantages(self, rewards: List[float]) -> List[float]:
+    def _compute_grpo_advantages(self, rewards: List[float], eps=1e-4) -> List[float]:
         """
         Compute GRPO advantages: reward - mean(group_rewards).
         This is the core of GRPO - advantages sum to zero within each group.
         """
         if not rewards:
             return []
-        mean_reward = sum(rewards) / len(rewards)
-        return [r - mean_reward for r in rewards]
+        rewards = np.array(rewards)
+        mean_reward = rewards.mean()
+        std_reward = rewards.std()
+        return (rewards - mean_reward) / (std_reward + eps)
 
     def _get_model_decision(
         self, prompt: str, env: Any, state: Any
