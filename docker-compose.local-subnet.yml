@@ -62,36 +62,6 @@ services:
       timeout: 3s
       retries: 20
 
-  # ============================================================================
-  # STORAGE (MinIO as S3/R2 replacement)
-  # ============================================================================
-  s3:
-    image: minio/minio:latest
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/ready"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-    volumes:
-      - minio-data:/data
-
-  # One-time job to create the bucket used in tests
-  s3-setup:
-    image: minio/mc:latest
-    depends_on:
-      s3:
-        condition: service_healthy
-    entrypoint: ["/bin/sh", "-c"]
-    command: >
-      "mc alias set local http://s3:9000 minioadmin minioadmin && \
-       mc mb -p local/grail || true"
 
   # ============================================================================
   # GRAIL MINERS AND VALIDATORS
@@ -103,8 +73,6 @@ services:
     depends_on:
       alice:
         condition: service_healthy
-      s3-setup:
-        condition: service_completed_successfully
     volumes:
       - ${HOME:-/root}/.bittensor/wallets:/root/.bittensor/wallets
       - logs:/app/logs
@@ -116,9 +84,9 @@ services:
       BT_NETWORK: local
       BT_CHAIN_ENDPOINT: ws://alice:9944
       NETUID: ${NETUID:-2}  # Use netuid 2 (newly created subnet)
-      # Wallets (service-specific defaults)
-      BT_WALLET_COLD: ${BT_WALLET_COLD:-Alice}
-      BT_WALLET_HOT: ${BT_WALLET_HOT:-M1}
+      # Wallets - hardcoded for miner-1
+      BT_WALLET_COLD: Alice
+      BT_WALLET_HOT: M1
       # Model / app config
       GRAIL_MODEL_NAME: ${GRAIL_MODEL_NAME:-Qwen/Qwen2-0.5B-Instruct}
       GRAIL_MAX_NEW_TOKENS: ${GRAIL_MAX_NEW_TOKENS:-100}
@@ -135,15 +103,14 @@ services:
       # Hugging Face (optional)
       HF_TOKEN: ${HF_TOKEN:-}
       HF_USERNAME: ${HF_USERNAME:-}
-      # Object storage
-      R2_ENDPOINT_URL: http://s3:9000
-      R2_FORCE_PATH_STYLE: "true"
-      R2_BUCKET_ID: ${R2_BUCKET_ID:-grail}
-      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-local}
-      R2_WRITE_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID:-minioadmin}
-      R2_WRITE_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY:-minioadmin}
-      R2_READ_ACCESS_KEY_ID: ${R2_READ_ACCESS_KEY_ID:-minioadmin}
-      R2_READ_SECRET_ACCESS_KEY: ${R2_READ_SECRET_ACCESS_KEY:-minioadmin}
+      # Object storage - using real R2 from .env
+      # R2_ENDPOINT_URL will be auto-constructed from R2_ACCOUNT_ID
+      R2_BUCKET_ID: ${R2_BUCKET_ID}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
+      R2_WRITE_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID}
+      R2_WRITE_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY}
+      R2_READ_ACCESS_KEY_ID: ${R2_READ_ACCESS_KEY_ID}
+      R2_READ_SECRET_ACCESS_KEY: ${R2_READ_SECRET_ACCESS_KEY}
       # Metrics tuning
       GRAIL_METRIC_BUFFER_SIZE: ${GRAIL_METRIC_BUFFER_SIZE:-100}
       GRAIL_METRIC_FLUSH_INTERVAL: ${GRAIL_METRIC_FLUSH_INTERVAL:-30.0}
@@ -157,7 +124,7 @@ services:
             - driver: nvidia
               device_ids: ['0']
               capabilities: [gpu]
-    command: ["-vv", "mine", "--no-drand"]
+    command: ["-vv", "mine"]
 
   miner-2:
     build:
@@ -166,8 +133,6 @@ services:
     depends_on:
       alice:
         condition: service_healthy
-      s3-setup:
-        condition: service_completed_successfully
     volumes:
       - ${HOME:-/root}/.bittensor/wallets:/root/.bittensor/wallets
       - logs:/app/logs
@@ -179,9 +144,9 @@ services:
       BT_NETWORK: local
       BT_CHAIN_ENDPOINT: ws://alice:9944
       NETUID: ${NETUID:-2}  # Use netuid 2 (newly created subnet)
-      # Wallets (service-specific defaults)
-      BT_WALLET_COLD: ${BT_WALLET_COLD:-Alice}
-      BT_WALLET_HOT: ${BT_WALLET_HOT:-M2}
+      # Wallets - hardcoded for miner-2
+      BT_WALLET_COLD: Alice
+      BT_WALLET_HOT: M2
       # Model / app config
       GRAIL_MODEL_NAME: ${GRAIL_MODEL_NAME:-Qwen/Qwen2-0.5B-Instruct}
       GRAIL_MAX_NEW_TOKENS: ${GRAIL_MAX_NEW_TOKENS:-100}
@@ -198,15 +163,14 @@ services:
       # Hugging Face (optional)
       HF_TOKEN: ${HF_TOKEN:-}
       HF_USERNAME: ${HF_USERNAME:-}
-      # Object storage
-      R2_ENDPOINT_URL: http://s3:9000
-      R2_FORCE_PATH_STYLE: "true"
-      R2_BUCKET_ID: ${R2_BUCKET_ID:-grail}
-      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-local}
-      R2_WRITE_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID:-minioadmin}
-      R2_WRITE_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY:-minioadmin}
-      R2_READ_ACCESS_KEY_ID: ${R2_READ_ACCESS_KEY_ID:-minioadmin}
-      R2_READ_SECRET_ACCESS_KEY: ${R2_READ_SECRET_ACCESS_KEY:-minioadmin}
+      # Object storage - using real R2 from .env
+      # R2_ENDPOINT_URL will be auto-constructed from R2_ACCOUNT_ID
+      R2_BUCKET_ID: ${R2_BUCKET_ID}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
+      R2_WRITE_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID}
+      R2_WRITE_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY}
+      R2_READ_ACCESS_KEY_ID: ${R2_READ_ACCESS_KEY_ID}
+      R2_READ_SECRET_ACCESS_KEY: ${R2_READ_SECRET_ACCESS_KEY}
       # Metrics tuning
       GRAIL_METRIC_BUFFER_SIZE: ${GRAIL_METRIC_BUFFER_SIZE:-100}
       GRAIL_METRIC_FLUSH_INTERVAL: ${GRAIL_METRIC_FLUSH_INTERVAL:-30.0}
@@ -220,7 +184,7 @@ services:
             - driver: nvidia
               device_ids: ['1']
               capabilities: [gpu]
-    command: ["-vv", "mine", "--no-drand"]
+    command: ["-vv", "mine"]
 
   validator:
     build:
@@ -244,9 +208,9 @@ services:
       BT_NETWORK: local
       BT_CHAIN_ENDPOINT: ws://alice:9944
       NETUID: ${NETUID:-2}  # Use netuid 2 (newly created subnet)
-      # Wallets (service-specific defaults)
-      BT_WALLET_COLD: ${BT_WALLET_COLD:-Alice}
-      BT_WALLET_HOT: ${BT_WALLET_HOT:-default}  # Owner hotkey acts as validator
+      # Wallets - hardcoded for validator
+      BT_WALLET_COLD: Alice
+      BT_WALLET_HOT: default  # Owner hotkey acts as validator
       # Model / app config
       GRAIL_MODEL_NAME: ${GRAIL_MODEL_NAME:-Qwen/Qwen2-0.5B-Instruct}
       GRAIL_MAX_NEW_TOKENS: ${GRAIL_MAX_NEW_TOKENS:-100}
@@ -263,15 +227,14 @@ services:
       # Hugging Face (optional)
       HF_TOKEN: ${HF_TOKEN:-}
       HF_USERNAME: ${HF_USERNAME:-}
-      # Object storage
-      R2_ENDPOINT_URL: http://s3:9000
-      R2_FORCE_PATH_STYLE: "true"
-      R2_BUCKET_ID: ${R2_BUCKET_ID:-grail}
-      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-local}
-      R2_WRITE_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID:-minioadmin}
-      R2_WRITE_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY:-minioadmin}
-      R2_READ_ACCESS_KEY_ID: ${R2_READ_ACCESS_KEY_ID:-minioadmin}
-      R2_READ_SECRET_ACCESS_KEY: ${R2_READ_SECRET_ACCESS_KEY:-minioadmin}
+      # Object storage - using real R2 from .env
+      # R2_ENDPOINT_URL will be auto-constructed from R2_ACCOUNT_ID
+      R2_BUCKET_ID: ${R2_BUCKET_ID}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
+      R2_WRITE_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID}
+      R2_WRITE_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY}
+      R2_READ_ACCESS_KEY_ID: ${R2_READ_ACCESS_KEY_ID}
+      R2_READ_SECRET_ACCESS_KEY: ${R2_READ_SECRET_ACCESS_KEY}
       # Metrics tuning
       GRAIL_METRIC_BUFFER_SIZE: ${GRAIL_METRIC_BUFFER_SIZE:-100}
       GRAIL_METRIC_FLUSH_INTERVAL: ${GRAIL_METRIC_FLUSH_INTERVAL:-30.0}
@@ -285,10 +248,9 @@ services:
             - driver: nvidia
               device_ids: ['2']
               capabilities: [gpu]
-    command: ["-vv", "validate", "--no-drand"]
+    command: ["-vv", "validate", "--no-test-mode"]
 
 volumes:
   alice-data: {}
   bob-data: {}
-  minio-data: {}
   logs: {}

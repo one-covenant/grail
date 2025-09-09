@@ -560,15 +560,20 @@ def validate(
                                         commit_data["sat_problem"]["seed"] = base_sat_seed
                                         # The verifier will regenerate the problem from this seed
 
+                                    # Get challenge randomness from the inference data
+                                    challenge_randomness = inference.get("randomness", "")
+                                    
                                     # Use wallet address for signature verification (public key verification)
                                     if monitor:
                                         with monitor.timer("validation.rollout_verification"):
                                             is_valid = verifier.verify_rollout(
-                                                commit_data, inference["proof"], wallet_addr
+                                                commit_data, inference["proof"], wallet_addr,
+                                                challenge_randomness=challenge_randomness
                                             )
                                     else:
                                         is_valid = verifier.verify_rollout(
-                                            commit_data, inference["proof"], wallet_addr
+                                            commit_data, inference["proof"], wallet_addr,
+                                            challenge_randomness=challenge_randomness
                                         )
                                     
                                     total_rollouts_processed += 1
