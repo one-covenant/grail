@@ -197,8 +197,9 @@ def mine(
             raise
         
         # Initialize chain manager for credential commitments
-        config = bt.config()
-        config.netuid = int(get_conf("BT_NETUID", 200))  # Default to netuid 200
+        # Create a simple config object with just netuid
+        from types import SimpleNamespace
+        config = SimpleNamespace(netuid=int(get_conf("BT_NETUID", get_conf("NETUID", 200))))
         chain_manager = GrailChainManager(config, wallet, credentials)
         await chain_manager.initialize()
         logger.info("✅ Initialized chain manager and committed read credentials")

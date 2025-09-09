@@ -9,7 +9,7 @@ services:
       - "9000:9000"
       - "9001:9001"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/ready"]
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/ready" ]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -22,7 +22,7 @@ services:
     depends_on:
       s3:
         condition: service_healthy
-    entrypoint: ["/bin/sh", "-c"]
+    entrypoint: [ "/bin/sh", "-c" ]
     command: >
       "mc alias set local http://s3:9000 minioadmin minioadmin && \
        mc mb -p local/grail || true"
@@ -37,6 +37,8 @@ services:
     volumes:
       - ${HOME:-/root}/.bittensor/wallets:/root/.bittensor/wallets
       - logs:/app/logs
+    env_file:
+      - .env
     environment:
       NODE_TYPE: miner
       # Chain / network
@@ -69,15 +71,22 @@ services:
       R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
       R2_WRITE_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID:-minioadmin}
       R2_WRITE_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY:-minioadmin}
+      R2_READ_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID:-minioadmin}
+      R2_READ_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY:-minioadmin}
       # Metrics tuning
       GRAIL_METRIC_BUFFER_SIZE: ${GRAIL_METRIC_BUFFER_SIZE:-100}
       GRAIL_METRIC_FLUSH_INTERVAL: ${GRAIL_METRIC_FLUSH_INTERVAL:-30.0}
       # Testing ergonomics
       GRAIL_WINDOW_LENGTH: "3"
       CUDA_VISIBLE_DEVICES: "0"
-    devices:
-      - "nvidia.com/gpu=0"
-    command: ["-vv", "mine", "--no-drand"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ '0' ]
+              capabilities: [ gpu ]
+    command: [ "-vv", "mine", "--no-drand" ]
 
   miner-2:
     build:
@@ -89,6 +98,8 @@ services:
     volumes:
       - ${HOME:-/root}/.bittensor/wallets:/root/.bittensor/wallets
       - logs:/app/logs
+    env_file:
+      - .env
     environment:
       NODE_TYPE: miner
       # Chain / network
@@ -121,15 +132,22 @@ services:
       R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
       R2_WRITE_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID:-minioadmin}
       R2_WRITE_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY:-minioadmin}
+      R2_READ_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID:-minioadmin}
+      R2_READ_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY:-minioadmin}
       # Metrics tuning
       GRAIL_METRIC_BUFFER_SIZE: ${GRAIL_METRIC_BUFFER_SIZE:-100}
       GRAIL_METRIC_FLUSH_INTERVAL: ${GRAIL_METRIC_FLUSH_INTERVAL:-30.0}
       # Testing ergonomics
       GRAIL_WINDOW_LENGTH: "3"
-      CUDA_VISIBLE_DEVICES: "0"
-    devices:
-      - "nvidia.com/gpu=1"
-    command: ["-vv", "mine", "--no-drand"]
+      CUDA_VISIBLE_DEVICES: "1"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ '1' ]
+              capabilities: [ gpu ]
+    command: [ "-vv", "mine", "--no-drand" ]
 
   validator:
     build:
@@ -143,6 +161,8 @@ services:
     volumes:
       - ${HOME:-/root}/.bittensor/wallets:/root/.bittensor/wallets
       - logs:/app/logs
+    env_file:
+      - .env
     environment:
       NODE_TYPE: validator
       # Chain / network
@@ -175,18 +195,23 @@ services:
       R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
       R2_WRITE_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID:-minioadmin}
       R2_WRITE_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY:-minioadmin}
+      R2_READ_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID:-minioadmin}
+      R2_READ_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY:-minioadmin}
       # Metrics tuning
       GRAIL_METRIC_BUFFER_SIZE: ${GRAIL_METRIC_BUFFER_SIZE:-100}
       GRAIL_METRIC_FLUSH_INTERVAL: ${GRAIL_METRIC_FLUSH_INTERVAL:-30.0}
       # Testing ergonomics
       GRAIL_WINDOW_LENGTH: "3"
-      CUDA_VISIBLE_DEVICES: "0"
-    devices:
-      - "nvidia.com/gpu=2"
-    command: ["-vv", "validate", "--no-drand"]
+      CUDA_VISIBLE_DEVICES: "2"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ '2' ]
+              capabilities: [ gpu ]
+    command: [ "-vv", "validate", "--no-drand" ]
 
 volumes:
   minio-data: {}
   logs: {}
-
-

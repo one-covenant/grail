@@ -39,7 +39,16 @@ class GrailChainManager:
         self.fetch_interval = fetch_interval
         
         # Initialize Bittensor objects
-        self.subtensor = bt.subtensor(config=config)
+        # Use environment variables for network configuration
+        import os
+        network = os.getenv("BT_NETWORK") or os.getenv("GRAIL_NETWORK") or "test"
+        chain_endpoint = os.getenv("BT_CHAIN_ENDPOINT") or os.getenv("GRAIL_CHAIN_ENDPOINT")
+        
+        if chain_endpoint:
+            self.subtensor = bt.subtensor(subtensor_address=chain_endpoint)
+        else:
+            self.subtensor = bt.subtensor(network=network)
+        
         self.metagraph = self.subtensor.metagraph(self.netuid)
         
         # Commitment tracking
