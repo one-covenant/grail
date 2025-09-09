@@ -199,6 +199,8 @@ async def upload_file_chunked(
     chunk_size: int = 100 * 1024 * 1024,
     max_retries: int = 3,
     compress: bool = True,
+    credentials: Optional[BucketCredentials] = None,
+    use_write: bool = False,
 ) -> bool:
     """Upload file in chunks optimized for H100 high-bandwidth - 100MB chunks with compression"""
     # Compress data if enabled and it's JSON
