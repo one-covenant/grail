@@ -246,7 +246,7 @@ services:
       NETUID: ${NETUID:-2}  # Use netuid 2 (newly created subnet)
       # Wallets (service-specific defaults)
       BT_WALLET_COLD: ${BT_WALLET_COLD:-Alice}
-      BT_WALLET_HOT: ${BT_WALLET_HOT:-V1}
+      BT_WALLET_HOT: ${BT_WALLET_HOT:-default}  # Owner hotkey acts as validator
       # Model / app config
       GRAIL_MODEL_NAME: ${GRAIL_MODEL_NAME:-Qwen/Qwen2-0.5B-Instruct}
       GRAIL_MAX_NEW_TOKENS: ${GRAIL_MAX_NEW_TOKENS:-100}

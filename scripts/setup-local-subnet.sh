@@ -56,7 +56,8 @@ if ! [ -f "$WALLET_PATH/Alice/hotkeys/default" ]; then
     btcli wallet new_hotkey --wallet.path "$WALLET_PATH" --wallet.name Alice --wallet.hotkey default --n_words 12 --no-use-password
 fi
 
-# Create hotkeys for miners and validator
+# Create hotkeys for miners
+# Note: The subnet owner (Alice with default hotkey) will act as validator (UID 0)
 if ! [ -f "$WALLET_PATH/Alice/hotkeys/M1" ]; then
     echo "Creating miner hotkey M1..."
     btcli wallet new_hotkey --wallet.path "$WALLET_PATH" --wallet.name Alice --wallet.hotkey M1 --n_words 12 --no-use-password
@@ -65,11 +66,6 @@ fi
 if ! [ -f "$WALLET_PATH/Alice/hotkeys/M2" ]; then
     echo "Creating miner hotkey M2..."
     btcli wallet new_hotkey --wallet.path "$WALLET_PATH" --wallet.name Alice --wallet.hotkey M2 --n_words 12 --no-use-password
-fi
-
-if ! [ -f "$WALLET_PATH/Alice/hotkeys/V1" ]; then
-    echo "Creating validator hotkey V1..."
-    btcli wallet new_hotkey --wallet.path "$WALLET_PATH" --wallet.name Alice --wallet.hotkey V1 --n_words 12 --no-use-password
 fi
 
 echo -e "${GREEN}✅ Wallets created${NC}"
@@ -125,15 +121,15 @@ register_neuron() {
 }
 
 # Register neurons
-echo -e "${YELLOW}Registering neurons on subnet $NETUID...${NC}"
+echo -e "${YELLOW}Registering miner neurons on subnet $NETUID...${NC}"
+echo "Note: The subnet owner (Alice/default) is automatically registered as UID 0 (validator)"
 
 # Add a small delay after subnet creation to ensure it's fully initialized
 sleep 5
 
-# Register each neuron with retry logic
+# Register miner neurons with retry logic
 M1_SUCCESS=0
 M2_SUCCESS=0
-V1_SUCCESS=0
 
 if register_neuron "M1" "miner M1"; then
     M1_SUCCESS=1
@@ -143,18 +139,14 @@ if register_neuron "M2" "miner M2"; then
     M2_SUCCESS=1
 fi
 
-if register_neuron "V1" "validator V1"; then
-    V1_SUCCESS=1
-fi
-
 # Check if all registrations succeeded
-if [ $M1_SUCCESS -eq 1 ] && [ $M2_SUCCESS -eq 1 ] && [ $V1_SUCCESS -eq 1 ]; then
-    echo -e "${GREEN}✅ All neurons registered successfully${NC}"
+if [ $M1_SUCCESS -eq 1 ] && [ $M2_SUCCESS -eq 1 ]; then
+    echo -e "${GREEN}✅ All miner neurons registered successfully${NC}"
+    echo "Validator (Alice/default) is already registered as UID 0"
 else
-    echo -e "${YELLOW}⚠️  Some neurons may have failed to register${NC}"
+    echo -e "${YELLOW}⚠️  Some miners may have failed to register${NC}"
     echo "M1: $([ $M1_SUCCESS -eq 1 ] && echo '✅' || echo '❌')"
     echo "M2: $([ $M2_SUCCESS -eq 1 ] && echo '✅' || echo '❌')"
-    echo "V1: $([ $V1_SUCCESS -eq 1 ] && echo '✅' || echo '❌')"
 fi
 
 # Start the subnet's emission schedule

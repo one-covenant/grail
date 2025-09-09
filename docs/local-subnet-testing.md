@@ -7,8 +7,8 @@ This guide explains how to run GRAIL with a local Bittensor subnet for developme
 The local testing environment includes:
 - **2 Subtensor nodes** (Alice and Bob) running a local blockchain
 - **MinIO S3** for object storage (replacing Cloudflare R2)
-- **2 GRAIL miners** connected to the local subnet (netuid 2)
-- **1 GRAIL validator** connected to the local subnet (netuid 2)
+- **2 GRAIL miners** (M1, M2) connected to the local subnet (netuid 2)
+- **1 GRAIL validator** (Alice/default as subnet owner, UID 0)
 
 ## Prerequisites
 
@@ -56,11 +56,11 @@ btcli wallet regen_coldkey --wallet.name Alice \
     --mnemonic "bottom drive obey lake curtain smoke basket hold race lonely fit walk" \
     --no-use-password
 
-# Create hotkeys for miners and validator under Alice
+# Create hotkeys for miners under Alice
+# Note: default hotkey will be the validator (subnet owner, UID 0)
 btcli wallet new_hotkey --wallet.name Alice --wallet.hotkey default --n_words 12 --no-use-password
 btcli wallet new_hotkey --wallet.name Alice --wallet.hotkey M1 --n_words 12 --no-use-password
 btcli wallet new_hotkey --wallet.name Alice --wallet.hotkey M2 --n_words 12 --no-use-password
-btcli wallet new_hotkey --wallet.name Alice --wallet.hotkey V1 --n_words 12 --no-use-password
 ```
 
 #### 3. Fund wallets
@@ -77,16 +77,12 @@ btcli subnet create --subtensor.network local --subtensor.chain_endpoint ws://lo
 #### 5. Register neurons
 
 ```bash
-# Register miners
+# Register miners (validator is automatically registered as subnet owner, UID 0)
 btcli subnet register --netuid 2 --subtensor.network local --subtensor.chain_endpoint ws://localhost:9944 \
     --wallet.name Alice --wallet.hotkey M1 --no_prompt
 
 btcli subnet register --netuid 2 --subtensor.network local --subtensor.chain_endpoint ws://localhost:9944 \
     --wallet.name Alice --wallet.hotkey M2 --no_prompt
-
-# Register validator
-btcli subnet register --netuid 2 --subtensor.network local --subtensor.chain_endpoint ws://localhost:9944 \
-    --wallet.name Alice --wallet.hotkey V1 --no_prompt
 ```
 
 #### 6. Start subnet emission
