@@ -157,6 +157,13 @@ else
     echo "V1: $([ $V1_SUCCESS -eq 1 ] && echo '✅' || echo '❌')"
 fi
 
+# Start the subnet's emission schedule
+echo -e "${YELLOW}Starting subnet emission schedule...${NC}"
+btcli subnet start --netuid $NETUID --subtensor.network local --subtensor.chain_endpoint $CHAIN_ENDPOINT \
+    --wallet.path "$WALLET_PATH" --wallet.name Alice --wallet.hotkey default --no_prompt || echo "Subnet emission may already be started"
+
+echo -e "${GREEN}✅ Subnet emission schedule started${NC}"
+
 # Start GRAIL services
 echo -e "${YELLOW}Starting GRAIL miners and validator...${NC}"
 docker compose -f docker-compose.local-subnet.yml up -d miner-1 miner-2 validator

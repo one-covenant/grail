@@ -32,8 +32,9 @@ This script will:
 2. Create wallets for miners and validator
 3. Fund wallets from Alice's initial balance (not needed with Alice wallet)
 4. Create a subnet (netuid 2)
-5. Register all neurons on netuid 2
-6. Start GRAIL miners and validator
+5. Register all neurons on netuid 2 (with automatic retries)
+6. Start the subnet's emission schedule
+7. Start GRAIL miners and validator
 
 ### Manual Setup
 
@@ -88,7 +89,14 @@ btcli subnet register --netuid 2 --subtensor.network local --subtensor.chain_end
     --wallet.name Alice --wallet.hotkey V1 --no_prompt
 ```
 
-#### 6. Start GRAIL services
+#### 6. Start subnet emission
+
+```bash
+btcli subnet start --netuid 2 --subtensor.network local --subtensor.chain_endpoint ws://localhost:9944 \
+    --wallet.name Alice --wallet.hotkey default --no_prompt
+```
+
+#### 7. Start GRAIL services
 
 ```bash
 docker compose -f docker-compose.local-subnet.yml up -d miner-1 miner-2 validator
