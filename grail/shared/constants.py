@@ -11,7 +11,7 @@ import os
 
 NETWORK = os.getenv("BT_NETWORK", "finney")
 NETUID = int(os.getenv("NETUID", 81))
-WINDOW_LENGTH = 40
+WINDOW_LENGTH = 50
 
 # ────────────────  MODEL CONFIGURATION  ────────────────
 
@@ -31,7 +31,7 @@ RNG_LABEL = {"sketch": b"sketch", "open": b"open", "sat": b"sat"}
 
 # ────────────────  TERMINATION VALIDATION HPs  ────────────────
 
-MAX_NEW_TOKENS = int(os.getenv("GRAIL_MAX_NEW_TOKENS", "256"))
+MAX_NEW_TOKENS = int(os.getenv("GRAIL_MAX_NEW_TOKENS", "1024"))
 
 # Must match rollout generator default
 MIN_EOS_PROBABILITY = 0.1  # Minimum probability for valid EOS termination
