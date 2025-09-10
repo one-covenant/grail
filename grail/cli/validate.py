@@ -38,7 +38,7 @@ from ..infrastructure.comms import (
 )
 from ..infrastructure.credentials import load_r2_credentials
 from ..infrastructure.chain import GrailChainManager
-from ..shared.constants import NETUID, WINDOW_LENGTH, MODEL_NAME, SUPERLINEAR_EXPONENT
+from ..shared.constants import NETUID, WINDOW_LENGTH, MODEL_NAME, SUPERLINEAR_EXPONENT, ROLLOUTS_PER_PROBLEM
 from ..monitoring import get_monitoring_manager
 from ..monitoring.config import MonitoringConfig
 
@@ -692,7 +692,7 @@ def validate(
                                 continue
 
                             # Check if this looks like a complete group (should have 4 rollouts for GRPO)
-                            expected_group_size = 4  # Standard GRPO uses 4 rollouts per problem
+                            expected_group_size = ROLLOUTS_PER_PROBLEM # Standard GRPO uses 4 rollouts per problem
                             if len(group_rollouts) != expected_group_size:
                                 logger.debug(
                                     f"GRPO group {group_id} has {len(group_rollouts)} rollouts, expected {expected_group_size}"
