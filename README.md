@@ -2,11 +2,11 @@
 
 <div align="center">
   <pre>
-GGGGG RRRRR AAAAA IIIII LLLLL
-G     R   R A   A   I   L    
-G  GG RRRR  AAAAA   I   L    
-G   G R  R  A   A   I   L    
-GGGGG R   R A   A IIIII LLLLL
+GGGGG RRRRR AAAAA IIIII L
+    G     R   R A   A   I   L    
+    G  GG RRRR  AAAAA   I   L    
+    G   G R  R  A   A   I   L    
+    GGGGG R   R A   A IIIII LLLLL
   </pre>
 </div>
 
