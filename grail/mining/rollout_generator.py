@@ -16,6 +16,62 @@ from ..shared.hf_compat import resolve_hidden_size
 logger = logging.getLogger(__name__)
 
 
+# Qwen-style reasoning/solution tagging and system prompt
+REASONING_START = "<start_working_out>"
+REASONING_END = "<end_working_out>"
+SOLUTION_START = "<SOLUTION>"
+SOLUTION_END = "</SOLUTION>"
+
+SYSTEM_PROMPT = (
+    "You are given a problem.\n"
+    "Think about the problem and provide your working out.\n"
+    f"Place it between {REASONING_START} and {REASONING_END}.\n"
+    f"Then, provide your solution between {SOLUTION_START}{SOLUTION_END}"
+    # TODO: replace shorting logic with a better approach later
+    "Keep the reasoning succinct (≤25 steps, ≤500 tokens)."
+)
+
+
+# TODO: We need to build a module that makes the chat template
+# 'model' agnostic and task agnostic for reasoning tasks later on
+def _build_qwen_chat_template(
+    system_prompt: str,
+    reasoning_start: str,
+) -> str:
+    # Keep Jinja2 template exactly as specified; substitute via string
+    # replace
+    # TODO: later support jinja files for different system prompts,
+    # prompts, etc
+    chat_template = (
+        "{% if messages[0]['role'] == 'system' %}"
+        "{{ messages[0]['content'] + eos_token }}"
+        "{% set loop_messages = messages[1:] %}"
+        "{% else %}"
+        "{{ '{system_prompt}' + eos_token }}"
+        "{% set loop_messages = messages %}"
+        "{% endif %}"
+        "{% for message in loop_messages %}"
+        "{% if message['role'] == 'user' %}"
+        "{{ message['content'] }}"
+        "{% elif message['role'] == 'assistant' %}"
+        "{{ message['content'] + eos_token }}"
+        "{% endif %}"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}{{ '{reasoning_start}' }}"
+        "{% endif %}"
+    )
+
+    chat_template = chat_template.replace(
+        "'{system_prompt}'",
+        f"'{system_prompt}'",
+    )
+    chat_template = chat_template.replace(
+        """'{reasoning_start}'""",
+        f"'{reasoning_start}'",
+    )
+    return chat_template
+
+
 @dataclass
 class GRPORollout:
     """Single rollout for GRPO training with GRAIL proof support."""
@@ -69,6 +125,17 @@ class RolloutGenerator(ABC):
         self.tokenizer = tokenizer
         self.device = device
         self.rollouts_per_problem = rollouts_per_problem
+
+        # Inject Qwen-style chat template with system prompt and reasoning
+        # start token
+        try:
+            tpl = _build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
+            # Set only if not already matching to avoid unnecessary churn
+            if getattr(self.tokenizer, "chat_template", None) != tpl:
+                self.tokenizer.chat_template = tpl
+        except Exception:
+            # Non-fatal: fallback to tokenizer default template
+            logger.debug("Unable to set custom chat_template; using default.")
 
     def generate_grpo_rollouts(
         self, problem: Any, randomness_hex: str, wallet: bt.wallet
@@ -216,18 +283,21 @@ class RolloutGenerator(ABC):
         )
         trajectory.append(trajectory_entry)
         total_reward += reward
+        
+        if "success" not in info:
+            logger.warning(
+                "step_environment did not return 'success' in info; "
+                "defaulting to False"
+            )
+        success = bool(info.get("success", False))
 
         # Continue stepping if needed (for multi-step environments)
-        state = next_state
-        while not done and len(trajectory) < self.get_max_tokens():
-            # For subsequent steps, we might need to generate more actions
-            # This depends on the environment - for SAT, we usually make
-            # all assignments at once
-            break
-
-        # Check final success
-        final_info = self.get_final_info(env, trajectory, total_reward)
-        success = final_info.get("success", False)
+        # state = next_state
+        # while not done and len(trajectory) < self.get_max_tokens():
+        #     # For subsequent steps, we might need to generate more actions
+        #     # This depends on the environment - for SAT, we usually make
+        #     # all assignments at once
+        #     break
 
         # Generate GRAIL proof components (using existing grail.py logic)
         from ..grail import r_vec_from_randomness, dot_mod_q, sign_s_vals
@@ -322,34 +392,31 @@ class RolloutGenerator(ABC):
 
         with torch.inference_mode():
             try:
+                has_pad = (
+                    getattr(self.tokenizer, "pad_token_id", None) is not None
+                )
+                pad_id = (
+                    self.tokenizer.pad_token_id
+                    if has_pad
+                    else self.tokenizer.eos_token_id
+                )
                 gen = self.model.generate(
                     input_ids,
                     attention_mask=attention_mask,
                     max_new_tokens=self.get_max_tokens(),
                     temperature=self.get_temperature(),
                     do_sample=True,
-                    pad_token_id=self.tokenizer.eos_token_id,
+                    pad_token_id=pad_id,
                     top_p=0.95,
                     top_k=50,
                     repetition_penalty=1.1,
                     eos_token_id=self.tokenizer.eos_token_id,
                 )
             except RuntimeError as e:
-                if "inf" in str(e) or "nan" in str(e):
-                    # Fallback to greedy decoding if sampling fails
-                    logger.debug(
-                        f"Sampling failed, using greedy decoding: {e}"
-                    )
-                    gen = self.model.generate(
-                        input_ids,
-                        attention_mask=attention_mask,
-                        max_new_tokens=self.get_max_tokens(),
-                        do_sample=False,
-                        pad_token_id=self.tokenizer.eos_token_id,
-                        eos_token_id=self.tokenizer.eos_token_id,
-                    )
-                else:
-                    raise
+                logger.debug(
+                    f"Sampling failed, using greedy decoding: {e}"
+                )
+                raise
 
         # Extract tokens and parse action
         tokens = gen[0].tolist()
@@ -401,12 +468,19 @@ class RolloutGenerator(ABC):
         (next_state, reward, done, info)."""
         pass
 
-    @abstractmethod
     def create_trajectory_entry(
         self, state: Any, action: Any, reward: float, info: Dict
     ) -> Any:
-        """Create an entry for the trajectory list."""
-        pass
+        """Create an entry for the trajectory list.
+
+        Default implementation returns a minimal tuple:
+        (step_index, action, reward).
+
+        For single-step environments, the step_index is 0. Subclasses can
+        override to include richer information if needed.
+        """
+        # NOTE step_index is 0 because we're focusing on single-turn RL
+        return (0, action, reward)
 
     @abstractmethod
     def get_final_info(
