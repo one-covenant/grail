@@ -22,6 +22,8 @@ REASONING_END = "<end_working_out>"
 SOLUTION_START = "<SOLUTION>"
 SOLUTION_END = "</SOLUTION>"
 
+ADVANTAGE_STD_MIN = 1e-8
+
 SYSTEM_PROMPT = (
     "You are given a problem.\n"
     "Think about the problem and provide your working out.\n"
@@ -160,7 +162,8 @@ class RolloutGenerator(ABC):
         """
         rollouts = []
 
-        for i in range(self.rollouts_per_problem):
+        # TODO: super inefficient! add dynamic batching; vllm-support; etc soon
+        for _ in range(self.rollouts_per_problem):
             # Initialize environment
             env = self.create_environment(problem)
             state = self.reset_environment(env)
@@ -180,36 +183,6 @@ class RolloutGenerator(ABC):
             rollout.advantage = advantage
 
         return rollouts
-
-    def generate_rollout(self, problem: Any) -> Dict:
-        """Legacy method for backward compatibility - generates single
-        rollout."""
-        env = self.create_environment(problem)
-        state = self.reset_environment(env)
-        trajectory: List[Any] = []
-        total_reward = 0
-        done = False
-        all_tokens = []
-
-        while not done:
-            prompt = self.create_prompt(problem, env, state, trajectory)
-            tokens, action = self._get_model_decision(prompt, env, state)
-            all_tokens.extend(tokens)
-            next_state, reward, done, info = self.step_environment(env, action)
-            trajectory_entry = self.create_trajectory_entry(
-                state, action, reward, info
-            )
-            trajectory.append(trajectory_entry)
-            total_reward += reward
-            state = next_state
-
-        final_info = self.get_final_info(env, trajectory, total_reward)
-        return {
-            "tokens": all_tokens,
-            "trajectory": trajectory,
-            "total_reward": total_reward,
-            **final_info,
-        }
 
     def _generate_single_rollout(
         self,
@@ -283,7 +256,7 @@ class RolloutGenerator(ABC):
         )
         trajectory.append(trajectory_entry)
         total_reward += reward
-        
+
         if "success" not in info:
             logger.warning(
                 "step_environment did not return 'success' in info; "
@@ -361,84 +334,6 @@ class RolloutGenerator(ABC):
             return []
         mean_reward = sum(rewards) / len(rewards)
         return [r - mean_reward for r in rewards]
-
-    def _get_model_decision(
-        self, prompt: str, env: Any, state: Any
-    ) -> Tuple[List[int], Any]:
-        """
-        Get model's decision for the current state.
-
-        Args:
-            prompt: The prompt to send to the model
-            env: The environment instance
-            state: Current environment state
-
-        Returns:
-            Tuple of (tokens generated, action to take)
-        """
-        # Apply chat template
-        messages = [{"role": "user", "content": prompt}]
-        prompt_with_template = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        tokenized = self.tokenizer(
-            prompt_with_template,
-            return_tensors="pt",
-            return_attention_mask=True,
-        )
-
-        input_ids = tokenized.input_ids.to(self.device)
-        attention_mask = tokenized.attention_mask.to(self.device)
-
-        with torch.inference_mode():
-            try:
-                has_pad = (
-                    getattr(self.tokenizer, "pad_token_id", None) is not None
-                )
-                pad_id = (
-                    self.tokenizer.pad_token_id
-                    if has_pad
-                    else self.tokenizer.eos_token_id
-                )
-                gen = self.model.generate(
-                    input_ids,
-                    attention_mask=attention_mask,
-                    max_new_tokens=self.get_max_tokens(),
-                    temperature=self.get_temperature(),
-                    do_sample=True,
-                    pad_token_id=pad_id,
-                    top_p=0.95,
-                    top_k=50,
-                    repetition_penalty=1.1,
-                    eos_token_id=self.tokenizer.eos_token_id,
-                )
-            except RuntimeError as e:
-                logger.debug(
-                    f"Sampling failed, using greedy decoding: {e}"
-                )
-                raise
-
-        # Extract tokens and parse action
-        tokens = gen[0].tolist()
-
-        # Validate tokens are within vocabulary range
-        vocab_size = len(self.tokenizer)
-        invalid_tokens = [t for t in tokens if t < 0 or t >= vocab_size]
-        if invalid_tokens:
-            logger.warning(
-                f"Found invalid tokens: {invalid_tokens[:5]}... "
-                "Clamping to valid range"
-            )
-            tokens = [max(0, min(t, vocab_size - 1)) for t in tokens]
-
-        generated_text = self.tokenizer.decode(
-            gen[0][len(input_ids[0]):], skip_special_tokens=True
-        )
-        action = self.parse_action(generated_text, env, state)
-
-        return tokens, action
-
-    # Abstract methods that subclasses must implement
 
     @abstractmethod
     def create_environment(self, problem: Any) -> Any:

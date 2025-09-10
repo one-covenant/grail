@@ -605,47 +605,6 @@ class Prover:
             "signature": signature.hex(),
         }
 
-    def commit_rollout(
-        self, sat_problem: SATProblem, randomness_hex: str, difficulty: float = 0.5
-    ) -> dict:
-        """
-        Generate SAT rollout and create GRAIL proof.
-
-        This combines:
-        1. SAT rollout generation (delegated to SATRolloutGenerator)
-        2. GRAIL proof generation (commit method)
-
-        Returns:
-            Dictionary with both rollout data and GRAIL proof
-        """
-        # Use SATRolloutGenerator for environment-specific logic
-        sat_generator = SATRolloutGenerator(self.model, self.tokenizer, self.device)
-        rollout_data = sat_generator.generate_rollout(sat_problem)
-
-        # Create GRAIL commitment for the generated tokens
-        commit_data = self.commit(rollout_data["tokens"], randomness_hex)
-
-        # Combine rollout and proof data
-        return {
-            "sat_problem": {
-                "seed": sat_problem.seed,
-                "num_vars": sat_problem.num_vars,
-                "clauses": sat_problem.clauses,
-                "difficulty": difficulty,
-            },
-            "rollout": {
-                "trajectory": rollout_data["trajectory"],
-                "total_reward": rollout_data["total_reward"],
-                "success": rollout_data["success"],
-                "satisfied_clauses": rollout_data["satisfied_clauses"],
-                "assignment": rollout_data["assignment"],
-            },
-            "tokens": commit_data["tokens"],
-            "s_vals": commit_data["s_vals"],
-            "signature": commit_data["signature"],
-            "beacon": commit_data["beacon"],
-        }
-
     def open(self, randomness_hex: str, k: int = CHALLENGE_K) -> dict:
         # Use provided randomness instead of generating beacon
         beacon_R1 = {"round": 2, "randomness": randomness_hex}
