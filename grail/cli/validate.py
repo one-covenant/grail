@@ -9,6 +9,7 @@ import random
 import asyncio
 import logging
 import hashlib
+import json
 import traceback
 import math
 import bittensor as bt
@@ -186,9 +187,9 @@ async def watchdog(timeout: int = 600) -> None:
 # --------------------------------------------------------------------------- #
 def validate(
     use_drand: bool = typer.Option(
-        False,
+        True,
         "--use-drand/--no-drand",
-        help="Include drand in challenge randomness (deterministic fallback by default)",
+        help="Include drand in challenge randomness (default: True)",
         show_default=True,
     ),
     test_mode: bool = typer.Option(
@@ -417,12 +418,41 @@ def validate(
                             num_groups = len(groups_map)
                             groups_to_check = max(1, min(num_groups, int(num_groups * SAMPLE_RATE)))
 
-                            # Deterministic RNG seeded by wallet+window hash
-                            seed_material = f"{wallet_addr}:{target_window_hash}:groups".encode()
-                            seed_int = int.from_bytes(hashlib.sha256(seed_material).digest()[:8], "big")
+                            # Deterministic per-validator RNG (optionally drand-mixed)
+                            seed_parts = [
+                                wallet_addr,
+                                target_window_hash,
+                                wallet.hotkey.ss58_address,
+                            ]
+                            if use_drand:
+                                try:
+                                    drand_round = get_round_at_time(int(time.time()))
+                                    drand_beacon = get_drand_beacon(drand_round)
+                                    seed_parts.append(drand_beacon["randomness"])
+                                except Exception:
+                                    pass
+                            seed_material = ":".join(seed_parts).encode()
+                            seed_int = int.from_bytes(
+                                hashlib.sha256(seed_material).digest()[:8], "big"
+                            )
                             rng = random.Random(seed_int)
-                            # Sort keys by string representation for stable ordering across types
-                            group_keys = sorted(list(groups_map.keys()), key=lambda k: str(k))
+
+                            # Canonicalize group order by content digest
+                            def _group_digest(gidxs):
+                                dig = hashlib.sha256()
+                                for i in sorted(gidxs):
+                                    commit_json = json.dumps(
+                                        inferences[i].get("commit", {}),
+                                        sort_keys=True,
+                                        separators=(",", ":"),
+                                    )
+                                    dig.update(hashlib.sha256(commit_json.encode()).digest())
+                                return dig.hexdigest()
+
+                            group_keys = sorted(
+                                list(groups_map.keys()),
+                                key=lambda gid: _group_digest(groups_map[gid]),
+                            )
                             selected_groups = rng.sample(group_keys, groups_to_check)
 
                             # Add all rollouts from selected groups
@@ -587,20 +617,16 @@ def validate(
                                     # Use wallet address for signature verification (public key verification)
                                     if monitor:
                                         with monitor.timer("validation.rollout_verification"):
-                                            is_valid = await asyncio.to_thread(
-                                                verifier.verify_rollout,
-                                                commit_data,
-                                                inference["proof"],
+                                            is_valid = verifier.verify_rollout(
+                                                commit_data, inference["proof"],
                                                 wallet_addr,
-                                                challenge_randomness=challenge_rand,
+                                                challenge_randomness=challenge_rand
                                             )
                                     else:
-                                        is_valid = await asyncio.to_thread(
-                                            verifier.verify_rollout,
-                                            commit_data,
-                                            inference["proof"],
+                                        is_valid = verifier.verify_rollout(
+                                            commit_data, inference["proof"],
                                             wallet_addr,
-                                            challenge_randomness=challenge_rand,
+                                            challenge_randomness=challenge_rand
                                         )
                                     
                                     total_rollouts_processed += 1
@@ -838,13 +864,6 @@ def validate(
                 for hotkey, metrics in window_inference_counts.items():
                     inference_counts[hotkey][target_window] = metrics
 
-                # Prune history to the last 3 windows per miner to bound memory
-                prune_before = target_window - 2 * WINDOW_LENGTH
-                for hk in list(inference_counts.keys()):
-                    for w in list(inference_counts[hk].keys()):
-                        if w < prune_before:
-                            del inference_counts[hk][w]
-
                 # Compute weights based on unique successful rollouts
                 EMPTY_METRICS: Dict[str, int] = {}
                 raw_scores = []
@@ -870,8 +889,7 @@ def validate(
                     success_score = min(1.0, total_successful / 20.0) if total_successful > 0 else 0
                     valid_score = min(1.0, total_estimated_valid / 50.0) if total_estimated_valid > 0 else 0
 
-                    # Emphasize uniqueness, include success, and retain valid volume
-                    base_score = 0.6 * unique_score + 0.2 * success_score + 0.2 * valid_score
+                    base_score = 0.6 * unique_score + 0.0 * success_score + 0.4 * valid_score
                     base_score = max(0.0, min(1.0, base_score))
 
                     # Apply superlinear curve: emphasizes higher performers and penalizes splitting
