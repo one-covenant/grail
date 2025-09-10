@@ -308,6 +308,19 @@ def validate(
                 # Get block hash for the window start
                 target_window_hash = await subtensor.get_block_hash(target_window)
 
+                # Derive one window-level randomness value to reuse everywhere in this window
+                if use_drand:
+                    try:
+                        drand_round = get_round_at_time(int(time.time()))
+                        drand_beacon = get_drand_beacon(drand_round)
+                        window_rand = hashlib.sha256(
+                            (target_window_hash + drand_beacon["randomness"]).encode()
+                        ).hexdigest()
+                    except Exception:
+                        window_rand = hashlib.sha256(target_window_hash.encode()).hexdigest()
+                else:
+                    window_rand = hashlib.sha256(target_window_hash.encode()).hexdigest()
+
                 # For testing: just use the validator's own hotkey (same as miner in local testing)
                 # In production, this would iterate through meta.hotkeys
                 # Use the test_mode parameter passed to the function instead of hardcoding
@@ -418,20 +431,8 @@ def validate(
                             num_groups = len(groups_map)
                             groups_to_check = max(1, min(num_groups, int(num_groups * SAMPLE_RATE)))
 
-                            # Deterministic per-validator RNG (optionally drand-mixed)
-                            seed_parts = [
-                                wallet_addr,
-                                target_window_hash,
-                                wallet.hotkey.ss58_address,
-                            ]
-                            if use_drand:
-                                try:
-                                    drand_round = get_round_at_time(int(time.time()))
-                                    drand_beacon = get_drand_beacon(drand_round)
-                                    seed_parts.append(drand_beacon["randomness"])
-                                except Exception:
-                                    pass
-                            seed_material = ":".join(seed_parts).encode()
+                            # Deterministic per-validator RNG seeded once per window
+                            seed_material = f"{wallet_addr}:{window_rand}:{wallet.hotkey.ss58_address}".encode()
                             seed_int = int.from_bytes(
                                 hashlib.sha256(seed_material).digest()[:8], "big"
                             )
@@ -590,29 +591,8 @@ def validate(
                                         # The verifier will regenerate the problem from this seed
 
 
-                                    # Deterministic challenge randomness (window-hash only by default)
-                                    if use_drand:
-                                        try:
-                                            # Derive a deterministic round anchor from the window hash;
-                                            # if unavailable, fallback remains deterministic.
-                                            round_time = int(
-                                                int(hashlib.sha256(target_window_hash.encode()).hexdigest()[:8], 16)
-                                            )
-                                            drand_round = get_round_at_time(round_time)
-                                            drand_beacon = get_drand_beacon(drand_round)
-                                            challenge_rand = hashlib.sha256(
-                                                (target_window_hash + drand_beacon['randomness']).encode()
-                                            ).hexdigest()
-                                        except Exception:
-                                            # Deterministic fallback to window hash only
-                                            challenge_rand = hashlib.sha256(
-                                                target_window_hash.encode()
-                                            ).hexdigest()
-                                            logger.debug(
-                                                "drand unavailable; using window-hash only"
-                                            )
-                                    else:
-                                        challenge_rand = hashlib.sha256(target_window_hash.encode()).hexdigest()
+                                    # Use one window-level randomness for this window
+                                    challenge_rand = window_rand
 
                                     # Use wallet address for signature verification (public key verification)
                                     if monitor:
