@@ -325,15 +325,21 @@ class RolloutGenerator(ABC):
                 logprobs.append(0.0)
         return logprobs
 
+    # TODO: optimize with torch tensors for efficiency; support off-policy
+    # variants later
     def _compute_grpo_advantages(self, rewards: List[float]) -> List[float]:
         """
-        Compute GRPO advantages: reward - mean(group_rewards).
-        This is the core of GRPO - advantages sum to zero within each group.
+        GRPO advantages with per-group baseline and variance normalization.
+        Ensures zero-mean within group; scales by std for stability.
         """
-        if not rewards:
+        n = len(rewards)
+        if n == 0:
             return []
-        mean_reward = sum(rewards) / len(rewards)
-        return [r - mean_reward for r in rewards]
+        mean_reward = sum(rewards) / n
+        centered = [r - mean_reward for r in rewards]
+        std = (sum(a * a for a in centered) / n) ** 0.5
+        denom = max(std, ADVANTAGE_STD_MIN)
+        return [a / denom for a in centered]
 
     @abstractmethod
     def create_environment(self, problem: Any) -> Any:
