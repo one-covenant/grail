@@ -15,6 +15,8 @@ import bittensor as bt
 from collections import defaultdict
 from typing import Any, Tuple, Optional, DefaultDict
 
+from grail.infrastructure.drand import get_round_at_time, get_drand_beacon
+
 # TODO(v2): Re-enable training imports
 # from trl import PPOTrainer, PPOConfig
 # TODO(v2): Re-enable for training
@@ -537,15 +539,30 @@ def validate(
                                         commit_data["sat_problem"]["seed"] = base_sat_seed
                                         # The verifier will regenerate the problem from this seed
 
+                                    # Use drand-derived challenge randomness mixed with window hash
+                                    try:
+                                        drand_round = get_round_at_time(int(time.time()))
+                                        drand_beacon = get_drand_beacon(drand_round)
+                                        challenge_rand = hashlib.sha256(
+                                            (target_window_hash + drand_beacon['randomness']).encode()
+                                        ).hexdigest()
+                                    except Exception:
+                                        # Fallback to window hash if drand unavailable
+                                        challenge_rand = hashlib.sha256(target_window_hash.encode()).hexdigest()
+
                                     # Use wallet address for signature verification (public key verification)
                                     if monitor:
                                         with monitor.timer("validation.rollout_verification"):
                                             is_valid = verifier.verify_rollout(
-                                                commit_data, inference["proof"], wallet_addr
+                                                commit_data, inference["proof"],
+                                                wallet_addr,
+                                                challenge_randomness=challenge_rand
                                             )
                                     else:
                                         is_valid = verifier.verify_rollout(
-                                            commit_data, inference["proof"], wallet_addr
+                                            commit_data, inference["proof"],
+                                            wallet_addr,
+                                            challenge_randomness=challenge_rand
                                         )
                                     
                                     total_rollouts_processed += 1
