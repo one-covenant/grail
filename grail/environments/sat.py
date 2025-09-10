@@ -36,7 +36,9 @@ class SATProblem:
         text += f"Variables: {self.num_vars}\n"
         text += "Clauses:\n"
         for i, clause in enumerate(self.clauses):
-            clause_str = " OR ".join([f"{'NOT ' if lit < 0 else ''}x{abs(lit)}" for lit in clause])
+            clause_str = " OR ".join(
+                [f"{'NOT ' if lit < 0 else ''}x{abs(lit)}" for lit in clause]
+            )
             text += f"  ({clause_str})\n"
         return text
 
@@ -78,7 +80,10 @@ def generate_sat_problem(seed: str, difficulty: float = 0.5) -> SATProblem:
     clauses = []
     for _ in range(num_clauses):
         clause = []
-        vars_in_clause = rng.sample(range(1, num_vars + 1), min(CLAUSE_LENGTH, num_vars))
+        vars_in_clause = rng.sample(
+            range(1, num_vars + 1),
+            min(CLAUSE_LENGTH, num_vars),
+        )
         for var in vars_in_clause:
             # Randomly negate
             if rng.random() < 0.5:
@@ -102,38 +107,12 @@ class SATParser(Parser):
         - strict_format_ok: bool
         - trailing_after_answer: int
         - answer_has_only_bits_spaces: bool
-
-      Backward compatible: if tags are missing, falls back to legacy parsing.
     """
 
-    _ANSWER_OPEN = re.compile(r"<\s*answer\s*>", re.IGNORECASE)
-    _ANSWER_CLOSE = re.compile(r"<\s*/\s*answer\s*>", re.IGNORECASE)
-    _THINK_OPEN = re.compile(r"<\s*thinking\s*>", re.IGNORECASE)
-    _THINK_CLOSE = re.compile(r"<\s*/\s*thinking\s*>", re.IGNORECASE)
-
-    def _legacy_parse_assignment(self, text: str, num_vars: int) -> List[bool]:
-        actions: List[int] = []
-        # Simple scan for 0/1 tokens first
-        for ch in text:
-            if ch in "01":
-                actions.append(int(ch))
-                if len(actions) >= num_vars:
-                    break
-
-        # Fallback: patterns like x1=0 or "variable 2: 1"
-        if len(actions) < num_vars:
-            pattern = r"x\d+\s*[:=]\s*([01])|variable\s+\d+\s*[:=]\s*([01])"
-            matches = re.findall(pattern, text.lower())
-            for a, b in matches:
-                value = a or b
-                if value:
-                    actions.append(int(value))
-                    if len(actions) >= num_vars:
-                        break
-
-        while len(actions) < num_vars:
-            actions.append(0)
-        return [bool(x) for x in actions[:num_vars]]
+    _ANSWER_OPEN = re.compile(r"<\s*SOLUTION\s*>", re.IGNORECASE)
+    _ANSWER_CLOSE = re.compile(r"<\s*/\s*SOLUTION\s*>", re.IGNORECASE)
+    _THINK_OPEN = re.compile(r"<\s*start_working_out\s*>", re.IGNORECASE)
+    _THINK_CLOSE = re.compile(r"<\s*end_working_out\s*>", re.IGNORECASE)
 
     def _exact_token_count(self, answer_text: str) -> int:
         # Count 0/1 tokens separated by whitespace
@@ -168,15 +147,19 @@ class SATParser(Parser):
             if close_match is not None:
                 close_idx = close_match.start()
                 answer_text = text[open_idx:close_idx]
-                # Everything after </answer>
+                # Everything after </SOLUTION>
                 trailing_after_answer = len(text) - close_match.end()
-                # Strict format: exactly one thinking and one answer, and no trailing chars
+                # Strict format: exactly one answer pair, no trailing,
+                # bits-only, exact count
                 strict_format_ok = (
-                    len(think_opens) == 1
-                    and len(think_closes) == 1
-                    and len(ans_opens) == 1
+                    len(ans_opens) == 1
                     and len(ans_closes) == 1
                     and trailing_after_answer == 0
+                    and bool(
+                        re.fullmatch(r"[\s01]*", answer_text or "")
+                    )
+                    and self._exact_token_count(answer_text)
+                    == problem.num_vars
                 )
             else:
                 # Malformed; treat as no answer
@@ -184,9 +167,12 @@ class SATParser(Parser):
                 answer_text = ""
                 trailing_after_answer = 0
 
-        answer_has_only_bits_spaces = bool(re.fullmatch(r"[\s01]*", answer_text or ""))
+        answer_has_only_bits_spaces = bool(
+            re.fullmatch(r"[\s01]*", answer_text or "")
+        )
 
-        # Determine assignment
+        # Determine assignment strictly from <SOLUTION> block;
+        # otherwise default all-false
         if has_answer and answer_text:
             # Parse from answer_text strictly as bits
             bits = re.findall(r"[01]", answer_text)
@@ -195,8 +181,7 @@ class SATParser(Parser):
                 actions.append(0)
             assignment = [bool(x) for x in actions[: problem.num_vars]]
         else:
-            # Legacy fallback over full text
-            assignment = self._legacy_parse_assignment(text, problem.num_vars)
+            assignment = [False] * problem.num_vars
 
         parsed: Dict[str, Any] = {
             "assignment": assignment,
@@ -209,75 +194,71 @@ class SATParser(Parser):
         }
 
         # Best-effort: debug-only logging, no PII and no thinking text
-        try:
-            logger.debug(
-                "SATParser: has_answer=%s, has_thinking=%s, strict=%s, trailing=%d",
-                has_answer,
-                has_thinking,
-                strict_format_ok,
-                trailing_after_answer,
-            )
-        except Exception:
-            pass
+        logger.debug(
+            "SATParser: has_answer=%s, has_thinking=%s, strict=%s, "
+            "trailing=%d",
+            has_answer,
+            has_thinking,
+            strict_format_ok,
+            trailing_after_answer,
+        )
 
         return parsed
 
 
-def _normalize_assignment(parsed_or_assignment: Any, problem: SATProblem) -> List[bool]:
-    """Accepts either dict from SATParser or legacy list, returns List[bool]."""
-    if isinstance(parsed_or_assignment, dict) and "assignment" in parsed_or_assignment:
-        assignment = parsed_or_assignment["assignment"]
-        try:
-            return [bool(x) for x in assignment[: problem.num_vars]]
-        except Exception:
-            pass
-    # Legacy: list of bools
-    if isinstance(parsed_or_assignment, list):
-        try:
-            return [bool(x) for x in parsed_or_assignment[: problem.num_vars]]
-        except Exception:
-            pass
-    # Fallback: all false
-    return [False] * problem.num_vars
+def _normalize_assignment(
+    parsed: Dict[str, Any], problem: SATProblem
+) -> List[bool]:
+    """Accepts parsed dict from SATParser, returns List[bool]."""
+    assignment_any = parsed.get("assignment", [])
+    try:
+        assignment_any = assignment_any[: problem.num_vars]
+        return [bool(x) for x in assignment_any]
+    except Exception:
+        return [False] * problem.num_vars
 
 
-def sat_correctness_reward(parsed_or_assignment: Any, problem: SATProblem) -> float:
-    """Primary correctness reward, compatible with dict or list inputs.
+def sat_correctness_reward(
+    parsed_or_assignment: Any, problem: SATProblem
+) -> float:
+    """Primary correctness reward.
 
-    Best-practice gating for GRPO: only grant correctness reward when the model
-    outputs a properly formatted answer — i.e., there is an <answer>...</answer>
-    block whose contents are only 0/1 tokens (whitespace allowed), the number of
-    0/1 tokens equals the number of variables, and there is no trailing text
-    after the closing </answer>.
+    GRPO best-practice gating: only consider correctness when there is a
+    <SOLUTION>...</SOLUTION> block whose contents are only 0/1 tokens
+    (whitespace allowed), the number of tokens equals the number of
+    variables, and there is no trailing text after the closing tag.
+    Well-formed but wrong ⇒ 0.0; malformed ⇒ small negative.
     """
-    # If parser produced rich metadata, enforce formatting gate before checking correctness
-    if isinstance(parsed_or_assignment, dict):
-        has_answer = bool(parsed_or_assignment.get("has_answer"))
-        only_bits_spaces = bool(parsed_or_assignment.get("answer_has_only_bits_spaces"))
-        trailing_after = int(parsed_or_assignment.get("trailing_after_answer", 0))
-        answer_text = parsed_or_assignment.get("answer_text", "")
-        bits = re.findall(r"[01]", answer_text)
+    # Enforce formatting gate before checking correctness
+    if not isinstance(parsed_or_assignment, dict):
+        return -0.2
 
-        formatting_ok = (
-            has_answer
-            and only_bits_spaces
-            and trailing_after == 0
-            and len(bits) == problem.num_vars
-        )
+    has_answer = bool(parsed_or_assignment.get("has_answer"))
+    only_bits_spaces = bool(
+        parsed_or_assignment.get("answer_has_only_bits_spaces")
+    )
+    trailing_after = int(
+        parsed_or_assignment.get("trailing_after_answer", 0)
+    )
+    answer_text = parsed_or_assignment.get("answer_text", "")
+    bits = re.findall(r"[01]", answer_text)
 
-        if not formatting_ok:
-            # Do not reward answers that violate the strict formatting contract
-            return -1.0
+    well_formed = (
+        has_answer
+        and only_bits_spaces
+        and trailing_after == 0
+        and len(bits) == problem.num_vars
+    )
 
-        assignment = _normalize_assignment(parsed_or_assignment, problem)
-        return 10.0 if problem.check_solution(assignment) else -1.0
+    if not well_formed:
+        # Small penalty to discourage malformed outputs
+        return -0.2
 
-    # Legacy fallback (should rarely trigger when a parser is used)
     assignment = _normalize_assignment(parsed_or_assignment, problem)
-    return 10.0 if problem.check_solution(assignment) else -1.0
+    return 1.0 if problem.check_solution(assignment) else 0.0
 
 
-# ----------------------------- Formatting Rewards -----------------------------
+# ----------------------------- Formatting Rewards ----------------------------
 
 def sat_strict_format_reward(parsed: Any, _: SATProblem) -> float:
     if isinstance(parsed, dict) and parsed.get("strict_format_ok"):
@@ -286,7 +267,7 @@ def sat_strict_format_reward(parsed: Any, _: SATProblem) -> float:
 
 
 def sat_soft_format_reward(parsed: Any, _: SATProblem) -> float:
-    if isinstance(parsed, dict) and parsed.get("has_thinking") and parsed.get("has_answer"):
+    if isinstance(parsed, dict) and parsed.get("has_answer"):
         return 0.2
     return 0.0
 
@@ -349,7 +330,7 @@ def create_sat_reward_vector(
     parser = SATParser()
 
     # Per-function bounds
-    SAT_CORRECTNESS_BOUNDS = (-1.0, 10.0)
+    SAT_CORRECTNESS_BOUNDS = (-0.2, 1.0)
     STRICT_BOUNDS = (0.0, 0.3)
     SOFT_BOUNDS = (0.0, 0.2)
     SHAPE_BOUNDS = (0.0, 0.3)
@@ -372,7 +353,7 @@ def create_sat_reward_vector(
 
 
 class SATRolloutGenerator(RolloutGenerator):
-    """SAT-specific rollout generator using RewardVector instead of environment."""
+    """SAT-specific rollout generator using RewardVector."""
     _current_problem: Optional[SATProblem]
 
     def __init__(
@@ -397,31 +378,44 @@ class SATRolloutGenerator(RolloutGenerator):
         # Create a dummy environment for compatibility
         self._current_problem = None
 
-    # Required abstract methods from RolloutGenerator
+    # TODO: in later versions this will return the env, not the problem,
+    # supporting multi-turn RL
     def create_environment(self, problem: SATProblem) -> SATProblem:
-        """Return the problem itself as 'environment' - no separate env needed."""
+        """Return the problem itself as 'environment' - no separate env
+        needed.
+        """
         self._current_problem = problem
         return problem
 
     def reset_environment(self, env: SATProblem) -> Dict[str, Any]:
         """Return initial state - just the problem description."""
-        return {"problem": env.to_text(), "num_vars": env.num_vars, "clauses": env.clauses}
+        return {
+            "problem": env.to_text(),
+            "num_vars": env.num_vars,
+            "clauses": env.clauses,
+        }
 
     def create_prompt(
-        self, problem: SATProblem, env: SATProblem, state: Dict[str, Any], trajectory: List
+        self,
+        problem: SATProblem,
+        env: SATProblem,
+        state: Dict[str, Any],
+        trajectory: List,
     ) -> str:
-        """Create prompt for SAT solving with reasoning and answer tags."""
+        """Create minimal prompt with problem and solution format hint."""
         instructions = (
-            "Instructions:\n"
-            "- First, think about the problem and provide your reasoning. Place it between <thinking> and </thinking>.\n"
-            "- Then, provide your solution between <answer> and </answer>. The solution should be a space-separated list of 0/1 values, representing the assignment of each variable (x1..xN).\n"
-            "- Example: <answer>0 1 0 1</answer> means x1=0, x2=1, x3=0, x4=1.\n\n"
+            "Provide your final assignment between <SOLUTION></SOLUTION> as "
+            "space-separated 0/1 values for x1..xN (e.g., "
+            "<SOLUTION>0 1 0 1</SOLUTION>).\n"
         )
         prompt = f"SAT Problem:\n{problem.to_text()}\n{instructions}"
         return prompt
 
-    def parse_action(self, text: str, env: SATProblem, state: Dict[str, Any]) -> List[bool]:
-        """Parse completion text into boolean assignment using reward parser output.
+    def parse_action(
+        self, text: str, env: SATProblem, state: Dict[str, Any]
+    ) -> List[bool]:
+        """Parse completion text into boolean assignment using reward parser
+        output.
 
         Also caches last raw completion for reward computation.
         """
@@ -445,7 +439,8 @@ class SATRolloutGenerator(RolloutGenerator):
     ) -> Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
         """Single-shot evaluation using reward vector.
 
-        Uses the raw completion text when available to enable formatting rewards.
+        Uses the raw completion text when available to enable formatting
+        rewards.
         """
         # Prefer the raw completion from the model to preserve formatting
         completion = getattr(self, "_last_completion_text", None)
@@ -457,11 +452,13 @@ class SATRolloutGenerator(RolloutGenerator):
         reward = self.reward_vector.compute_reward(completion, env)
         # Optional: warn if reward outside declarative bounds
         try:
-            if hasattr(self.reward_vector, "has_bounds") and self.reward_vector.has_bounds():
+            if (
+                hasattr(self.reward_vector, "has_bounds")
+                and self.reward_vector.has_bounds()
+            ):
                 low, high = self.reward_vector.reward_bounds()
                 if reward < low or reward > high:
                     # Lazy import to avoid circular logger config
-
                     logger.warning(
                         "SAT reward %.4f outside composed bounds [%.4f, %.4f]",
                         reward,
@@ -473,14 +470,14 @@ class SATRolloutGenerator(RolloutGenerator):
             pass
 
         # Check success — gate on strict answer formatting to avoid rewarding
-        # malformed outputs that happen to contain a correct pattern somewhere else
-        # Success iff correctness reward == 10.0 (correct and correctly formatted)
+        # malformed outputs that happen to contain a correct pattern elsewhere
+        # Success iff correctness reward == 1.0 (correct and well-formed)
         success = False
         try:
             if self.reward_vector.parser:
                 parsed = self.reward_vector.parser.parse(completion, env)
                 if isinstance(parsed, dict):
-                    success = sat_correctness_reward(parsed, env) == 10.0
+                    success = sat_correctness_reward(parsed, env) == 1.0
         except Exception:
             success = False
 
@@ -490,11 +487,18 @@ class SATRolloutGenerator(RolloutGenerator):
             for clause in env.clauses:
                 for lit in clause:
                     var_idx = abs(lit) - 1
-                    if (lit > 0 and action[var_idx]) or (lit < 0 and not action[var_idx]):
+                    if (
+                        (lit > 0 and action[var_idx])
+                        or (lit < 0 and not action[var_idx])
+                    ):
                         satisfied_clauses += 1
                         break
 
-        state = {"problem": env.to_text(), "assignment": action, "success": success}
+        state = {
+            "problem": env.to_text(),
+            "assignment": action,
+            "success": success,
+        }
 
         info = {
             "success": success,
@@ -505,26 +509,21 @@ class SATRolloutGenerator(RolloutGenerator):
 
         return state, reward, True, info  # Always done after one step
 
-    def create_trajectory_entry(
-        self, state: Dict[str, Any], action: List[bool], reward: float, info: Dict[str, Any]
-    ) -> Tuple[int, List[bool], float]:
-        """Create trajectory entry."""
-        return (0, action, reward)  # Simple: step 0, assignment, reward
-
     def get_final_info(
         self, env: SATProblem, trajectory: List, total_reward: float
     ) -> Dict[str, Any]:
         """Get final SAT-specific information."""
         if trajectory:
-            _, assignment, _ = trajectory[-1]
-            success = env.check_solution(assignment)
+            _, assignment, info = trajectory[-1]
+            success = info.get("success", False)
             satisfied_clauses = 0
             if len(assignment) == env.num_vars:
                 for clause in env.clauses:
                     for lit in clause:
                         var_idx = abs(lit) - 1
-                        if (lit > 0 and assignment[var_idx]) or (
-                            lit < 0 and not assignment[var_idx]
+                        if (
+                            (lit > 0 and assignment[var_idx])
+                            or (lit < 0 and not assignment[var_idx])
                         ):
                             satisfied_clauses += 1
                             break
@@ -537,7 +536,11 @@ class SATRolloutGenerator(RolloutGenerator):
             "success": success,
             "satisfied_clauses": satisfied_clauses,
             "assignment": assignment,
-            "sat_problem": {"seed": env.seed, "num_vars": env.num_vars, "clauses": env.clauses},
+            "sat_problem": {
+                "seed": env.seed,
+                "num_vars": env.num_vars,
+                "clauses": env.clauses,
+            },
         }
 
     # Decoding controls

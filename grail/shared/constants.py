@@ -15,7 +15,7 @@ WINDOW_LENGTH = 40
 
 # ────────────────  MODEL CONFIGURATION  ────────────────
 
-MODEL_NAME = os.getenv("GRAIL_MODEL_NAME", "google/gemma-3-1b-it")
+MODEL_NAME = os.getenv("GRAIL_MODEL_NAME", "Qwen/Qwen3-4B-Instruct-2507")
 LAYER_INDEX = -1
 
 # ────────────────  LOGGING  ────────────────
@@ -59,3 +59,7 @@ SAMPLING_LOW_Q10_MAX = 0.20
 # For p > 1, w_i ∝ s_i^p amplifies differences and penalizes sybil splitting:
 # splitting into k identities yields k^(1-p) * s^p < s^p.
 SUPERLINEAR_EXPONENT = 1.5
+
+# ────────────────  ROLLOUTS PER PROBLEM  ────────────────
+
+ROLLOUTS_PER_PROBLEM = int(os.getenv("GRAIL_ROLLOUTS_PER_PROBLEM", "4"))

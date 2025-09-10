@@ -29,7 +29,7 @@ from ..environments import generate_sat_problem, SATRolloutGenerator
 from ..infrastructure.comms import sink_window_inferences
 from ..infrastructure.credentials import load_r2_credentials
 from ..infrastructure.chain import GrailChainManager
-from ..shared.constants import WINDOW_LENGTH, MODEL_NAME
+from ..shared.constants import WINDOW_LENGTH, MODEL_NAME, ROLLOUTS_PER_PROBLEM
 from ..monitoring import get_monitoring_manager
 from ..monitoring.config import MonitoringConfig
 
@@ -355,7 +355,7 @@ def mine(
                             prover.model,
                             prover.tokenizer,
                             prover.device,
-                            rollouts_per_problem=4,  # GRPO standard
+                            rollouts_per_problem=ROLLOUTS_PER_PROBLEM,
                         )
 
                         # Generate rollouts with GRAIL proofs
