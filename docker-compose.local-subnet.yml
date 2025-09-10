@@ -1,0 +1,256 @@
+services:
+  # ============================================================================
+  # LOCAL SUBTENSOR NODES
+  # ============================================================================
+  alice:
+    image: ghcr.io/opentensor/subtensor-localnet:devnet-ready
+    container_name: subtensor-alice
+    ports:
+      - "9944:9944"
+      - "30333:30333"
+    environment:
+      - RUST_LOG=info
+    volumes:
+      - alice-data:/tmp/blockchain
+    command:
+      - --dev
+      - --alice
+      - --rpc-external
+      - --rpc-cors=all
+      - --rpc-methods=unsafe
+      - --port=30333
+      - --rpc-port=9944
+      - --base-path=/tmp/blockchain
+      - --validator
+      - --allow-private-ipv4
+      - --discover-local
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'health check' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  bob:
+    image: ghcr.io/opentensor/subtensor-localnet:devnet-ready
+    container_name: subtensor-bob
+    ports:
+      - "9945:9945"
+      - "30334:30334"
+    environment:
+      - RUST_LOG=info
+    volumes:
+      - bob-data:/tmp/blockchain
+    command:
+      - --dev
+      - --bob
+      - --rpc-external
+      - --rpc-cors=all
+      - --rpc-methods=unsafe
+      - --port=30334
+      - --rpc-port=9945
+      - --base-path=/tmp/blockchain
+      - --validator
+      - --bootnodes=/dns4/alice/tcp/30333/p2p/12D3KooWEyoppNCUx8Yx66oV9fJnriXwCcXwDDUA2kj6vnc6iDEp
+      - --allow-private-ipv4
+      - --discover-local
+    depends_on:
+      alice:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'health check' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+
+  # ============================================================================
+  # GRAIL MINERS AND VALIDATORS
+  # ============================================================================
+  miner-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      alice:
+        condition: service_healthy
+    volumes:
+      - ${HOME:-/root}/.bittensor/wallets:/root/.bittensor/wallets
+      - logs:/app/logs
+    env_file:
+      - .env
+    environment:
+      NODE_TYPE: miner
+      # Chain / network - Connect to local subtensor
+      BT_NETWORK: local
+      BT_CHAIN_ENDPOINT: ws://alice:9944
+      NETUID: ${NETUID:-2}  # Use netuid 2 (newly created subnet)
+      # Wallets - hardcoded for miner-1
+      BT_WALLET_COLD: Alice
+      BT_WALLET_HOT: M1
+      # Model / app config
+      GRAIL_MODEL_NAME: ${GRAIL_MODEL_NAME:-Qwen/Qwen2-0.5B-Instruct}
+      GRAIL_MAX_NEW_TOKENS: ${GRAIL_MAX_NEW_TOKENS:-100}
+      GRAIL_ROLLOUTS_PER_PROBLEM: ${GRAIL_ROLLOUTS_PER_PROBLEM:-4}
+      GRAIL_MONITORING_BACKEND: ${GRAIL_MONITORING_BACKEND:-wandb}
+      # WandB / monitoring
+      WANDB_MODE: ${WANDB_MODE:-offline}
+      WANDB_PROJECT: ${WANDB_PROJECT:-grail-local}
+      WANDB_ENTITY: ${WANDB_ENTITY:-tplr}
+      WANDB_TAGS: ${WANDB_TAGS:-grail,local,testing}
+      WANDB_NOTES: ${WANDB_NOTES:-Local subnet testing}
+      WANDB_RESUME: ${WANDB_RESUME:-allow}
+      WANDB_API_KEY: ${WANDB_API_KEY:-}
+      # Hugging Face (optional)
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_USERNAME: ${HF_USERNAME:-}
+      # Object storage - using real R2 from .env
+      # R2_ENDPOINT_URL will be auto-constructed from R2_ACCOUNT_ID
+      R2_BUCKET_ID: ${R2_BUCKET_ID}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
+      R2_WRITE_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID}
+      R2_WRITE_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY}
+      R2_READ_ACCESS_KEY_ID: ${R2_READ_ACCESS_KEY_ID}
+      R2_READ_SECRET_ACCESS_KEY: ${R2_READ_SECRET_ACCESS_KEY}
+      # Metrics tuning
+      GRAIL_METRIC_BUFFER_SIZE: ${GRAIL_METRIC_BUFFER_SIZE:-100}
+      GRAIL_METRIC_FLUSH_INTERVAL: ${GRAIL_METRIC_FLUSH_INTERVAL:-30.0}
+      # Testing ergonomics
+      GRAIL_WINDOW_LENGTH: "3"
+      CUDA_VISIBLE_DEVICES: "0"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+    command: ["-vv", "mine"]
+
+  miner-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      alice:
+        condition: service_healthy
+    volumes:
+      - ${HOME:-/root}/.bittensor/wallets:/root/.bittensor/wallets
+      - logs:/app/logs
+    env_file:
+      - .env
+    environment:
+      NODE_TYPE: miner
+      # Chain / network - Connect to local subtensor
+      BT_NETWORK: local
+      BT_CHAIN_ENDPOINT: ws://alice:9944
+      NETUID: ${NETUID:-2}  # Use netuid 2 (newly created subnet)
+      # Wallets - hardcoded for miner-2
+      BT_WALLET_COLD: Alice
+      BT_WALLET_HOT: M2
+      # Model / app config
+      GRAIL_MODEL_NAME: ${GRAIL_MODEL_NAME:-Qwen/Qwen2-0.5B-Instruct}
+      GRAIL_MAX_NEW_TOKENS: ${GRAIL_MAX_NEW_TOKENS:-100}
+      GRAIL_ROLLOUTS_PER_PROBLEM: ${GRAIL_ROLLOUTS_PER_PROBLEM:-4}
+      GRAIL_MONITORING_BACKEND: ${GRAIL_MONITORING_BACKEND:-wandb}
+      # WandB / monitoring
+      WANDB_MODE: ${WANDB_MODE:-offline}
+      WANDB_PROJECT: ${WANDB_PROJECT:-grail-local}
+      WANDB_ENTITY: ${WANDB_ENTITY:-tplr}
+      WANDB_TAGS: ${WANDB_TAGS:-grail,local,testing}
+      WANDB_NOTES: ${WANDB_NOTES:-Local subnet testing}
+      WANDB_RESUME: ${WANDB_RESUME:-allow}
+      WANDB_API_KEY: ${WANDB_API_KEY:-}
+      # Hugging Face (optional)
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_USERNAME: ${HF_USERNAME:-}
+      # Object storage - using real R2 from .env
+      # R2_ENDPOINT_URL will be auto-constructed from R2_ACCOUNT_ID
+      R2_BUCKET_ID: ${R2_BUCKET_ID}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
+      R2_WRITE_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID}
+      R2_WRITE_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY}
+      R2_READ_ACCESS_KEY_ID: ${R2_READ_ACCESS_KEY_ID}
+      R2_READ_SECRET_ACCESS_KEY: ${R2_READ_SECRET_ACCESS_KEY}
+      # Metrics tuning
+      GRAIL_METRIC_BUFFER_SIZE: ${GRAIL_METRIC_BUFFER_SIZE:-100}
+      GRAIL_METRIC_FLUSH_INTERVAL: ${GRAIL_METRIC_FLUSH_INTERVAL:-30.0}
+      # Testing ergonomics
+      GRAIL_WINDOW_LENGTH: "3"
+      CUDA_VISIBLE_DEVICES: "1"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['1']
+              capabilities: [gpu]
+    command: ["-vv", "mine"]
+
+  validator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      alice:
+        condition: service_healthy
+      miner-1:
+        condition: service_started
+      miner-2:
+        condition: service_started
+    volumes:
+      - ${HOME:-/root}/.bittensor/wallets:/root/.bittensor/wallets
+      - logs:/app/logs
+    env_file:
+      - .env
+    environment:
+      NODE_TYPE: validator
+      # Chain / network - Connect to local subtensor
+      BT_NETWORK: local
+      BT_CHAIN_ENDPOINT: ws://alice:9944
+      NETUID: ${NETUID:-2}  # Use netuid 2 (newly created subnet)
+      # Wallets - hardcoded for validator
+      BT_WALLET_COLD: Alice
+      BT_WALLET_HOT: default  # Owner hotkey acts as validator
+      # Model / app config
+      GRAIL_MODEL_NAME: ${GRAIL_MODEL_NAME:-Qwen/Qwen2-0.5B-Instruct}
+      GRAIL_MAX_NEW_TOKENS: ${GRAIL_MAX_NEW_TOKENS:-100}
+      GRAIL_ROLLOUTS_PER_PROBLEM: ${GRAIL_ROLLOUTS_PER_PROBLEM:-4}
+      GRAIL_MONITORING_BACKEND: ${GRAIL_MONITORING_BACKEND:-wandb}
+      # WandB / monitoring
+      WANDB_MODE: ${WANDB_MODE:-offline}
+      WANDB_PROJECT: ${WANDB_PROJECT:-grail-local}
+      WANDB_ENTITY: ${WANDB_ENTITY:-tplr}
+      WANDB_TAGS: ${WANDB_TAGS:-grail,local,testing}
+      WANDB_NOTES: ${WANDB_NOTES:-Local subnet testing}
+      WANDB_RESUME: ${WANDB_RESUME:-allow}
+      WANDB_API_KEY: ${WANDB_API_KEY:-}
+      # Hugging Face (optional)
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_USERNAME: ${HF_USERNAME:-}
+      # Object storage - using real R2 from .env
+      # R2_ENDPOINT_URL will be auto-constructed from R2_ACCOUNT_ID
+      R2_BUCKET_ID: ${R2_BUCKET_ID}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
+      R2_WRITE_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID}
+      R2_WRITE_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY}
+      R2_READ_ACCESS_KEY_ID: ${R2_READ_ACCESS_KEY_ID}
+      R2_READ_SECRET_ACCESS_KEY: ${R2_READ_SECRET_ACCESS_KEY}
+      # Metrics tuning
+      GRAIL_METRIC_BUFFER_SIZE: ${GRAIL_METRIC_BUFFER_SIZE:-100}
+      GRAIL_METRIC_FLUSH_INTERVAL: ${GRAIL_METRIC_FLUSH_INTERVAL:-30.0}
+      # Testing ergonomics
+      GRAIL_WINDOW_LENGTH: "3"
+      CUDA_VISIBLE_DEVICES: "2"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['2']
+              capabilities: [gpu]
+    command: ["-vv", "validate", "--no-test-mode"]
+
+volumes:
+  alice-data: {}
+  bob-data: {}
+  logs: {}
