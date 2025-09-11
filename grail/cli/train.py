@@ -17,10 +17,6 @@ import hashlib
 from ..infrastructure.comms import get_valid_rollouts, save_model_state
 from ..infrastructure.network import create_subtensor
 
-# TODO(v2): Re-enable training imports
-# from trl import PPOTrainer, PPOConfig
-# TODO(v2): Re-enable for training
-# from accelerate import Accelerator
 from accelerate import Accelerator
 
 
@@ -65,19 +61,10 @@ async def get_subtensor() -> bt.subtensor:
     return SUBTENSOR
 
 
-# S3/R2 communication functions are now imported from comms.py
-
 
 # --------------------------------------------------------------------------- #
 #                        Helper Functions                                     #
 # --------------------------------------------------------------------------- #
-def generate_prompt(hotkey_address: str, block_hash: str, nonce: int) -> str:
-    """Generate prompt in the required format"""
-    return (
-        f"Hey my name is {hotkey_address} it is currently {block_hash} days since friday "
-        f"and my fav number is {nonce}, tell me a story about these three facts"
-    )
-
 
 def parse_filename(
     filename: str,
@@ -139,9 +126,6 @@ def verify_rollout_signature(rollout_data: dict) -> bool:
     except Exception:
         return False
 
-
-# REMOVED: derive_secret_key was insecure and has been removed
-# The GRAIL proof system now uses wallet signatures for security
 
 # Global storage for miner state
 miner_inference_counts: DefaultDict[str, list] = defaultdict(
