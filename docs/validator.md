@@ -40,6 +40,7 @@ Grail validators:
 - Linux, Python via `uv venv`, Git
 - Bittensor wallet (cold/hot) registered on the target subnet
 - Cloudflare R2 (or S3-compatible) bucket and credentials
+  - **Create a Bucket: Name it the same as your account ID and set the region to ENAM.**
 - Optional: WandB account for monitoring
 
 Hardware: CPU-only is fine. A GPU can speed up verification if the model forward is used more heavily, but the default verifier is optimized for practicality.
@@ -96,6 +97,8 @@ Set these in `.env` (see `.env.example`):
 Use a registered wallet. Set `BT_WALLET_COLD`/`BT_WALLET_HOT` to the names you created with `btcli`.
 
 ### Storage (R2/S3)
+
+**Bucket requirement:** Name it the same as your account ID; set the region to ENAM.
 
 Validators load local write credentials and use miners’ read credentials fetched from chain to download their files. See `docs/r2_credentials_design.md`.
 

@@ -35,6 +35,7 @@ Grail miners:
 - Python (via `uv venv`) and Git
 - Bittensor wallet (cold/hot) registered on the target subnet
 - Cloudflare R2 (or S3-compatible) bucket and credentials
+  - **Create a Bucket: Name it the same as your account ID and set the region to ENAM.**
 - Optional: WandB account for monitoring
 
 Hardware guidance:
@@ -105,6 +106,8 @@ btcli subnet register --wallet.name default --wallet.hotkey miner --netuid <NETU
 Set `BT_WALLET_COLD` and `BT_WALLET_HOT` to these names in `.env`.
 
 ### Storage (R2/S3)
+
+**Bucket requirement:** Name it the same as your account ID; set the region to ENAM.
 
 Grail uses a dual-credential design:
 - Write credentials stay local and are used by miners to upload.
