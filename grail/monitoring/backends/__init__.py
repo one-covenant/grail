@@ -1,7 +1,8 @@
 """
 Monitoring backend implementations.
 
-This package contains concrete implementations of the MonitoringBackend interface
+This package contains concrete implementations of the MonitoringBackend
+interface
 for various telemetry and observability platforms.
 """
 

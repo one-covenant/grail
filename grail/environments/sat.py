@@ -155,9 +155,7 @@ class SATParser(Parser):
                     len(ans_opens) == 1
                     and len(ans_closes) == 1
                     and trailing_after_answer == 0
-                    and bool(
-                        re.fullmatch(r"[\s01]*", answer_text or "")
-                    )
+                    and bool(re.fullmatch(r"[\s01]*", answer_text or ""))
                     and self._exact_token_count(answer_text)
                     == problem.num_vars
                 )
@@ -237,9 +235,7 @@ def sat_correctness_reward(
     only_bits_spaces = bool(
         parsed_or_assignment.get("answer_has_only_bits_spaces")
     )
-    trailing_after = int(
-        parsed_or_assignment.get("trailing_after_answer", 0)
-    )
+    trailing_after = int(parsed_or_assignment.get("trailing_after_answer", 0))
     answer_text = parsed_or_assignment.get("answer_text", "")
     bits = re.findall(r"[01]", answer_text)
 
@@ -259,6 +255,7 @@ def sat_correctness_reward(
 
 
 # ----------------------------- Formatting Rewards ----------------------------
+
 
 def sat_strict_format_reward(parsed: Any, _: SATProblem) -> float:
     if isinstance(parsed, dict) and parsed.get("strict_format_ok"):
@@ -354,6 +351,7 @@ def create_sat_reward_vector(
 
 class SATRolloutGenerator(RolloutGenerator):
     """SAT-specific rollout generator using RewardVector."""
+
     _current_problem: Optional[SATProblem]
 
     def __init__(
@@ -487,9 +485,8 @@ class SATRolloutGenerator(RolloutGenerator):
             for clause in env.clauses:
                 for lit in clause:
                     var_idx = abs(lit) - 1
-                    if (
-                        (lit > 0 and action[var_idx])
-                        or (lit < 0 and not action[var_idx])
+                    if (lit > 0 and action[var_idx]) or (
+                        lit < 0 and not action[var_idx]
                     ):
                         satisfied_clauses += 1
                         break
@@ -521,9 +518,8 @@ class SATRolloutGenerator(RolloutGenerator):
                 for clause in env.clauses:
                     for lit in clause:
                         var_idx = abs(lit) - 1
-                        if (
-                            (lit > 0 and assignment[var_idx])
-                            or (lit < 0 and not assignment[var_idx])
+                        if (lit > 0 and assignment[var_idx]) or (
+                            lit < 0 and not assignment[var_idx]
                         ):
                             satisfied_clauses += 1
                             break

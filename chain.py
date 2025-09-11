@@ -237,7 +237,9 @@ class ChainManager:
             concatenated = self.subtensor.get_commitment(self.netuid, uid)
             logger.info(f"Commitment fetched: {concatenated}")
         except Exception as e:
-            raise Exception(f"Couldn't get commitment from uid {uid} because {e}")
+            raise Exception(
+                f"Couldn't get commitment from uid {uid} because {e}"
+            )
         if len(concatenated) != 128:
             raise ValueError(
                 f"Commitment '{concatenated}' is of length {len(concatenated)} but should be of length 128."
@@ -253,7 +255,9 @@ class ChainManager:
         except ValidationError as e:
             raise ValueError(f"Invalid data in commitment: {e}")
 
-    def decode_metadata(self, encoded_ss58: tuple, metadata: dict) -> tuple[str, str]:
+    def decode_metadata(
+        self, encoded_ss58: tuple, metadata: dict
+    ) -> tuple[str, str]:
         # Decode the key into an SS58 address.
         decoded_key = decode_account_id(encoded_ss58[0])
         # Get the commitment from the metadata.
@@ -261,7 +265,9 @@ class ChainManager:
         bytes_tuple = commitment[next(iter(commitment.keys()))][0]
         return decoded_key, bytes(bytes_tuple).decode()
 
-    async def get_commitments(self, block: int | None = None) -> dict[int, Bucket]:
+    async def get_commitments(
+        self, block: int | None = None
+    ) -> dict[int, Bucket]:
         """Retrieves all bucket commitments from the chain.
 
         Args:
@@ -277,10 +283,14 @@ class ChainManager:
                 module="Commitments",
                 storage_function="CommitmentOf",
                 params=[self.netuid],
-                block_hash=None if block is None else substrate.get_block_hash(block),
+                block_hash=(
+                    None if block is None else substrate.get_block_hash(block)
+                ),
             )
 
-            hotkey_to_uid = dict(zip(self.metagraph.hotkeys, self.metagraph.uids))
+            hotkey_to_uid = dict(
+                zip(self.metagraph.hotkeys, self.metagraph.uids)
+            )
             commitments = {}
 
             for key, value in query_result:
@@ -289,7 +299,9 @@ class ChainManager:
                         key, value.value
                     )
                 except Exception as e:
-                    logger.error(f"Failed to decode metadata for key {key.value}: {e}")
+                    logger.error(
+                        f"Failed to decode metadata for key {key.value}: {e}"
+                    )
                     continue
 
                 if decoded_ss58 not in hotkey_to_uid:
@@ -321,7 +333,9 @@ class ChainManager:
             self.subtensor.substrate.initialize()
             return
 
-    async def get_bucket_for_neuron(self, wallet: "bt.wallet") -> Bucket | None:
+    async def get_bucket_for_neuron(
+        self, wallet: "bt.wallet"
+    ) -> Bucket | None:
         """Get bucket configuration for a specific neuron's wallet
 
         Args:

@@ -17,6 +17,7 @@ from collections import defaultdict
 from typing import Any, Tuple, Optional, DefaultDict, Dict
 
 from grail.infrastructure.drand import get_round_at_time, get_drand_beacon
+from types import SimpleNamespace
 
 # TODO(v2): Re-enable training imports
 # from trl import PPOTrainer, PPOConfig
@@ -75,9 +76,6 @@ async def get_subtensor() -> bt.subtensor:
         SUBTENSOR = await create_subtensor()
         logger.info("Connected")
     return SUBTENSOR
-
-
-# S3/R2 communication functions are now imported from comms.py
 
 
 # --------------------------------------------------------------------------- #
@@ -215,7 +213,9 @@ def validate(
     # Storage for inference counts per miner
     # {hotkey: {window_start: {"valid": int, "checked": int, "total": int,
     #                          "estimated_valid": int, "successful": int, "unique": int}}}
-    inference_counts: DefaultDict[str, Dict[int, Dict[str, int]]] = defaultdict(dict)
+    inference_counts: DefaultDict[str, DefaultDict[int, int]] = defaultdict(
+        lambda: defaultdict(int)
+    )  # {hotkey: {window: count}}
 
     # Declarative SAT reward bounds (composed from per-function bounds)
     try:
@@ -238,7 +238,7 @@ def validate(
         
         # Initialize chain manager for credential commitments
         # Create a simple config object with just netuid
-        from types import SimpleNamespace
+        
         config = SimpleNamespace(netuid=NETUID)
         chain_manager = GrailChainManager(config, wallet, credentials)
         await chain_manager.initialize()
@@ -324,7 +324,6 @@ def validate(
                 # For testing: just use the validator's own hotkey (same as miner in local testing)
                 # In production, this would iterate through meta.hotkeys
                 # Use the test_mode parameter passed to the function instead of hardcoding
-
                 if test_mode:
                     # Use the wallet's own hotkey for testing
                     hotkeys_to_check = [wallet.hotkey.ss58_address]
@@ -881,9 +880,7 @@ def validate(
                 if denom > 0.0:
                     weights = [score / denom for score in raw_scores]
                 else:
-                    # Fallback to uniform weights to avoid all-zero submissions
-                    n = len(meta.hotkeys)
-                    weights = ([1.0 / n] * n) if n > 0 else []
+                    weights = [0.0] * len(meta.hotkeys)
 
                 # Log non-zero weights
                 non_zero_weights = [

@@ -16,7 +16,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 # Global imports
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -24,13 +24,18 @@ from pydantic import BaseModel, ConfigDict, Field
 class Bucket(BaseModel):
     """Configuration for a bucket, including name and access credentials."""
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         # Use all fields to generate a unique hash
         return hash(
-            (self.name, self.account_id, self.access_key_id, self.secret_access_key)
+            (
+                self.name,
+                self.account_id,
+                self.access_key_id,
+                self.secret_access_key,
+            )
         )
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         # Compare all fields to determine equality
         if isinstance(other, Bucket):
             return self.model_dump() == other.model_dump()
@@ -49,14 +54,14 @@ class Bucket(BaseModel):
 class CommsGetResult(BaseModel):
     """A standard return type for the `get` function."""
 
-    data: None | dict[str, Any] = Field(
+    data: Optional[dict[str, Any]] = Field(
         None, description="The data retrieved by the get function."
     )
-    global_step: None | int = Field(
+    global_step: Optional[int] = Field(
         None, description="The global step associated with the data."
     )
-    status: Literal["OK", "TOO_EARLY", "TOO_LATE", "NOT_FOUND", "ERROR"] = Field(
-        "OK", description="The status of the get operation."
+    status: Literal["OK", "TOO_EARLY", "TOO_LATE", "NOT_FOUND", "ERROR"] = (
+        Field("OK", description="The status of the get operation.")
     )
 
     @property

@@ -4,6 +4,7 @@ Run all real-model experiments and summarize results.
 Usage:
   python experiments/run_all.py
 """
+
 import importlib
 import io
 import sys
@@ -42,7 +43,7 @@ def run_one(mod_name: str) -> tuple[str, str]:
     return out, status
 
 
-def main():
+def main() -> None:
     print("Running GRAIL proof security experiments...\n")
     results = []
     for mod, title in EXPERIMENTS:
@@ -62,4 +63,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
