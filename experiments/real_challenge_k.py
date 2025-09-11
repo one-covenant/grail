@@ -4,15 +4,16 @@ Real-model experiment: Prover-controlled challenge + small k
 Uses the actual model and verifier implementation (no module stubs).
 We only bypass signature verification to focus on the protocol flaw.
 """
+
 import logging
 
 
-def main():
+def main() -> None:
     import grail.grail as gg
 
     logging.getLogger("grail").setLevel(logging.INFO)
     # Bypass signature verification to isolate protocol behavior
-    gg.verify_commit_signature = lambda commit, addr: True
+    gg.verify_commit_signature = lambda commit, wallet_address: True
 
     verifier = gg.Verifier(model_name=gg.MODEL_NAME)
 
@@ -22,8 +23,12 @@ def main():
     commit_rand = "deadbeefcafebabe"
 
     # Compute true s_vals
-    r_vec = gg.r_vec_from_randomness(commit_rand, verifier.model.config.hidden_size)
-    full_ids = gg.torch.tensor(tokens, dtype=gg.torch.long, device=verifier.device).unsqueeze(0)
+    r_vec = gg.r_vec_from_randomness(
+        commit_rand, verifier.model.config.hidden_size
+    )
+    full_ids = gg.torch.tensor(
+        tokens, dtype=gg.torch.long, device=verifier.device
+    ).unsqueeze(0)
     with gg.torch.no_grad():
         outs = verifier.model(full_ids, output_hidden_states=True)
     h_layer = outs.hidden_states[gg.LAYER_INDEX][0]
@@ -51,9 +56,17 @@ def main():
 
     # Verifier enforces its own challenge randomness and min k
     verifier_rand = "feedbead"  # verifier-chosen
-    ok = verifier.verify(commit, proof_pkg, prover_address="stub", challenge_randomness=verifier_rand, min_k=gg.CHALLENGE_K)
+    ok = verifier.verify(
+        commit,
+        proof_pkg,
+        prover_address="stub",
+        challenge_randomness=verifier_rand,
+        min_k=gg.CHALLENGE_K,
+    )
     print("Exploit: challenge control + small k ->", "PASS" if ok else "FAIL")
-    print(f"Indices: {indices}; Correct only at those positions (k={k}, n={len(tokens)})")
+    print(
+        f"Indices: {indices}; Correct only at those positions (k={k}, n={len(tokens)})"
+    )
 
 
 if __name__ == "__main__":

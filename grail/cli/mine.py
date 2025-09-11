@@ -9,6 +9,7 @@ import os
 import random
 import time
 import traceback
+import math
 
 import bittensor as bt
 import torch
@@ -21,7 +22,7 @@ from typing import Any, Optional, Tuple
 # from accelerate import Accelerator
 
 
-from ..grail import Prover
+from ..grail import Prover, sign_commit_binding
 from . import console
 from ..infrastructure.drand import get_drand_beacon
 from ..infrastructure.network import create_subtensor
@@ -29,15 +30,23 @@ from ..environments import generate_sat_problem, SATRolloutGenerator
 from ..infrastructure.comms import sink_window_inferences
 from ..infrastructure.credentials import load_r2_credentials
 from ..infrastructure.chain import GrailChainManager
-from ..shared.constants import WINDOW_LENGTH, MODEL_NAME, ROLLOUTS_PER_PROBLEM
+from ..shared.constants import WINDOW_LENGTH, MODEL_NAME, ROLLOUTS_PER_PROBLEM, LAYER_INDEX
 from ..monitoring import get_monitoring_manager
 from ..monitoring.config import MonitoringConfig
-
+from types import SimpleNamespace
+        
 
 # --------------------------------------------------------------------------- #
 #                       Constants & global singletons                         #
 # --------------------------------------------------------------------------- #
 logger = logging.getLogger("grail")
+
+# Miner timing controls
+EMA_ALPHA = 0.2
+DEFAULT_BLOCK_TIME_S = 12.0 # bittensor block time (s)
+MINER_SAFETY_BLOCKS = int(
+    os.getenv("GRAIL_MINER_SAFETY_BLOCKS", "1")
+)
 
 # --------------------------------------------------------------------------- #
 #                             Utility helpers                                 #
@@ -47,7 +56,9 @@ logger = logging.getLogger("grail")
 def get_conf(key: str, default: Any = None) -> Any:
     v = os.getenv(key)
     if not v and default is None:
-        console.print(f"[red]{key} not set.[/red]\nRun:\n    af set {key} <value>")
+        console.print(
+            f"[red]{key} not set.[/red]\nRun:\n    af set {key} <value>"
+        )
         raise typer.Exit(code=1)
     return v or default
 
@@ -81,7 +92,9 @@ def generate_prompt(hotkey_address: str, block_hash: str, nonce: int) -> str:
     )
 
 
-def parse_filename(filename: str) -> Tuple[Optional[str], Optional[int], Optional[int]]:
+def parse_filename(
+    filename: str,
+) -> Tuple[Optional[str], Optional[int], Optional[int]]:
     """Parse filename to extract wallet, block, nonce"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -94,7 +107,9 @@ def parse_filename(filename: str) -> Tuple[Optional[str], Optional[int], Optiona
     return None, None, None
 
 
-def parse_window_filename(filename: str) -> Tuple[Optional[str], Optional[int]]:
+def parse_window_filename(
+    filename: str,
+) -> Tuple[Optional[str], Optional[int]]:
     """Parse window filename to extract wallet and window_start"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -134,7 +149,9 @@ def verify_rollout_signature(rollout_data: dict) -> bool:
             return False
 
         keypair = bt.Keypair(ss58_address=hotkey)
-        result = keypair.verify(data=challenge, signature=bytes.fromhex(signature))
+        result = keypair.verify(
+            data=challenge, signature=bytes.fromhex(signature)
+        )
         return bool(result)
     except Exception:
         return False
@@ -159,7 +176,9 @@ async def watchdog(timeout: int = 600) -> None:
         await asyncio.sleep(timeout // 3)
         elapsed = time.monotonic() - HEARTBEAT
         if elapsed > timeout:
-            logging.error(f"[WATCHDOG] Process stalled {elapsed:.0f}s — exiting process.")
+            logging.error(
+                f"[WATCHDOG] Process stalled {elapsed:.0f}s — exiting process."
+            )
             os._exit(1)
 
 
@@ -187,7 +206,43 @@ def mine(
     async def _run() -> None:
         subtensor = None
         last_window_start = -1
-        
+
+        # Time estimates (EMAs)
+        block_time_ema_s = DEFAULT_BLOCK_TIME_S
+        gen_time_ema_s = None  # seconds per problem (generation + packaging)
+        upload_time_ema_s = None  # seconds per window upload
+
+        last_block_num = None
+        last_block_ts = None
+
+        def _update_block_time_ema(current_block: int) -> None:
+            nonlocal block_time_ema_s, last_block_num, last_block_ts
+            now_ts = time.time()
+            if last_block_num is not None and last_block_ts is not None:
+                dn = current_block - last_block_num
+                if dn > 0:
+                    dt = now_ts - last_block_ts
+                    if dt > 0.0:
+                        sample_bt = dt / dn
+                        block_time_ema_s = (
+                            EMA_ALPHA * sample_bt
+                            + (1.0 - EMA_ALPHA) * block_time_ema_s
+                        )
+            last_block_num = current_block
+            last_block_ts = now_ts
+
+        def _blocks_needed_for_next_gen() -> int:
+            # Conservative defaults before EMAs are populated
+            est_gen_s = (
+                gen_time_ema_s if gen_time_ema_s is not None else 6.0 * block_time_ema_s
+            )
+            est_upload_s = (
+                upload_time_ema_s if upload_time_ema_s is not None else 1.0 * block_time_ema_s
+            )
+            safety_s = float(MINER_SAFETY_BLOCKS) * block_time_ema_s
+            total_s = est_gen_s + est_upload_s + safety_s
+            return max(1, math.ceil(total_s / max(0.001, block_time_ema_s)))
+
         # Load R2 credentials
         try:
             credentials = load_r2_credentials()
@@ -195,21 +250,27 @@ def mine(
         except Exception as e:
             logger.error(f"Failed to load R2 credentials: {e}")
             raise
-        
+
         # Initialize chain manager for credential commitments
         # Create a simple config object with just netuid
-        from types import SimpleNamespace
-        config = SimpleNamespace(netuid=int(get_conf("BT_NETUID", get_conf("NETUID", 200))))
+        config = SimpleNamespace(
+            netuid=int(get_conf("BT_NETUID", get_conf("NETUID", 200)))
+        )
         chain_manager = GrailChainManager(config, wallet, credentials)
         await chain_manager.initialize()
-        logger.info("✅ Initialized chain manager and committed read credentials")
-        
+        logger.info(
+            "✅ Initialized chain manager and committed read credentials"
+        )
+
         # Initialize monitoring for mining operations
         monitor = get_monitoring_manager()
         if monitor:
             # Start a mining run with wallet-specific configuration
             mining_config = MonitoringConfig.for_mining(wallet.name)
-            run_id = await monitor.start_run(f"mining_{wallet.name}", mining_config.get("hyperparameters", {}))
+            run_id = await monitor.start_run(
+                f"mining_{wallet.name}",
+                mining_config.get("hyperparameters", {}),
+            )
             logger.info(f"Started monitoring run: {run_id}")
 
         while True:
@@ -254,20 +315,30 @@ def mine(
                 logger.info(f"🚀 Using base model for window {window_start}")
 
                 logger.info(
-                    f"🔥 Starting inference generation for window {window_start}-{window_start + WINDOW_LENGTH - 1}"
+                    f"🔥 Starting inference generation for window {window_start}-"
+                    f"{window_start + WINDOW_LENGTH - 1}"
                 )
 
-                # Check if we're already past this window
+                # Check if there's enough time to complete another gen+upload
                 current_check = await subtensor.get_current_block()
-                if current_check > window_start + WINDOW_LENGTH - 2:
+                _update_block_time_ema(current_check)
+                pre_blocks_remaining = (window_start + WINDOW_LENGTH) - current_check
+                pre_needed = _blocks_needed_for_next_gen()
+                if pre_blocks_remaining <= pre_needed:
                     logger.warning(
-                        f"Window {window_start} nearly over (current block: {current_check}), waiting for next window"
+                        "Window %s nearly over (block %s); need %s blocks to safely finish next "
+                        "generation+upload. Waiting for next window.",
+                        window_start,
+                        current_check,
+                        pre_needed,
                     )
                     last_window_start = window_start
                     await asyncio.sleep(5)
                     continue
 
-                window_block_hash = await subtensor.get_block_hash(window_start)
+                window_block_hash = await subtensor.get_block_hash(
+                    window_start
+                )
 
                 # Get drand randomness for this window if enabled
                 if use_drand:
@@ -278,10 +349,14 @@ def mine(
                         )
                         # Combine drand with block hash for window randomness
                         combined_randomness = hashlib.sha256(
-                            (window_block_hash + drand_beacon["randomness"]).encode()
+                            (
+                                window_block_hash + drand_beacon["randomness"]
+                            ).encode()
                         ).hexdigest()
                     except Exception as e:
-                        logger.warning(f"Failed to get drand, using block hash only: {e}")
+                        logger.warning(
+                            f"Failed to get drand, using block hash only: {e}"
+                        )
                         combined_randomness = window_block_hash
                 else:
                     combined_randomness = window_block_hash
@@ -290,7 +365,7 @@ def mine(
                 inferences: list = []
                 start_time = time.time()
                 inference_count = 0
-                
+
                 # Track mining metrics
                 successful_rollouts = 0
                 failed_rollouts = 0
@@ -303,24 +378,38 @@ def mine(
                 problem_count = 0
                 while True:
                     current_block = await subtensor.get_current_block()
+                    _update_block_time_ema(current_block)
                     # Refresh watchdog heartbeat during long-running inner loop
                     HEARTBEAT = time.monotonic()
-                    current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
+                    current_window = (
+                        current_block // WINDOW_LENGTH
+                    ) * WINDOW_LENGTH
 
                     # Stop if we've moved to the next window
                     if current_window > window_start:
-                        logger.info(f"Window {window_start} has ended, moving to next window")
+                        logger.info(
+                            f"Window {window_start} has ended, moving to next window"
+                        )
                         break
 
-                    # Check if we're getting close to window end (leave time for upload)
-                    blocks_remaining = (window_start + WINDOW_LENGTH) - current_block
-                    if blocks_remaining <= 2:  # Leave last 2 blocks for upload
+                    # Time-budget guard: only start a new problem if we can finish + upload safely
+                    blocks_remaining = (
+                        window_start + WINDOW_LENGTH
+                    ) - current_block
+                    needed_blocks = _blocks_needed_for_next_gen()
+                    if blocks_remaining <= needed_blocks:
                         logger.info(
-                            f"Approaching window end (blocks remaining: {blocks_remaining}), stopping generation"
+                            "Stopping generation: %s blocks remain, need %s (gen≈%.1fs, upload≈%.1fs, block≈%.2fs)",
+                            blocks_remaining,
+                            needed_blocks,
+                            (gen_time_ema_s or 0.0),
+                            (upload_time_ema_s or 0.0),
+                            block_time_ema_s,
                         )
                         break
 
                     try:
+                        gen_start = time.time()
                         problem_count += 1
                         inference_count += 1  # For logging
                         logger.info(
@@ -329,7 +418,10 @@ def mine(
                         )
 
                         # Clean up GPU memory periodically
-                        if inference_count % 10 == 0 and torch.cuda.is_available():
+                        if (
+                            inference_count % 10 == 0
+                            and torch.cuda.is_available()
+                        ):
                             torch.cuda.empty_cache()
                             logger.debug(
                                 f"GPU memory allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB"
@@ -339,13 +431,13 @@ def mine(
                         base_nonce = random.randint(1000, 9999)
 
                         # Generate SAT problem from seed (using base nonce)
-                        sat_seed_base = (
-                            f"{wallet.hotkey.ss58_address}-{window_block_hash}-{base_nonce}"
-                        )
+                        sat_seed_base = f"{wallet.hotkey.ss58_address}-{window_block_hash}-{base_nonce}"
                         difficulty = min(
                             0.9, 0.3 + (inference_count * 0.01)
                         )  # Gradually increase difficulty
-                        sat_problem = generate_sat_problem(sat_seed_base, difficulty)
+                        sat_problem = generate_sat_problem(
+                            sat_seed_base, difficulty
+                        )
                         logger.debug(
                             f"Generated SAT problem: {sat_problem.num_vars} vars, {len(sat_problem.clauses)} clauses"
                         )
@@ -380,10 +472,18 @@ def mine(
                         ):
                             try:
                                 sample = grpo_rollouts[0]
-                                prompt_len = int(getattr(sample, "prompt_length", 0) or 0)
-                                completion_len = int(getattr(sample, "completion_length", 0) or 0)
+                                prompt_len = int(
+                                    getattr(sample, "prompt_length", 0) or 0
+                                )
+                                completion_len = int(
+                                    getattr(sample, "completion_length", 0)
+                                    or 0
+                                )
                                 if completion_len > 0 and prompt_len >= 0:
-                                    completion_ids = sample.tokens[prompt_len: prompt_len + completion_len]
+                                    completion_ids = sample.tokens[
+                                        prompt_len: prompt_len
+                                        + completion_len
+                                    ]
                                 else:
                                     completion_ids = sample.tokens[prompt_len:]
                                 sample_text = prover.tokenizer.decode(
@@ -409,7 +509,9 @@ def mine(
                                             "group": base_nonce,
                                             "nonce": sample_nonce,
                                             "reward": float(sample.reward),
-                                            "advantage": float(sample.advantage),
+                                            "advantage": float(
+                                                sample.advantage
+                                            ),
                                             "success": bool(sample.success),
                                             "text": sample_text,
                                         },
@@ -421,9 +523,12 @@ def mine(
                                 pass
 
                         # Log GRPO statistics
-                        successful_count = sum(1 for r in grpo_rollouts if r.success)
+                        successful_count = sum(
+                            1 for r in grpo_rollouts if r.success
+                        )
                         mean_reward = (
-                            sum(r.reward for r in grpo_rollouts) / len(grpo_rollouts)
+                            sum(r.reward for r in grpo_rollouts)
+                            / len(grpo_rollouts)
                             if grpo_rollouts
                             else 0
                         )
@@ -434,20 +539,34 @@ def mine(
                         # Log progress every 10 problems
                         if problem_count % 10 == 0:
                             elapsed = time.time() - start_time
-                            rollouts_per_sec = len(inferences) / elapsed if elapsed > 0 else 0
+                            rollouts_per_sec = (
+                                len(inferences) / elapsed if elapsed > 0 else 0
+                            )
                             logger.info(
                                 f"📊 Progress: {len(inferences)} rollouts from {problem_count} problems "
                                 f"in {elapsed:.1f}s ({rollouts_per_sec:.1f} rollouts/sec)"
                             )
-                            
+
                             # Log mining metrics
                             if monitor:
-                                await monitor.log_gauge("mining.rollouts_generated", len(inferences))
-                                await monitor.log_gauge("mining.problems_processed", problem_count)
-                                await monitor.log_gauge("mining.rollouts_per_second", rollouts_per_sec)
+                                await monitor.log_gauge(
+                                    "mining.rollouts_generated",
+                                    len(inferences),
+                                )
+                                await monitor.log_gauge(
+                                    "mining.problems_processed", problem_count
+                                )
+                                await monitor.log_gauge(
+                                    "mining.rollouts_per_second",
+                                    rollouts_per_sec,
+                                )
                                 if successful_rollouts + failed_rollouts > 0:
-                                    success_rate = successful_rollouts / (successful_rollouts + failed_rollouts)
-                                    await monitor.log_gauge("mining.success_rate", success_rate)
+                                    success_rate = successful_rollouts / (
+                                        successful_rollouts + failed_rollouts
+                                    )
+                                    await monitor.log_gauge(
+                                        "mining.success_rate", success_rate
+                                    )
 
                         # Package rollouts for submission
                         for rollout_idx, rollout in enumerate(grpo_rollouts):
@@ -455,9 +574,7 @@ def mine(
                             rollout_nonce = (
                                 base_nonce * 10 + rollout_idx
                             )  # e.g., 1234 -> 12340, 12341, 12342, 12343
-                            rollout_sat_seed = (
-                                f"{wallet.hotkey.ss58_address}-{window_block_hash}-{rollout_nonce}"
-                            )
+                            rollout_sat_seed = f"{wallet.hotkey.ss58_address}-{window_block_hash}-{rollout_nonce}"
 
                             # Set up prover state for open() method
                             prover._state = {
@@ -467,6 +584,16 @@ def mine(
                                 "signature": rollout.signature,
                             }
                             proof_data = prover.open(combined_randomness)
+
+                            # Compute commit-binding signature (binds tokens, randomness, model, layer, s_vals)
+                            commit_sig = sign_commit_binding(
+                                rollout.tokens,
+                                combined_randomness,
+                                prover.model.name_or_path,
+                                LAYER_INDEX,
+                                rollout.s_vals,
+                                wallet,
+                            )
 
                             rollout_data = {
                                 "window_start": window_start,
@@ -483,7 +610,11 @@ def mine(
                                 "commit": {
                                     "tokens": rollout.tokens,
                                     "s_vals": rollout.s_vals,
-                                    "signature": rollout.signature.hex(),
+                                    "model": {
+                                        "name": prover.model.name_or_path,
+                                        "layer_index": LAYER_INDEX,
+                                    },
+                                    "signature": commit_sig.hex(),
                                     "beacon": rollout.beacon,
                                     "sat_problem": {
                                         "seed": sat_seed_base,  # Use base seed for GRPO group
@@ -508,28 +639,64 @@ def mine(
                                                     if any(
                                                         (
                                                             lit > 0
-                                                            and rollout.trajectory[0][1][
+                                                            and rollout.trajectory[
+                                                                0
+                                                            ][
+                                                                1
+                                                            ][
                                                                 abs(lit) - 1
                                                             ]
-                                                            if len(rollout.trajectory) > 0
+                                                            if len(
+                                                                rollout.trajectory
+                                                            )
+                                                            > 0
                                                             and isinstance(
-                                                                rollout.trajectory[0][1], list
+                                                                rollout.trajectory[
+                                                                    0
+                                                                ][
+                                                                    1
+                                                                ],
+                                                                list,
                                                             )
                                                             and abs(lit) - 1
-                                                            < len(rollout.trajectory[0][1])
+                                                            < len(
+                                                                rollout.trajectory[
+                                                                    0
+                                                                ][
+                                                                    1
+                                                                ]
+                                                            )
                                                             else False
                                                         )
                                                         or (
                                                             lit < 0
-                                                            and not rollout.trajectory[0][1][
+                                                            and not rollout.trajectory[
+                                                                0
+                                                            ][
+                                                                1
+                                                            ][
                                                                 abs(lit) - 1
                                                             ]
-                                                            if len(rollout.trajectory) > 0
+                                                            if len(
+                                                                rollout.trajectory
+                                                            )
+                                                            > 0
                                                             and isinstance(
-                                                                rollout.trajectory[0][1], list
+                                                                rollout.trajectory[
+                                                                    0
+                                                                ][
+                                                                    1
+                                                                ],
+                                                                list,
                                                             )
                                                             and abs(lit) - 1
-                                                            < len(rollout.trajectory[0][1])
+                                                            < len(
+                                                                rollout.trajectory[
+                                                                    0
+                                                                ][
+                                                                    1
+                                                                ]
+                                                            )
                                                             else False
                                                         )
                                                         for lit in c
@@ -542,7 +709,9 @@ def mine(
                                         "assignment": (
                                             rollout.trajectory[0][1]
                                             if rollout.trajectory
-                                            and isinstance(rollout.trajectory[0][1], list)
+                                            and isinstance(
+                                                rollout.trajectory[0][1], list
+                                            )
                                             else []
                                         ),
                                     },
@@ -554,18 +723,36 @@ def mine(
                             # Sign each rollout
                             rollout_data = sign_rollout(rollout_data, wallet)
                             inferences.append(rollout_data)
-                            
+
                             # Track rollout metrics
                             if rollout.success:
                                 successful_rollouts += 1
                                 total_reward += rollout.reward
                                 if monitor:
-                                    await monitor.log_counter("mining.successful_rollouts")
-                                    await monitor.log_histogram("mining.reward_distribution", rollout.reward)
+                                    await monitor.log_counter(
+                                        "mining.successful_rollouts"
+                                    )
+                                    await monitor.log_histogram(
+                                        "mining.reward_distribution",
+                                        rollout.reward,
+                                    )
                             else:
                                 failed_rollouts += 1
                                 if monitor:
-                                    await monitor.log_counter("mining.failed_rollouts")
+                                    await monitor.log_counter(
+                                        "mining.failed_rollouts"
+                                    )
+
+                        # Update generation EMA (generation + packaging)
+                        gen_duration = time.time() - gen_start
+                        gen_time_ema_s = (
+                            gen_duration
+                            if gen_time_ema_s is None
+                            else (
+                                EMA_ALPHA * gen_duration
+                                + (1.0 - EMA_ALPHA) * gen_time_ema_s
+                            )
+                        )
 
                         # Tiny delay to yield control
                         await asyncio.sleep(0.01)
@@ -573,7 +760,9 @@ def mine(
 
                     except RuntimeError as e:
                         if "CUDA" in str(e):
-                            logger.error(f"CUDA error at inference {inference_count}: {e}")
+                            logger.error(
+                                f"CUDA error at inference {inference_count}: {e}"
+                            )
                             logger.error(
                                 f"SAT problem: vars={sat_problem.num_vars if 'sat_problem' in locals() else 'N/A'}, "
                                 f"clauses={len(sat_problem.clauses) if 'sat_problem' in locals() else 'N/A'}"
@@ -589,52 +778,91 @@ def mine(
                         else:
                             raise
                     except Exception as e:
-                        logger.warning(f"Failed to generate inference {inference_count}: {e}")
+                        logger.warning(
+                            f"Failed to generate inference {inference_count}: {e}"
+                        )
                         continue
 
                 elapsed_time = time.time() - start_time
                 logger.info(
                     f"🎯 Generated {len(inferences)} rollouts in {elapsed_time:.1f}s for window {window_start}"
                 )
-                
+
                 # Log final window metrics
                 if monitor:
                     await monitor.log_counter("mining.windows_completed")
-                    await monitor.log_gauge("mining.window_duration", elapsed_time)
-                    await monitor.log_gauge("mining.total_rollouts_in_window", len(inferences))
+                    await monitor.log_gauge(
+                        "mining.window_duration", elapsed_time
+                    )
+                    await monitor.log_gauge(
+                        "mining.total_rollouts_in_window", len(inferences)
+                    )
                     if successful_rollouts + failed_rollouts > 0:
-                        final_success_rate = successful_rollouts / (successful_rollouts + failed_rollouts)
-                        await monitor.log_gauge("mining.final_success_rate", final_success_rate)
+                        final_success_rate = successful_rollouts / (
+                            successful_rollouts + failed_rollouts
+                        )
+                        await monitor.log_gauge(
+                            "mining.final_success_rate", final_success_rate
+                        )
                     if successful_rollouts > 0:
                         avg_reward = total_reward / successful_rollouts
-                        await monitor.log_gauge("mining.average_reward", avg_reward)
+                        await monitor.log_gauge(
+                            "mining.average_reward", avg_reward
+                        )
 
                 if inferences:
                     logger.info(
                         f"📤 Uploading {len(inferences)} rollouts to R2 for window {window_start}..."
                     )
                     try:
+                        upload_start = time.time()
                         if monitor:
                             with monitor.timer("mining.upload_duration"):
-                                await sink_window_inferences(wallet, window_start, inferences, credentials)
+                                await sink_window_inferences(
+                                    wallet,
+                                    window_start,
+                                    inferences,
+                                    credentials,
+                                )
                         else:
-                            await sink_window_inferences(wallet, window_start, inferences, credentials)
-                            
+                            await sink_window_inferences(
+                                wallet, window_start, inferences, credentials
+                            )
+
+                        # Update upload EMA
+                        upload_duration = time.time() - upload_start
+                        upload_time_ema_s = (
+                            upload_duration
+                            if upload_time_ema_s is None
+                            else (
+                                EMA_ALPHA * upload_duration
+                                + (1.0 - EMA_ALPHA) * upload_time_ema_s
+                            )
+                        )
+
                         logger.info(
                             f"✅ Successfully uploaded window {window_start} with {len(inferences)} rollouts"
                         )
                         HEARTBEAT = time.monotonic()
                         if monitor:
-                            await monitor.log_counter("mining.successful_uploads")
-                            await monitor.log_gauge("mining.uploaded_rollouts", len(inferences))
-                            
+                            await monitor.log_counter(
+                                "mining.successful_uploads"
+                            )
+                            await monitor.log_gauge(
+                                "mining.uploaded_rollouts", len(inferences)
+                            )
+
                     except Exception as e:
-                        logger.error(f"❌ Failed to upload window {window_start}: {e}")
+                        logger.error(
+                            f"❌ Failed to upload window {window_start}: {e}"
+                        )
                         logger.error(traceback.format_exc())
                         if monitor:
                             await monitor.log_counter("mining.failed_uploads")
                 else:
-                    logger.warning(f"No inferences generated for window {window_start}")
+                    logger.warning(
+                        f"No inferences generated for window {window_start}"
+                    )
                     if monitor:
                         await monitor.log_counter("mining.empty_windows")
 

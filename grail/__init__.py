@@ -5,14 +5,14 @@ from dotenv import load_dotenv
 
 # Load environment variables as early as possible so any module-level
 # reads (e.g., in shared.constants) see updated values from .env.
-try:
-    load_dotenv(override=True)
-except Exception:
-    pass
+load_dotenv(override=True)
 
-from .grail import Prover, Verifier  # noqa: F401
-from .infrastructure.drand import get_drand_beacon, get_round_at_time  # noqa: F401
-from .environments import (  # noqa: F401
+from .grail import Prover, Verifier  # noqa: F401, E402, E501, F403, F405
+from .infrastructure.drand import (
+    get_drand_beacon,
+    get_round_at_time,
+)  # noqa: F401, E402, E501, F403, F405
+from .environments import (  # noqa: F401, E402, E501, F403, F405
     # New reward system
     Parser,
     RewardVector,
@@ -23,8 +23,8 @@ from .environments import (  # noqa: F401
     generate_sat_problem,
     SATRolloutGenerator,
 )
-from .mining.rollout_generator import RolloutGenerator  # noqa: F401
-from .infrastructure.comms import (  # noqa: F401
+from .mining.rollout_generator import RolloutGenerator  # noqa: F401, E402, E501, F403, F405
+from .infrastructure.comms import (  # noqa: F401, E402, E501, F403, F405
     upload_file_chunked,
     download_file_chunked,
     file_exists,
@@ -41,6 +41,7 @@ from .infrastructure.comms import (  # noqa: F401
     login_huggingface,
     PROTOCOL_VERSION,
 )
+# flake8: noqa: E402,E501,F401,F403,F405
 
 __all__ = [
     # Core classes

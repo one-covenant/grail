@@ -9,13 +9,15 @@ import random
 import asyncio
 import logging
 import hashlib
+import json
 import traceback
 import math
 import bittensor as bt
 from collections import defaultdict
-from typing import Any, Tuple, Optional, DefaultDict
+from typing import Any, Tuple, Optional, DefaultDict, Dict
 
 from grail.infrastructure.drand import get_round_at_time, get_drand_beacon
+from types import SimpleNamespace
 
 # TODO(v2): Re-enable training imports
 # from trl import PPOTrainer, PPOConfig
@@ -26,7 +28,7 @@ from grail.infrastructure.drand import get_round_at_time, get_drand_beacon
 from ..grail import Verifier
 from . import console
 
-from ..environments import generate_sat_problem, create_sat_reward_vector
+from ..environments import create_sat_reward_vector
 from ..infrastructure.network import create_subtensor
 from ..infrastructure.comms import (
     file_exists,
@@ -74,9 +76,6 @@ async def get_subtensor() -> bt.subtensor:
         SUBTENSOR = await create_subtensor()
         logger.info("Connected")
     return SUBTENSOR
-
-
-# S3/R2 communication functions are now imported from comms.py
 
 
 # --------------------------------------------------------------------------- #
@@ -188,13 +187,13 @@ def validate(
     use_drand: bool = typer.Option(
         True,
         "--use-drand/--no-drand",
-        help="Verify drand randomness (default: True)",
+        help="Include drand in challenge randomness (default: True)",
         show_default=True,
     ),
     test_mode: bool = typer.Option(
-        True,
+        False,
         "--test-mode/--no-test-mode",
-        help="Test mode: validate own files (default: True)",
+        help="Test mode: validate only own files (default: False)",
         show_default=True,
     ),
 ) -> None:
@@ -212,6 +211,8 @@ def validate(
     login_huggingface()
 
     # Storage for inference counts per miner
+    # {hotkey: {window_start: {"valid": int, "checked": int, "total": int,
+    #                          "estimated_valid": int, "successful": int, "unique": int}}}
     inference_counts: DefaultDict[str, DefaultDict[int, int]] = defaultdict(
         lambda: defaultdict(int)
     )  # {hotkey: {window: count}}
@@ -237,7 +238,7 @@ def validate(
         
         # Initialize chain manager for credential commitments
         # Create a simple config object with just netuid
-        from types import SimpleNamespace
+        
         config = SimpleNamespace(netuid=NETUID)
         chain_manager = GrailChainManager(config, wallet, credentials)
         await chain_manager.initialize()
@@ -307,10 +308,22 @@ def validate(
                 # Get block hash for the window start
                 target_window_hash = await subtensor.get_block_hash(target_window)
 
+                # Derive one window-level randomness value to reuse everywhere in this window
+                if use_drand:
+                    try:
+                        drand_round = get_round_at_time(int(time.time()))
+                        drand_beacon = get_drand_beacon(drand_round)
+                        window_rand = hashlib.sha256(
+                            (target_window_hash + drand_beacon["randomness"]).encode()
+                        ).hexdigest()
+                    except Exception:
+                        window_rand = hashlib.sha256(target_window_hash.encode()).hexdigest()
+                else:
+                    window_rand = hashlib.sha256(target_window_hash.encode()).hexdigest()
+
                 # For testing: just use the validator's own hotkey (same as miner in local testing)
                 # In production, this would iterate through meta.hotkeys
                 # Use the test_mode parameter passed to the function instead of hardcoding
-
                 if test_mode:
                     # Use the wallet's own hotkey for testing
                     hotkeys_to_check = [wallet.hotkey.ss58_address]
@@ -327,7 +340,7 @@ def validate(
 
                 # Download and process files
                 total_valid_rollouts = 0
-                window_inference_counts: DefaultDict[str, int] = defaultdict(int)
+                window_inference_counts: Dict[str, Dict[str, int]] = {}
                 files_found = 0
                 all_valid_rollouts = []  # Store all valid rollouts for uploading
                 # Debug text logging limits (only used when -vv)
@@ -406,23 +419,41 @@ def validate(
                         if total_inferences <= MAX_SAMPLES_PER_MINER:
                             # If few enough rollouts, check them all
                             indices_to_check = list(range(total_inferences))
-                            use_spot_check = False
                             logger.info(
                                 f"🔍 Verifying all {total_inferences} rollouts from {wallet_addr}"
                             )
                         else:
-                            # For spot checking, sample complete GRPO groups
-                            use_spot_check = True
+                            # For spot checking, sample complete GRPO groups (deterministically)
                             indices_to_check = []
 
                             # Calculate how many groups to check
                             num_groups = len(groups_map)
                             groups_to_check = max(1, min(num_groups, int(num_groups * SAMPLE_RATE)))
 
-                            # Randomly select groups
-                            selected_groups = random.sample(
-                                list(groups_map.keys()), groups_to_check
+                            # Deterministic per-validator RNG seeded once per window
+                            seed_material = f"{wallet_addr}:{window_rand}:{wallet.hotkey.ss58_address}".encode()
+                            seed_int = int.from_bytes(
+                                hashlib.sha256(seed_material).digest()[:8], "big"
                             )
+                            rng = random.Random(seed_int)
+
+                            # Canonicalize group order by content digest
+                            def _group_digest(gidxs):
+                                dig = hashlib.sha256()
+                                for i in sorted(gidxs):
+                                    commit_json = json.dumps(
+                                        inferences[i].get("commit", {}),
+                                        sort_keys=True,
+                                        separators=(",", ":"),
+                                    )
+                                    dig.update(hashlib.sha256(commit_json.encode()).digest())
+                                return dig.hexdigest()
+
+                            group_keys = sorted(
+                                list(groups_map.keys()),
+                                key=lambda gid: _group_digest(groups_map[gid]),
+                            )
+                            selected_groups = rng.sample(group_keys, groups_to_check)
 
                             # Add all rollouts from selected groups
                             for group_id in selected_groups:
@@ -442,7 +473,6 @@ def validate(
 
                         # Progressive verification with early stopping
                         should_stop = False
-                        batch_failures = 0
 
                         for idx, inference_idx in enumerate(indices_to_check):
                             # Early stopping check every BATCH_SIZE verifications
@@ -555,24 +585,13 @@ def validate(
                                         base_sat_seed = (
                                             f"{wallet_addr}-{target_window_hash}-{rollout_group}"
                                         )
-                                        base_problem = generate_sat_problem(
-                                            base_sat_seed, inference.get("difficulty", 0.5)
-                                        )
                                         # Update commit data with base problem for verification
                                         commit_data["sat_problem"]["seed"] = base_sat_seed
                                         # The verifier will regenerate the problem from this seed
 
 
-                                    # Use drand-derived challenge randomness mixed with window hash
-                                    try:
-                                        drand_round = get_round_at_time(int(time.time()))
-                                        drand_beacon = get_drand_beacon(drand_round)
-                                        challenge_rand = hashlib.sha256(
-                                            (target_window_hash + drand_beacon['randomness']).encode()
-                                        ).hexdigest()
-                                    except Exception:
-                                        # Fallback to window hash if drand unavailable
-                                        challenge_rand = hashlib.sha256(target_window_hash.encode()).hexdigest()
+                                    # Use one window-level randomness for this window
+                                    challenge_rand = window_rand
 
                                     # Use wallet address for signature verification (public key verification)
                                     if monitor:
@@ -825,6 +844,7 @@ def validate(
                     inference_counts[hotkey][target_window] = metrics
 
                 # Compute weights based on unique successful rollouts
+                EMPTY_METRICS: Dict[str, int] = {}
                 raw_scores = []
                 for uid, hotkey in enumerate(meta.hotkeys):
                     # Calculate score over last 3 windows
@@ -834,23 +854,19 @@ def validate(
 
                     total_unique = 0
                     total_successful = 0
-                    total_valid = 0
+                    total_estimated_valid = 0
 
                     for w in recent_windows:
-                        metrics = inference_counts[hotkey].get(w, {})
-                        if isinstance(metrics, dict):
-                            total_unique += metrics.get("unique", 0)
-                            total_successful += metrics.get("successful", 0)
-                            total_valid += metrics.get("valid", 0)
-                        else:
-                            # Backward compatibility
-                            total_valid += metrics if isinstance(metrics, (int, float)) else 0
+                        metrics = inference_counts[hotkey].get(w, EMPTY_METRICS)
+                        total_unique += metrics.get("unique", 0)
+                        total_successful += metrics.get("successful", 0)
+                        total_estimated_valid += metrics.get("estimated_valid", 0)
 
                     # Scoring formula: prioritize unique solutions, then successful, then valid
                     # Base performance score in [0, 1]
                     unique_score = min(1.0, total_unique / 10.0) if total_unique > 0 else 0
                     success_score = min(1.0, total_successful / 20.0) if total_successful > 0 else 0
-                    valid_score = min(1.0, total_valid / 50.0) if total_valid > 0 else 0
+                    valid_score = min(1.0, total_estimated_valid / 50.0) if total_estimated_valid > 0 else 0
 
                     base_score = 0.6 * unique_score + 0.0 * success_score + 0.4 * valid_score
                     base_score = max(0.0, min(1.0, base_score))

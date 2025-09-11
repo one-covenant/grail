@@ -2,10 +2,11 @@
 
 import os
 import logging
-import requests  # type: ignore[import]
+import requests
 from typing import Any, Dict, Optional, TypedDict
 
 logger = logging.getLogger(__name__)
+
 
 class ChainConfig(TypedDict):
     hash: str
@@ -82,7 +83,9 @@ def get_current_chain() -> Dict[str, Any]:
     return {"name": _current_chain, **DRAND_CHAINS[_current_chain]}
 
 
-def get_drand_beacon(round_id: Optional[int] = None, use_fallback: bool = True) -> dict:
+def get_drand_beacon(
+    round_id: Optional[int] = None, use_fallback: bool = True
+) -> dict:
     """
     Fetch randomness from drand network.
 
@@ -106,9 +109,7 @@ def get_drand_beacon(round_id: Optional[int] = None, use_fallback: bool = True) 
             if response.status_code == 200:
                 data = response.json()
                 msg_prefix = f"[Drand-{_current_chain}] Success!"
-                msg_detail = (
-                    f" round={data['round']}, randomness={data['randomness'][:8]}…"
-                )
+                msg_detail = f" round={data['round']}, randomness={data['randomness'][:8]}…"
                 logger.info(msg_prefix + msg_detail)
                 return {
                     "round": data["round"],

@@ -11,7 +11,7 @@ import os
 
 NETWORK = os.getenv("BT_NETWORK", "finney")
 NETUID = int(os.getenv("NETUID", 81))
-WINDOW_LENGTH = 50
+WINDOW_LENGTH = 30 
 
 # ────────────────  MODEL CONFIGURATION  ────────────────
 
@@ -35,7 +35,8 @@ MAX_NEW_TOKENS = int(os.getenv("GRAIL_MAX_NEW_TOKENS", "1024"))
 
 # Must match rollout generator default
 MIN_EOS_PROBABILITY = 0.1  # Minimum probability for valid EOS termination
-SANITY_CHECK_DRIFT_THRESHOLD = 0.1  # Max acceptable drift between miner/validator
+# Max acceptable drift between miner/validator
+SANITY_CHECK_DRIFT_THRESHOLD = 0.1
 
 # ────────────────  TOKEN SAMPLING DIST CHECK HPs  ────────────────
 

@@ -84,24 +84,39 @@ _BEACON_COUNTER = 0
 
 # ───────────────────────────────  UTILITIES  ────────────────────────────────
 
+
 def _shuffle_urls() -> list[str]:
     urls = DRAND_URLS[:]
     random.shuffle(urls)
     return urls
 
+
 def _get_chain_record(name: str) -> Dict[str, Any]:
     if name not in DRAND_CHAINS:
-        raise ValueError(f"Unknown drand chain '{name}'. Available: {list(DRAND_CHAINS.keys())}")
+        raise ValueError(
+            f"Unknown drand chain '{name}'. Available: {list(DRAND_CHAINS.keys())}"
+        )
     return DRAND_CHAINS[name]
 
-def _parse_chain_info_payload(payload: Dict[str, Any]) -> Tuple[Optional[int], Optional[int]]:
+
+def _parse_chain_info_payload(
+    payload: Dict[str, Any],
+) -> Tuple[Optional[int], Optional[int]]:
     """
     Extract (genesis_time, period) from v2 or v1 /info responses.
     Be tolerant to possible key naming variants.
     """
     # Common/expected v2 keys
-    gt = payload.get("genesis_time") or payload.get("genesisTime") or payload.get("genesis")  # some docs use 'genesis'
-    pd = payload.get("period") or payload.get("round_time") or payload.get("roundTime")
+    gt = (
+        payload.get("genesis_time")
+        or payload.get("genesisTime")
+        or payload.get("genesis")
+    )  # some docs use 'genesis'
+    pd = (
+        payload.get("period")
+        or payload.get("round_time")
+        or payload.get("roundTime")
+    )
 
     # Many responses encode period as seconds int; sometimes strings—normalize:
     try:
@@ -118,6 +133,7 @@ def _parse_chain_info_payload(payload: Dict[str, Any]) -> Tuple[Optional[int], O
 
     return gt, pd
 
+
 def _http_get_json(paths: list[str]) -> Optional[Dict[str, Any]]:
     """
     Try all relays × all paths (v2-first, then v1) and return first JSON payload.
@@ -131,15 +147,20 @@ def _http_get_json(paths: list[str]) -> Optional[Dict[str, Any]]:
                 r = _SESSION.get(url, timeout=(1.5, 3.5), headers=_HEADERS)
                 if r.status_code == 200:
                     try:
-                        return r.json()
+                        return r.json()  # type: ignore[no-any-return]
                     except Exception as e:
-                        logger.debug(f"[Drand] JSON parse error for {url}: {e}; body[:160]={r.text[:160]!r}")
+                        logger.debug(
+                            f"[Drand] JSON parse error for {url}: {e}; body[:160]={r.text[:160]!r}"
+                        )
                         continue
                 else:
-                    logger.debug(f"[Drand] GET {url} -> HTTP {r.status_code} {r.text[:160]!r}")
+                    logger.debug(
+                        f"[Drand] GET {url} -> HTTP {r.status_code} {r.text[:160]!r}"
+                    )
             except Exception as e:
                 logger.debug(f"[Drand] GET {url} error: {e}")
     return None
+
 
 def _fetch_chain_info(chain_hash: str) -> Optional[Dict[str, Any]]:
     """
@@ -152,9 +173,11 @@ def _fetch_chain_info(chain_hash: str) -> Optional[Dict[str, Any]]:
     v2_info = f"/v2/chains/{chain_hash}/info"
     v1_info = f"/{chain_hash}/info"
     # Additional v1 fallback for 'default' (some relays allow /info at root):
-    root_info = "/info" if chain_hash == DRAND_CHAINS["default"]["hash"] else None
+    root_info = (
+        "/info" if chain_hash == DRAND_CHAINS["default"]["hash"] else None
+    )
 
-    payload = _http_get_json([v2_info, v1_info, root_info])
+    payload = _http_get_json([v2_info, v1_info, root_info])  # type: ignore[list-item]
     if not payload:
         logger.debug(f"[Drand] chain info fetch failed for {chain_hash}")
         return None
@@ -169,6 +192,7 @@ def _fetch_chain_info(chain_hash: str) -> Optional[Dict[str, Any]]:
     _CHAIN_INFO_CACHE[chain_hash] = payload
     return payload
 
+
 def _ensure_params(refresh: bool = False) -> None:
     """
     Ensure _DRAND_CHAIN_HASH / _DRAND_GENESIS_TIME / _DRAND_PERIOD are populated.
@@ -178,7 +202,12 @@ def _ensure_params(refresh: bool = False) -> None:
 
     rec = _get_chain_record(_current_chain)
     chain_hash = rec["hash"]
-    if refresh or _DRAND_CHAIN_HASH != chain_hash or _DRAND_GENESIS_TIME is None or _DRAND_PERIOD is None:
+    if (
+        refresh
+        or _DRAND_CHAIN_HASH != chain_hash
+        or _DRAND_GENESIS_TIME is None
+        or _DRAND_PERIOD is None
+    ):
         # Start with configured defaults:
         gt = rec.get("genesis_time")
         pd = rec.get("period")
@@ -203,7 +232,9 @@ def _ensure_params(refresh: bool = False) -> None:
         else:
             logger.info(msg + " (using configured defaults)")
 
+
 # ─────────────────────────────  PUBLIC API  ─────────────────────────────
+
 
 def set_chain(chain_name: str, refresh_info: bool = True) -> None:
     """
@@ -218,7 +249,10 @@ def set_chain(chain_name: str, refresh_info: bool = True) -> None:
     _current_chain = chain_name
     with _LOCK:
         _ensure_params(refresh=refresh_info)
-    logger.info(f"Switched to drand chain '{chain_name}': {DRAND_CHAINS[chain_name]['description']}")
+    logger.info(
+        f"Switched to drand chain '{chain_name}': {DRAND_CHAINS[chain_name]['description']}"
+    )
+
 
 def get_current_chain() -> Dict[str, Any]:
     """
@@ -226,15 +260,20 @@ def get_current_chain() -> Dict[str, Any]:
     """
     _ensure_params(refresh=False)
     rec = _get_chain_record(_current_chain).copy()
-    rec.update({
-        "name": _current_chain,
-        "hash": _DRAND_CHAIN_HASH,
-        "period": _DRAND_PERIOD,
-        "genesis_time": _DRAND_GENESIS_TIME,
-    })
+    rec.update(
+        {
+            "name": _current_chain,
+            "hash": _DRAND_CHAIN_HASH,
+            "period": _DRAND_PERIOD,
+            "genesis_time": _DRAND_GENESIS_TIME,
+        }
+    )
     return rec
 
-def get_drand_beacon(round_id: Optional[int] = None, use_fallback: bool = True) -> Dict[str, Any]:
+
+def get_drand_beacon(
+    round_id: Optional[int] = None, use_fallback: bool = True
+) -> Dict[str, Any]:
     """
     Fetch randomness from the drand network (v2-first, v1 fallback).
 
@@ -258,9 +297,13 @@ def get_drand_beacon(round_id: Optional[int] = None, use_fallback: bool = True) 
     v2_path = f"/v2/chains/{_DRAND_CHAIN_HASH}/rounds/{rid}"
     v1_path = f"/{_DRAND_CHAIN_HASH}/public/{rid}"
     # Default chain extra fallback (root v1 path without chain hash)
-    root_v1 = f"/public/{rid}" if _DRAND_CHAIN_HASH == DRAND_CHAINS["default"]["hash"] else None
+    root_v1 = (
+        f"/public/{rid}"
+        if _DRAND_CHAIN_HASH == DRAND_CHAINS["default"]["hash"]
+        else None
+    )
 
-    data = _http_get_json([v2_path, v1_path, root_v1])
+    data = _http_get_json([v2_path, v1_path, root_v1])  # type: ignore[list-item]
     if not data:
         logger.warning("[Drand] All relays/paths failed to fetch beacon")
         if use_fallback:
@@ -270,12 +313,16 @@ def get_drand_beacon(round_id: Optional[int] = None, use_fallback: bool = True) 
     rnd = data.get("randomness")
     rno = data.get("round")
     if rnd is None or rno is None:
-        logger.debug(f"[Drand] Missing fields in response: {json.dumps(data)[:200]}")
+        logger.debug(
+            f"[Drand] Missing fields in response: {json.dumps(data)[:200]}"
+        )
         if use_fallback:
             return get_mock_beacon()
         raise RuntimeError("drand response missing required fields")
 
-    logger.debug(f"[Drand-{_current_chain}] ok round={rno} rand={str(rnd)[:8]}…")
+    logger.debug(
+        f"[Drand-{_current_chain}] ok round={rno} rand={str(rnd)[:8]}…"
+    )
     return {
         "source": "drand",
         "chain": _current_chain,
@@ -286,6 +333,7 @@ def get_drand_beacon(round_id: Optional[int] = None, use_fallback: bool = True) 
         "signature": data.get("signature"),
         "previous_signature": data.get("previous_signature"),
     }
+
 
 def get_mock_beacon() -> Dict[str, Any]:
     """
@@ -309,10 +357,9 @@ def get_mock_beacon() -> Dict[str, Any]:
         "previous_signature": None,
     }
 
+
 def get_beacon(
-    round_id: str = "latest",
-    use_drand: bool = True,
-    use_fallback: bool = True
+    round_id: str = "latest", use_drand: bool = True, use_fallback: bool = True
 ) -> Dict[str, Any]:
     """
     Convenience wrapper:
@@ -331,6 +378,7 @@ def get_beacon(
             return get_mock_beacon()
         raise
 
+
 def get_round_at_time(timestamp: int) -> int:
     """
     Compute the drand round number for a given UNIX timestamp.
@@ -347,6 +395,7 @@ def get_round_at_time(timestamp: int) -> int:
     if timestamp < _DRAND_GENESIS_TIME:
         return 0
     return 1 + (timestamp - _DRAND_GENESIS_TIME) // _DRAND_PERIOD
+
 
 def get_expected_round() -> Optional[int]:
     """
@@ -370,6 +419,7 @@ def get_expected_round() -> Optional[int]:
         return int(payload.get("round", {}).get("expected"))  # be liberal
     except Exception:
         return None
+
 
 # ───────────────────────────────  BOOTSTRAP  ───────────────────────────────
 

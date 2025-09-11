@@ -13,7 +13,13 @@ def resolve_hidden_size(model: PreTrainedModel) -> int:
     """
     cfg = getattr(model, "config", None)
 
-    for attr in ("hidden_size", "d_model", "n_embd", "embed_dim", "hidden_dim"):
+    for attr in (
+        "hidden_size",
+        "d_model",
+        "n_embd",
+        "embed_dim",
+        "hidden_dim",
+    ):
         try:
             if cfg is not None and hasattr(cfg, attr):
                 val = getattr(cfg, attr)
@@ -32,18 +38,28 @@ def resolve_hidden_size(model: PreTrainedModel) -> int:
         pass
 
     try:
-        if hasattr(model, "get_input_embeddings") and callable(model.get_input_embeddings):
+        if hasattr(model, "get_input_embeddings") and callable(
+            model.get_input_embeddings
+        ):
             emb = model.get_input_embeddings()
             weight = getattr(emb, "weight", None)
-            if weight is not None and hasattr(weight, "shape") and len(weight.shape) == 2:
+            if (
+                weight is not None
+                and hasattr(weight, "shape")
+                and len(weight.shape) == 2
+            ):
                 return int(weight.shape[1])
     except Exception:
         pass
 
-    raise AttributeError("Could not determine model hidden size from config or embeddings")
+    raise AttributeError(
+        "Could not determine model hidden size from config or embeddings"
+    )
 
 
-def resolve_vocab_size(model_config: Union[PretrainedConfig, Any]) -> Optional[int]:
+def resolve_vocab_size(
+    model_config: Union[PretrainedConfig, Any],
+) -> Optional[int]:
     """Return vocab size if present in config (direct or nested)."""
     try:
         for attr in ("vocab_size", "n_vocab", "vocabulary_size"):
@@ -63,7 +79,9 @@ def resolve_vocab_size(model_config: Union[PretrainedConfig, Any]) -> Optional[i
     return None
 
 
-def resolve_max_context_length(model_config: Union[PretrainedConfig, Any]) -> int:
+def resolve_max_context_length(
+    model_config: Union[PretrainedConfig, Any],
+) -> int:
     """Return best-effort max context length (max sequence length) with common fallbacks."""
     candidates = (
         "max_position_embeddings",
@@ -84,5 +102,3 @@ def resolve_max_context_length(model_config: Union[PretrainedConfig, Any]) -> in
             pass
 
     return 16384
-
-

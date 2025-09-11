@@ -13,7 +13,8 @@ class Parser(ABC):
 
         Args:
             completion: The raw text completion from the model
-            context: Additional context (e.g., problem instance) needed for parsing
+            context: Additional context (e.g., problem instance) needed for
+                parsing
 
         Returns:
             Parsed structured output that can be consumed by reward functions
@@ -44,7 +45,9 @@ class RewardVector:
                     total reward bound.
         """
         if len(reward_functions) != len(weights):
-            raise ValueError("Number of reward functions must match number of weights")
+            raise ValueError(
+                "Number of reward functions must match number of weights"
+            )
 
         self.reward_functions = reward_functions
         self.weights = weights
@@ -73,7 +76,9 @@ class RewardVector:
 
         return total_reward
 
-    def compute_individual_rewards(self, completion: str, context: Any) -> List[float]:
+    def compute_individual_rewards(
+        self, completion: str, context: Any
+    ) -> List[float]:
         """Compute individual rewards from each function (useful for analysis).
 
         Args:
@@ -95,7 +100,7 @@ class RewardVector:
 
         return rewards
 
-    # --------------------------------- Bounds ---------------------------------
+    # --------------------------------- Bounds --------------------------------
     def has_bounds(self) -> bool:
         """Return True if per-function bounds metadata was provided."""
         return self._bounds is not None
@@ -110,12 +115,15 @@ class RewardVector:
             ValueError: if bounds metadata is missing or malformed.
         """
         if self._bounds is None:
-            raise ValueError("No bounds metadata available for this RewardVector")
-        if (
-            len(self._bounds) != len(self.reward_functions)
-            or len(self._bounds) != len(self.weights)
-        ):
-            raise ValueError("Bounds must align with reward functions and weights")
+            raise ValueError(
+                "No bounds metadata available for this RewardVector"
+            )
+        if len(self._bounds) != len(self.reward_functions) or len(
+            self._bounds
+        ) != len(self.weights):
+            raise ValueError(
+                "Bounds must align with reward functions and weights"
+            )
 
         min_total = 0.0
         max_total = 0.0

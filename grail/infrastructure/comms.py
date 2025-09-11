@@ -35,19 +35,24 @@ def get_conf(key: str, default: Optional[str] = None) -> str:
     """Get configuration from environment variables."""
     v = os.getenv(key)
     if not v and default is None:
-        raise ValueError(f"{key} not set. Please set the environment variable.")
+        raise ValueError(
+            f"{key} not set. Please set the environment variable."
+        )
     return v or default or ""
 
 
-def get_client_ctx(credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None, use_write: bool = True) -> Any:
+def get_client_ctx(
+    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    use_write: bool = True,
+) -> Any:
     """Create an S3 client for Cloudflare R2 or a compatible endpoint.
-    
+
     Args:
         credentials: Either BucketCredentials, Bucket, or dict with credential fields.
                     If None, falls back to environment variables (backwards compatibility).
         use_write: If True and credentials is BucketCredentials, use write creds.
                   Ignored for Bucket/dict types.
-    
+
     Environment overrides for hermetic/integration tests:
       - R2_ENDPOINT_URL: full endpoint (e.g., http://s3:9000 for MinIO)
       - R2_REGION: region name (default: us-east-1)
@@ -73,12 +78,16 @@ def get_client_ctx(credentials: Optional[Union[BucketCredentials, Bucket, dict]]
             bucket_name = credentials.name.strip()
         elif isinstance(credentials, dict):
             # Handle dict format (from chain commitments or legacy)
-            account_id = credentials.get('account_id', '').strip()
-            access_key = credentials.get('access_key_id', '').strip()
-            secret_key = credentials.get('secret_access_key', '').strip()
-            bucket_name = credentials.get('name', credentials.get('bucket_name', '')).strip()
+            account_id = credentials.get("account_id", "").strip()
+            access_key = credentials.get("access_key_id", "").strip()
+            secret_key = credentials.get("secret_access_key", "").strip()
+            bucket_name = credentials.get(
+                "name", credentials.get("bucket_name", "")
+            ).strip()
         else:
-            raise ValueError(f"Unsupported credentials type: {type(credentials)}")
+            raise ValueError(
+                f"Unsupported credentials type: {type(credentials)}"
+            )
     else:
         # Fall back to environment variables (backwards compatibility)
         account_id = get_conf("R2_ACCOUNT_ID", None)
@@ -103,17 +112,16 @@ def get_client_ctx(credentials: Optional[Union[BucketCredentials, Bucket, dict]]
                     # Fall back to write credentials for backwards compatibility
                     access_key = get_conf("R2_WRITE_ACCESS_KEY_ID")
                     secret_key = get_conf("R2_WRITE_SECRET_ACCESS_KEY")
-    
+
     # Resolve endpoint
     endpoint_url = os.getenv("R2_ENDPOINT_URL")
     if not endpoint_url:
         endpoint_url = f"https://{account_id}.r2.cloudflarestorage.com"
 
     region_name = os.getenv("R2_REGION", "us-east-1")
-    force_path_style = (
-        os.getenv("R2_FORCE_PATH_STYLE", "false").strip().lower()
-        in {"1", "true", "yes"}
-    )
+    force_path_style = os.getenv(
+        "R2_FORCE_PATH_STYLE", "false"
+    ).strip().lower() in {"1", "true", "yes"}
 
     s3_config: dict = {}
     if force_path_style:
@@ -135,9 +143,12 @@ def get_client_ctx(credentials: Optional[Union[BucketCredentials, Bucket, dict]]
     )
 
 
-def get_bucket_id(credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None, use_write: bool = True) -> str:
+def get_bucket_id(
+    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    use_write: bool = True,
+) -> str:
     """Get the bucket ID from credentials or environment.
-    
+
     Note: Since we use the same bucket for both read and write operations,
     the use_write parameter doesn't affect the bucket ID, only the access keys.
     """
@@ -147,10 +158,12 @@ def get_bucket_id(credentials: Optional[Union[BucketCredentials, Bucket, dict]] 
         elif isinstance(credentials, Bucket):
             return credentials.name.strip()
         elif isinstance(credentials, dict):
-            name = credentials.get('name', credentials.get('bucket_name', '')).strip()
+            name = credentials.get(
+                "name", credentials.get("bucket_name", "")
+            ).strip()
             if name:
                 return name
-    
+
     # Fall back to environment variable (same bucket for read and write)
     return get_conf("R2_BUCKET_ID")
 
@@ -176,10 +189,21 @@ class TransferProgress:
         now = time.time()
 
         # Log progress every 2 seconds or on completion
-        if now - self.last_log_time >= 2.0 or self.transferred >= self.total_size:
+        if (
+            now - self.last_log_time >= 2.0
+            or self.transferred >= self.total_size
+        ):
             elapsed = now - self.start_time
-            speed_mbps = (self.transferred / (1024 * 1024)) / elapsed if elapsed > 0 else 0
-            progress_pct = (self.transferred / self.total_size) * 100 if self.total_size > 0 else 0
+            speed_mbps = (
+                (self.transferred / (1024 * 1024)) / elapsed
+                if elapsed > 0
+                else 0
+            )
+            progress_pct = (
+                (self.transferred / self.total_size) * 100
+                if self.total_size > 0
+                else 0
+            )
 
             logger.info(
                 f"📊 {self.operation}: {progress_pct:.1f}% ({self.transferred}/{self.total_size} bytes) @ {speed_mbps:.2f} MB/s"
@@ -218,7 +242,9 @@ async def upload_file_chunked(
     # For small files, use single upload
     if total_size <= chunk_size:
         logger.info(f"📤 Uploading {key} ({total_size} bytes)")
-        return await _upload_single_chunk(key, data, progress, max_retries, credentials, use_write)
+        return await _upload_single_chunk(
+            key, data, progress, max_retries, credentials, use_write
+        )
 
     # For large files, use multipart upload
     logger.info(
@@ -235,11 +261,13 @@ async def upload_file_chunked(
             upload_id = response["UploadId"]
 
             # Upload chunks concurrently with limited concurrency
-            semaphore = asyncio.Semaphore(30)  # High concurrency for H100 bandwidth
+            semaphore = asyncio.Semaphore(
+                30
+            )  # High concurrency for H100 bandwidth
             tasks = []
 
             for i in range(0, total_size, chunk_size):
-                chunk_data = data[i : i + chunk_size]
+                chunk_data = data[i: i + chunk_size]
                 part_number = (i // chunk_size) + 1
                 task = _upload_chunk_with_semaphore(
                     semaphore,
@@ -280,7 +308,9 @@ async def upload_file_chunked(
             )
 
             elapsed = time.time() - progress.start_time
-            speed_mbps = (total_size / (1024 * 1024)) / elapsed if elapsed > 0 else 0
+            speed_mbps = (
+                (total_size / (1024 * 1024)) / elapsed if elapsed > 0 else 0
+            )
             logger.info(
                 f"✅ Upload completed: {key} ({total_size} bytes) in {elapsed:.1f}s @ {speed_mbps:.2f} MB/s"
             )
@@ -292,7 +322,10 @@ async def upload_file_chunked(
 
 
 async def _upload_single_chunk(
-    key: str, data: bytes, progress: TransferProgress, max_retries: int,
+    key: str,
+    data: bytes,
+    progress: TransferProgress,
+    max_retries: int,
     credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
     use_write: bool = True,
 ) -> bool:
@@ -312,7 +345,9 @@ async def _upload_single_chunk(
                 )
                 await asyncio.sleep(wait_time)
             else:
-                logger.error(f"Upload failed after {max_retries} attempts for {key}: {e}")
+                logger.error(
+                    f"Upload failed after {max_retries} attempts for {key}: {e}"
+                )
     return False
 
 
@@ -360,7 +395,7 @@ async def _upload_chunk_with_semaphore(
 
 
 async def download_file_chunked(
-    key: str, 
+    key: str,
     max_retries: int = 3,
     credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
     use_write: bool = False,
@@ -382,7 +417,9 @@ async def download_file_chunked(
                         )
                         actual_key = compressed_key
                         is_compressed = True
-                        logger.debug(f"Found compressed version: {compressed_key}")
+                        logger.debug(
+                            f"Found compressed version: {compressed_key}"
+                        )
                     except Exception:
                         # Fallback to uncompressed
                         bucket_id = get_bucket_id(credentials, use_write)
@@ -401,10 +438,14 @@ async def download_file_chunked(
                 logger.info(
                     f"📥 Downloading {actual_key} ({total_size} bytes){' (compressed)' if is_compressed else ''}"
                 )
-                progress = TransferProgress(total_size, f"Download {actual_key}")
+                progress = TransferProgress(
+                    total_size, f"Download {actual_key}"
+                )
 
                 # For small files, download in one go
-                chunk_size = 100 * 1024 * 1024  # 100MB chunks for H100 bandwidth
+                chunk_size = (
+                    100 * 1024 * 1024
+                )  # 100MB chunks for H100 bandwidth
                 if total_size <= chunk_size:
                     bucket_id = get_bucket_id(credentials, use_write)
                     response = await client.get_object(
@@ -413,7 +454,11 @@ async def download_file_chunked(
                     data = await response["Body"].read()
                     progress.update(len(data))
                     elapsed = time.time() - progress.start_time
-                    speed_mbps = (total_size / (1024 * 1024)) / elapsed if elapsed > 0 else 0
+                    speed_mbps = (
+                        (total_size / (1024 * 1024)) / elapsed
+                        if elapsed > 0
+                        else 0
+                    )
                     logger.info(
                         f"✅ Download completed: {actual_key} ({total_size} bytes) in {elapsed:.1f}s @ {speed_mbps:.2f} MB/s"
                     )
@@ -421,23 +466,34 @@ async def download_file_chunked(
                     if is_compressed:
                         data = gzip.decompress(data)
                         logger.debug(f"🗜️ Decompressed to {len(data)} bytes")
-                    return data
+                    return data  # type: ignore[no-any-return]
 
                 # For large files, download in chunks
                 chunks = []
-                semaphore = asyncio.Semaphore(30)  # High concurrency for H100 bandwidth
+                semaphore = asyncio.Semaphore(
+                    30
+                )  # High concurrency for H100 bandwidth
                 tasks = []
 
                 for start in range(0, total_size, chunk_size):
                     end = min(start + chunk_size - 1, total_size - 1)
                     task = _download_chunk_with_semaphore(
-                        semaphore, client, actual_key, start, end, progress, max_retries,
-                        credentials, use_write
+                        semaphore,
+                        client,
+                        actual_key,
+                        start,
+                        end,
+                        progress,
+                        max_retries,
+                        credentials,
+                        use_write,
                     )
                     tasks.append(task)
 
                 # Wait for all chunks
-                chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
+                chunk_results = await asyncio.gather(
+                    *tasks, return_exceptions=True
+                )
 
                 # Check for failures and reassemble
                 for i, result in enumerate(chunk_results):
@@ -446,9 +502,13 @@ async def download_file_chunked(
                         raise result
                     chunks.append(result)
 
-                data = b"".join(chunks)
+                data = b"".join(chunks)  # type: ignore[arg-type]
                 elapsed = time.time() - progress.start_time
-                speed_mbps = (total_size / (1024 * 1024)) / elapsed if elapsed > 0 else 0
+                speed_mbps = (
+                    (total_size / (1024 * 1024)) / elapsed
+                    if elapsed > 0
+                    else 0
+                )
                 logger.info(
                     f"✅ Download completed: {actual_key} ({total_size} bytes) in {elapsed:.1f}s @ {speed_mbps:.2f} MB/s"
                 )
@@ -467,7 +527,9 @@ async def download_file_chunked(
                 )
                 await asyncio.sleep(wait_time)
             else:
-                logger.error(f"Download failed after {max_retries} attempts for {key}: {e}")
+                logger.error(
+                    f"Download failed after {max_retries} attempts for {key}: {e}"
+                )
 
     # If all retries failed, return None
     return None
@@ -494,7 +556,7 @@ async def _download_chunk_with_semaphore(
                 )
                 data = await response["Body"].read()
                 progress.update(len(data))
-                return data
+                return data  # type: ignore[no-any-return]
             except Exception as e:
                 if attempt < max_retries - 1:
                     wait_time = 2**attempt
@@ -546,12 +608,16 @@ async def list_bucket_files(
     try:
         async with get_client_ctx(credentials, use_write) as client:
             bucket_id = get_bucket_id(credentials, use_write)
-            response = await client.list_objects_v2(Bucket=bucket_id, Prefix=prefix)
+            response = await client.list_objects_v2(
+                Bucket=bucket_id, Prefix=prefix
+            )
             if "Contents" in response:
                 return [obj["Key"] for obj in response["Contents"]]
             return []
     except Exception:
-        logger.error("Failed to list bucket files with prefix %s", prefix, exc_info=True)
+        logger.error(
+            "Failed to list bucket files with prefix %s", prefix, exc_info=True
+        )
         return []
 
 
@@ -562,13 +628,17 @@ async def get_file(
 ) -> Optional[Dict[str, Any]]:
     """Download and parse JSON file with improved error handling"""
     try:
-        data = await download_file_chunked(key, credentials=credentials, use_write=use_write)
+        data = await download_file_chunked(
+            key, credentials=credentials, use_write=use_write
+        )
         if data:
             loaded: Any = json.loads(data.decode())
             if isinstance(loaded, dict):
                 return loaded
             else:
-                logger.debug(f"Expected dict JSON in {key}, found {type(loaded).__name__}")
+                logger.debug(
+                    f"Expected dict JSON in {key}, found {type(loaded).__name__}"
+                )
                 return None
         return None
     except Exception as e:
@@ -582,7 +652,9 @@ async def get_file(
 
 
 async def sink_window_inferences(
-    wallet: bt.wallet, window_start: int, inferences: List[dict],
+    wallet: bt.wallet,
+    window_start: int,
+    inferences: List[dict],
     credentials: Optional[BucketCredentials] = None,
 ) -> None:
     """Upload window of inferences to S3 with improved logging"""
@@ -599,33 +671,43 @@ async def sink_window_inferences(
     }
 
     body = json.dumps(window_data).encode()
-    logger.debug(f"[SINK] window={window_start} count={len(inferences)} → key={key}")
+    logger.debug(
+        f"[SINK] window={window_start} count={len(inferences)} → key={key}"
+    )
 
-    success = await upload_file_chunked(key, body, credentials=credentials, use_write=True)
+    success = await upload_file_chunked(
+        key, body, credentials=credentials, use_write=True
+    )
     if success:
         logger.info(
             f"📤 Uploaded window data for window {window_start} ({len(inferences)} inferences)"
         )
     else:
-        logger.error(f"❌ Failed to upload window data for window {window_start}")
+        logger.error(
+            f"❌ Failed to upload window data for window {window_start}"
+        )
 
 
 # TODO(v2): Re-enable model state management for training
 async def save_model_state(
-    model: AutoModelForCausalLM, hotkey: str, window: int,
+    model: AutoModelForCausalLM,
+    hotkey: str,
+    window: int,
     credentials: Optional[BucketCredentials] = None,
 ) -> bool:
     # Save model state as safetensors to S3 with chunked upload and progress logging
     key = f"grail/models/{hotkey}-{window}.safetensors"
 
     # Create temporary file for safetensors
-    with tempfile.NamedTemporaryFile(suffix=".safetensors", delete=False) as tmp_file:
+    with tempfile.NamedTemporaryFile(
+        suffix=".safetensors", delete=False
+    ) as tmp_file:
         temp_path = tmp_file.name
 
     try:
         logger.info(f"💾 Preparing model state for {hotkey} window {window}")
         # Save to temporary file
-        save_file(model.state_dict(), temp_path)
+        save_file(model.state_dict(), temp_path)  # type: ignore[attr-defined]
 
         # Read file content as bytes
         with open(temp_path, "rb") as f:
@@ -639,13 +721,19 @@ async def save_model_state(
         if os.path.exists(temp_path):
             os.unlink(temp_path)
 
-    logger.debug(f"[MODEL] Saving model state for {hotkey} window {window} → {key}")
+    logger.debug(
+        f"[MODEL] Saving model state for {hotkey} window {window} → {key}"
+    )
 
     # Use chunked upload with retry logic
-    success = await upload_file_chunked(key, body, credentials=credentials, use_write=True)
+    success = await upload_file_chunked(
+        key, body, credentials=credentials, use_write=True
+    )
 
     if success:
-        logger.info(f"✅ Successfully uploaded model state for window {window}")
+        logger.info(
+            f"✅ Successfully uploaded model state for window {window}"
+        )
     else:
         logger.error(f"❌ Failed to upload model state for window {window}")
 
@@ -653,7 +741,9 @@ async def save_model_state(
 
 
 async def load_model_state(
-    model: AutoModelForCausalLM, hotkey: str, window: int,
+    model: AutoModelForCausalLM,
+    hotkey: str,
+    window: int,
     credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
     use_write: bool = False,
 ) -> bool:
@@ -663,7 +753,9 @@ async def load_model_state(
     logger.info(f"🔍 Loading model state for {hotkey} window {window}")
 
     # Use chunked download with retry logic
-    data = await download_file_chunked(key, credentials=credentials, use_write=use_write)
+    data = await download_file_chunked(
+        key, credentials=credentials, use_write=use_write
+    )
 
     if data is None:
         logger.debug(f"Model state not found for {key}")
@@ -671,14 +763,16 @@ async def load_model_state(
 
     try:
         # Load safetensors from bytes using temporary file
-        with tempfile.NamedTemporaryFile(suffix=".safetensors", delete=False) as tmp_file:
+        with tempfile.NamedTemporaryFile(
+            suffix=".safetensors", delete=False
+        ) as tmp_file:
             temp_path = tmp_file.name
             tmp_file.write(data)
 
         try:
             # Load from temporary file
             state_dict = load_file(temp_path)
-            model.load_state_dict(state_dict)
+            model.load_state_dict(state_dict)  # type: ignore[attr-defined]
 
             file_size_mb = len(data) / (1024 * 1024)
             logger.info(
@@ -697,7 +791,8 @@ async def load_model_state(
 
 
 async def model_state_exists(
-    hotkey: str, window: int,
+    hotkey: str,
+    window: int,
     credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
     use_write: bool = False,
 ) -> bool:
@@ -707,7 +802,8 @@ async def model_state_exists(
 
 
 async def upload_valid_rollouts(
-    window: int, valid_rollouts: List[dict],
+    window: int,
+    valid_rollouts: List[dict],
     credentials: Optional[BucketCredentials] = None,
 ) -> bool:
     """Upload validated SAT rollouts for training with chunked upload and progress logging"""
@@ -721,12 +817,18 @@ async def upload_valid_rollouts(
     }
 
     body = json.dumps(data).encode()
-    logger.debug(f"[VALID] Uploading {len(valid_rollouts)} valid rollouts for window {window}")
+    logger.debug(
+        f"[VALID] Uploading {len(valid_rollouts)} valid rollouts for window {window}"
+    )
 
-    success = await upload_file_chunked(key, body, credentials=credentials, use_write=True)
+    success = await upload_file_chunked(
+        key, body, credentials=credentials, use_write=True
+    )
 
     if success:
-        logger.info(f"📤 Uploaded {len(valid_rollouts)} valid rollouts for window {window}")
+        logger.info(
+            f"📤 Uploaded {len(valid_rollouts)} valid rollouts for window {window}"
+        )
     else:
         logger.error(f"❌ Failed to upload valid rollouts for window {window}")
 
@@ -751,16 +853,20 @@ async def get_valid_rollouts(
     key = f"grail/valid_rollouts/{window}.json"
 
     try:
-        data = await get_file(key, credentials=credentials, use_write=use_write)
+        data = await get_file(
+            key, credentials=credentials, use_write=use_write
+        )
         if data and "rollouts" in data:
-            logger.info(f"Downloaded {len(data['rollouts'])} verified rollouts for window {window}")
-            return data["rollouts"]
+            logger.info(
+                f"Downloaded {len(data['rollouts'])} verified rollouts for window {window}"
+            )
+            return data["rollouts"]  # type: ignore[no-any-return]
         # Backward compatibility: check old format
         elif data and "inferences" in data:
             logger.info(
                 f"Downloaded {len(data['inferences'])} verified rollouts (legacy format) for window {window}"
             )
-            return data["inferences"]
+            return data["inferences"]  # type: ignore[no-any-return]
         return []
     except Exception:
         logger.debug("No valid rollouts found for window %s", window)
@@ -793,8 +899,12 @@ def login_huggingface() -> bool:
             logger.info("✅ Successfully logged into Hugging Face")
             return True
         else:
-            logger.info("No HF_TOKEN found. Set HF_TOKEN to enable dataset uploads.")
-            logger.info("Get your token at: https://huggingface.co/settings/tokens")
+            logger.info(
+                "No HF_TOKEN found. Set HF_TOKEN to enable dataset uploads."
+            )
+            logger.info(
+                "Get your token at: https://huggingface.co/settings/tokens"
+            )
             return False
 
     except Exception as e:
@@ -857,12 +967,20 @@ async def upload_to_huggingface(
                 "sat_num_vars": sat_problem.get("num_vars", 0),
                 "sat_num_clauses": len(sat_problem.get("clauses", [])),
                 "sat_difficulty": sat_problem.get("difficulty", 0.5),
-                "sat_clauses": json.dumps(sat_problem.get("clauses", [])),  # Store as JSON string
+                "sat_clauses": json.dumps(
+                    sat_problem.get("clauses", [])
+                ),  # Store as JSON string
                 # Solution
                 "solution_success": rollout_data.get("success", False),
-                "solution_assignment": json.dumps(rollout_data.get("assignment", [])),
-                "solution_trajectory": json.dumps(rollout_data.get("trajectory", [])),
-                "solution_satisfied_clauses": rollout_data.get("satisfied_clauses", 0),
+                "solution_assignment": json.dumps(
+                    rollout_data.get("assignment", [])
+                ),
+                "solution_trajectory": json.dumps(
+                    rollout_data.get("trajectory", [])
+                ),
+                "solution_satisfied_clauses": rollout_data.get(
+                    "satisfied_clauses", 0
+                ),
                 "solution_total_reward": rollout_data.get("total_reward", 0.0),
                 # GRAIL proof (store as JSON strings for complex fields)
                 "grail_tokens": json.dumps(commit.get("tokens", [])),
@@ -896,14 +1014,27 @@ async def upload_to_huggingface(
 
         # Check if repository exists before trying to create it
         try:
-            repo_exists_flag = repo_exists(repo_id=dataset_name, repo_type="dataset", token=token)
+            repo_exists_flag = repo_exists(
+                repo_id=dataset_name, repo_type="dataset", token=token
+            )
             if not repo_exists_flag:
                 # Only create if it doesn't exist
-                logger.debug(f"Creating new dataset repository: {dataset_name}")
-                create_repo(repo_id=dataset_name, token=token, private=False, repo_type="dataset")
-                logger.info(f"✅ Created new dataset repository: {dataset_name}")
+                logger.debug(
+                    f"Creating new dataset repository: {dataset_name}"
+                )
+                create_repo(
+                    repo_id=dataset_name,
+                    token=token,
+                    private=False,
+                    repo_type="dataset",
+                )
+                logger.info(
+                    f"✅ Created new dataset repository: {dataset_name}"
+                )
             else:
-                logger.debug(f"Dataset repository {dataset_name} already exists")
+                logger.debug(
+                    f"Dataset repository {dataset_name} already exists"
+                )
         except Exception as e:
             # If we can't check or create, just continue - the push might still work
             logger.debug(f"Note about repo check/creation: {e}")
@@ -926,25 +1057,36 @@ async def upload_to_huggingface(
             )
             dataset_pushed = True
         except Exception as push_error:
-            logger.debug(f"Direct push failed, trying append approach: {push_error}")
+            logger.debug(
+                f"Direct push failed, trying append approach: {push_error}"
+            )
 
             # If direct push fails, try to append to existing dataset
             try:
                 from datasets import load_dataset, concatenate_datasets
 
-                logger.debug(f"Attempting to load and append to existing dataset: {dataset_name}")
+                logger.debug(
+                    f"Attempting to load and append to existing dataset: {dataset_name}"
+                )
 
                 # Try without force_redownload first (use cache if available)
                 try:
-                    existing_dataset = load_dataset(dataset_name, split="train", token=token)
+                    existing_dataset = load_dataset(
+                        dataset_name, split="train", token=token
+                    )
                 except Exception:
                     # If that fails, try forcing redownload
                     existing_dataset = load_dataset(
-                        dataset_name, split="train", token=token, download_mode="force_redownload"
+                        dataset_name,
+                        split="train",
+                        token=token,
+                        download_mode="force_redownload",
                     )
 
                 # Append new data to existing
-                combined_dataset = concatenate_datasets([existing_dataset, dataset])
+                combined_dataset = concatenate_datasets(
+                    [existing_dataset, dataset]
+                )
                 combined_dataset.push_to_hub(
                     dataset_name, token=token, private=False, split="train"
                 )
@@ -953,7 +1095,9 @@ async def upload_to_huggingface(
                 )
                 dataset_pushed = True
             except Exception as append_error:
-                logger.error(f"Failed to push dataset via both methods: {append_error}")
+                logger.error(
+                    f"Failed to push dataset via both methods: {append_error}"
+                )
                 return False
 
         if not dataset_pushed:
@@ -970,7 +1114,9 @@ async def upload_to_huggingface(
 
 
 async def download_from_huggingface(
-    version: Optional[str] = None, window: Optional[int] = None, limit: Optional[int] = None
+    version: Optional[str] = None,
+    window: Optional[int] = None,
+    limit: Optional[int] = None,
 ) -> List[Dict]:
     """
     Download rollouts from Hugging Face dataset with optional filtering.
@@ -1009,16 +1155,30 @@ async def download_from_huggingface(
 
         # Decode JSON strings back to objects
         for rollout in rollouts:
-            rollout["sat_clauses"] = json.loads(rollout.get("sat_clauses", "[]"))
-            rollout["solution_assignment"] = json.loads(rollout.get("solution_assignment", "[]"))
-            rollout["solution_trajectory"] = json.loads(rollout.get("solution_trajectory", "[]"))
-            rollout["grail_tokens"] = json.loads(rollout.get("grail_tokens", "[]"))
-            rollout["grail_s_vals"] = json.loads(rollout.get("grail_s_vals", "[]"))
-            rollout["grail_beacon"] = json.loads(rollout.get("grail_beacon", "{}"))
-            rollout["grail_indices"] = json.loads(rollout.get("grail_indices", "[]"))
+            rollout["sat_clauses"] = json.loads(
+                rollout.get("sat_clauses", "[]")
+            )
+            rollout["solution_assignment"] = json.loads(
+                rollout.get("solution_assignment", "[]")
+            )
+            rollout["solution_trajectory"] = json.loads(
+                rollout.get("solution_trajectory", "[]")
+            )
+            rollout["grail_tokens"] = json.loads(
+                rollout.get("grail_tokens", "[]")
+            )
+            rollout["grail_s_vals"] = json.loads(
+                rollout.get("grail_s_vals", "[]")
+            )
+            rollout["grail_beacon"] = json.loads(
+                rollout.get("grail_beacon", "{}")
+            )
+            rollout["grail_indices"] = json.loads(
+                rollout.get("grail_indices", "[]")
+            )
 
         logger.info(f"Downloaded {len(rollouts)} rollouts from HF dataset")
-        return rollouts
+        return rollouts  # type: ignore[no-any-return]
 
     except Exception as e:
         logger.error(f"Failed to download from Hugging Face: {e}")

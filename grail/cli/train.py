@@ -43,7 +43,9 @@ logger = logging.getLogger("grail")
 def get_conf(key: str, default: Any = None) -> Any:
     v = os.getenv(key)
     if not v and default is None:
-        console.print(f"[red]{key} not set.[/red]\nRun:\n    af set {key} <value>")
+        console.print(
+            f"[red]{key} not set.[/red]\nRun:\n    af set {key} <value>"
+        )
         raise typer.Exit(code=1)
     return v or default
 
@@ -77,7 +79,9 @@ def generate_prompt(hotkey_address: str, block_hash: str, nonce: int) -> str:
     )
 
 
-def parse_filename(filename: str) -> Tuple[Optional[str], Optional[int], Optional[int]]:
+def parse_filename(
+    filename: str,
+) -> Tuple[Optional[str], Optional[int], Optional[int]]:
     """Parse filename to extract wallet, block, nonce"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -90,7 +94,9 @@ def parse_filename(filename: str) -> Tuple[Optional[str], Optional[int], Optiona
     return None, None, None
 
 
-def parse_window_filename(filename: str) -> Tuple[Optional[str], Optional[int]]:
+def parse_window_filename(
+    filename: str,
+) -> Tuple[Optional[str], Optional[int]]:
     """Parse window filename to extract wallet and window_start"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -127,7 +133,9 @@ def verify_rollout_signature(rollout_data: dict) -> bool:
             return False
 
         keypair = bt.Keypair(ss58_address=hotkey)
-        return keypair.verify(data=challenge, signature=bytes.fromhex(signature))
+        return keypair.verify(
+            data=challenge, signature=bytes.fromhex(signature)
+        )
     except Exception:
         return False
 
@@ -163,7 +171,9 @@ class Trainer:
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            torch_dtype=(
+                torch.float16 if torch.cuda.is_available() else torch.float32
+            ),
             device_map="auto" if torch.cuda.is_available() else None,
             use_safetensors=True,
         )
@@ -173,7 +183,9 @@ class Trainer:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         # Prepare for training
-        self.model, self.tokenizer = self.accelerator.prepare(self.model, self.tokenizer)
+        self.model, self.tokenizer = self.accelerator.prepare(
+            self.model, self.tokenizer
+        )
 
     def _check_model_health(self) -> bool:
         """Check if model has NaN or Inf parameters."""
@@ -201,9 +213,13 @@ class Trainer:
         valid_rollouts = await get_valid_rollouts(window - WINDOW_LENGTH)
 
         if not valid_rollouts:
-            logger.warning(f"No valid rollouts found for window {window - WINDOW_LENGTH}")
+            logger.warning(
+                f"No valid rollouts found for window {window - WINDOW_LENGTH}"
+            )
             # Still upload base model state if no training data
-            success = await save_model_state(self.model, hotkey, window + WINDOW_LENGTH)
+            success = await save_model_state(
+                self.model, hotkey, window + WINDOW_LENGTH
+            )
             return success
 
         logger.info(
@@ -229,7 +245,9 @@ class Trainer:
                     continue
 
                 # Decode the full sequence (SAT problem + solution attempt)
-                full_text = self.tokenizer.decode(tokens, skip_special_tokens=True)
+                full_text = self.tokenizer.decode(
+                    tokens, skip_special_tokens=True
+                )
                 texts.append(full_text)
 
                 # Calculate reward based on SAT solving performance
@@ -243,22 +261,36 @@ class Trainer:
                     successful_count += 1
 
                     # Track unique solutions for bonus rewards
-                    solution_hash = hashlib.sha256(str(assignment).encode()).hexdigest()
+                    solution_hash = hashlib.sha256(
+                        str(assignment).encode()
+                    ).hexdigest()
                     if solution_hash not in unique_solutions:
                         unique_solutions.add(solution_hash)
                         reward += 0.5  # Bonus for finding unique solution
-                        logger.debug(f"Found unique solution #{len(unique_solutions)}")
+                        logger.debug(
+                            f"Found unique solution #{len(unique_solutions)}"
+                        )
                 else:
                     # Partial reward based on satisfied clauses
                     satisfied = rollout_data.get("satisfied_clauses", 0)
-                    total = len(sat_problem.get("clauses", [1]))  # Avoid division by zero
-                    reward = -0.5 + (satisfied / total) * 0.5  # Range: [-0.5, 0]
+                    total = len(
+                        sat_problem.get("clauses", [1])
+                    )  # Avoid division by zero
+                    reward = (
+                        -0.5 + (satisfied / total) * 0.5
+                    )  # Range: [-0.5, 0]
 
                 # Add trajectory reward (bonus for efficiency)
                 if trajectory and rollout_data.get("success", False):
                     # Bonus for solving quickly
                     efficiency_bonus = max(
-                        0, 0.2 * (1 - len(trajectory) / (sat_problem.get("num_vars", 10) * 2))
+                        0,
+                        0.2
+                        * (
+                            1
+                            - len(trajectory)
+                            / (sat_problem.get("num_vars", 10) * 2)
+                        ),
                     )
                     reward += efficiency_bonus
 
@@ -272,13 +304,17 @@ class Trainer:
         if not texts:
             logger.warning("No valid training texts extracted")
             # Still upload base model state
-            success = await save_model_state(self.model, hotkey, window + WINDOW_LENGTH)
+            success = await save_model_state(
+                self.model, hotkey, window + WINDOW_LENGTH
+            )
             return success
 
         logger.info(
             f"📚 Training on {len(texts)} SAT rollouts ({successful_count} successful, {len(unique_solutions)} unique)"
         )
-        logger.info(f"📊 Average reward: {sum(rewards)/len(rewards):.3f}, Max: {max(rewards):.3f}")
+        logger.info(
+            f"📊 Average reward: {sum(rewards)/len(rewards):.3f}, Max: {max(rewards):.3f}"
+        )
 
         # GRPO-style training: reinforce successful trajectories
         try:
@@ -310,10 +346,14 @@ class Trainer:
                     break
 
                 # Sort by rewards to prioritize learning from successful rollouts
-                sorted_indices = sorted(range(len(texts)), key=lambda i: rewards[i], reverse=True)
+                sorted_indices = sorted(
+                    range(len(texts)), key=lambda i: rewards[i], reverse=True
+                )
 
                 for batch_idx in range(0, len(sorted_indices), batch_size):
-                    batch_indices = sorted_indices[batch_idx : batch_idx + batch_size]
+                    batch_indices = sorted_indices[
+                        batch_idx: batch_idx + batch_size
+                    ]
                     batch_texts = [texts[i] for i in batch_indices]
                     batch_rewards = [rewards[i] for i in batch_indices]
 
@@ -328,7 +368,9 @@ class Trainer:
                     )
 
                     if torch.cuda.is_available():
-                        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                        inputs = {
+                            k: v.to(self.device) for k, v in inputs.items()
+                        }
 
                     # Forward pass
                     outputs = self.model(**inputs, labels=inputs["input_ids"])
@@ -340,14 +382,19 @@ class Trainer:
                     max_reward = max(batch_rewards)
                     if max_reward > min_reward:
                         normalized_rewards = [
-                            (r - min_reward) / (max_reward - min_reward) for r in batch_rewards
+                            (r - min_reward) / (max_reward - min_reward)
+                            for r in batch_rewards
                         ]
                     else:
                         normalized_rewards = [0.5] * len(batch_rewards)
 
                     # Apply reward-weighted loss
-                    avg_normalized_reward = sum(normalized_rewards) / len(normalized_rewards)
-                    reward_weight = 0.5 + avg_normalized_reward  # Range: [0.5, 1.5]
+                    avg_normalized_reward = sum(normalized_rewards) / len(
+                        normalized_rewards
+                    )
+                    reward_weight = (
+                        0.5 + avg_normalized_reward
+                    )  # Range: [0.5, 1.5]
                     weighted_loss = loss * reward_weight
 
                     # Backward pass
@@ -370,12 +417,17 @@ class Trainer:
                     has_nan_grad = False
                     for param in self.model.parameters():
                         if param.grad is not None:
-                            if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                            if (
+                                torch.isnan(param.grad).any()
+                                or torch.isinf(param.grad).any()
+                            ):
                                 has_nan_grad = True
                                 break
 
                     if has_nan_grad:
-                        logger.warning("NaN/Inf gradients detected, skipping batch")
+                        logger.warning(
+                            "NaN/Inf gradients detected, skipping batch"
+                        )
                         continue
 
                     optimizer.step()
@@ -383,40 +435,60 @@ class Trainer:
 
                     # Check model health after update
                     if self._check_model_health():
-                        logger.error("Model became unhealthy during training, stopping")
+                        logger.error(
+                            "Model became unhealthy during training, stopping"
+                        )
                         break
 
                     total_loss += weighted_loss.item()
 
                 avg_loss = total_loss / (len(texts) // batch_size + 1)
-                logger.info(f"Epoch {epoch+1} completed - avg loss: {avg_loss:.4f}")
-                
+                logger.info(
+                    f"Epoch {epoch+1} completed - avg loss: {avg_loss:.4f}"
+                )
+
                 # Log training metrics
                 if monitor:
                     await monitor.log_gauge("training.epoch_loss", avg_loss)
                     await monitor.log_counter("training.epochs_completed")
-                    await monitor.log_gauge("training.gradient_norm", float(grad_norm))
-                    await monitor.log_gauge("training.successful_solutions", successful_count)
-                    await monitor.log_gauge("training.total_rollouts", len(texts))
+                    await monitor.log_gauge(
+                        "training.gradient_norm", float(grad_norm)
+                    )
+                    await monitor.log_gauge(
+                        "training.successful_solutions", successful_count
+                    )
+                    await monitor.log_gauge(
+                        "training.total_rollouts", len(texts)
+                    )
                     if len(texts) > 0:
                         success_rate = successful_count / len(texts)
-                        await monitor.log_gauge("training.training_success_rate", success_rate)
+                        await monitor.log_gauge(
+                            "training.training_success_rate", success_rate
+                        )
 
         except Exception as e:
             logger.error(f"Training failed: {e}")
             # Still try to upload base model
-            success = await save_model_state(self.model, hotkey, window + WINDOW_LENGTH)
+            success = await save_model_state(
+                self.model, hotkey, window + WINDOW_LENGTH
+            )
             return success
 
         # Upload trained model state for future window (window + WINDOW_LENGTH)
         future_window = window + WINDOW_LENGTH
-        logger.info(f"💾 Uploading trained model for future window {future_window}")
+        logger.info(
+            f"💾 Uploading trained model for future window {future_window}"
+        )
         success = await save_model_state(self.model, hotkey, future_window)
 
         if success:
-            logger.info(f"✅ Successfully trained and uploaded model for window {future_window}")
+            logger.info(
+                f"✅ Successfully trained and uploaded model for window {future_window}"
+            )
         else:
-            logger.error(f"❌ Failed to upload trained model for window {future_window}")
+            logger.error(
+                f"❌ Failed to upload trained model for window {future_window}"
+            )
 
         return success
 
@@ -440,7 +512,9 @@ async def watchdog(timeout: int = 600) -> None:
         await asyncio.sleep(timeout // 3)
         elapsed = time.monotonic() - HEARTBEAT
         if elapsed > timeout:
-            logging.error(f"[WATCHDOG] Process stalled {elapsed:.0f}s — exiting process.")
+            logging.error(
+                f"[WATCHDOG] Process stalled {elapsed:.0f}s — exiting process."
+            )
             os._exit(1)
 
 
@@ -463,13 +537,16 @@ def train() -> None:
     async def _run() -> None:
         subtensor = None
         last_processed_window = -1
-        
+
         # Initialize monitoring for training operations
         monitor = get_monitoring_manager()
         if monitor:
             # Start a training run with wallet-specific configuration
             training_config = MonitoringConfig.for_training(wallet.name)
-            run_id = await monitor.start_run(f"training_{wallet.name}", training_config.get("hyperparameters", {}))
+            run_id = await monitor.start_run(
+                f"training_{wallet.name}",
+                training_config.get("hyperparameters", {}),
+            )
             logger.info(f"Started monitoring run: {run_id}")
 
         # Upload initial base model state on startup
@@ -483,9 +560,13 @@ def train() -> None:
         initial_window = current_window + WINDOW_LENGTH
 
         # Upload base model for the next window
-        success = await save_model_state(trainer.model, wallet.hotkey.ss58_address, initial_window)
+        success = await save_model_state(
+            trainer.model, wallet.hotkey.ss58_address, initial_window
+        )
         if success:
-            logger.info(f"✅ Uploaded initial model state for window {initial_window}")
+            logger.info(
+                f"✅ Uploaded initial model state for window {initial_window}"
+            )
         else:
             logger.error("❌ Failed to upload initial model state")
             return
@@ -498,7 +579,9 @@ def train() -> None:
                     subtensor = await get_subtensor()
 
                 current_block = await subtensor.get_current_block()
-                current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
+                current_window = (
+                    current_block // WINDOW_LENGTH
+                ) * WINDOW_LENGTH
 
                 # Process previous complete window for training
                 target_window = current_window - WINDOW_LENGTH
@@ -507,21 +590,33 @@ def train() -> None:
                     await asyncio.sleep(10)  # Wait for new window
                     continue
 
-                logger.info(f"🎓 Processing training for window {target_window}")
+                logger.info(
+                    f"🎓 Processing training for window {target_window}"
+                )
 
                 # Train on previous window's valid inferences and upload for future window
                 if monitor:
                     with monitor.timer("training.window_duration"):
-                        success = await trainer.train_window(wallet.hotkey.ss58_address, target_window)
+                        success = await trainer.train_window(
+                            wallet.hotkey.ss58_address, target_window
+                        )
                 else:
-                    success = await trainer.train_window(wallet.hotkey.ss58_address, target_window)
+                    success = await trainer.train_window(
+                        wallet.hotkey.ss58_address, target_window
+                    )
 
                 if success:
-                    logger.info(f"✅ Completed training cycle for window {target_window}")
+                    logger.info(
+                        f"✅ Completed training cycle for window {target_window}"
+                    )
                     if monitor:
-                        await monitor.log_counter("training.successful_windows")
+                        await monitor.log_counter(
+                            "training.successful_windows"
+                        )
                 else:
-                    logger.warning(f"⚠️ Training cycle had issues for window {target_window}")
+                    logger.warning(
+                        f"⚠️ Training cycle had issues for window {target_window}"
+                    )
                     if monitor:
                         await monitor.log_counter("training.failed_windows")
 
@@ -537,7 +632,9 @@ def train() -> None:
                 continue
 
     async def _main() -> None:
-        await asyncio.gather(_run(), watchdog(timeout=(60 * 15)))  # 15 minute timeout for training
+        await asyncio.gather(
+            _run(), watchdog(timeout=(60 * 15))
+        )  # 15 minute timeout for training
 
     asyncio.run(_main())
 

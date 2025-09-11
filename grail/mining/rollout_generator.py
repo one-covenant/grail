@@ -282,9 +282,9 @@ class RolloutGenerator(ABC):
         s_vals = []
 
         with torch.inference_mode():
-            token_tensor = torch.tensor(
-                [all_token_ids], dtype=torch.long
-            ).to(self.device)
+            token_tensor = torch.tensor([all_token_ids], dtype=torch.long).to(
+                self.device
+            )
             model_outputs = self.model(token_tensor, output_hidden_states=True)
             # Last layer hidden states
             h_layer = model_outputs.hidden_states[-1][0]

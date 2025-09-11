@@ -31,7 +31,9 @@ def compose_env() -> None:
     os.environ.setdefault("GRAIL_WINDOW_LENGTH", "3")
 
 
-async def _wait_for_keys(prefix: str, expect_min: int, timeout_s: int = 300) -> List[str]:
+async def _wait_for_keys(
+    prefix: str, expect_min: int, timeout_s: int = 300
+) -> List[str]:
     start = time.time()
     seen: List[str] = []
     while time.time() - start < timeout_s:
@@ -73,4 +75,3 @@ async def test_validator_processes_previous_window(compose_env: None) -> None:
         vdata = await get_file(vf)
         assert isinstance(vdata, dict)
         assert "window" in vdata and "rollouts" in vdata
-
