@@ -395,11 +395,21 @@ def validate(
                             continue
 
                         # Spot check configuration
-                        MIN_SAMPLES_PER_MINER = 3  # Minimum rollouts to check
                         MAX_SAMPLES_PER_MINER = 20  # Maximum rollouts to check
                         SAMPLE_RATE = 0.1  # Check 10% of rollouts
-                        FAILURE_THRESHOLD = 0.3  # Stop if >30% failures
-                        BATCH_SIZE = 5  # Check in batches for early stopping
+                        STOCHASTIC_CHECK_FAILURE_THRESHOLD = 0.05
+                        # Tolerances for reward bounds
+                        REWARD_REL_TOL = 0.02
+                        REWARD_ABS_TOL = 1e-6
+                        # Wallet-level gating keys (from verifier checks)
+                        SOFT_CHECK_KEY = "token_distribution_valid"
+                        HARD_CHECK_KEYS = (
+                            "tokens_valid",
+                            "proof_valid",
+                            "sat_problem_valid",
+                            "termination_valid",
+                            "solution_valid",
+                        )
 
                         # Calculate sample size based on total inferences
                         total_inferences = len(inferences)
@@ -438,7 +448,7 @@ def validate(
                             rng = random.Random(seed_int)
 
                             # Canonicalize group order by content digest
-                            def _group_digest(gidxs):
+                            def _group_digest(gidxs: list[int]) -> str:
                                 dig = hashlib.sha256()
                                 for i in sorted(gidxs):
                                     commit_json = json.dumps(
@@ -470,23 +480,15 @@ def validate(
                         unique_solutions = set()  # Track unique successful solutions
                         nonces_seen = set()
                         rollout_groups = defaultdict(list)  # Track GRPO groups
-
-                        # Progressive verification with early stopping
-                        should_stop = False
+                        # Wallet-level gating state
+                        wallet_rollouts_buffer = []
+                        soft_failures = 0
+                        hard_failure = False
+                        soft_gate_triggered = False
+                        total_planned_checks = len(indices_to_check)
+                        soft_fail_cutoff = max(1, math.ceil(STOCHASTIC_CHECK_FAILURE_THRESHOLD * max(1, total_planned_checks)))
 
                         for idx, inference_idx in enumerate(indices_to_check):
-                            # Early stopping check every BATCH_SIZE verifications
-                            if checked_count > 0 and checked_count % BATCH_SIZE == 0:
-                                failure_rate = (checked_count - valid_count) / checked_count
-                                if (
-                                    failure_rate > FAILURE_THRESHOLD
-                                    and checked_count >= MIN_SAMPLES_PER_MINER
-                                ):
-                                    logger.warning(
-                                        f"⚠️ Early stopping for {wallet_addr}: {failure_rate:.1%} failure rate after {checked_count} checks"
-                                    )
-                                    should_stop = True
-                                    break
 
                             inference = inferences[inference_idx]
                             checked_count += 1
@@ -497,7 +499,7 @@ def validate(
                                 rollout_groups[rollout_group].append(inference)
 
                             try:
-                                # Check required fields for SAT rollouts
+                                # Check required fields for SAT rollouts - hard check
                                 required_fields = [
                                     "window_start",
                                     "nonce",
@@ -510,73 +512,82 @@ def validate(
                                     "signature",
                                 ]
                                 if not all(field in inference for field in required_fields):
-                                    logger.debug(
-                                        f"Missing required fields in inference from {wallet_addr}"
+                                    hard_failure = True
+                                    logger.warning(
+                                        f"Missing required fields in inference from {wallet_addr}; invalidating wallet for window {target_window}"
                                     )
-                                    continue
+                                    break
 
-                                # Check window consistency
+                                # Check window consistency - hard check
                                 if inference["window_start"] != target_window:
-                                    logger.debug(f"Window mismatch in inference from {wallet_addr}")
-                                    continue
+                                    hard_failure = True
+                                    logger.warning(f"Window mismatch in inference from {wallet_addr}; invalidating wallet for window {target_window}")
+                                    break
 
-                                # Check block hash matches
+                                # Check block hash matches - hard check
                                 if inference["block_hash"] != target_window_hash:
-                                    logger.debug(
-                                        f"Block hash mismatch in inference from {wallet_addr}"
+                                    hard_failure = True
+                                    logger.warning(
+                                        f"Block hash mismatch in inference from {wallet_addr}; invalidating wallet for window {target_window}"
                                     )
-                                    continue
+                                    break
 
-                                # Check nonce uniqueness within window
+                                # Check nonce uniqueness within window - hard check
                                 nonce = inference["nonce"]
                                 if nonce in nonces_seen:
-                                    logger.debug(
-                                        f"Duplicate nonce {nonce} in window from {wallet_addr}"
+                                    hard_failure = True
+                                    logger.warning(
+                                        f"Duplicate nonce {nonce} in window from {wallet_addr}; invalidating wallet for window {target_window}"
                                     )
-                                    continue
+                                    break
                                 nonces_seen.add(nonce)
 
-                                # Verify signature
+                                # Verify signature - this is a hard check
                                 if not verify_rollout_signature(inference):
-                                    logger.debug(
-                                        f"Invalid signature for inference from {wallet_addr}"
-                                    )
                                     invalid_signatures += 1
-                                    continue
+                                    hard_failure = True
+                                    logger.warning(
+                                        f"Invalid signature for {wallet_addr}; invalidating wallet for window {target_window}"
+                                    )
+                                    break
 
-                                # Verify SAT seed format
+                                # Verify SAT seed format - hard check
                                 expected_seed = f"{wallet_addr}-{target_window_hash}-{nonce}"
                                 if inference.get("sat_seed") != expected_seed:
-                                    logger.debug(
-                                        f"Invalid SAT seed in inference from {wallet_addr}: expected {expected_seed}, got {inference.get('sat_seed')}"
+                                    hard_failure = True
+                                    logger.warning(
+                                        f"Invalid SAT seed in inference from {wallet_addr}: expected {expected_seed}, got {inference.get('sat_seed')}; invalidating wallet for window {target_window}"
                                     )
-                                    continue
+                                    break
 
                                 # Verify GRAIL proof and SAT rollout
-                                # We must verify ALL rollouts to ensure model identity
                                 try:
                                     logger.debug(f"Verifying SAT rollout from {wallet_addr}")
 
                                     # For GRPO rollouts, we need to modify the commit data to use the base problem
                                     commit_data = inference["commit"]
-                                    # Reward bounds check (pre-proof; fast filter)
+                                    
+                                    # Reward bounds check (pre-proof; fast rollout filter) with tolerance
                                     try:
                                         rollout_meta = commit_data.get("rollout", {})
                                         total_reward = rollout_meta.get("total_reward", None)
                                         if not isinstance(total_reward, (int, float)):
                                             logger.debug("Missing or invalid total_reward; skipping inference")
                                             continue
-                                        if (
-                                            total_reward < SAT_REWARD_LOW
-                                            or total_reward > SAT_REWARD_HIGH
-                                        ):
-                                            logger.debug(
-                                                "total_reward %.4f outside bounds [%.4f, %.4f]",
-                                                total_reward,
-                                                SAT_REWARD_LOW,
-                                                SAT_REWARD_HIGH,
+
+                                        low = float(SAT_REWARD_LOW)
+                                        high = float(SAT_REWARD_HIGH)
+                                        tr = float(total_reward)
+
+                                        lo = float("-inf") if low == float("-inf") else low - max(abs(low) * REWARD_REL_TOL, REWARD_ABS_TOL)
+                                        hi = float("inf") if high == float("inf") else high + max(abs(high) * REWARD_REL_TOL, REWARD_ABS_TOL)
+
+                                        if not (lo <= tr <= hi):
+                                            hard_failure = True
+                                            logger.warning(
+                                                f"Reward {tr:.6f} outside tolerant bounds [{lo:.6f}, {hi:.6f}] (base=[{low:.6f}, {high:.6f}]); invalidating wallet for window {target_window}"
                                             )
-                                            continue
+                                            break
                                     except Exception:
                                         pass
                                     rollout_group = inference.get("rollout_group")
@@ -596,31 +607,48 @@ def validate(
                                     # Use wallet address for signature verification (public key verification)
                                     if monitor:
                                         with monitor.timer("validation.rollout_verification"):
-                                            is_valid = verifier.verify_rollout(
+                                            is_valid, checks = verifier.verify_rollout(
                                                 commit_data, inference["proof"],
                                                 wallet_addr,
                                                 challenge_randomness=challenge_rand
                                             )
                                     else:
-                                        is_valid = verifier.verify_rollout(
+                                        is_valid, checks = verifier.verify_rollout(
                                             commit_data, inference["proof"],
                                             wallet_addr,
                                             challenge_randomness=challenge_rand
                                         )
-                                    
+
                                     total_rollouts_processed += 1
-                                    if not is_valid:
-                                        logger.warning(
-                                            f"SAT rollout verification failed for {wallet_addr} - skipping"
-                                        )
+
+                                    # Determine hard-valid ignoring the soft heuristic
+                                    hard_valid = all(checks.get(k, False) for k in HARD_CHECK_KEYS)
+                                    soft_valid = checks.get(SOFT_CHECK_KEY, True)
+
+                                    # Any hard failure invalidates the entire wallet window
+                                    if not hard_valid:
                                         invalid_proofs += 1
-                                        continue
+                                        hard_failure = True
+                                        logger.warning(
+                                            f"Hard verification failed for {wallet_addr}; invalidating wallet for window {target_window}"
+                                        )
+                                        break
+
+                                    # Track soft failures; trip wallet-level soft gate if threshold reached
+                                    if not soft_valid:
+                                        soft_failures += 1
+                                        if soft_failures >= soft_fail_cutoff:
+                                            soft_gate_triggered = True
+                                            logger.warning(
+                                                f"Soft-check failures threshold reached ({soft_failures}/{total_planned_checks}) for {wallet_addr}; invalidating wallet for window {target_window}"
+                                            )
+                                            break
                                 except Exception as e:
                                     logger.warning(
                                         f"Rollout verification error for {wallet_addr}: {e}"
                                     )
                                     continue
-
+                                
                                 valid_count += 1
 
                                 # Debug-only: log a small subset of validated texts with rewards
@@ -684,13 +712,28 @@ def validate(
                                     ).hexdigest()
                                     unique_solutions.add(solution_hash)
 
-                                # Add to collection of all valid rollouts
-                                all_valid_rollouts.append(inference)
+                                # Buffer until wallet passes gates
+                                wallet_rollouts_buffer.append(inference)
 
                             except Exception as e:
                                 logger.debug(f"Error processing inference from {wallet_addr}: {e}")
                                 processing_errors += 1
                                 continue
+
+                        # If wallet invalid due to hard or soft gates, record and skip publishing
+                        if hard_failure or soft_gate_triggered:
+                            window_inference_counts[wallet_addr] = {
+                                "valid": 0,
+                                "checked": checked_count,
+                                "total": total_inferences,
+                                "estimated_valid": 0,
+                                "successful": 0,
+                                "unique": 0,
+                            }
+                            logger.info(
+                                f"❌ Wallet {wallet_addr} rejected for window {target_window} (hard_failure={hard_failure}, soft_failures={soft_failures}/{total_planned_checks})"
+                            )
+                            continue
 
                         # Verify GRPO groups after processing checked inferences
                         grpo_valid_groups = 0
@@ -762,15 +805,11 @@ def validate(
                                 )
 
                         # Calculate estimated total valid rollouts based on sampling
-                        if should_stop:
-                            # If we stopped early due to failures, assume 0 valid rollouts
-                            estimated_valid = 0
-                        else:
-                            # Extrapolate from sample to estimate total
-                            sample_pass_rate = (
-                                valid_count / checked_count if checked_count > 0 else 0
-                            )
-                            estimated_valid = int(total_inferences * sample_pass_rate)
+                        # Extrapolate from sample to estimate total
+                        sample_pass_rate = (
+                            valid_count / checked_count if checked_count > 0 else 0
+                        )
+                        estimated_valid = int(total_inferences * sample_pass_rate)
 
                         # Store metrics for this miner
                         window_inference_counts[wallet_addr] = {
@@ -782,6 +821,10 @@ def validate(
                             "unique": len(unique_solutions),
                         }
                         total_valid_rollouts += estimated_valid  # Use estimated for rewards
+
+                        # Publish buffered rollouts only if wallet passed gates
+                        if wallet_rollouts_buffer:
+                            all_valid_rollouts.extend(wallet_rollouts_buffer)
 
                         logger.info(
                             f"✅ {wallet_addr}: {valid_count}/{checked_count} checked, ~{estimated_valid}/{total_inferences} estimated valid, {successful_rollouts} successful, {len(unique_solutions)} unique"
@@ -868,7 +911,7 @@ def validate(
                     success_score = min(1.0, total_successful / 20.0) if total_successful > 0 else 0
                     valid_score = min(1.0, total_estimated_valid / 50.0) if total_estimated_valid > 0 else 0
 
-                    base_score = 0.6 * unique_score + 0.0 * success_score + 0.4 * valid_score
+                    base_score = 1.0 * unique_score + 0.0 * success_score + 0.0 * valid_score
                     base_score = max(0.0, min(1.0, base_score))
 
                     # Apply superlinear curve: emphasizes higher performers and penalizes splitting
