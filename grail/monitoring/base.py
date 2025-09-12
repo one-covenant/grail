@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any
 
 
 class MetricType(Enum):
@@ -31,10 +32,10 @@ class MetricData:
     name: str
     value: Any
     metric_type: MetricType
-    tags: Optional[Dict[str, str]] = None
-    timestamp: Optional[float] = None
-    block_number: Optional[int] = None
-    window_number: Optional[int] = None
+    tags: dict[str, str] | None = None
+    timestamp: float | None = None
+    block_number: int | None = None
+    window_number: int | None = None
 
     def __post_init__(self) -> None:
         """Set default timestamp if not provided."""
@@ -51,7 +52,7 @@ class MonitoringBackend(ABC):
     """
 
     @abstractmethod
-    def initialize(self, config: Dict[str, Any]) -> None:
+    def initialize(self, config: dict[str, Any]) -> None:
         """Initialize the monitoring backend with configuration (synchronous).
 
         This method should:
@@ -82,7 +83,7 @@ class MonitoringBackend(ABC):
         pass
 
     @abstractmethod
-    async def log_metrics(self, metrics: List[MetricData]) -> None:
+    async def log_metrics(self, metrics: list[MetricData]) -> None:
         """Log multiple metrics efficiently in a batch.
 
         Args:
@@ -96,9 +97,7 @@ class MonitoringBackend(ABC):
 
     @abstractmethod
     @contextmanager
-    def timer(
-        self, name: str, tags: Optional[Dict[str, str]] = None
-    ) -> Generator[None, None, None]:
+    def timer(self, name: str, tags: dict[str, str] | None = None) -> Generator[None, None, None]:
         """Context manager for timing operations.
 
         Args:
@@ -126,7 +125,7 @@ class MonitoringBackend(ABC):
         pass
 
     @abstractmethod
-    async def start_run(self, run_name: str, config: Dict[str, Any]) -> str:
+    async def start_run(self, run_name: str, config: dict[str, Any]) -> str:
         """Start a new monitoring run/session.
 
         Args:

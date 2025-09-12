@@ -227,7 +227,7 @@ class ChainManager:
             concatenated = self.subtensor.get_commitment(self.netuid, uid)
             logger.info(f"Commitment fetched: {concatenated}")
         except Exception as e:
-            raise Exception(f"Couldn't get commitment from uid {uid} because {e}")
+            raise Exception(f"Couldn't get commitment from uid {uid} because {e}") from e
         if len(concatenated) != 128:
             raise ValueError(
                 f"Commitment '{concatenated}' is of length {len(concatenated)} but should be of length 128."
@@ -241,7 +241,7 @@ class ChainManager:
                 secret_access_key=concatenated[64:],
             )
         except ValidationError as e:
-            raise ValueError(f"Invalid data in commitment: {e}")
+            raise ValueError(f"Invalid data in commitment: {e}") from e
 
     def decode_metadata(self, encoded_ss58: tuple, metadata: dict) -> tuple[str, str]:
         # Decode the key into an SS58 address.
@@ -359,7 +359,7 @@ class ChainManager:
         uid_to_stake = dict(zip(self.metagraph.uids.tolist(), self.metagraph.S.tolist()))
 
         # Get currently active peers
-        active_peers = set(int(uid) for uid in self.active_peers)
+        active_peers = {int(uid) for uid in self.active_peers}
 
         # Track inactive peers (previously active peers that are no longer active)
         previously_active = set(self.eval_peers.keys())  # since self.eval_peers is now a dict

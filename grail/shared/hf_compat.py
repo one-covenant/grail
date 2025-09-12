@@ -1,6 +1,6 @@
 from typing import Any, Optional, Union
 
-from transformers import PreTrainedModel, PretrainedConfig
+from transformers import PretrainedConfig, PreTrainedModel
 
 
 def resolve_hidden_size(model: PreTrainedModel) -> int:
@@ -31,7 +31,7 @@ def resolve_hidden_size(model: PreTrainedModel) -> int:
     try:
         text_cfg = getattr(cfg, "text_config", None)
         if text_cfg is not None and hasattr(text_cfg, "hidden_size"):
-            val = getattr(text_cfg, "hidden_size")
+            val = text_cfg.hidden_size
             if isinstance(val, int) and val > 0:
                 return val
     except Exception:
@@ -62,7 +62,7 @@ def resolve_vocab_size(
 
         text_cfg = getattr(model_config, "text_config", None)
         if text_cfg is not None and hasattr(text_cfg, "vocab_size"):
-            val = getattr(text_cfg, "vocab_size")
+            val = text_cfg.vocab_size
             if isinstance(val, int) and val > 0:
                 return val
     except Exception:

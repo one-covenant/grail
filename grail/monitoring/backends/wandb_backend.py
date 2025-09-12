@@ -10,11 +10,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any
 
-from ..base import MonitoringBackend, MetricData, MetricType
 import numpy as np
+
+from ..base import MetricData, MetricType, MonitoringBackend
 
 logger = logging.getLogger(__name__)
 
@@ -30,15 +32,15 @@ class WandBBackend(MonitoringBackend):
     def __init__(self) -> None:
         """Initialize the WandB backend."""
         self.run: Any = None
-        self.config: Dict[str, Any] = {}
+        self.config: dict[str, Any] = {}
         self._initialized = False
         self._wandb_module: Any = None
         self._wandb_run_started = False
-        self._start_time: Optional[float] = None
+        self._start_time: float | None = None
         # Cache of persistent tables by name to allow incremental row appends
-        self._tables: Dict[str, Any] = {}
+        self._tables: dict[str, Any] = {}
 
-    def initialize(self, config: Dict[str, Any]) -> None:
+    def initialize(self, config: dict[str, Any]) -> None:
         """Initialize wandb backend synchronously (no network calls).
 
         Args:
@@ -175,7 +177,7 @@ class WandBBackend(MonitoringBackend):
         except Exception as e:
             logger.warning(f"Failed to log metric {metric.name}: {e}")
 
-    async def log_metrics(self, metrics: List[MetricData]) -> None:
+    async def log_metrics(self, metrics: list[MetricData]) -> None:
         """Log multiple metrics efficiently to wandb.
 
         Args:
@@ -192,7 +194,7 @@ class WandBBackend(MonitoringBackend):
                 return
 
             # Combine all metrics into a single data dict
-            data: Dict[str, Any] = {}
+            data: dict[str, Any] = {}
             latest_timestamp = None
 
             for metric in metrics:
@@ -215,7 +217,7 @@ class WandBBackend(MonitoringBackend):
         except Exception as e:
             logger.warning(f"Failed to log metrics batch: {e}")
 
-    def _prepare_metric_data(self, metric: MetricData) -> Dict[str, Any]:
+    def _prepare_metric_data(self, metric: MetricData) -> dict[str, Any]:
         """Prepare metric data for wandb logging.
 
         Args:
@@ -255,7 +257,7 @@ class WandBBackend(MonitoringBackend):
             return value
         try:
             # Normalize to a 1D numpy array
-            array_like: Optional[np.ndarray] = None
+            array_like: np.ndarray | None = None
             # Handle torch tensors without importing torch explicitly
             if hasattr(value, "detach") and hasattr(value, "cpu") and hasattr(value, "numpy"):
                 try:
@@ -275,7 +277,7 @@ class WandBBackend(MonitoringBackend):
             logger.debug(f"Failed to convert value to wandb.Histogram: {exc}")
             return value
 
-    def _to_optional_float(self, value: Any) -> Optional[float]:
+    def _to_optional_float(self, value: Any) -> float | None:
         """Best-effort conversion to float with None passthrough.
 
         Args:
@@ -291,7 +293,7 @@ class WandBBackend(MonitoringBackend):
         except Exception:
             return None
 
-    def _add_temporal_context(self, data: Dict[str, Any], metric: MetricData) -> None:
+    def _add_temporal_context(self, data: dict[str, Any], metric: MetricData) -> None:
         """Add temporal context to the data for better visualization.
 
         Args:
@@ -319,9 +321,7 @@ class WandBBackend(MonitoringBackend):
             data["window_number"] = metric.window_number
 
     @contextmanager
-    def timer(
-        self, name: str, tags: Optional[Dict[str, str]] = None
-    ) -> Generator[None, None, None]:
+    def timer(self, name: str, tags: dict[str, str] | None = None) -> Generator[None, None, None]:
         """Context manager for timing operations.
 
         Args:
@@ -424,7 +424,7 @@ class WandBBackend(MonitoringBackend):
         except Exception as e:
             logger.warning(f"Failed to log artifact {name}: {e}")
 
-    async def start_run(self, run_name: str, config: Dict[str, Any]) -> str:
+    async def start_run(self, run_name: str, config: dict[str, Any]) -> str:
         """Start a new wandb run.
 
         Args:

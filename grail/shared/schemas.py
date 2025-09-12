@@ -1,6 +1,6 @@
 """Data schemas for GRAIL R2 credentials management."""
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class BucketCredentials(BaseModel):

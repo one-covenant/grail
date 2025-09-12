@@ -43,7 +43,7 @@ If you prefer manual control, follow these steps:
 #### 1. Start the local subnet and storage
 
 ```bash
-docker compose -f docker-compose.local-subnet.yml up -d alice bob s3 s3-setup
+docker compose -f docker/docker-compose.local-subnet.yml up -d alice bob s3 s3-setup
 ```
 
 Wait for the subtensor to be ready (about 15 seconds).
@@ -95,7 +95,7 @@ btcli subnet start --netuid 2 --subtensor.network local --subtensor.chain_endpoi
 #### 7. Start GRAIL services
 
 ```bash
-docker compose -f docker-compose.local-subnet.yml up -d miner-1 miner-2 validator
+docker compose -f docker/docker-compose.local-subnet.yml up -d miner-1 miner-2 validator
 ```
 
 ## Monitoring

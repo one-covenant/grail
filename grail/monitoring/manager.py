@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional, Union
 from contextlib import contextmanager
+from typing import Any
 
-from .base import MonitoringBackend, MetricData, MetricType
-from .backends.wandb_backend import WandBBackend
 from .backends.null_backend import NullBackend
+from .backends.wandb_backend import WandBBackend
+from .base import MetricData, MetricType, MonitoringBackend
 
 logger = logging.getLogger(__name__)
 
@@ -28,25 +28,25 @@ class MonitoringManager:
     interfaces for different use cases.
     """
 
-    def __init__(self, backend: Optional[MonitoringBackend] = None):
+    def __init__(self, backend: MonitoringBackend | None = None):
         """Initialize the monitoring manager.
 
         Args:
             backend: The monitoring backend to use. If None, uses NullBackend.
         """
         self.backend = backend or NullBackend()
-        self._metric_buffer: List[MetricData] = []
+        self._metric_buffer: list[MetricData] = []
         self._buffer_size = 100
         self._flush_interval = 30.0  # seconds
-        self._flush_task: Optional[asyncio.Task] = None
-        self._shutdown_event: Optional[asyncio.Event] = None
+        self._flush_task: asyncio.Task | None = None
+        self._shutdown_event: asyncio.Event | None = None
         self._initialized = False
-        self._config: Dict[str, Any] = {}
-        self._current_block: Optional[int] = None
-        self._current_window: Optional[int] = None
-        self._start_time: Optional[float] = None
+        self._config: dict[str, Any] = {}
+        self._current_block: int | None = None
+        self._current_window: int | None = None
+        self._start_time: float | None = None
 
-    def initialize(self, config: Dict[str, Any]) -> None:
+    def initialize(self, config: dict[str, Any]) -> None:
         """Initialize the monitoring system synchronously.
 
         Args:
@@ -100,7 +100,7 @@ class MonitoringManager:
                 logger.warning(f"Error in periodic flush: {e}")
                 await asyncio.sleep(1.0)  # Brief pause before retrying
 
-    def set_block_context(self, block_number: int, window_number: Optional[int] = None) -> None:
+    def set_block_context(self, block_number: int, window_number: int | None = None) -> None:
         """Set the current block and window context for metrics.
 
         Args:
@@ -113,8 +113,8 @@ class MonitoringManager:
     async def log_counter(
         self,
         name: str,
-        value: Union[int, float] = 1,
-        tags: Optional[Dict[str, str]] = None,
+        value: int | float = 1,
+        tags: dict[str, str] | None = None,
     ) -> None:
         """Log a counter metric.
 
@@ -145,8 +145,8 @@ class MonitoringManager:
     async def log_gauge(
         self,
         name: str,
-        value: Union[int, float],
-        tags: Optional[Dict[str, str]] = None,
+        value: int | float,
+        tags: dict[str, str] | None = None,
     ) -> None:
         """Log a gauge metric.
 
@@ -173,7 +173,7 @@ class MonitoringManager:
             logger.warning(f"Failed to log gauge {name}: {e}")
 
     async def log_histogram(
-        self, name: str, value: Any, tags: Optional[Dict[str, str]] = None
+        self, name: str, value: Any, tags: dict[str, str] | None = None
     ) -> None:
         """Log a histogram metric.
 
@@ -199,7 +199,7 @@ class MonitoringManager:
             await self.flush_metrics()
 
     @contextmanager
-    def timer(self, name: str, tags: Optional[Dict[str, str]] = None) -> Any:
+    def timer(self, name: str, tags: dict[str, str] | None = None) -> Any:
         """Time an operation.
 
         Args:
@@ -265,7 +265,7 @@ class MonitoringManager:
             logger.warning(f"Health check failed: {e}")
             return False
 
-    async def start_run(self, run_name: str, config: Optional[Dict[str, Any]] = None) -> str:
+    async def start_run(self, run_name: str, config: dict[str, Any] | None = None) -> str:
         """Start a new monitoring run.
 
         Args:
@@ -332,7 +332,7 @@ class MonitoringManager:
 
 
 # Global monitoring instance
-_monitoring_manager: Optional[MonitoringManager] = None
+_monitoring_manager: MonitoringManager | None = None
 
 
 def get_monitoring_manager() -> MonitoringManager:

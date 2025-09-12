@@ -12,7 +12,7 @@ import time
 import traceback
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any, List, Optional, Tuple
+from typing import Any, Optional
 
 import bittensor as bt
 import torch
@@ -81,7 +81,7 @@ async def get_subtensor() -> bt.subtensor:
 
 def parse_filename(
     filename: str,
-) -> Tuple[Optional[str], Optional[int], Optional[int]]:
+) -> tuple[Optional[str], Optional[int], Optional[int]]:
     """Parse filename to extract wallet, block, nonce"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -96,7 +96,7 @@ def parse_filename(
 
 def parse_window_filename(
     filename: str,
-) -> Tuple[Optional[str], Optional[int]]:
+) -> tuple[Optional[str], Optional[int]]:
     """Parse window filename to extract wallet and window_start"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -249,7 +249,7 @@ async def has_time_for_next_generation(
 
 async def get_window_randomness(
     subtensor: bt.subtensor, window_start: int, use_drand: bool
-) -> Tuple[str, str]:
+) -> tuple[str, str]:
     """Compute randomness for the window using block hash and optional drand.
 
     We prefer mixing the window's block hash with the drand beacon when
@@ -285,7 +285,7 @@ def compute_difficulty(inference_count: int) -> float:
 
 def generate_sat_problem_for_group(
     wallet: bt.wallet, window_block_hash: str, base_nonce: int, difficulty: float
-) -> Tuple[Any, str]:
+) -> tuple[Any, str]:
     """Create a SAT problem and the base seed shared by a GRPO rollout group."""
     sat_seed_base = f"{wallet.hotkey.ss58_address}-{window_block_hash}-{base_nonce}"
     sat_problem = generate_sat_problem(sat_seed_base, difficulty)
@@ -332,7 +332,7 @@ async def maybe_log_debug_sample(
         sample_text = prover.tokenizer.decode(completion_ids, skip_special_tokens=False)
         sample_nonce = base_nonce * 10
         logger.debug(
-            "TEXT[mine] window=%s group=%s nonce=%s reward=%.3f " "adv=%.3f success=%s text=%s",
+            "TEXT[mine] window=%s group=%s nonce=%s reward=%.3f adv=%.3f success=%s text=%s",
             window_start,
             base_nonce,
             sample_nonce,
@@ -360,14 +360,14 @@ async def maybe_log_debug_sample(
         return text_logs_emitted
 
 
-def extract_assignment_from_rollout(rollout: Any) -> List[bool]:
+def extract_assignment_from_rollout(rollout: Any) -> list[bool]:
     """Extract boolean assignment from rollout trajectory if available."""
     if rollout.trajectory and isinstance(rollout.trajectory[0][1], list):
         return rollout.trajectory[0][1]
     return []
 
 
-def count_satisfied_clauses(sat_problem: Any, assignment: List[bool]) -> int:
+def count_satisfied_clauses(sat_problem: Any, assignment: list[bool]) -> int:
     """Count how many SAT clauses are satisfied by a boolean assignment."""
     if not assignment:
         return 0
@@ -486,7 +486,7 @@ def package_rollout_data(
 async def upload_inferences_with_metrics(
     wallet: bt.wallet,
     window_start: int,
-    inferences: List[dict],
+    inferences: list[dict],
     credentials: Any,
     monitor: Optional[Any],
 ) -> float:
@@ -531,7 +531,7 @@ async def generate_rollouts_for_window(
     timers: MiningTimers,
     monitor: Optional[Any],
     use_drand: bool,
-) -> List[dict]:
+) -> list[dict]:
     """Generate as many GRPO rollouts as safely possible within a window.
 
     Core loop responsibilities:
@@ -555,7 +555,7 @@ async def generate_rollouts_for_window(
         List of signed rollout data ready for upload.
     """
     # Window generation state and metrics
-    inferences: List[dict] = []
+    inferences: list[dict] = []
     start_time = time.time()
     inference_count = 0  # Total number of problems attempted in this window
     successful_rollouts = 0
@@ -597,7 +597,7 @@ async def generate_rollouts_for_window(
             inference_count += 1
 
             logger.info(
-                "⚡ Generating GRPO rollouts for problem %s " "(block %s/%s)...",
+                "⚡ Generating GRPO rollouts for problem %s (block %s/%s)...",
                 problem_count,
                 current_block,
                 window_start + WINDOW_LENGTH - 1,
@@ -655,7 +655,7 @@ async def generate_rollouts_for_window(
                 elapsed = time.time() - start_time
                 rollouts_per_sec = (len(inferences) / elapsed) if elapsed > 0 else 0
                 logger.info(
-                    "📊 Progress: %s rollouts from %s problems in %.1fs " "(%.1f rollouts/sec)",
+                    "📊 Progress: %s rollouts from %s problems in %.1fs (%.1f rollouts/sec)",
                     len(inferences),
                     problem_count,
                     elapsed,

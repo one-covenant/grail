@@ -1,17 +1,16 @@
 """Generic rollout generation for GRAIL RL environments - GRPO Version."""
 
-import torch
 import logging
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Tuple
 from dataclasses import dataclass
+from typing import Any
 
 # Imports for type hints only - actual types are Any in method signatures
 import bittensor as bt
+import torch
 
 from ..shared.constants import MAX_NEW_TOKENS
 from ..shared.hf_compat import resolve_hidden_size
-
 
 logger = logging.getLogger(__name__)
 
@@ -79,8 +78,8 @@ class GRPORollout:
     """Single rollout for GRPO training with GRAIL proof support."""
 
     # Token data for GRAIL proof
-    tokens: List[int]  # All tokens (prompt + completion)
-    token_logprobs: List[float]  # Logprobs for all tokens
+    tokens: list[int]  # All tokens (prompt + completion)
+    token_logprobs: list[float]  # Logprobs for all tokens
 
     # Training masks
     prompt_length: int  # Where prompt ends and completion begins
@@ -91,13 +90,13 @@ class GRPORollout:
     advantage: float  # Computed after all rollouts collected
 
     # Trajectory for analysis
-    trajectory: List[Tuple[Any, Any, float]]
+    trajectory: list[tuple[Any, Any, float]]
     success: bool
 
     # GRAIL proof fields (from existing grail.py)
-    s_vals: List[int]
+    s_vals: list[int]
     signature: bytes
-    beacon: Dict
+    beacon: dict
 
 
 class RolloutGenerator(ABC):
@@ -141,7 +140,7 @@ class RolloutGenerator(ABC):
 
     def generate_grpo_rollouts(
         self, problem: Any, randomness_hex: str, wallet: bt.wallet
-    ) -> List[GRPORollout]:
+    ) -> list[GRPORollout]:
         """
         Generate multiple rollouts for GRPO training with GRAIL proofs.
 
@@ -252,9 +251,7 @@ class RolloutGenerator(ABC):
         total_reward += reward
 
         if "success" not in info:
-            logger.warning(
-                "step_environment did not return 'success' in info; " "defaulting to False"
-            )
+            logger.warning("step_environment did not return 'success' in info; defaulting to False")
         success = bool(info.get("success", False))
 
         # Continue stepping if needed (for multi-step environments)
@@ -266,7 +263,7 @@ class RolloutGenerator(ABC):
         #     break
 
         # Generate GRAIL proof components (using existing grail.py logic)
-        from ..grail import r_vec_from_randomness, dot_mod_q, sign_s_vals
+        from ..grail import dot_mod_q, r_vec_from_randomness, sign_s_vals
 
         # Compute s_vals for GRAIL proof
         r_vec = r_vec_from_randomness(randomness_hex, resolve_hidden_size(self.model))
@@ -300,7 +297,7 @@ class RolloutGenerator(ABC):
             beacon={"randomness": randomness_hex},
         )
 
-    def _extract_logprobs(self, scores: List[torch.Tensor], token_ids: List[int]) -> List[float]:
+    def _extract_logprobs(self, scores: list[torch.Tensor], token_ids: list[int]) -> list[float]:
         """Extract log probabilities for generated tokens."""
         logprobs = []
         for i, token_id in enumerate(token_ids):
@@ -314,7 +311,7 @@ class RolloutGenerator(ABC):
 
     # TODO: optimize with torch tensors for efficiency; support off-policy
     # variants later
-    def _compute_grpo_advantages(self, rewards: List[float]) -> List[float]:
+    def _compute_grpo_advantages(self, rewards: list[float]) -> list[float]:
         """
         GRPO advantages with per-group baseline and variance normalization.
         Ensures zero-mean within group; scales by std for stability.
@@ -339,7 +336,7 @@ class RolloutGenerator(ABC):
         pass
 
     @abstractmethod
-    def create_prompt(self, problem: Any, env: Any, state: Any, trajectory: List) -> str:
+    def create_prompt(self, problem: Any, env: Any, state: Any, trajectory: list) -> str:
         """Create a prompt for the model based on current state."""
         pass
 
@@ -354,7 +351,7 @@ class RolloutGenerator(ABC):
         (next_state, reward, done, info)."""
         pass
 
-    def create_trajectory_entry(self, state: Any, action: Any, reward: float, info: Dict) -> Any:
+    def create_trajectory_entry(self, state: Any, action: Any, reward: float, info: dict) -> Any:
         """Create an entry for the trajectory list.
 
         Default implementation returns a minimal tuple:
@@ -367,7 +364,7 @@ class RolloutGenerator(ABC):
         return (0, action, reward)
 
     @abstractmethod
-    def get_final_info(self, env: Any, trajectory: List, total_reward: float) -> Dict:
+    def get_final_info(self, env: Any, trajectory: list, total_reward: float) -> dict:
         """Get final information to include in the rollout result."""
         pass
 

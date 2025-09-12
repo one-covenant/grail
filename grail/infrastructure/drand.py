@@ -1,9 +1,10 @@
 """Drand distributed randomness beacon integration for GRAIL."""
 
-import os
 import logging
+import os
+from typing import Any, Optional, TypedDict
+
 import requests
-from typing import Any, Dict, Optional, TypedDict
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,7 @@ class ChainConfig(TypedDict):
 
 
 # Drand chain configurations
-DRAND_CHAINS: Dict[str, ChainConfig] = {
+DRAND_CHAINS: dict[str, ChainConfig] = {
     "quicknet": {
         "hash": "8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce",
         "genesis_time": 1692803367,
@@ -78,7 +79,7 @@ def set_chain(chain_name: str) -> None:
     )
 
 
-def get_current_chain() -> Dict[str, Any]:
+def get_current_chain() -> dict[str, Any]:
     """Get information about the currently selected chain."""
     return {"name": _current_chain, **DRAND_CHAINS[_current_chain]}
 

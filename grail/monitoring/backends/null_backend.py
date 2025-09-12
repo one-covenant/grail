@@ -8,10 +8,11 @@ application continues to function normally without any monitoring overhead.
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any
 
-from ..base import MonitoringBackend, MetricData
+from ..base import MetricData, MonitoringBackend
 
 
 class NullBackend(MonitoringBackend):
@@ -22,7 +23,7 @@ class NullBackend(MonitoringBackend):
     or explicitly disabled, ensuring the application continues to work normally.
     """
 
-    def initialize(self, config: Dict[str, Any]) -> None:
+    def initialize(self, config: dict[str, Any]) -> None:
         """Initialize the null backend (no-op).
 
         Args:
@@ -38,7 +39,7 @@ class NullBackend(MonitoringBackend):
         """
         pass
 
-    async def log_metrics(self, metrics: List[MetricData]) -> None:
+    async def log_metrics(self, metrics: list[MetricData]) -> None:
         """Log multiple metrics (no-op).
 
         Args:
@@ -47,9 +48,7 @@ class NullBackend(MonitoringBackend):
         pass
 
     @contextmanager
-    def timer(
-        self, name: str, tags: Optional[Dict[str, str]] = None
-    ) -> Generator[None, None, None]:
+    def timer(self, name: str, tags: dict[str, str] | None = None) -> Generator[None, None, None]:
         """Context manager for timing operations (no-op).
 
         Args:
@@ -71,7 +70,7 @@ class NullBackend(MonitoringBackend):
         """
         pass
 
-    async def start_run(self, run_name: str, config: Dict[str, Any]) -> str:
+    async def start_run(self, run_name: str, config: dict[str, Any]) -> str:
         """Start a new monitoring run (no-op).
 
         Args:

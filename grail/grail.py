@@ -10,7 +10,7 @@ import logging
 import os
 import random
 import struct
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Optional, Union, cast
 
 import bittensor as bt
 import torch
@@ -18,11 +18,23 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
 
 from .environments import generate_sat_problem
 from .monitoring import get_monitoring_manager
-from .shared.constants import (CHALLENGE_K, LAYER_INDEX, MAX_NEW_TOKENS, MIN_EOS_PROBABILITY,
-                               MODEL_NAME, PRIME_Q, RNG_LABEL, SAMPLING_BC_THRESHOLD,
-                               SAMPLING_HIGH_P, SAMPLING_LOW_P, SAMPLING_LOW_Q10_MAX,
-                               SAMPLING_MEDIAN_LOW_MAX, SAMPLING_MIN_STEPS,
-                               SANITY_CHECK_DRIFT_THRESHOLD, TOLERANCE)
+from .shared.constants import (
+    CHALLENGE_K,
+    LAYER_INDEX,
+    MAX_NEW_TOKENS,
+    MIN_EOS_PROBABILITY,
+    MODEL_NAME,
+    PRIME_Q,
+    RNG_LABEL,
+    SAMPLING_BC_THRESHOLD,
+    SAMPLING_HIGH_P,
+    SAMPLING_LOW_P,
+    SAMPLING_LOW_Q10_MAX,
+    SAMPLING_MEDIAN_LOW_MAX,
+    SAMPLING_MIN_STEPS,
+    SANITY_CHECK_DRIFT_THRESHOLD,
+    TOLERANCE,
+)
 from .shared.hf_compat import resolve_max_context_length, resolve_vocab_size
 
 # Enable CUDA debugging for better error messages
@@ -152,8 +164,8 @@ def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
     cache_key = (clean_hex, d_model)
 
     # Check if we've already computed this (useful for repeated calls)
-    cache: Dict[Tuple[str, int], torch.Tensor] = cast(
-        Dict[Tuple[str, int], torch.Tensor],
+    cache: dict[tuple[str, int], torch.Tensor] = cast(
+        dict[tuple[str, int], torch.Tensor],
         getattr(r_vec_from_randomness, "_cache", {}),
     )
     if cache_key in cache:
@@ -193,7 +205,7 @@ def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
     # Cache the result (limit cache size to prevent memory issues)
     if len(cache) < 100:
         cache[cache_key] = tensor.clone()
-        setattr(r_vec_from_randomness, "_cache", cache)
+        r_vec_from_randomness._cache = cache
 
     logger.debug(
         f"[SketchVec] Generated vector with shape={tensor.shape}, "
@@ -246,7 +258,9 @@ def indices_from_root(tokens: list[int], rand_hex: str, seq_len: int, k: int) ->
             out_bytes=32,
         )
     except ValueError as e:
-        raise ValueError(f"Invalid hex string for randomness: '{rand_hex}' -> '{clean_hex}': {e}")
+        raise ValueError(
+            f"Invalid hex string for randomness: '{rand_hex}' -> '{clean_hex}': {e}"
+        ) from e
 
     # Use deterministic sampling with seed
     rnd = random.Random(material)
@@ -560,7 +574,7 @@ class Verifier:
         challenge_randomness: str,
         min_k: int = CHALLENGE_K,
         log_identity: Optional[str] = None,
-    ) -> Tuple[bool, Dict[str, bool]]:
+    ) -> tuple[bool, dict[str, bool]]:
         """
         Verify SAT rollout with GRAIL proof.
 
@@ -579,7 +593,7 @@ class Verifier:
         self._current_wallet = log_identity if log_identity is not None else prover_address
 
         # Initialize checks map with conservative defaults
-        checks: Dict[str, bool] = {
+        checks: dict[str, bool] = {
             "tokens_valid": False,
             "proof_valid": False,
             "sat_problem_valid": False,
@@ -633,8 +647,7 @@ class Verifier:
         # Use the difficulty from the commit data, defaulting to 0.5 if not present
         difficulty = sat_data.get("difficulty", 0.5)
         logger.debug(
-            f"Regenerating SAT problem from seed '{sat_data['seed']}' "
-            f"with difficulty {difficulty}"
+            f"Regenerating SAT problem from seed '{sat_data['seed']}' with difficulty {difficulty}"
         )
         expected_problem = generate_sat_problem(sat_data["seed"], difficulty)
         if (
@@ -1018,7 +1031,6 @@ class Verifier:
                 return
 
             try:
-
                 loop = asyncio.get_event_loop()
 
                 if not loop.is_running():
@@ -1115,7 +1127,7 @@ class Verifier:
         except Exception as e:
             logger.debug(f"Sanity check failed: {e}")
 
-    def _get_step_logits(self, tokens: List[int]) -> Optional[torch.Tensor]:
+    def _get_step_logits(self, tokens: list[int]) -> Optional[torch.Tensor]:
         """Get logits for the last generation step, using cache when possible."""
         # Try to use cached logits from the proof verification pass
         try:

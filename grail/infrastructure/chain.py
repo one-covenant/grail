@@ -2,14 +2,14 @@
 
 import asyncio
 import logging
-from typing import Optional, Dict, Any
-from pydantic import ValidationError
 import os
+from typing import Any, Optional
 
 import bittensor as bt
 from bittensor.core.chain_data import decode_account_id
+from pydantic import ValidationError
 
-from ..shared.schemas import BucketCredentials, Bucket
+from ..shared.schemas import Bucket, BucketCredentials
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ class GrailChainManager:
         self.metagraph = self.subtensor.metagraph(self.netuid)
 
         # Commitment tracking
-        self.commitments: Dict[int, Bucket] = {}
+        self.commitments: dict[int, Bucket] = {}
         self._fetch_task: Optional[asyncio.Task] = None
 
         logger.info(f"Initialized GrailChainManager for netuid {self.netuid}")
@@ -164,7 +164,7 @@ class GrailChainManager:
         except Exception as e:
             logger.error(f"Failed to fetch commitments: {e}")
 
-    async def get_commitments(self, block: Optional[int] = None) -> Dict[int, Bucket]:
+    async def get_commitments(self, block: Optional[int] = None) -> dict[int, Bucket]:
         """
         Retrieve all bucket commitments from the chain.
 
@@ -264,7 +264,7 @@ class GrailChainManager:
         """
         return self.commitments.get(uid)
 
-    def get_all_buckets(self) -> Dict[int, Optional[Bucket]]:
+    def get_all_buckets(self) -> dict[int, Optional[Bucket]]:
         """
         Get all bucket configurations for all UIDs.
 

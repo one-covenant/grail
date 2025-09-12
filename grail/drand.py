@@ -9,6 +9,7 @@ Features:
 - Robust networking (Session, retries, shuffled relays, sensible timeouts)
 - Uniform schema for real & mock beacons
 """
+
 from __future__ import annotations
 
 import json
@@ -16,7 +17,7 @@ import logging
 import os
 import random
 from threading import Lock
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 import requests
 from requests.adapters import HTTPAdapter  # type: ignore[import-untyped]
@@ -51,7 +52,7 @@ _HEADERS = {"User-Agent": "GRAIL-drand/0.2"}
 
 # NOTE: hashes are authoritative identifiers of chains (v2 uses them in the path).
 # quicknet: 3s, unchained; default: 30s, chained.
-DRAND_CHAINS: Dict[str, Dict[str, Any]] = {
+DRAND_CHAINS: dict[str, dict[str, Any]] = {
     "quicknet": {
         "hash": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
         "description": "Fast 3-second randomness (unchained, recommended)",
@@ -71,12 +72,12 @@ DEFAULT_CHAIN = os.getenv("DRAND_CHAIN", "quicknet").strip() or "quicknet"
 
 _current_chain = DEFAULT_CHAIN
 # Cached, resolved parameters (populated lazily)
-_DRAND_CHAIN_HASH: Optional[str] = None
-_DRAND_GENESIS_TIME: Optional[int] = None
-_DRAND_PERIOD: Optional[int] = None
+_DRAND_CHAIN_HASH: str | None = None
+_DRAND_GENESIS_TIME: int | None = None
+_DRAND_PERIOD: int | None = None
 
 # Cache chain-info lookups by chain-hash to avoid repeated /info calls
-_CHAIN_INFO_CACHE: Dict[str, Dict[str, Any]] = {}
+_CHAIN_INFO_CACHE: dict[str, dict[str, Any]] = {}
 
 # Thread-safety for globals and mock counter
 _LOCK = Lock()
@@ -91,15 +92,15 @@ def _shuffle_urls() -> list[str]:
     return urls
 
 
-def _get_chain_record(name: str) -> Dict[str, Any]:
+def _get_chain_record(name: str) -> dict[str, Any]:
     if name not in DRAND_CHAINS:
         raise ValueError(f"Unknown drand chain '{name}'. Available: {list(DRAND_CHAINS.keys())}")
     return DRAND_CHAINS[name]
 
 
 def _parse_chain_info_payload(
-    payload: Dict[str, Any],
-) -> Tuple[Optional[int], Optional[int]]:
+    payload: dict[str, Any],
+) -> tuple[int | None, int | None]:
     """
     Extract (genesis_time, period) from v2 or v1 /info responses.
     Be tolerant to possible key naming variants.
@@ -126,7 +127,7 @@ def _parse_chain_info_payload(
     return gt, pd
 
 
-def _http_get_json(paths: list[str]) -> Optional[Dict[str, Any]]:
+def _http_get_json(paths: list[str]) -> dict[str, Any] | None:
     """
     Try all relays × all paths (v2-first, then v1) and return first JSON payload.
     """
@@ -152,7 +153,7 @@ def _http_get_json(paths: list[str]) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _fetch_chain_info(chain_hash: str) -> Optional[Dict[str, Any]]:
+def _fetch_chain_info(chain_hash: str) -> dict[str, Any] | None:
     """
     Programmatically fetch chain info (genesis_time, period, pubkey…) from relays.
     Tries v2 then v1 shapes; caches on success.
@@ -245,7 +246,7 @@ def set_chain(chain_name: str, refresh_info: bool = True) -> None:
     )
 
 
-def get_current_chain() -> Dict[str, Any]:
+def get_current_chain() -> dict[str, Any]:
     """
     Return details of the active chain, including resolved period/genesis_time if known.
     """
@@ -262,7 +263,7 @@ def get_current_chain() -> Dict[str, Any]:
     return rec
 
 
-def get_drand_beacon(round_id: Optional[int] = None, use_fallback: bool = True) -> Dict[str, Any]:
+def get_drand_beacon(round_id: int | None = None, use_fallback: bool = True) -> dict[str, Any]:
     """
     Fetch randomness from the drand network (v2-first, v1 fallback).
 
@@ -316,7 +317,7 @@ def get_drand_beacon(round_id: Optional[int] = None, use_fallback: bool = True) 
     }
 
 
-def get_mock_beacon() -> Dict[str, Any]:
+def get_mock_beacon() -> dict[str, Any]:
     """
     Fallback mock beacon for testing/development; uniform schema.
     """
@@ -341,7 +342,7 @@ def get_mock_beacon() -> Dict[str, Any]:
 
 def get_beacon(
     round_id: str = "latest", use_drand: bool = True, use_fallback: bool = True
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Convenience wrapper:
       - round_id: "latest" or round number as string/int
@@ -378,7 +379,7 @@ def get_round_at_time(timestamp: int) -> int:
     return 1 + (timestamp - _DRAND_GENESIS_TIME) // _DRAND_PERIOD
 
 
-def get_expected_round() -> Optional[int]:
+def get_expected_round() -> int | None:
     """
     Query the chain health to get the current/expected round (v2).
     Useful to clamp future-round requests.

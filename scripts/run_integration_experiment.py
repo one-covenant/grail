@@ -22,16 +22,16 @@ Usage:
         --hotkeys "custom1,custom2,custom3"
 """
 
-import os
-import sys
-import subprocess
-import signal
-import time
 import argparse
-import threading
-from pathlib import Path
-from typing import Dict, List, Optional, Any, IO
 import logging
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import IO, Any, Optional
 
 # Configure logging
 logging.basicConfig(
@@ -45,27 +45,27 @@ class Tier3TestRunner:
     """Minimal test runner for Tier 3 integration testing."""
 
     def __init__(self, start_gpu: int = 0):
-        self.processes: Dict[str, subprocess.Popen] = {}
+        self.processes: dict[str, subprocess.Popen] = {}
         self.base_env = self._load_env()
         self.running = True
-        self.gpu_assignments: Dict[str, int] = {}  # Track GPU assignments
+        self.gpu_assignments: dict[str, int] = {}  # Track GPU assignments
         self.next_gpu = start_gpu  # Next GPU to assign
         self.start_gpu = start_gpu  # Remember starting GPU
         self.log_dir: Path = self._init_log_dir()
-        self.log_files: Dict[str, IO[str]] = {}
-        self.log_locks: Dict[str, threading.Lock] = {}
+        self.log_files: dict[str, IO[str]] = {}
+        self.log_locks: dict[str, threading.Lock] = {}
 
         # Handle signals for clean shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
-    def _load_env(self) -> Dict[str, str]:
+    def _load_env(self) -> dict[str, str]:
         """Load environment from .env file."""
         env = os.environ.copy()
         env_file = Path(__file__).parent.parent / ".env"
 
         if env_file.exists():
-            with open(env_file, "r") as f:
+            with open(env_file) as f:
                 for line in f:
                     line = line.strip()
                     if line and not line.startswith("#") and "=" in line:
@@ -95,9 +95,7 @@ class Tier3TestRunner:
             f = open(log_path, "a", encoding="utf-8")
             self.log_files[name] = f
             self.log_locks[name] = threading.Lock()
-            f.write(
-                f"==== {name} log started at " f"{time.strftime('%Y-%m-%d %H:%M:%S')} ====" "\n"
-            )
+            f.write(f"==== {name} log started at {time.strftime('%Y-%m-%d %H:%M:%S')} ====\n")
             f.flush()
             logger.info(f"{name} log file: {log_path}")
         return self.log_dir / f"{name}.log"
@@ -159,8 +157,8 @@ class Tier3TestRunner:
         env.update(
             {
                 "GRAIL_MODEL_NAME": model_name,
-                "WANDB_RUN_NAME": (f'tier3-miner-{index}-{model_name.split("/")[-1]}'),
-                "WANDB_TAGS": f'tier3,miner,{model_name.split("/")[-1]}',
+                "WANDB_RUN_NAME": (f"tier3-miner-{index}-{model_name.split('/')[-1]}"),
+                "WANDB_TAGS": f"tier3,miner,{model_name.split('/')[-1]}",
                 "CUDA_VISIBLE_DEVICES": str(gpu_id),
             }
         )
@@ -207,8 +205,8 @@ class Tier3TestRunner:
         env.update(
             {
                 "GRAIL_MODEL_NAME": model_name,
-                "WANDB_RUN_NAME": f'tier3-validator-{model_name.split("/")[-1]}',
-                "WANDB_TAGS": f'tier3,validator,{model_name.split("/")[-1]}',
+                "WANDB_RUN_NAME": f"tier3-validator-{model_name.split('/')[-1]}",
+                "WANDB_TAGS": f"tier3,validator,{model_name.split('/')[-1]}",
                 "CUDA_VISIBLE_DEVICES": str(gpu_id),
             }
         )
@@ -269,9 +267,9 @@ class Tier3TestRunner:
 
     def run(
         self,
-        miner_models: List[str],
+        miner_models: list[str],
         validator_model: str,
-        miner_hotkeys: Optional[List[str]] = None,
+        miner_hotkeys: Optional[list[str]] = None,
         validator_delay: int = 30,
     ) -> None:
         """Run the test with specified models and optionally specific hotkeys.
@@ -303,7 +301,7 @@ class Tier3TestRunner:
 
         # Wait for miners to fully initialize and register on network
         logger.info(
-            f"\n⏳ Waiting {validator_delay} seconds for miners to initialize " "and register..."
+            f"\n⏳ Waiting {validator_delay} seconds for miners to initialize and register..."
         )
         logger.info("   This ensures miners are ready before validator starts checking")
 
@@ -401,7 +399,7 @@ Examples:
         "--hotkeys",
         type=str,
         default="hk1,hk2,hk3",
-        help=("Comma-separated list of hotkey names for miners " '(default: "hk1,hk2,hk3")'),
+        help=('Comma-separated list of hotkey names for miners (default: "hk1,hk2,hk3")'),
     )
 
     # Validator delay configuration
@@ -409,7 +407,7 @@ Examples:
         "--validator-delay",
         type=int,
         default=30,
-        help=("Seconds to wait after starting miners before starting validator " "(default: 30)"),
+        help=("Seconds to wait after starting miners before starting validator (default: 30)"),
     )
 
     args = parser.parse_args()
@@ -426,10 +424,10 @@ Examples:
     # Check if number of hotkeys matches number of miners
     if len(miner_hotkeys) < len(miner_models):
         logger.error(
-            f"Error: Not enough hotkeys ({len(miner_hotkeys)}) for " f"{len(miner_models)} miners"
+            f"Error: Not enough hotkeys ({len(miner_hotkeys)}) for {len(miner_models)} miners"
         )
         logger.error(f"Provided hotkeys: {miner_hotkeys}")
-        logger.error("Either provide more hotkeys with --hotkeys or reduce number of " "miners")
+        logger.error("Either provide more hotkeys with --hotkeys or reduce number of miners")
         sys.exit(1)
     elif len(miner_hotkeys) > len(miner_models):
         # Just use the first N hotkeys
@@ -445,16 +443,13 @@ Examples:
             f"Error: Cannot run {len(miner_models)} miners + 1 validator = "
             f"{total_services} services"
         )
-        logger.error(f"Only {available_gpus} GPUs available starting from GPU " f"{args.start_gpu}")
+        logger.error(f"Only {available_gpus} GPUs available starting from GPU {args.start_gpu}")
         sys.exit(1)
     elif total_services > available_gpus - 2:
         logger.warning(
-            f"Warning: Running {len(miner_models)} miners + 1 validator = "
-            f"{total_services} services"
+            f"Warning: Running {len(miner_models)} miners + 1 validator = {total_services} services"
         )
-        logger.warning(
-            f"Using GPUs {args.start_gpu} through " f"{args.start_gpu + total_services - 1}"
-        )
+        logger.warning(f"Using GPUs {args.start_gpu} through {args.start_gpu + total_services - 1}")
         response = input("Continue? (y/N): ")
         if response.lower() != "y":
             sys.exit(0)

@@ -1,13 +1,13 @@
-import os
 import logging
-from typing import Optional, Tuple
+import os
+from typing import Optional
 
 import bittensor as bt
 
 logger = logging.getLogger(__name__)
 
 
-def _resolve_network() -> Tuple[str, Optional[str]]:
+def _resolve_network() -> tuple[str, Optional[str]]:
     """
     Resolve network selection from environment variables.
 

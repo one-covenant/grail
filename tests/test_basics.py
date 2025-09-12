@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from grail.monitoring.config import MonitoringConfig
 from grail.shared.constants import (
-    WINDOW_LENGTH,
     ROLLOUTS_PER_PROBLEM,
     SUPERLINEAR_EXPONENT,
+    WINDOW_LENGTH,
 )
-from grail.monitoring.config import MonitoringConfig
 
 
 def test_constants_are_reasonable() -> None:
