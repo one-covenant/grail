@@ -64,3 +64,8 @@ SUPERLINEAR_EXPONENT = 1.4
 # ────────────────  ROLLOUTS PER PROBLEM  ────────────────
 
 ROLLOUTS_PER_PROBLEM = int(os.getenv("GRAIL_ROLLOUTS_PER_PROBLEM", "4"))
+
+# ────────────────  EMISSION BURN MECHANISM  ────────────────
+
+GRAIL_BURN_UID = int(os.getenv("GRAIL_BURN_UID", "0"))
+GRAIL_BURN_PERCENTAGE = float(os.getenv("GRAIL_BURN_PERCENTAGE", "10.0"))

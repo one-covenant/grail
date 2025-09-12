@@ -41,6 +41,8 @@ from ..shared.constants import (
     ROLLOUTS_PER_PROBLEM,
     SUPERLINEAR_EXPONENT,
     WINDOW_LENGTH,
+    GRAIL_BURN_UID,
+    GRAIL_BURN_PERCENTAGE,
 )
 from . import console
 
@@ -481,6 +483,7 @@ async def _run_validation_service(
                     meta_hotkeys=meta.hotkeys,
                     inference_counts=inference_counts,
                     target_window=target_window,
+                    meta_uids=list(meta.uids),
                 )
                 if non_zero_weights:
                     logger.info(f"⚖️  Setting weights for {len(non_zero_weights)} miners")
@@ -1287,6 +1290,7 @@ def _compute_weights(
     meta_hotkeys: list[str],
     inference_counts: defaultdict[str, defaultdict[int, dict[str, int]]],
     target_window: int,
+    meta_uids: list[int] = None,
 ) -> tuple[list[float], list[tuple[str, float]]]:
     """Compute normalized weights over the last N windows.
 
@@ -1357,6 +1361,48 @@ def _compute_weights(
     # Normalize weights
     denom = math.fsum(raw_scores)
     weights = [score / denom for score in raw_scores] if denom > 0.0 else [0.0] * len(meta_hotkeys)
+    
+    # Apply burn mechanism if configured
+    burn_uid = GRAIL_BURN_UID
+    burn_percentage = GRAIL_BURN_PERCENTAGE
+    
+    if (
+        burn_uid is not None 
+        and burn_uid >= 0 
+        and burn_percentage > 0 
+        and meta_uids is not None
+    ):
+        try:
+            burn_uid = int(burn_uid)
+            # Ensure burn percentage is between 0 and 100
+            burn_percentage = max(0.0, min(100.0, burn_percentage))
+            burn_fraction = burn_percentage / 100.0
+            
+            # Find the index of the burn UID in the meta_uids list
+            if burn_uid in meta_uids:
+                burn_index = meta_uids.index(burn_uid)
+                
+                # Scale down all weights by (1 - burn_fraction)
+                weights = [w * (1 - burn_fraction) for w in weights]
+                
+                # Allocate burn_fraction to the burn UID
+                weights[burn_index] = burn_fraction
+                
+                logger.info(
+                    f"🔥 Burn mechanism active: Allocating {burn_percentage:.1f}% "
+                    f"of emissions to UID {burn_uid}"
+                )
+            else:
+                logger.warning(
+                    f"Burn UID {burn_uid} not found in metagraph. "
+                    f"Burn mechanism disabled for this round."
+                )
+        except (ValueError, TypeError) as e:
+            logger.error(f"Invalid burn configuration: {e}")
+    else:
+        logger.info(f"Burn uid {burn_uid} or burn percentage {burn_percentage} not set, burn mechanism disabled")
+        raise ValueError("GRAIL_BURN_UID or GRAIL_BURN_PERCENTAGE not set. Please set them in .env!")
+    
     non_zero_weights = [
         (meta_hotkeys[i], weights[i]) for i in range(len(weights)) if weights[i] > 0
     ]
