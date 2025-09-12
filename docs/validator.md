@@ -100,7 +100,7 @@ Use a registered wallet. Set `BT_WALLET_COLD`/`BT_WALLET_HOT` to the names you c
 
 **Bucket requirement:** Name it the same as your account ID; set the region to ENAM.
 
-Validators load local write credentials and use miners’ read credentials fetched from chain to download their files. See `docs/r2_credentials_design.md`.
+Validators load local write credentials and use miners’ read credentials fetched from chain to download their files.
 
 ### Monitoring
 

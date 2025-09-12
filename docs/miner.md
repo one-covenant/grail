@@ -113,7 +113,7 @@ Grail uses a dual-credential design:
 - Write credentials stay local and are used by miners to upload.
 - Read credentials are committed on-chain so validators can fetch your data.
 
-Fill `R2_*` variables in `.env`. See `docs/r2_credentials_design.md` for details.
+Fill `R2_*` variables in `.env.example`.
 
 ### Monitoring
 

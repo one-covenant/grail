@@ -14,7 +14,6 @@ GGGGG RRRRR AAAAA IIIII L
   Documentation:
   <a href="docs/miner.md">Miner</a> •
   <a href="docs/validator.md">Validator</a> •
-  <a href="docs/r2_credentials_design.md">Storage</a>
 </p>
 
 <p align="center">
