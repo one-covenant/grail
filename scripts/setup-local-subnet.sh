@@ -23,7 +23,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 echo -e "${YELLOW}Starting local subtensor nodes...${NC}"
-docker compose -f docker-compose.local-subnet.yml up -d alice bob
+docker compose -f docker/docker-compose.local-subnet.yml up -d alice bob
 
 echo "Waiting for subtensor to be ready..."
 sleep 15
@@ -158,7 +158,7 @@ echo -e "${GREEN}✅ Subnet emission schedule started${NC}"
 
 # Start GRAIL services
 echo -e "${YELLOW}Starting GRAIL miners and validator...${NC}"
-docker compose -f docker-compose.local-subnet.yml up -d miner-1 miner-2 validator
+docker compose -f docker/docker-compose.local-subnet.yml up -d miner-1 miner-2 validator
 
 echo -e "${GREEN}✅ All services started!${NC}"
 
@@ -176,18 +176,18 @@ echo "  - Username: minioadmin"
 echo "  - Password: minioadmin"
 echo ""
 echo "Monitor logs:"
-echo "  All services:  docker compose -f docker-compose.local-subnet.yml logs -f"
-echo "  Miner 1 only:  docker compose -f docker-compose.local-subnet.yml logs -f miner-1"
-echo "  Validator:     docker compose -f docker-compose.local-subnet.yml logs -f validator"
+echo "  All services:  docker compose -f docker/docker-compose.local-subnet.yml logs -f"
+echo "  Miner 1 only:  docker compose -f docker/docker-compose.local-subnet.yml logs -f miner-1"
+echo "  Validator:     docker compose -f docker/docker-compose.local-subnet.yml logs -f validator"
 echo ""
 echo "Rebuild and restart services (after code changes):"
-echo "  All GRAIL:     docker compose -f docker-compose.local-subnet.yml up -d --build miner-1 miner-2 validator"
-echo "  Miner 1 only:  docker compose -f docker-compose.local-subnet.yml up -d --build miner-1"
-echo "  Validator:     docker compose -f docker-compose.local-subnet.yml up -d --build validator"
+echo "  All GRAIL:     docker compose -f docker/docker-compose.local-subnet.yml up -d --build miner-1 miner-2 validator"
+echo "  Miner 1 only:  docker compose -f docker/docker-compose.local-subnet.yml up -d --build miner-1"
+echo "  Validator:     docker compose -f docker/docker-compose.local-subnet.yml up -d --build validator"
 echo ""docker compose -nf docker-compose.local-subnet.yml logs -f miner-1
 echo "Stop everything:"
-echo "  docker compose -f docker-compose.local-subnet.yml down"
+echo "  docker compose -f docker/docker-compose.local-subnet.yml down"
 echo ""
 echo "Clean up volumes:"
-echo "  docker compose -f docker-compose.local-subnet.yml down -v"
+echo "  docker compose -f docker/docker-compose.local-subnet.yml down -v"
 echo "==================================================================="

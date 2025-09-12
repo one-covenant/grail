@@ -1,0 +1,88 @@
+version: '3.8'
+
+services:
+  validator:
+    image: ghcr.io/tplr-ai/grail:latest
+    container_name: grail-validator
+    restart: unless-stopped
+    command: validate
+    environment:
+      # Core Bittensor configuration
+      - WALLET_NAME=${WALLET_NAME}
+      - WALLET_HOTKEY=${WALLET_HOTKEY}
+      - NETUID=${NETUID:-81}
+      - SUBTENSOR_NETWORK=${SUBTENSOR_NETWORK:-finney}
+      - SUBTENSOR_CHAIN_ENDPOINT=${SUBTENSOR_CHAIN_ENDPOINT:-}
+      
+      # Monitoring configuration
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+      - WANDB_PROJECT=${WANDB_PROJECT:-grail-validator}
+      - GRAIL_MONITORING_BACKEND=${GRAIL_MONITORING_BACKEND:-wandb}
+      
+      # Hugging Face configuration for model access
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HF_HOME=/root/.cache/huggingface
+      
+      # Performance tuning
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      - TRANSFORMERS_NO_ADVISORY_WARNINGS=1
+      
+      # Optional: Override default settings
+      - AXON_PORT=${AXON_PORT:-}
+      - AXON_IP=${AXON_IP:-}
+      - AXON_EXTERNAL_PORT=${AXON_EXTERNAL_PORT:-}
+      - AXON_EXTERNAL_IP=${AXON_EXTERNAL_IP:-}
+      
+    volumes:
+      # Persistent storage for wallet and cache
+      - ${HOME}/.bittensor:/root/.bittensor:ro
+      - validator-cache:/root/.cache
+      - validator-data:/app/data
+      
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    
+    networks:
+      - grail-network
+    
+    # Health check to ensure validator is running
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "grail validate"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    
+    # Labels for Watchtower
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.stop-signal=SIGTERM"
+      - "com.centurylinklabs.watchtower.timeout=120s"
+
+  watchtower:
+    image: containrrr/watchtower
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --interval 30 --cleanup --label-enable
+    restart: unless-stopped
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_LABEL_ENABLE=true
+      - WATCHTOWER_INCLUDE_RESTARTING=true
+      - REPO_USER=${GITHUB_USER}
+      - REPO_PASSWORD=${GITHUB_TOKEN}
+
+networks:
+  grail-network:
+    driver: bridge
+
+volumes:
+  validator-cache:
+    driver: local
+  validator-data:
+    driver: local
