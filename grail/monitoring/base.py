@@ -97,9 +97,7 @@ class MonitoringBackend(ABC):
 
     @abstractmethod
     @contextmanager
-    def timer(
-        self, name: str, tags: dict[str, str] | None = None
-    ) -> Generator[None, None, None]:
+    def timer(self, name: str, tags: dict[str, str] | None = None) -> Generator[None, None, None]:
         """Context manager for timing operations.
 
         Args:

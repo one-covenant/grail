@@ -332,7 +332,7 @@ async def maybe_log_debug_sample(
         sample_text = prover.tokenizer.decode(completion_ids, skip_special_tokens=False)
         sample_nonce = base_nonce * 10
         logger.debug(
-            "TEXT[mine] window=%s group=%s nonce=%s reward=%.3f " "adv=%.3f success=%s text=%s",
+            "TEXT[mine] window=%s group=%s nonce=%s reward=%.3f adv=%.3f success=%s text=%s",
             window_start,
             base_nonce,
             sample_nonce,
@@ -597,7 +597,7 @@ async def generate_rollouts_for_window(
             inference_count += 1
 
             logger.info(
-                "⚡ Generating GRPO rollouts for problem %s " "(block %s/%s)...",
+                "⚡ Generating GRPO rollouts for problem %s (block %s/%s)...",
                 problem_count,
                 current_block,
                 window_start + WINDOW_LENGTH - 1,
@@ -655,7 +655,7 @@ async def generate_rollouts_for_window(
                 elapsed = time.time() - start_time
                 rollouts_per_sec = (len(inferences) / elapsed) if elapsed > 0 else 0
                 logger.info(
-                    "📊 Progress: %s rollouts from %s problems in %.1fs " "(%.1f rollouts/sec)",
+                    "📊 Progress: %s rollouts from %s problems in %.1fs (%.1f rollouts/sec)",
                     len(inferences),
                     problem_count,
                     elapsed,

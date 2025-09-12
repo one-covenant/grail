@@ -148,7 +148,7 @@ def _main_callback(
         "--verbose",
         count=True,
         help="Increase verbosity (-v INFO, -vv DEBUG)",
-    )
+    ),
 ) -> None:
     """Configure logging once for all subcommands."""
     configure_logging(verbose)

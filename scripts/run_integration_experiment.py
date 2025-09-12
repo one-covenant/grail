@@ -95,9 +95,7 @@ class Tier3TestRunner:
             f = open(log_path, "a", encoding="utf-8")
             self.log_files[name] = f
             self.log_locks[name] = threading.Lock()
-            f.write(
-                f"==== {name} log started at " f"{time.strftime('%Y-%m-%d %H:%M:%S')} ====" "\n"
-            )
+            f.write(f"==== {name} log started at {time.strftime('%Y-%m-%d %H:%M:%S')} ====\n")
             f.flush()
             logger.info(f"{name} log file: {log_path}")
         return self.log_dir / f"{name}.log"
@@ -159,8 +157,8 @@ class Tier3TestRunner:
         env.update(
             {
                 "GRAIL_MODEL_NAME": model_name,
-                "WANDB_RUN_NAME": (f'tier3-miner-{index}-{model_name.split("/")[-1]}'),
-                "WANDB_TAGS": f'tier3,miner,{model_name.split("/")[-1]}',
+                "WANDB_RUN_NAME": (f"tier3-miner-{index}-{model_name.split('/')[-1]}"),
+                "WANDB_TAGS": f"tier3,miner,{model_name.split('/')[-1]}",
                 "CUDA_VISIBLE_DEVICES": str(gpu_id),
             }
         )
@@ -207,8 +205,8 @@ class Tier3TestRunner:
         env.update(
             {
                 "GRAIL_MODEL_NAME": model_name,
-                "WANDB_RUN_NAME": f'tier3-validator-{model_name.split("/")[-1]}',
-                "WANDB_TAGS": f'tier3,validator,{model_name.split("/")[-1]}',
+                "WANDB_RUN_NAME": f"tier3-validator-{model_name.split('/')[-1]}",
+                "WANDB_TAGS": f"tier3,validator,{model_name.split('/')[-1]}",
                 "CUDA_VISIBLE_DEVICES": str(gpu_id),
             }
         )
@@ -303,7 +301,7 @@ class Tier3TestRunner:
 
         # Wait for miners to fully initialize and register on network
         logger.info(
-            f"\n⏳ Waiting {validator_delay} seconds for miners to initialize " "and register..."
+            f"\n⏳ Waiting {validator_delay} seconds for miners to initialize and register..."
         )
         logger.info("   This ensures miners are ready before validator starts checking")
 
@@ -401,7 +399,7 @@ Examples:
         "--hotkeys",
         type=str,
         default="hk1,hk2,hk3",
-        help=("Comma-separated list of hotkey names for miners " '(default: "hk1,hk2,hk3")'),
+        help=('Comma-separated list of hotkey names for miners (default: "hk1,hk2,hk3")'),
     )
 
     # Validator delay configuration
@@ -409,7 +407,7 @@ Examples:
         "--validator-delay",
         type=int,
         default=30,
-        help=("Seconds to wait after starting miners before starting validator " "(default: 30)"),
+        help=("Seconds to wait after starting miners before starting validator (default: 30)"),
     )
 
     args = parser.parse_args()
@@ -426,10 +424,10 @@ Examples:
     # Check if number of hotkeys matches number of miners
     if len(miner_hotkeys) < len(miner_models):
         logger.error(
-            f"Error: Not enough hotkeys ({len(miner_hotkeys)}) for " f"{len(miner_models)} miners"
+            f"Error: Not enough hotkeys ({len(miner_hotkeys)}) for {len(miner_models)} miners"
         )
         logger.error(f"Provided hotkeys: {miner_hotkeys}")
-        logger.error("Either provide more hotkeys with --hotkeys or reduce number of " "miners")
+        logger.error("Either provide more hotkeys with --hotkeys or reduce number of miners")
         sys.exit(1)
     elif len(miner_hotkeys) > len(miner_models):
         # Just use the first N hotkeys
@@ -445,16 +443,13 @@ Examples:
             f"Error: Cannot run {len(miner_models)} miners + 1 validator = "
             f"{total_services} services"
         )
-        logger.error(f"Only {available_gpus} GPUs available starting from GPU " f"{args.start_gpu}")
+        logger.error(f"Only {available_gpus} GPUs available starting from GPU {args.start_gpu}")
         sys.exit(1)
     elif total_services > available_gpus - 2:
         logger.warning(
-            f"Warning: Running {len(miner_models)} miners + 1 validator = "
-            f"{total_services} services"
+            f"Warning: Running {len(miner_models)} miners + 1 validator = {total_services} services"
         )
-        logger.warning(
-            f"Using GPUs {args.start_gpu} through " f"{args.start_gpu + total_services - 1}"
-        )
+        logger.warning(f"Using GPUs {args.start_gpu} through {args.start_gpu + total_services - 1}")
         response = input("Continue? (y/N): ")
         if response.lower() != "y":
             sys.exit(0)

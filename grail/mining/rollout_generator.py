@@ -251,9 +251,7 @@ class RolloutGenerator(ABC):
         total_reward += reward
 
         if "success" not in info:
-            logger.warning(
-                "step_environment did not return 'success' in info; " "defaulting to False"
-            )
+            logger.warning("step_environment did not return 'success' in info; defaulting to False")
         success = bool(info.get("success", False))
 
         # Continue stepping if needed (for multi-step environments)

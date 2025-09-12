@@ -258,7 +258,9 @@ def indices_from_root(tokens: list[int], rand_hex: str, seq_len: int, k: int) ->
             out_bytes=32,
         )
     except ValueError as e:
-        raise ValueError(f"Invalid hex string for randomness: '{rand_hex}' -> '{clean_hex}': {e}") from e
+        raise ValueError(
+            f"Invalid hex string for randomness: '{rand_hex}' -> '{clean_hex}': {e}"
+        ) from e
 
     # Use deterministic sampling with seed
     rnd = random.Random(material)
@@ -645,8 +647,7 @@ class Verifier:
         # Use the difficulty from the commit data, defaulting to 0.5 if not present
         difficulty = sat_data.get("difficulty", 0.5)
         logger.debug(
-            f"Regenerating SAT problem from seed '{sat_data['seed']}' "
-            f"with difficulty {difficulty}"
+            f"Regenerating SAT problem from seed '{sat_data['seed']}' with difficulty {difficulty}"
         )
         expected_problem = generate_sat_problem(sat_data["seed"], difficulty)
         if (
@@ -1030,7 +1031,6 @@ class Verifier:
                 return
 
             try:
-
                 loop = asyncio.get_event_loop()
 
                 if not loop.is_running():

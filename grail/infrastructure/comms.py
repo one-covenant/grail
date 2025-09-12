@@ -217,7 +217,7 @@ async def upload_file_chunked(
         data = gzip.compress(data, compresslevel=1)  # Fast compression
         key = key + ".gz"
         logger.info(
-            f"🗜️ Compressed {original_size} → {len(data)} bytes ({100*(1-len(data)/original_size):.1f}% reduction)"
+            f"🗜️ Compressed {original_size} → {len(data)} bytes ({100 * (1 - len(data) / original_size):.1f}% reduction)"
         )
 
     total_size = len(data)
@@ -268,7 +268,7 @@ async def upload_file_chunked(
             parts = []
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
-                    logger.error(f"Chunk {i+1} failed: {result}")
+                    logger.error(f"Chunk {i + 1} failed: {result}")
                     bucket_id = get_bucket_id(credentials, use_write)
                     await client.abort_multipart_upload(
                         Bucket=bucket_id, Key=key, UploadId=upload_id

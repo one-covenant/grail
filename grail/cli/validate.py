@@ -435,11 +435,10 @@ async def _run_validation_service(
 
                 # Log summary
                 logger.info(
-                    f"📁 Found {files_found} window files from "
-                    f"{len(meta.hotkeys)} active hotkeys"
+                    f"📁 Found {files_found} window files from {len(meta.hotkeys)} active hotkeys"
                 )
                 logger.info(
-                    f"🏁 Total valid rollouts in window {target_window}: " f"{total_valid_rollouts}"
+                    f"🏁 Total valid rollouts in window {target_window}: {total_valid_rollouts}"
                 )
                 # Aggregate had_failure across wallets for visibility
                 failed_wallets = sum(
@@ -690,7 +689,7 @@ def _compute_window_randomness(target_window_hash: str, use_drand: bool) -> str:
 def _determine_hotkeys_to_check(test_mode: bool, wallet: bt.wallet, meta: Any) -> list[str]:
     """Choose which hotkeys to validate based on test/prod mode."""
     if test_mode:
-        logger.info(f"🧪 TEST MODE: Checking files for own hotkey " f"{wallet.hotkey.ss58_address}")
+        logger.info(f"🧪 TEST MODE: Checking files for own hotkey {wallet.hotkey.ss58_address}")
         return [wallet.hotkey.ss58_address]
 
     logger.info(f"Checking files for {len(meta.hotkeys)} active hotkeys")
@@ -866,12 +865,12 @@ async def _process_wallet_window(
     inferences = window_data.get("inferences", [])
     if file_wallet_addr != wallet_addr:
         logger.warning(
-            f"Wallet mismatch in {filename}: expected {wallet_addr}, " f"got {file_wallet_addr}"
+            f"Wallet mismatch in {filename}: expected {wallet_addr}, got {file_wallet_addr}"
         )
         return True, None, [], (0, 0, 0, 0)
     if window_start != target_window:
         logger.warning(
-            f"Window mismatch in {filename}: expected {target_window}, " f"got {window_start}"
+            f"Window mismatch in {filename}: expected {target_window}, got {window_start}"
         )
         return True, None, [], (0, 0, 0, 0)
 
@@ -935,7 +934,7 @@ async def _process_wallet_window(
         logger.info(
             f"📊 Spot checking {len(indices_to_check)}/{total_inferences} "
             f"rollouts from {groups_to_check}/{num_groups} groups "
-            f"({SAMPLE_RATE*100:.0f}% of groups)"
+            f"({SAMPLE_RATE * 100:.0f}% of groups)"
         )
 
     # Per-wallet counters for metrics and gating
@@ -1234,9 +1233,7 @@ async def _process_wallet_window(
             sat_problem = r.get("commit", {}).get("sat_problem", {})
             base_seeds.append(sat_problem.get("seed"))
         if len(set(base_seeds)) != 1:
-            logger.debug(
-                f"GRPO group {group_id} has different base problems: " f"{set(base_seeds)}"
-            )
+            logger.debug(f"GRPO group {group_id} has different base problems: {set(base_seeds)}")
             grpo_invalid_groups += 1
             continue
         logger.debug(
@@ -1383,9 +1380,7 @@ async def _upload_rollouts(
             all_valid_rollouts, target_window, PROTOCOL_VERSION
         )
         if hf_success:
-            logger.info(
-                f"🤗 Uploaded {len(all_valid_rollouts)} rollouts to Hugging Face dataset"
-            )
+            logger.info(f"🤗 Uploaded {len(all_valid_rollouts)} rollouts to Hugging Face dataset")
         else:
             logger.debug("Failed to upload to Hugging Face (may need HF_TOKEN)")
     except Exception as e:

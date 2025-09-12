@@ -188,7 +188,7 @@ class SATParser(Parser):
 
         # Best-effort: debug-only logging, no PII and no thinking text
         logger.debug(
-            "SATParser: has_answer=%s, has_thinking=%s, strict=%s, " "trailing=%d",
+            "SATParser: has_answer=%s, has_thinking=%s, strict=%s, trailing=%d",
             has_answer,
             has_thinking,
             strict_format_ok,

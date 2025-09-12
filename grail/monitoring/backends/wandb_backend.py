@@ -321,9 +321,7 @@ class WandBBackend(MonitoringBackend):
             data["window_number"] = metric.window_number
 
     @contextmanager
-    def timer(
-        self, name: str, tags: dict[str, str] | None = None
-    ) -> Generator[None, None, None]:
+    def timer(self, name: str, tags: dict[str, str] | None = None) -> Generator[None, None, None]:
         """Context manager for timing operations.
 
         Args:

@@ -268,7 +268,9 @@ class Trainer:
             f"📚 Training on {len(texts)} SAT rollouts "
             f"({successful_count} successful, {len(unique_solutions)} unique)"
         )
-        logger.info(f"📊 Average reward: {sum(rewards)/len(rewards):.3f}, Max: {max(rewards):.3f}")
+        logger.info(
+            f"📊 Average reward: {sum(rewards) / len(rewards):.3f}, Max: {max(rewards):.3f}"
+        )
 
         # GRPO-style training: reinforce successful trajectories
         try:
@@ -379,7 +381,7 @@ class Trainer:
                     total_loss += weighted_loss.item()
 
                 avg_loss = total_loss / (len(texts) // batch_size + 1)
-                logger.info(f"Epoch {epoch+1} completed - avg loss: {avg_loss:.4f}")
+                logger.info(f"Epoch {epoch + 1} completed - avg loss: {avg_loss:.4f}")
 
                 # Log training metrics
                 if monitor:

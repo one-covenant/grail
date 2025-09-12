@@ -18,9 +18,7 @@ def test_credentials() -> None:
     credentials = {
         "write": {
             "access_key": os.getenv("R2_WRITE_ACCESS_KEY_ID", "minioadmin"),
-            "secret_key": os.getenv(
-                "R2_WRITE_SECRET_ACCESS_KEY", "minioadmin"
-            ),
+            "secret_key": os.getenv("R2_WRITE_SECRET_ACCESS_KEY", "minioadmin"),
         },
         "read": {
             "access_key": os.getenv("R2_READ_ACCESS_KEY_ID", "minioadmin"),
@@ -36,9 +34,7 @@ def test_credentials() -> None:
     for cred_type, creds in credentials.items():
         print(f"Testing {cred_type.upper()} credentials:")
         print(f"  Access Key ID: {creds['access_key']}")
-        print(
-            f"  Secret Key: {'*' * len(creds['secret_key']) if creds['secret_key'] else 'EMPTY'}"
-        )
+        print(f"  Secret Key: {'*' * len(creds['secret_key']) if creds['secret_key'] else 'EMPTY'}")
 
         try:
             # Create S3 client
@@ -54,9 +50,7 @@ def test_credentials() -> None:
             # Test connection by listing buckets
             response = s3_client.list_buckets()
             print("  ✅ Connection successful!")
-            print(
-                f"     Buckets found: {[b['Name'] for b in response['Buckets']]}"
-            )
+            print(f"     Buckets found: {[b['Name'] for b in response['Buckets']]}")
 
             # Check if our bucket exists
             if bucket_name in [b["Name"] for b in response["Buckets"]]:
@@ -64,9 +58,7 @@ def test_credentials() -> None:
 
                 # Try to list objects (read test)
                 try:
-                    objects = s3_client.list_objects_v2(
-                        Bucket=bucket_name, MaxKeys=5
-                    )
+                    objects = s3_client.list_objects_v2(Bucket=bucket_name, MaxKeys=5)
                     obj_count = objects.get("KeyCount", 0)
                     print(f"     Objects in bucket: {obj_count}")
                 except ClientError as e:
@@ -81,14 +73,10 @@ def test_credentials() -> None:
                             Key=test_key,
                             Body=b"Test upload from credential verification script",
                         )
-                        print(
-                            f"  ✅ Write test successful (uploaded {test_key})"
-                        )
+                        print(f"  ✅ Write test successful (uploaded {test_key})")
 
                         # Clean up test file
-                        s3_client.delete_object(
-                            Bucket=bucket_name, Key=test_key
-                        )
+                        s3_client.delete_object(Bucket=bucket_name, Key=test_key)
                         print("     Cleaned up test file")
                     except ClientError as e:
                         print(f"  ❌ Write test failed: {e}")
@@ -113,9 +101,7 @@ def test_credentials() -> None:
     # Test from inside Docker network perspective
     print("Testing from Docker network perspective:")
     print("  If running inside Docker, the endpoint should be: http://s3:9000")
-    print(
-        "  If running from host, the endpoint should be: http://localhost:9000"
-    )
+    print("  If running from host, the endpoint should be: http://localhost:9000")
     print()
 
     # Show what the miners/validators should use

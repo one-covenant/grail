@@ -9,6 +9,7 @@ Features:
 - Robust networking (Session, retries, shuffled relays, sensible timeouts)
 - Uniform schema for real & mock beacons
 """
+
 from __future__ import annotations
 
 import json
