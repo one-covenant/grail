@@ -10,7 +10,6 @@ import io
 import sys
 from contextlib import redirect_stdout
 
-
 EXPERIMENTS = [
     ("real_challenge_k", "Prover-controlled challenge + small k"),
     ("real_k_equals_one", "k=1 trivializes verification"),

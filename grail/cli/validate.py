@@ -13,7 +13,7 @@ import time
 import traceback
 from collections import defaultdict
 from types import SimpleNamespace
-from typing import Any, DefaultDict, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import bittensor as bt
 import typer
@@ -159,7 +159,7 @@ async def get_subtensor() -> bt.subtensor:
 # --------------------------------------------------------------------------- #
 
 
-def parse_filename(filename: str) -> Tuple[Optional[str], Optional[int], Optional[int]]:
+def parse_filename(filename: str) -> tuple[Optional[str], Optional[int], Optional[int]]:
     """Parse filename to extract wallet, block, nonce"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -172,7 +172,7 @@ def parse_filename(filename: str) -> Tuple[Optional[str], Optional[int], Optiona
     return None, None, None
 
 
-def parse_window_filename(filename: str) -> Tuple[Optional[str], Optional[int]]:
+def parse_window_filename(filename: str) -> tuple[Optional[str], Optional[int]]:
     """Parse window filename to extract wallet and window_start"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -219,7 +219,7 @@ def verify_rollout_signature(rollout_data: dict) -> bool:
 
 
 # Global storage for miner state
-miner_inference_counts: DefaultDict[str, list] = defaultdict(
+miner_inference_counts: defaultdict[str, list] = defaultdict(
     list
 )  # track inferences per block for weight calculation
 
@@ -300,7 +300,7 @@ def validate(
 # ----------------------------- Refactored Helpers ---------------------------- #
 
 
-def _get_sat_reward_bounds() -> Tuple[float, float]:
+def _get_sat_reward_bounds() -> tuple[float, float]:
     """Return SAT reward bounds or permissive defaults on failure."""
     try:
         _sat_rv = create_sat_reward_vector()
@@ -338,7 +338,7 @@ async def _run_validation_service(
         monitor = await _initialize_monitor(wallet)
         # Rolling window metrics per hotkey, keyed by window_start -> metric dict
         # Metrics include: valid, checked, total, estimated_valid, successful, unique
-        inference_counts: DefaultDict[str, DefaultDict[int, Dict[str, int]]] = defaultdict(
+        inference_counts: defaultdict[str, defaultdict[int, dict[str, int]]] = defaultdict(
             lambda: defaultdict(dict)
         )
         last_processed_window = -1
@@ -354,7 +354,7 @@ async def _run_validation_service(
 
                 meta = await subtensor.metagraph(NETUID)
                 # Build hotkey -> uid mapping for per-miner logging namespaces
-                uid_by_hotkey = {hk: uid for hk, uid in zip(meta.hotkeys, meta.uids)}
+                uid_by_hotkey = dict(zip(meta.hotkeys, meta.uids))
                 current_block = await subtensor.get_current_block()
                 target_window = _determine_target_window(current_block)
                 if target_window <= last_processed_window or target_window < 0:
@@ -627,7 +627,7 @@ async def _run_validation_service(
     await asyncio.gather(_validation_loop(), watchdog(timeout=(60 * 10)))
 
 
-async def _initialize_credentials_and_chain(wallet: bt.wallet) -> Tuple[Any, GrailChainManager]:
+async def _initialize_credentials_and_chain(wallet: bt.wallet) -> tuple[Any, GrailChainManager]:
     """Load storage credentials and initialize chain manager.
 
     Returns:
@@ -687,7 +687,7 @@ def _compute_window_randomness(target_window_hash: str, use_drand: bool) -> str:
     return hashlib.sha256(target_window_hash.encode()).hexdigest()
 
 
-def _determine_hotkeys_to_check(test_mode: bool, wallet: bt.wallet, meta: Any) -> List[str]:
+def _determine_hotkeys_to_check(test_mode: bool, wallet: bt.wallet, meta: Any) -> list[str]:
     """Choose which hotkeys to validate based on test/prod mode."""
     if test_mode:
         logger.info(f"🧪 TEST MODE: Checking files for own hotkey " f"{wallet.hotkey.ss58_address}")
@@ -700,9 +700,9 @@ def _determine_hotkeys_to_check(test_mode: bool, wallet: bt.wallet, meta: Any) -
 
 def _aggregate_weight_inputs(
     hotkey: str,
-    inference_counts: DefaultDict[str, DefaultDict[int, Dict[str, int]]],
+    inference_counts: defaultdict[str, defaultdict[int, dict[str, int]]],
     target_window: int,
-) -> Tuple[int, int, int, float, float]:
+) -> tuple[int, int, int, float, float]:
     """Aggregate rolling inputs and derive base/superlinear scores.
 
     Returns: (unique_sum, successful_sum, estimated_valid_sum,
@@ -735,8 +735,8 @@ def _aggregate_weight_inputs(
 
 
 def _build_top_miners(
-    hotkeys: List[str], uids: List[int], weights: List[float], k: int
-) -> List[Tuple[str, int, float]]:
+    hotkeys: list[str], uids: list[int], weights: list[float], k: int
+) -> list[tuple[str, int, float]]:
     """Return top-k (hotkey, uid, weight) sorted by weight desc."""
     pairs = [(hk, uid, float(weights[i])) for i, (hk, uid) in enumerate(zip(hotkeys, uids))]
     pairs.sort(key=lambda x: x[2], reverse=True)
@@ -744,7 +744,7 @@ def _build_top_miners(
 
 
 async def _process_window(
-    hotkeys_to_check: List[str],
+    hotkeys_to_check: list[str],
     target_window: int,
     target_window_hash: str,
     window_rand: str,
@@ -753,17 +753,17 @@ async def _process_window(
     credentials: Any,
     chain_manager: GrailChainManager,
     monitor: Any,
-    uid_by_hotkey: Dict[str, int],
+    uid_by_hotkey: dict[str, int],
     sat_reward_low: float,
     sat_reward_high: float,
-) -> Tuple[Dict[str, Dict[str, int]], int, int, int, int, int, int, List[dict]]:
+) -> tuple[dict[str, dict[str, int]], int, int, int, int, int, int, list[dict]]:
     """Process a window across hotkeys and aggregate metrics/results."""
     total_valid_rollouts = 0
-    window_inference_counts: Dict[str, Dict[str, int]] = {}
+    window_inference_counts: dict[str, dict[str, int]] = {}
     files_found = 0
-    all_valid_rollouts: List[dict] = []
+    all_valid_rollouts: list[dict] = []
     # Limit how many sample texts we log per wallet (debug noise control)
-    text_logs_emitted_by_wallet: DefaultDict[str, int] = defaultdict(int)
+    text_logs_emitted_by_wallet: defaultdict[str, int] = defaultdict(int)
 
     total_rollouts_processed = 0
     invalid_signatures = 0
@@ -833,12 +833,12 @@ async def _process_wallet_window(
     credentials: Any,
     chain_manager: GrailChainManager,
     monitor: Any,
-    uid_by_hotkey: Dict[str, int],
-    text_logs_emitted_by_wallet: DefaultDict[str, int],
+    uid_by_hotkey: dict[str, int],
+    text_logs_emitted_by_wallet: defaultdict[str, int],
     text_log_limit: int,
     sat_reward_low: float,
     sat_reward_high: float,
-) -> Tuple[bool, Optional[Dict[str, int]], List[dict], Tuple[int, int, int, int]]:
+) -> tuple[bool, Optional[dict[str, int]], list[dict], tuple[int, int, int, int]]:
     """Validate a single wallet window file and return metrics and rollouts."""
     filename = f"grail/windows/{wallet_addr}-window-{target_window}.json"
     miner_bucket = chain_manager.get_bucket_for_hotkey(wallet_addr)
@@ -925,7 +925,7 @@ async def _process_wallet_window(
         # Canonicalize group ordering by sorting ids by their
         # content-derived digest. This avoids dict insertion
         # order or arbitrary ids affecting RNG sampling.
-        group_keys = sorted(list(groups_map.keys()), key=lambda gid: _group_digest(groups_map[gid]))
+        group_keys = sorted(groups_map.keys(), key=lambda gid: _group_digest(groups_map[gid]))
         # Deterministically sample groups without replacement using the seeded RNG.
         selected_groups = rng.sample(group_keys, groups_to_check)
         for group_id in selected_groups:
@@ -1287,10 +1287,10 @@ async def _process_wallet_window(
 
 
 def _compute_weights(
-    meta_hotkeys: List[str],
-    inference_counts: DefaultDict[str, DefaultDict[int, Dict[str, int]]],
+    meta_hotkeys: list[str],
+    inference_counts: defaultdict[str, defaultdict[int, dict[str, int]]],
     target_window: int,
-) -> Tuple[List[float], List[Tuple[str, float]]]:
+) -> tuple[list[float], list[tuple[str, float]]]:
     """Compute normalized weights over the last N windows.
 
     Args:
@@ -1310,7 +1310,7 @@ def _compute_weights(
         weights: floats aligned to meta_hotkeys; sums to 1.0 or all zeros.
         non_zero_weights: (hotkey, weight) pairs where weight > 0.0.
     """
-    EMPTY_METRICS: Dict[str, int] = {}
+    EMPTY_METRICS: dict[str, int] = {}
     raw_scores = []
 
     for _, hotkey in enumerate(meta_hotkeys):
@@ -1368,7 +1368,7 @@ def _compute_weights(
 
 
 async def _upload_rollouts(
-    target_window: int, all_valid_rollouts: List[dict], credentials: Any
+    target_window: int, all_valid_rollouts: list[dict], credentials: Any
 ) -> None:
     """Upload validated rollouts to object storage and Hugging Face."""
     upload_success = await upload_valid_rollouts(target_window, all_valid_rollouts, credentials)
@@ -1384,7 +1384,7 @@ async def _upload_rollouts(
         )
         if hf_success:
             logger.info(
-                "🤗 Uploaded {} rollouts to Hugging Face dataset".format(len(all_valid_rollouts))
+                f"🤗 Uploaded {len(all_valid_rollouts)} rollouts to Hugging Face dataset"
             )
         else:
             logger.debug("Failed to upload to Hugging Face (may need HF_TOKEN)")

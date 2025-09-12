@@ -7,40 +7,40 @@ from dotenv import load_dotenv
 # reads (e.g., in shared.constants) see updated values from .env.
 load_dotenv(override=True)
 
-from .grail import Prover, Verifier  # noqa: F401, E402, E501, F403, F405
-from .infrastructure.drand import (
-    get_drand_beacon,
-    get_round_at_time,
-)  # noqa: F401, E402, E501, F403, F405
 from .environments import (  # noqa: F401, E402, E501, F403, F405
     # New reward system
     Parser,
     RewardVector,
     SATParser,
-    create_sat_reward_vector,
     # Existing classes
     SATProblem,
-    generate_sat_problem,
     SATRolloutGenerator,
+    create_sat_reward_vector,
+    generate_sat_problem,
 )
-from .mining.rollout_generator import RolloutGenerator  # noqa: F401, E402, E501, F403, F405
+from .grail import Prover, Verifier  # noqa: F401, E402, E501, F403, F405
 from .infrastructure.comms import (  # noqa: F401, E402, E501, F403, F405
-    upload_file_chunked,
+    PROTOCOL_VERSION,
     download_file_chunked,
+    download_from_huggingface,
     file_exists,
-    list_bucket_files,
     get_file,
+    get_valid_rollouts,
+    list_bucket_files,
+    login_huggingface,
     sink_window_inferences,
+    upload_file_chunked,
+    # NEW: Hugging Face dataset upload
+    upload_to_huggingface,
     # TODO(v2): Re-enable model state management for training
     # save_model_state, load_model_state, model_state_exists,
     upload_valid_rollouts,
-    get_valid_rollouts,
-    # NEW: Hugging Face dataset upload
-    upload_to_huggingface,
-    download_from_huggingface,
-    login_huggingface,
-    PROTOCOL_VERSION,
 )
+from .infrastructure.drand import (
+    get_drand_beacon,
+    get_round_at_time,
+)  # noqa: F401, E402, E501, F403, F405
+from .mining.rollout_generator import RolloutGenerator  # noqa: F401, E402, E501, F403, F405
 
 # flake8: noqa: E402,E501,F401,F403,F405
 

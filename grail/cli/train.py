@@ -9,7 +9,7 @@ import os
 import time
 import traceback
 from collections import defaultdict
-from typing import Any, DefaultDict, Optional, Tuple, cast
+from typing import Any, Optional, cast
 
 import bittensor as bt
 import torch
@@ -64,7 +64,7 @@ async def get_subtensor() -> bt.subtensor:
 
 def parse_filename(
     filename: str,
-) -> Tuple[Optional[str], Optional[int], Optional[int]]:
+) -> tuple[Optional[str], Optional[int], Optional[int]]:
     """Parse filename to extract wallet, block, nonce"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -79,7 +79,7 @@ def parse_filename(
 
 def parse_window_filename(
     filename: str,
-) -> Tuple[Optional[str], Optional[int]]:
+) -> tuple[Optional[str], Optional[int]]:
     """Parse window filename to extract wallet and window_start"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -122,7 +122,7 @@ def verify_rollout_signature(rollout_data: dict) -> bool:
 
 
 # Global storage for miner state
-miner_inference_counts: DefaultDict[str, list] = defaultdict(
+miner_inference_counts: defaultdict[str, list] = defaultdict(
     list
 )  # track inferences per block for weight calculation
 

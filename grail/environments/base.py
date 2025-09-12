@@ -1,7 +1,7 @@
 """Base classes for reward computation and parsing."""
 
 from abc import ABC, abstractmethod
-from typing import Any, List, Callable, Optional, Tuple
+from typing import Any, Callable, Optional
 
 
 class Parser(ABC):
@@ -27,10 +27,10 @@ class RewardVector:
 
     def __init__(
         self,
-        reward_functions: List[Callable[[Any, Any], float]],
-        weights: List[float],
+        reward_functions: list[Callable[[Any, Any], float]],
+        weights: list[float],
         parser: Optional[Parser] = None,
-        bounds: Optional[List[Tuple[float, float]]] = None,
+        bounds: Optional[list[tuple[float, float]]] = None,
     ):
         """Initialize reward vector.
 
@@ -74,7 +74,7 @@ class RewardVector:
 
         return total_reward
 
-    def compute_individual_rewards(self, completion: str, context: Any) -> List[float]:
+    def compute_individual_rewards(self, completion: str, context: Any) -> list[float]:
         """Compute individual rewards from each function (useful for analysis).
 
         Args:
@@ -101,7 +101,7 @@ class RewardVector:
         """Return True if per-function bounds metadata was provided."""
         return self._bounds is not None
 
-    def reward_bounds(self) -> Tuple[float, float]:
+    def reward_bounds(self) -> tuple[float, float]:
         """Compose total reward bounds from per-function bounds and weights.
 
         Returns:

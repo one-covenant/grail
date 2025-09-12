@@ -2,6 +2,7 @@
 """Test script to verify S3/MinIO credentials and connectivity."""
 
 import os
+
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 

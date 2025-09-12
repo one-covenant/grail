@@ -1,7 +1,7 @@
 """Credential loading utilities for GRAIL R2 integration."""
 
-import os
 import logging
+import os
 from typing import Optional
 
 from ..shared.schemas import BucketCredentials

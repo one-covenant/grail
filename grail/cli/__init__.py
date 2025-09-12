@@ -11,13 +11,13 @@ from __future__ import annotations
 import logging
 
 import typer
+from dotenv import load_dotenv
 from rich.console import Console
 from rich.logging import RichHandler
-from dotenv import load_dotenv
 
 from ..monitoring import initialize_monitoring
-from ..shared.constants import NETWORK, NETUID
 from ..monitoring.config import MonitoringConfig
+from ..shared.constants import NETUID, NETWORK
 
 # Load environment variables once for the whole CLI at import time so that
 # modules imported during subcommand registration can read them.
@@ -180,7 +180,7 @@ def main() -> None:
 # Register subcommands from sibling modules
 def _register_subcommands() -> None:
     import importlib
-    from typing import Callable, Optional
+    from typing import Callable
 
     for mod_name in (
         "grail.cli.mine",
@@ -188,7 +188,7 @@ def _register_subcommands() -> None:
         "grail.cli.train",
     ):
         module = importlib.import_module(mod_name)
-        register: Optional[Callable[[typer.Typer], None]] = getattr(module, "register", None)
+        register: Callable[[typer.Typer], None] | None = getattr(module, "register", None)
         if callable(register):
             register(app)
 

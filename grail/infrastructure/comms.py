@@ -9,7 +9,7 @@ import os
 import tempfile
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Optional, Union
 
 import bittensor as bt
 from aiobotocore.session import get_session
@@ -62,7 +62,6 @@ def get_client_ctx(
         if isinstance(credentials, BucketCredentials):
             # Same account and bucket, different access keys
             account_id = credentials.account_id
-            bucket_name = credentials.bucket_name
             if use_write:
                 access_key = credentials.write_access_key_id
                 secret_key = credentials.write_secret_access_key
@@ -74,13 +73,13 @@ def get_client_ctx(
             account_id = credentials.account_id.strip()
             access_key = credentials.access_key_id.strip()
             secret_key = credentials.secret_access_key.strip()
-            bucket_name = credentials.name.strip()
+            credentials.name.strip()
         elif isinstance(credentials, dict):
             # Handle dict format (from chain commitments or legacy)
             account_id = credentials.get("account_id", "").strip()
             access_key = credentials.get("access_key_id", "").strip()
             secret_key = credentials.get("secret_access_key", "").strip()
-            bucket_name = credentials.get("name", credentials.get("bucket_name", "")).strip()
+            credentials.get("name", credentials.get("bucket_name", "")).strip()
         else:
             raise ValueError(f"Unsupported credentials type: {type(credentials)}")
     else:
@@ -118,7 +117,7 @@ def get_client_ctx(
         "yes",
     }
 
-    s3_config: Dict[str, Any] = {}
+    s3_config: dict[str, Any] = {}
     if force_path_style:
         s3_config["addressing_style"] = "path"
 
@@ -337,7 +336,7 @@ async def _upload_chunk_with_semaphore(
     max_retries: int,
     credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
     use_write: bool = True,
-) -> Optional[Dict[str, Any]]:
+) -> Optional[dict[str, Any]]:
     """Upload a single chunk with concurrency control and retry logic"""
     async with semaphore:
         for attempt in range(max_retries):
@@ -552,7 +551,7 @@ async def list_bucket_files(
     prefix: str,
     credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
     use_write: bool = False,
-) -> List[str]:
+) -> list[str]:
     """List files in bucket with given prefix"""
     try:
         async with get_client_ctx(credentials, use_write) as client:
@@ -570,7 +569,7 @@ async def get_file(
     key: str,
     credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
     use_write: bool = False,
-) -> Optional[Dict[str, Any]]:
+) -> Optional[dict[str, Any]]:
     """Download and parse JSON file with improved error handling"""
     try:
         data = await download_file_chunked(key, credentials=credentials, use_write=use_write)
@@ -595,7 +594,7 @@ async def get_file(
 async def sink_window_inferences(
     wallet: bt.wallet,
     window_start: int,
-    inferences: List[dict],
+    inferences: list[dict],
     credentials: Optional[BucketCredentials] = None,
 ) -> None:
     """Upload window of inferences to S3 with improved logging"""
@@ -726,7 +725,7 @@ async def model_state_exists(
 
 async def upload_valid_rollouts(
     window: int,
-    valid_rollouts: List[dict],
+    valid_rollouts: list[dict],
     credentials: Optional[BucketCredentials] = None,
 ) -> bool:
     """Upload validated SAT rollouts for training with chunked upload and progress logging"""
@@ -756,7 +755,7 @@ async def get_valid_rollouts(
     window: int,
     credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
     use_write: bool = False,
-) -> List[dict]:
+) -> list[dict]:
     """
     Download valid SAT rollouts for training.
 
@@ -822,7 +821,7 @@ def login_huggingface() -> bool:
 
 
 async def upload_to_huggingface(
-    rollouts: List[Dict], window: int, version: Optional[str] = None
+    rollouts: list[dict], window: int, version: Optional[str] = None
 ) -> bool:
     """
     Upload rollouts to unified Hugging Face dataset.
@@ -998,7 +997,7 @@ async def download_from_huggingface(
     version: Optional[str] = None,
     window: Optional[int] = None,
     limit: Optional[int] = None,
-) -> List[Dict]:
+) -> list[dict]:
     """
     Download rollouts from Hugging Face dataset with optional filtering.
 

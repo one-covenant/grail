@@ -22,16 +22,16 @@ Usage:
         --hotkeys "custom1,custom2,custom3"
 """
 
-import os
-import sys
-import subprocess
-import signal
-import time
 import argparse
-import threading
-from pathlib import Path
-from typing import Dict, List, Optional, Any, IO
 import logging
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import IO, Any, Optional
 
 # Configure logging
 logging.basicConfig(
@@ -45,27 +45,27 @@ class Tier3TestRunner:
     """Minimal test runner for Tier 3 integration testing."""
 
     def __init__(self, start_gpu: int = 0):
-        self.processes: Dict[str, subprocess.Popen] = {}
+        self.processes: dict[str, subprocess.Popen] = {}
         self.base_env = self._load_env()
         self.running = True
-        self.gpu_assignments: Dict[str, int] = {}  # Track GPU assignments
+        self.gpu_assignments: dict[str, int] = {}  # Track GPU assignments
         self.next_gpu = start_gpu  # Next GPU to assign
         self.start_gpu = start_gpu  # Remember starting GPU
         self.log_dir: Path = self._init_log_dir()
-        self.log_files: Dict[str, IO[str]] = {}
-        self.log_locks: Dict[str, threading.Lock] = {}
+        self.log_files: dict[str, IO[str]] = {}
+        self.log_locks: dict[str, threading.Lock] = {}
 
         # Handle signals for clean shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
-    def _load_env(self) -> Dict[str, str]:
+    def _load_env(self) -> dict[str, str]:
         """Load environment from .env file."""
         env = os.environ.copy()
         env_file = Path(__file__).parent.parent / ".env"
 
         if env_file.exists():
-            with open(env_file, "r") as f:
+            with open(env_file) as f:
                 for line in f:
                     line = line.strip()
                     if line and not line.startswith("#") and "=" in line:
@@ -269,9 +269,9 @@ class Tier3TestRunner:
 
     def run(
         self,
-        miner_models: List[str],
+        miner_models: list[str],
         validator_model: str,
-        miner_hotkeys: Optional[List[str]] = None,
+        miner_hotkeys: Optional[list[str]] = None,
         validator_delay: int = 30,
     ) -> None:
         """Run the test with specified models and optionally specific hotkeys.

@@ -1,14 +1,14 @@
 """SAT Problem Solver for GRAIL RL System."""
 
-from typing import List, Dict, Tuple, Any, Callable, Optional, cast
-import re
-import random
 import hashlib
 import logging
+import random
+import re
+from typing import Any, Callable, Optional, cast
 
-from .base import Parser, RewardVector
 from ..mining.rollout_generator import RolloutGenerator
 from ..shared.constants import MAX_NEW_TOKENS
+from .base import Parser, RewardVector
 
 # SAT Problem Configuration
 MIN_VARS = 3
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 class SATProblem:
     """Represents a SAT problem instance."""
 
-    def __init__(self, num_vars: int, clauses: List[List[int]], seed: str):
+    def __init__(self, num_vars: int, clauses: list[list[int]], seed: str):
         self.num_vars = num_vars
         self.clauses = clauses
         self.seed = seed
@@ -35,12 +35,12 @@ class SATProblem:
         text = f"SAT Problem (seed: {self.seed[:8]}...):\n"
         text += f"Variables: {self.num_vars}\n"
         text += "Clauses:\n"
-        for i, clause in enumerate(self.clauses):
+        for _i, clause in enumerate(self.clauses):
             clause_str = " OR ".join([f"{'NOT ' if lit < 0 else ''}x{abs(lit)}" for lit in clause])
             text += f"  ({clause_str})\n"
         return text
 
-    def check_solution(self, assignment: List[bool]) -> bool:
+    def check_solution(self, assignment: list[bool]) -> bool:
         """Check if assignment satisfies all clauses."""
         if len(assignment) != self.num_vars:
             return False
@@ -117,7 +117,7 @@ class SATParser(Parser):
         tokens = re.findall(r"[01]", answer_text)
         return len(tokens)
 
-    def parse(self, completion: str, problem: SATProblem) -> Dict[str, Any]:
+    def parse(self, completion: str, problem: SATProblem) -> dict[str, Any]:
         text = completion or ""
 
         # Find tag spans (case-insensitive)
@@ -176,7 +176,7 @@ class SATParser(Parser):
         else:
             assignment = [False] * problem.num_vars
 
-        parsed: Dict[str, Any] = {
+        parsed: dict[str, Any] = {
             "assignment": assignment,
             "answer_text": answer_text,
             "has_thinking": has_thinking,
@@ -198,7 +198,7 @@ class SATParser(Parser):
         return parsed
 
 
-def _normalize_assignment(parsed: Dict[str, Any], problem: SATProblem) -> List[bool]:
+def _normalize_assignment(parsed: dict[str, Any], problem: SATProblem) -> list[bool]:
     """Accepts parsed dict from SATParser, returns List[bool]."""
     assignment_any = parsed.get("assignment", [])
     try:
@@ -291,7 +291,7 @@ def create_sat_reward_vector(
     Weights are small for formatting so correctness dominates.
     """
     reward_functions = cast(
-        List[Callable[[Any, Any], float]],
+        list[Callable[[Any, Any], float]],
         [
             sat_correctness_reward,
             sat_strict_format_reward,
@@ -370,7 +370,7 @@ class SATRolloutGenerator(RolloutGenerator):
         self._current_problem = problem
         return problem
 
-    def reset_environment(self, env: SATProblem) -> Dict[str, Any]:
+    def reset_environment(self, env: SATProblem) -> dict[str, Any]:
         """Return initial state - just the problem description."""
         return {
             "problem": env.to_text(),
@@ -382,8 +382,8 @@ class SATRolloutGenerator(RolloutGenerator):
         self,
         problem: SATProblem,
         env: SATProblem,
-        state: Dict[str, Any],
-        trajectory: List,
+        state: dict[str, Any],
+        trajectory: list,
     ) -> str:
         """Create minimal prompt with problem and solution format hint."""
         instructions = (
@@ -394,14 +394,14 @@ class SATRolloutGenerator(RolloutGenerator):
         prompt = f"SAT Problem:\n{problem.to_text()}\n{instructions}"
         return prompt
 
-    def parse_action(self, text: str, env: SATProblem, state: Dict[str, Any]) -> List[bool]:
+    def parse_action(self, text: str, env: SATProblem, state: dict[str, Any]) -> list[bool]:
         """Parse completion text into boolean assignment using reward parser
         output.
 
         Also caches last raw completion for reward computation.
         """
         # Cache the raw model output so step_environment can access formatting
-        setattr(self, "_last_completion_text", text)
+        self._last_completion_text = text
 
         # Prefer using the configured parser; fallback to SATParser
         parser_obj: Parser = self.reward_vector.parser or SATParser()
@@ -416,8 +416,8 @@ class SATRolloutGenerator(RolloutGenerator):
         return [False] * env.num_vars
 
     def step_environment(
-        self, env: SATProblem, action: List[bool]
-    ) -> Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
+        self, env: SATProblem, action: list[bool]
+    ) -> tuple[dict[str, Any], float, bool, dict[str, Any]]:
         """Single-shot evaluation using reward vector.
 
         Uses the raw completion text when available to enable formatting
@@ -485,8 +485,8 @@ class SATRolloutGenerator(RolloutGenerator):
         return state, reward, True, info  # Always done after one step
 
     def get_final_info(
-        self, env: SATProblem, trajectory: List, total_reward: float
-    ) -> Dict[str, Any]:
+        self, env: SATProblem, trajectory: list, total_reward: float
+    ) -> dict[str, Any]:
         """Get final SAT-specific information."""
         if trajectory:
             _, assignment, info = trajectory[-1]

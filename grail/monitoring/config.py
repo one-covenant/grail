@@ -8,7 +8,7 @@ from environment variables and other sources.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 class MonitoringConfig:
@@ -20,7 +20,7 @@ class MonitoringConfig:
     """
 
     @staticmethod
-    def from_environment() -> Dict[str, Any]:
+    def from_environment() -> dict[str, Any]:
         """Load monitoring configuration from environment variables.
 
         Environment variables:
@@ -53,7 +53,7 @@ class MonitoringConfig:
         }
 
     @staticmethod
-    def for_mining(wallet_name: Optional[str] = None) -> Dict[str, Any]:
+    def for_mining(wallet_name: str | None = None) -> dict[str, Any]:
         """Get configuration specific to mining operations.
 
         Args:
@@ -84,7 +84,7 @@ class MonitoringConfig:
         return config
 
     @staticmethod
-    def for_validation(wallet_name: Optional[str] = None) -> Dict[str, Any]:
+    def for_validation(wallet_name: str | None = None) -> dict[str, Any]:
         """Get configuration specific to validation operations.
 
         Args:
@@ -115,7 +115,7 @@ class MonitoringConfig:
         return config
 
     @staticmethod
-    def for_training(wallet_name: Optional[str] = None) -> Dict[str, Any]:
+    def for_training(wallet_name: str | None = None) -> dict[str, Any]:
         """Get configuration specific to training operations.
 
         Args:
@@ -168,7 +168,7 @@ class MonitoringConfig:
         return backend != "null" and mode != "disabled"
 
     @staticmethod
-    def get_debug_config() -> Dict[str, Any]:
+    def get_debug_config() -> dict[str, Any]:
         """Get configuration for debugging/development.
 
         Returns:
@@ -190,7 +190,7 @@ class MonitoringConfig:
         return config
 
     @staticmethod
-    def validate_config(config: Dict[str, Any]) -> List[str]:
+    def validate_config(config: dict[str, Any]) -> list[str]:
         """Validate monitoring configuration.
 
         Args:
