@@ -83,41 +83,31 @@ When Watchtower detects a new image:
 
 ### Update Schedule
 
-- Default: Checks every 6 hours (21600 seconds)
-- Customize via `WATCHTOWER_POLL_INTERVAL` environment variable
+- **Current Setting**: Checks every 30 seconds for rapid updates
+- This aggressive polling ensures validators stay up-to-date with the latest releases
+- The image is public on GitHub Container Registry, no authentication needed
 
 ## Configuration Options
 
 ### Watchtower Settings
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `WATCHTOWER_POLL_INTERVAL` | Seconds between update checks | 21600 (6 hours) |
-| `WATCHTOWER_CLEANUP` | Remove old images | true |
-| `WATCHTOWER_TIMEOUT` | Graceful shutdown timeout | 120s |
-| `WATCHTOWER_LOG_LEVEL` | Log verbosity | info |
+The current configuration uses:
+- **30-second intervals** for checking updates (via `--interval 30` command)
+- **Automatic cleanup** of old images after updates
+- **Label-based updates** - only containers with `watchtower.enable=true` label
+- **Include restarting** containers in update checks
 
-### Notifications
+### Environment Variables
 
-Configure notifications for updates:
+Required variables in `docker/.env.validator`:
+- `WALLET_NAME` - Your Bittensor wallet name
+- `WALLET_HOTKEY` - Your hotkey name
 
-**Slack:**
-```bash
-WATCHTOWER_NOTIFICATIONS=slack
-WATCHTOWER_NOTIFICATION_URL=slack://your-webhook-url
-```
-
-**Discord:**
-```bash
-WATCHTOWER_NOTIFICATIONS=discord
-WATCHTOWER_NOTIFICATION_URL=discord://token@channel
-```
-
-**Email:**
-```bash
-WATCHTOWER_NOTIFICATIONS=email
-WATCHTOWER_NOTIFICATION_URL=smtp://username:password@smtp.gmail.com:587/?from=sender@gmail.com&to=recipient@gmail.com
-```
+Optional variables:
+- `NETUID` - Network UID (default: 81)
+- `SUBTENSOR_NETWORK` - Network to connect to (default: finney)
+- `WANDB_API_KEY` - For monitoring with Weights & Biases
+- `WANDB_PROJECT` - WandB project name (default: grail-validator)
 
 ## Advanced Deployment
 

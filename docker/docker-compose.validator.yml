@@ -74,8 +74,6 @@ services:
       - WATCHTOWER_CLEANUP=true
       - WATCHTOWER_LABEL_ENABLE=true
       - WATCHTOWER_INCLUDE_RESTARTING=true
-      - REPO_USER=${GITHUB_USER}
-      - REPO_PASSWORD=${GITHUB_TOKEN}
 
 networks:
   grail-network:
