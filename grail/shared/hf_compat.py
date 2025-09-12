@@ -38,23 +38,15 @@ def resolve_hidden_size(model: PreTrainedModel) -> int:
         pass
 
     try:
-        if hasattr(model, "get_input_embeddings") and callable(
-            model.get_input_embeddings
-        ):
+        if hasattr(model, "get_input_embeddings") and callable(model.get_input_embeddings):
             emb = model.get_input_embeddings()
             weight = getattr(emb, "weight", None)
-            if (
-                weight is not None
-                and hasattr(weight, "shape")
-                and len(weight.shape) == 2
-            ):
+            if weight is not None and hasattr(weight, "shape") and len(weight.shape) == 2:
                 return int(weight.shape[1])
     except Exception:
         pass
 
-    raise AttributeError(
-        "Could not determine model hidden size from config or embeddings"
-    )
+    raise AttributeError("Could not determine model hidden size from config or embeddings")
 
 
 def resolve_vocab_size(

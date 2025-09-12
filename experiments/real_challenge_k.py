@@ -23,12 +23,8 @@ def main() -> None:
     commit_rand = "deadbeefcafebabe"
 
     # Compute true s_vals
-    r_vec = gg.r_vec_from_randomness(
-        commit_rand, verifier.model.config.hidden_size
-    )
-    full_ids = gg.torch.tensor(
-        tokens, dtype=gg.torch.long, device=verifier.device
-    ).unsqueeze(0)
+    r_vec = gg.r_vec_from_randomness(commit_rand, verifier.model.config.hidden_size)
+    full_ids = gg.torch.tensor(tokens, dtype=gg.torch.long, device=verifier.device).unsqueeze(0)
     with gg.torch.no_grad():
         outs = verifier.model(full_ids, output_hidden_states=True)
     h_layer = outs.hidden_states[gg.LAYER_INDEX][0]
@@ -64,9 +60,7 @@ def main() -> None:
         min_k=gg.CHALLENGE_K,
     )
     print("Exploit: challenge control + small k ->", "PASS" if ok else "FAIL")
-    print(
-        f"Indices: {indices}; Correct only at those positions (k={k}, n={len(tokens)})"
-    )
+    print(f"Indices: {indices}; Correct only at those positions (k={k}, n={len(tokens)})")
 
 
 if __name__ == "__main__":

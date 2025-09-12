@@ -11,7 +11,7 @@ import os
 
 NETWORK = os.getenv("BT_NETWORK", "finney")
 NETUID = int(os.getenv("NETUID", 81))
-WINDOW_LENGTH = 30 
+WINDOW_LENGTH = 30
 
 # ────────────────  MODEL CONFIGURATION  ────────────────
 

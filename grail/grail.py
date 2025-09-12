@@ -4,43 +4,26 @@ GRAIL – Guaranteed Rollout Authenticity via Inference Ledger
 Modified for SAT problem generation and RL rollouts
 """
 
+import asyncio
 import hashlib
 import logging
 import os
 import random
 import struct
-from typing import List, Optional, Any, Union, Tuple, Dict, cast
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
-import asyncio
 import bittensor as bt
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from transformers import PretrainedConfig
-from .shared.hf_compat import (
-    resolve_hidden_size,
-    resolve_vocab_size,
-    resolve_max_context_length,
-)
+from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
 
 from .environments import generate_sat_problem
-from .shared.constants import (
-    PRIME_Q,
-    CHALLENGE_K,
-    TOLERANCE,
-    MODEL_NAME,
-    LAYER_INDEX,
-    RNG_LABEL,
-    MAX_NEW_TOKENS,
-    MIN_EOS_PROBABILITY,
-    SANITY_CHECK_DRIFT_THRESHOLD,
-    SAMPLING_MIN_STEPS,
-    SAMPLING_LOW_P,
-    SAMPLING_HIGH_P,
-    SAMPLING_BC_THRESHOLD,
-    SAMPLING_MEDIAN_LOW_MAX,
-    SAMPLING_LOW_Q10_MAX,
-)
 from .monitoring import get_monitoring_manager
+from .shared.constants import (CHALLENGE_K, LAYER_INDEX, MAX_NEW_TOKENS, MIN_EOS_PROBABILITY,
+                               MODEL_NAME, PRIME_Q, RNG_LABEL, SAMPLING_BC_THRESHOLD,
+                               SAMPLING_HIGH_P, SAMPLING_LOW_P, SAMPLING_LOW_Q10_MAX,
+                               SAMPLING_MEDIAN_LOW_MAX, SAMPLING_MIN_STEPS,
+                               SANITY_CHECK_DRIFT_THRESHOLD, TOLERANCE)
+from .shared.hf_compat import resolve_max_context_length, resolve_vocab_size
 
 # Enable CUDA debugging for better error messages
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
@@ -83,9 +66,7 @@ def prf(label: bytes, *parts: bytes, out_bytes: int) -> bytes:
         raise TypeError(f"label must be bytes, got {type(label).__name__}")
     for i, part in enumerate(parts):
         if not isinstance(part, bytes):
-            raise TypeError(
-                f"parts[{i}] must be bytes, got {type(part).__name__}"
-            )
+            raise TypeError(f"parts[{i}] must be bytes, got {type(part).__name__}")
 
     # Use SHAKE256 for variable-length output if available (more efficient)
     try:
@@ -121,7 +102,7 @@ def prf(label: bytes, *parts: bytes, out_bytes: int) -> bytes:
         # Include counter in each block for better security properties
         block_input = input_data + i.to_bytes(4, "big")
         block_hash = hashlib.sha256(block_input).digest()
-        output[i * hash_size:(i + 1) * hash_size] = block_hash
+        output[i * hash_size : (i + 1) * hash_size] = block_hash
 
     return bytes(output[:out_bytes])
 
@@ -161,9 +142,7 @@ def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
     # Normalize hex string more robustly
     clean_hex = rand_hex.strip().replace("0x", "").replace("0X", "")
     if not clean_hex:
-        raise ValueError(
-            f"Empty randomness hex string after cleaning: '{rand_hex}'"
-        )
+        raise ValueError(f"Empty randomness hex string after cleaning: '{rand_hex}'")
 
     # Pad with leading zero if odd length
     if len(clean_hex) % 2 != 0:
@@ -199,12 +178,8 @@ def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
         import numpy as np
 
         # More efficient for large d_model
-        ints_array = np.frombuffer(raw, dtype=">i4").astype(
-            np.int32, copy=False
-        )
-        tensor = torch.from_numpy(
-            ints_array.copy()
-        )  # copy to ensure ownership
+        ints_array = np.frombuffer(raw, dtype=">i4").astype(np.int32, copy=False)
+        tensor = torch.from_numpy(ints_array.copy())  # copy to ensure ownership
     except ImportError as e:
         logger.error(f"Error unpacking ints_array: {e}")
         # Fallback to struct.unpack
@@ -221,14 +196,13 @@ def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
         setattr(r_vec_from_randomness, "_cache", cache)
 
     logger.debug(
-        f"[SketchVec] Generated vector with shape={tensor.shape}, first 4 values: {tensor[:4].tolist()}"
+        f"[SketchVec] Generated vector with shape={tensor.shape}, "
+        f"first 4 values: {tensor[:4].tolist()}"
     )
     return tensor
 
 
-def indices_from_root(
-    tokens: list[int], rand_hex: str, seq_len: int, k: int
-) -> list[int]:
+def indices_from_root(tokens: list[int], rand_hex: str, seq_len: int, k: int) -> list[int]:
     """
     Generate deterministic indices for proof verification.
     Args:
@@ -245,9 +219,7 @@ def indices_from_root(
     """
     # Validate inputs early
     if k > seq_len:
-        raise ValueError(
-            f"Cannot sample {k} indices from sequence of length {seq_len}"
-        )
+        raise ValueError(f"Cannot sample {k} indices from sequence of length {seq_len}")
     if k <= 0:
         raise ValueError(f"k must be positive, got {k}")
     if not tokens:
@@ -274,9 +246,7 @@ def indices_from_root(
             out_bytes=32,
         )
     except ValueError as e:
-        raise ValueError(
-            f"Invalid hex string for randomness: '{rand_hex}' -> '{clean_hex}': {e}"
-        )
+        raise ValueError(f"Invalid hex string for randomness: '{rand_hex}' -> '{clean_hex}': {e}")
 
     # Use deterministic sampling with seed
     rnd = random.Random(material)
@@ -334,22 +304,16 @@ def sign_s_vals(s_vals: list[int], wallet: bt.wallet) -> bytes:
         TypeError: If wallet doesn't have signing capability
     """
     if not hasattr(wallet, "hotkey") or not hasattr(wallet.hotkey, "sign"):
-        raise TypeError(
-            f"Wallet must be a bt.wallet with hotkey.sign() method, got {type(wallet)}"
-        )
+        raise TypeError(f"Wallet must be a bt.wallet with hotkey.sign() method, got {type(wallet)}")
 
     s_vals_bytes = b"".join(int_to_bytes(val) for val in s_vals)
     # Use Bittensor wallet's sign method (Ed25519 signature)
-    signature = wallet.hotkey.sign(s_vals_bytes)
-    logger.debug(
-        f"[Signature] signed {len(s_vals)} s_vals with Bittensor wallet signature"
-    )
+    signature: bytes = wallet.hotkey.sign(s_vals_bytes)
+    logger.debug(f"[Signature] signed {len(s_vals)} s_vals with Bittensor wallet signature")
     return signature
 
 
-def verify_s_vals_signature(
-    s_vals: list[int], signature: bytes, wallet_address: str
-) -> bool:
+def verify_s_vals_signature(s_vals: list[int], signature: bytes, wallet_address: str) -> bool:
     """
     Verify the signature of s_vals list using Bittensor wallet's public key.
 
@@ -365,9 +329,7 @@ def verify_s_vals_signature(
         TypeError: If wallet_address is not a string
     """
     if not isinstance(wallet_address, str):
-        raise TypeError(
-            f"wallet_address must be a string SS58 address, got {type(wallet_address)}"
-        )
+        raise TypeError(f"wallet_address must be a string SS58 address, got {type(wallet_address)}")
 
     s_vals_bytes = b"".join(int_to_bytes(val) for val in s_vals)
 
@@ -378,16 +340,12 @@ def verify_s_vals_signature(
         # Bittensor uses substrate under the hood but provides a cleaner interface
         keypair = bt.Keypair(ss58_address=wallet_address)
         # Verify signature using public key cryptography
-        verified = keypair.verify(data=s_vals_bytes, signature=signature)
+        verified: bool = keypair.verify(data=s_vals_bytes, signature=signature)
         if not verified:
-            logger.debug(
-                f"Signature verification failed for {wallet_address[:8]}..."
-            )
+            logger.debug(f"Signature verification failed for {wallet_address[:8]}...")
         return verified
     except Exception as e:
-        logger.warning(
-            f"Signature verification error for {wallet_address[:8]}...: {e}"
-        )
+        logger.warning(f"Signature verification error for {wallet_address[:8]}...: {e}")
         return False
 
 
@@ -397,9 +355,7 @@ def hash_s_vals(s_vals: list[int]) -> bytes:
     return hashlib.sha256(s_vals_bytes).digest()
 
 
-def verify_tokens(
-    tokens: list[int], model_config: Union[PretrainedConfig, Any]
-) -> bool:
+def verify_tokens(tokens: list[int], model_config: Union[PretrainedConfig, Any]) -> bool:
     """
     Verify token list validity for model processing.
 
@@ -421,9 +377,7 @@ def verify_tokens(
         if not _validate_token_ids(tokens, vocab_size):
             return False
     else:
-        logger.debug(
-            "Model config lacks vocab_size; skipping token-id bounds check"
-        )
+        logger.debug("Model config lacks vocab_size; skipping token-id bounds check")
 
     # Validate sequence length
     if not _validate_sequence_length(tokens, model_config):
@@ -434,9 +388,7 @@ def verify_tokens(
 
 def _validate_token_ids(tokens: list[int], vocab_size: int) -> bool:
     """Check that all token IDs are within vocabulary bounds."""
-    invalid_tokens = [
-        t for t in tokens if not isinstance(t, int) or t < 0 or t >= vocab_size
-    ]
+    invalid_tokens = [t for t in tokens if not isinstance(t, int) or t < 0 or t >= vocab_size]
     if invalid_tokens:
         logger.warning(
             f"Invalid token IDs found in verification: {invalid_tokens[:10]}... "
@@ -453,9 +405,7 @@ def _validate_sequence_length(
     max_length = resolve_max_context_length(model_config)
 
     if len(tokens) > max_length:
-        logger.warning(
-            f"Token sequence ({len(tokens)}) exceeds model max length ({max_length})"
-        )
+        logger.warning(f"Token sequence ({len(tokens)}) exceeds model max length ({max_length})")
         return False
     return True
 
@@ -475,7 +425,8 @@ def build_commit_binding(
 ) -> bytes:
     """Build domain-separated commit binding to be signed.
 
-    Format: SHA256(COMMIT_DOMAIN || len(x)||x for each x in [tokens_hash, rand_bytes, model_name_bytes, layer_index_be, s_vals_hash]).
+    Format: SHA256(COMMIT_DOMAIN || len(x)||x for each x in
+    [tokens_hash, rand_bytes, model_name_bytes, layer_index_be, s_vals_hash]).
     """
 
     def _len_bytes(b: bytes) -> bytes:
@@ -509,10 +460,8 @@ def sign_commit_binding(
     """Sign the commit-binding message with wallet hotkey."""
     if not hasattr(wallet, "hotkey") or not hasattr(wallet.hotkey, "sign"):
         raise TypeError("Wallet must provide hotkey.sign()")
-    msg = build_commit_binding(
-        tokens, randomness_hex, model_name, layer_index, s_vals
-    )
-    return wallet.hotkey.sign(msg)
+    msg = build_commit_binding(tokens, randomness_hex, model_name, layer_index, s_vals)
+    return wallet.hotkey.sign(msg)  # type: ignore
 
 
 def verify_commit_signature(commit: dict, wallet_address: str) -> bool:
@@ -528,12 +477,10 @@ def verify_commit_signature(commit: dict, wallet_address: str) -> bool:
         sig = bytes.fromhex(commit["signature"])
     except Exception:
         return False
-    msg = build_commit_binding(
-        tokens, randomness, model_name, layer_index, s_vals
-    )
+    msg = build_commit_binding(tokens, randomness, model_name, layer_index, s_vals)
     try:
         keypair = bt.Keypair(ss58_address=wallet_address)
-        return keypair.verify(data=msg, signature=sig)
+        return keypair.verify(data=msg, signature=sig)  # type: ignore
     except Exception:
         return False
 
@@ -542,48 +489,41 @@ def verify_commit_signature(commit: dict, wallet_address: str) -> bool:
 
 
 class Prover:
-    def __init__(
-        self, model_name: str = MODEL_NAME, wallet: bt.wallet = None
-    ) -> None:
+    def __init__(self, model_name: str = MODEL_NAME, wallet: bt.wallet = None) -> None:
         """
         Initialize Prover with model and Bittensor wallet for secure signatures.
 
         Args:
             model_name: Name of the model to load
-            wallet: Bittensor wallet object (bt.wallet) for cryptographic signatures (required)
+            wallet: Bittensor wallet object (bt.wallet) for cryptographic signatures
 
         Raises:
             ValueError: If wallet is not provided
         """
         if wallet is None:
-            raise ValueError(
-                "Prover requires a bt.wallet for secure signatures"
-            )
+            raise ValueError("Prover requires a bt.wallet for secure signatures")
 
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-        # Ensure pad_token is properly set to prevent model confusion between padding and content tokens
+        # Ensure pad_token is properly set to prevent model confusion between padding and content
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         self.model = (
-            AutoModelForCausalLM.from_pretrained(
-                model_name, use_safetensors=True
-            )
+            AutoModelForCausalLM.from_pretrained(model_name, use_safetensors=True)
             .to(self.device)
             .eval()
         )
         self.wallet = wallet
+        self._state: dict = {}
         logger.debug("Prover initialized with wallet for secure signatures")
 
     def open(self, randomness_hex: str, k: int = CHALLENGE_K) -> dict:
         # Use provided randomness instead of generating beacon
         beacon_R1 = {"round": 2, "randomness": randomness_hex}
         # Use tokens instead of s_vals for index derivation
-        idxs = indices_from_root(
-            self._state["tokens"], randomness_hex, self._state["seq_len"], k
-        )
+        idxs = indices_from_root(self._state["tokens"], randomness_hex, self._state["seq_len"], k)
         return {"round_R1": beacon_R1, "indices": idxs}
 
 
@@ -592,17 +532,15 @@ class Prover:
 
 class Verifier:
     def __init__(self, model_name: str = MODEL_NAME) -> None:
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-        # Ensure pad_token is properly set to prevent model confusion between padding and content tokens
+        # Ensure pad_token is properly set to prevent model confusion between padding and content
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         self.model = (
-            AutoModelForCausalLM.from_pretrained(
-                model_name, use_safetensors=True
-            )
+            AutoModelForCausalLM.from_pretrained(model_name, use_safetensors=True)
             .to(self.device)
             .eval()
         )
@@ -638,9 +576,7 @@ class Verifier:
         """
         monitor = get_monitoring_manager()
         # Record current logging identity for namespaced debug metrics
-        self._current_wallet = (
-            log_identity if log_identity is not None else prover_address
-        )
+        self._current_wallet = log_identity if log_identity is not None else prover_address
 
         # Initialize checks map with conservative defaults
         checks: Dict[str, bool] = {
@@ -662,11 +598,7 @@ class Verifier:
                 try:
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
-                        asyncio.create_task(
-                            monitor.log_counter(
-                                "grail.token_validation_failures"
-                            )
-                        )
+                        asyncio.create_task(monitor.log_counter("grail.token_validation_failures"))
                 except RuntimeError:
                     pass
             return False, checks
@@ -685,9 +617,7 @@ class Verifier:
                 try:
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
-                        asyncio.create_task(
-                            monitor.log_counter("grail.verification_failures")
-                        )
+                        asyncio.create_task(monitor.log_counter("grail.verification_failures"))
                 except RuntimeError:
                     pass
             return False, checks
@@ -703,7 +633,8 @@ class Verifier:
         # Use the difficulty from the commit data, defaulting to 0.5 if not present
         difficulty = sat_data.get("difficulty", 0.5)
         logger.debug(
-            f"Regenerating SAT problem from seed '{sat_data['seed']}' with difficulty {difficulty}"
+            f"Regenerating SAT problem from seed '{sat_data['seed']}' "
+            f"with difficulty {difficulty}"
         )
         expected_problem = generate_sat_problem(sat_data["seed"], difficulty)
         if (
@@ -712,14 +643,11 @@ class Verifier:
         ):
             logger.debug("SAT problem doesn't match seed generation:")
             logger.debug(
-                f"  Expected: {expected_problem.num_vars} vars, {len(expected_problem.clauses)} clauses"
+                f"  Expected: {expected_problem.num_vars} vars, "
+                f"{len(expected_problem.clauses)} clauses"
             )
-            logger.debug(
-                f"  Got: {sat_data['num_vars']} vars, {len(sat_data['clauses'])} clauses"
-            )
-            logger.debug(
-                f"  Seed: {sat_data['seed']}, Difficulty: {difficulty}"
-            )
+            logger.debug(f"  Got: {sat_data['num_vars']} vars, {len(sat_data['clauses'])} clauses")
+            logger.debug(f"  Seed: {sat_data['seed']}, Difficulty: {difficulty}")
             return False, checks
         checks["sat_problem_valid"] = True
 
@@ -739,24 +667,18 @@ class Verifier:
             # Check that the assignment actually solves the problem
             assignment = rollout.get("assignment", [])
             if not expected_problem.check_solution(assignment):
-                logger.debug(
-                    "Claimed solution doesn't actually solve SAT problem"
-                )
+                logger.debug("Claimed solution doesn't actually solve SAT problem")
                 checks["solution_valid"] = False
                 return False, checks
             checks["solution_valid"] = True
 
-        logger.debug(
-            "SAT rollout verification successful - model identity confirmed"
-        )
+        logger.debug("SAT rollout verification successful - model identity confirmed")
 
         # Token sampling distribution shape check
         ok_sampling, sampling_stats = self._token_sampling_shape_check(commit)
         checks["token_distribution_valid"] = bool(ok_sampling)
         if not ok_sampling:
-            logger.debug(
-                f"Token sampling shape check failed: {sampling_stats}"
-            )
+            logger.debug(f"Token sampling shape check failed: {sampling_stats}")
             return False, checks
 
         logger.debug(f"Token sampling shape check passed: {sampling_stats}")
@@ -765,9 +687,7 @@ class Verifier:
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    asyncio.create_task(
-                        monitor.log_counter("grail.verification_successes")
-                    )
+                    asyncio.create_task(monitor.log_counter("grail.verification_successes"))
             except RuntimeError:
                 pass
         return True, checks
@@ -788,7 +708,7 @@ class Verifier:
             commit: Commitment data with s_vals and signature
             proof_pkg: Proof package with revealed information
             prover_address: SS58 wallet address for public key verification
-            challenge_randomness: Use this randomness for index selection (verifier-chosen; required)
+            challenge_randomness: Use this randomness for index selection (verifier-chosen)
             min_k: Enforce a verifier-side minimum number of opened indices
 
         Returns:
@@ -820,9 +740,7 @@ class Verifier:
         # Enforce minimum coverage
         seq_len = len(tokens)
         if seq_len < int(min_k):
-            logger.debug(
-                f"Sequence too short for minimum challenge: len={seq_len}, min_k={min_k}"
-            )
+            logger.debug(f"Sequence too short for minimum challenge: len={seq_len}, min_k={min_k}")
             return False
 
         # Verify commit signature binding
@@ -844,9 +762,7 @@ class Verifier:
         if layer_index_claim != LAYER_INDEX:
             logger.debug("Layer index mismatch in commit")
             return False
-        r_vec = r_vec_from_randomness(
-            beacon["randomness"], self.model.config.hidden_size
-        )
+        r_vec = r_vec_from_randomness(beacon["randomness"], self.model.config.hidden_size)
 
         # Determine number of indices to open (enforce minimum)
         provided_indices = proof_pkg.get("indices", [])
@@ -870,23 +786,17 @@ class Verifier:
         # (kept for backward compatibility of packet shape, but not used for verification)
 
         # Recompute hidden states
-        full_ids = torch.tensor(
-            tokens, dtype=torch.long, device=self.device
-        ).unsqueeze(0)
+        full_ids = torch.tensor(tokens, dtype=torch.long, device=self.device).unsqueeze(0)
         try:
             with torch.inference_mode():
                 outs = self.model(full_ids, output_hidden_states=True)
         except RuntimeError as e:
-            logger.error(
-                f"CUDA/Runtime error during model inference in verification: {e}"
-            )
+            logger.error(f"CUDA/Runtime error during model inference in verification: {e}")
             logger.error(
                 f"Token count: {len(tokens)}, Token range: min={min(tokens)}, max={max(tokens)}"
             )
             _vsz = resolve_vocab_size(self.model.config)
-            logger.error(
-                f"Model vocab size: {_vsz if _vsz is not None else 'unknown'}"
-            )
+            logger.error(f"Model vocab size: {_vsz if _vsz is not None else 'unknown'}")
             return False
 
         h_layer = outs.hidden_states[LAYER_INDEX][0]
@@ -898,20 +808,14 @@ class Verifier:
                 # Logits at position t predict token at t+1
                 step_logits = outs.logits[0, seq_len - 2, :].detach().to("cpu")
                 # Hash current tokens to associate cache entries
-                tokens_bytes = b"".join(
-                    int_to_bytes(t) for t in commit["tokens"]
-                )
-                self._last_tokens_hash = hashlib.sha256(
-                    tokens_bytes
-                ).hexdigest()
+                tokens_bytes = b"".join(int_to_bytes(t) for t in commit["tokens"])
+                self._last_tokens_hash = hashlib.sha256(tokens_bytes).hexdigest()
                 self._last_step_logits = step_logits
             else:
                 self._last_tokens_hash = None
                 self._last_step_logits = None
         except Exception as e:
-            logger.debug(
-                f"Unable to cache step logits for termination check: {e}"
-            )
+            logger.debug(f"Unable to cache step logits for termination check: {e}")
             self._last_tokens_hash = None
             self._last_step_logits = None
 
@@ -925,9 +829,7 @@ class Verifier:
 
             # Sketch‐value check with proper modular distance
             local = dot_mod_q(h_layer[i], r_vec)
-            logger.debug(
-                f"[SketchCheck] idx={i}, committed={committed_s_val}, local={local}"
-            )
+            logger.debug(f"[SketchCheck] idx={i}, committed={committed_s_val}, local={local}")
 
             # Calculate minimum distance considering modular arithmetic
             diff = abs(local - committed_s_val)
@@ -942,9 +844,7 @@ class Verifier:
         logger.debug("GRAIL proof verification successful")
         return True
 
-    def _collect_chosen_token_probs(
-        self, commit: dict
-    ) -> Optional[list[float]]:
+    def _collect_chosen_token_probs(self, commit: dict) -> Optional[list[float]]:
         """Collect validator probabilities of chosen tokens over completion tokens.
 
         Uses a single forward pass. For token at index t, predictive logits are at t-1.
@@ -966,9 +866,7 @@ class Verifier:
             if prompt_len <= 0 or completion_len <= 0:
                 return None
 
-            full_ids = torch.tensor(
-                tokens, dtype=torch.long, device=self.device
-            )
+            full_ids = torch.tensor(tokens, dtype=torch.long, device=self.device)
             full_ids = full_ids.unsqueeze(0)
             with torch.inference_mode():
                 outs = self.model(full_ids)
@@ -994,7 +892,7 @@ class Verifier:
             try:
                 import numpy as np
             except Exception:
-                np = None
+                np = None  # type: ignore
 
             x_list = probs
             if np is not None:
@@ -1024,22 +922,14 @@ class Verifier:
                 # Torch fallback without numpy
                 tx = torch.tensor(x_list, dtype=torch.float64)
                 n = float(tx.numel())
-                low_frac = float(
-                    (tx <= SAMPLING_LOW_P).to(torch.float64).mean().item()
-                )
-                high_frac = float(
-                    (tx >= SAMPLING_HIGH_P).to(torch.float64).mean().item()
-                )
+                low_frac = float((tx <= SAMPLING_LOW_P).to(torch.float64).mean().item())
+                high_frac = float((tx >= SAMPLING_HIGH_P).to(torch.float64).mean().item())
                 mid_frac = max(0.0, 1.0 - low_frac - high_frac)
                 m = float(tx.mean().item())
                 # Robust location stats
                 med = float(tx.median().item())
                 try:
-                    q10 = float(
-                        torch.quantile(
-                            tx, torch.tensor(0.10, dtype=torch.float64)
-                        ).item()
-                    )
+                    q10 = float(torch.quantile(tx, torch.tensor(0.10, dtype=torch.float64)).item())
                 except Exception:
                     sorted_tx = torch.sort(tx).values
                     idx = max(
@@ -1100,13 +990,9 @@ class Verifier:
         metrics = self._bimodality_metrics(probs)
 
         # Simplified decision: unimodal-low via median; bimodal via BC gated by q10
-        suspicious_unimodal_low = (
-            metrics.get("median", 1.0) <= SAMPLING_MEDIAN_LOW_MAX
-        )
+        suspicious_unimodal_low = metrics.get("median", 1.0) <= SAMPLING_MEDIAN_LOW_MAX
         low_q10 = metrics.get("q10", 1.0) <= SAMPLING_LOW_Q10_MAX
-        suspicious_bimodal = low_q10 and (
-            metrics.get("bc", 0.0) >= SAMPLING_BC_THRESHOLD
-        )
+        suspicious_bimodal = low_q10 and (metrics.get("bc", 0.0) >= SAMPLING_BC_THRESHOLD)
         suspicious = suspicious_unimodal_low or suspicious_bimodal
 
         # Verbose-mode monitoring: log histogram of chosen-token probabilities
@@ -1114,9 +1000,7 @@ class Verifier:
 
         return (not suspicious), metrics
 
-    def _log_verbose_monitoring_metrics(
-        self, probs: list[float], metrics: dict
-    ) -> None:
+    def _log_verbose_monitoring_metrics(self, probs: list[float], metrics: dict) -> None:
         """Log verbose monitoring metrics for debugging and threshold tuning.
 
         Args:
@@ -1148,51 +1032,23 @@ class Verifier:
                 )
 
                 # Log the histogram using the more reliable approach
-                asyncio.create_task(
-                    monitor.log_histogram(f"{wallet_ns}/hist", probs)
-                )
+                asyncio.create_task(monitor.log_histogram(f"{wallet_ns}/hist", probs))
                 # Summary statistics under the sampling_shape_check prefix for easier navigation
+                asyncio.create_task(monitor.log_gauge(f"{wallet_ns}/mean", metrics["mean"]))
                 asyncio.create_task(
-                    monitor.log_gauge(f"{wallet_ns}/mean", metrics["mean"])
+                    monitor.log_gauge(f"{wallet_ns}/median", metrics.get("median", 0.0))
                 )
+                asyncio.create_task(monitor.log_gauge(f"{wallet_ns}/q10", metrics.get("q10", 0.0)))
+                asyncio.create_task(monitor.log_gauge(f"{wallet_ns}/low_frac", metrics["low_frac"]))
                 asyncio.create_task(
-                    monitor.log_gauge(
-                        f"{wallet_ns}/median", metrics.get("median", 0.0)
-                    )
+                    monitor.log_gauge(f"{wallet_ns}/high_frac", metrics["high_frac"])
                 )
-                asyncio.create_task(
-                    monitor.log_gauge(
-                        f"{wallet_ns}/q10", metrics.get("q10", 0.0)
-                    )
-                )
-                asyncio.create_task(
-                    monitor.log_gauge(
-                        f"{wallet_ns}/low_frac", metrics["low_frac"]
-                    )
-                )
-                asyncio.create_task(
-                    monitor.log_gauge(
-                        f"{wallet_ns}/high_frac", metrics["high_frac"]
-                    )
-                )
-                asyncio.create_task(
-                    monitor.log_gauge(
-                        f"{wallet_ns}/mid_frac", metrics["mid_frac"]
-                    )
-                )
-                asyncio.create_task(
-                    monitor.log_gauge(f"{wallet_ns}/bc", metrics["bc"])
-                )
-                asyncio.create_task(
-                    monitor.log_gauge(f"{wallet_ns}/n", metrics["n"])
-                )
-                logger.debug(
-                    "-------- log_verbose_monitoring_metrics finished--------"
-                )
+                asyncio.create_task(monitor.log_gauge(f"{wallet_ns}/mid_frac", metrics["mid_frac"]))
+                asyncio.create_task(monitor.log_gauge(f"{wallet_ns}/bc", metrics["bc"]))
+                asyncio.create_task(monitor.log_gauge(f"{wallet_ns}/n", metrics["n"]))
+                logger.debug("-------- log_verbose_monitoring_metrics finished--------")
             except RuntimeError:
-                logger.debug(
-                    "-------- log_verbose_monitoring_metrics failed--------"
-                )
+                logger.debug("-------- log_verbose_monitoring_metrics failed--------")
                 pass
         except Exception:
             pass
@@ -1204,10 +1060,7 @@ class Verifier:
         rollout = commit.get("rollout", {})
         completion_length = rollout.get("completion_length")
 
-        if (
-            isinstance(completion_length, int)
-            and completion_length >= expected_max_new
-        ):
+        if isinstance(completion_length, int) and completion_length >= expected_max_new:
             logger.debug(
                 f"Termination via max length: completion_length={completion_length} "
                 f">= expected_max_new={expected_max_new}"
@@ -1215,9 +1068,7 @@ class Verifier:
             return True
         return False
 
-    def _check_eos_termination(
-        self, commit: dict, step_logits: torch.Tensor
-    ) -> bool:
+    def _check_eos_termination(self, commit: dict, step_logits: torch.Tensor) -> bool:
         """Check if sequence terminated with sufficient EOS probability."""
         tokens = commit.get("tokens", [])
         if not tokens:
@@ -1234,37 +1085,26 @@ class Verifier:
         p_eos = float(probs[eos_id].item())
 
         if p_eos >= MIN_EOS_PROBABILITY:
-            logger.debug(
-                f"Termination via EOS with p={p_eos:.4f} >= {MIN_EOS_PROBABILITY}"
-            )
+            logger.debug(f"Termination via EOS with p={p_eos:.4f} >= {MIN_EOS_PROBABILITY}")
             return True
 
-        logger.debug(
-            f"EOS probability too low: p={p_eos:.4f} < {MIN_EOS_PROBABILITY}"
-        )
+        logger.debug(f"EOS probability too low: p={p_eos:.4f} < {MIN_EOS_PROBABILITY}")
         return False
 
-    def _run_sanity_check(
-        self, commit: dict, step_logits: torch.Tensor
-    ) -> None:
+    def _run_sanity_check(self, commit: dict, step_logits: torch.Tensor) -> None:
         """Compare miner vs validator logprobs (logging only, does not affect validation)."""
         try:
             tokens = commit.get("tokens", [])
             rollout = commit.get("rollout", {})
             miner_logprobs = rollout.get("token_logprobs")
 
-            if (
-                not isinstance(miner_logprobs, list)
-                or len(miner_logprobs) == 0
-            ):
+            if not isinstance(miner_logprobs, list) or len(miner_logprobs) == 0:
                 return
 
             last_token = tokens[-1]
             probs = torch.softmax(step_logits, dim=-1)
             p_last = float(probs[last_token].item())
-            miner_p_last = float(
-                torch.exp(torch.tensor(miner_logprobs[-1])).item()
-            )
+            miner_p_last = float(torch.exp(torch.tensor(miner_logprobs[-1])).item())
             drift = abs(p_last - miner_p_last)
 
             if drift > SANITY_CHECK_DRIFT_THRESHOLD:
@@ -1281,29 +1121,20 @@ class Verifier:
         try:
             tokens_bytes = b"".join(int_to_bytes(t) for t in tokens)
             cur_hash = hashlib.sha256(tokens_bytes).hexdigest()
-            if (
-                self._last_tokens_hash == cur_hash
-                and self._last_step_logits is not None
-            ):
+            if self._last_tokens_hash == cur_hash and self._last_step_logits is not None:
                 return self._last_step_logits
         except Exception:
             pass
 
         # Cache miss: run minimal forward pass
         try:
-            full_ids = torch.tensor(
-                tokens, dtype=torch.long, device=self.device
-            ).unsqueeze(0)
+            full_ids = torch.tensor(tokens, dtype=torch.long, device=self.device).unsqueeze(0)
             with torch.inference_mode():
                 outs = self.model(full_ids)
             if outs.logits.size(1) < 2:
-                logger.debug(
-                    "Not enough timesteps to compute last-step logits"
-                )
+                logger.debug("Not enough timesteps to compute last-step logits")
                 return None
-            return (
-                outs.logits[0, outs.logits.size(1) - 2, :].detach().to("cpu")
-            )
+            return outs.logits[0, outs.logits.size(1) - 2, :].detach().to("cpu")  # type: ignore
         except Exception as e:
             logger.debug(f"Failed to compute step logits: {e}")
             return None
@@ -1328,9 +1159,7 @@ class Verifier:
             # For EOS termination, we need logits
             step_logits = self._get_step_logits(tokens)
             if step_logits is None:
-                logger.debug(
-                    "Cannot verify EOS termination: no logits available"
-                )
+                logger.debug("Cannot verify EOS termination: no logits available")
                 return False
 
             # Check EOS termination
@@ -1339,9 +1168,7 @@ class Verifier:
                 self._run_sanity_check(commit, step_logits)
                 return True
 
-            logger.debug(
-                "Termination check failed: neither max length nor valid EOS termination"
-            )
+            logger.debug("Termination check failed: neither max length nor valid EOS termination")
             return False
 
         except Exception as e:

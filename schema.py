@@ -60,8 +60,8 @@ class CommsGetResult(BaseModel):
     global_step: Optional[int] = Field(
         None, description="The global step associated with the data."
     )
-    status: Literal["OK", "TOO_EARLY", "TOO_LATE", "NOT_FOUND", "ERROR"] = (
-        Field("OK", description="The status of the get operation.")
+    status: Literal["OK", "TOO_EARLY", "TOO_LATE", "NOT_FOUND", "ERROR"] = Field(
+        "OK", description="The status of the get operation."
     )
 
     @property

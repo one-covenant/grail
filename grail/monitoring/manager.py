@@ -90,9 +90,7 @@ class MonitoringManager:
 
         while not self._shutdown_event.is_set():
             try:
-                await asyncio.wait_for(
-                    self._shutdown_event.wait(), timeout=self._flush_interval
-                )
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=self._flush_interval)
                 # If we get here, shutdown was requested
                 break
             except asyncio.TimeoutError:
@@ -102,9 +100,7 @@ class MonitoringManager:
                 logger.warning(f"Error in periodic flush: {e}")
                 await asyncio.sleep(1.0)  # Brief pause before retrying
 
-    def set_block_context(
-        self, block_number: int, window_number: Optional[int] = None
-    ) -> None:
+    def set_block_context(self, block_number: int, window_number: Optional[int] = None) -> None:
         """Set the current block and window context for metrics.
 
         Args:
@@ -221,9 +217,7 @@ class MonitoringManager:
         with self.backend.timer(name, tags):
             yield
 
-    async def log_artifact(
-        self, name: str, data: Any, artifact_type: str
-    ) -> None:
+    async def log_artifact(self, name: str, data: Any, artifact_type: str) -> None:
         """Log an artifact.
 
         Args:
@@ -271,9 +265,7 @@ class MonitoringManager:
             logger.warning(f"Health check failed: {e}")
             return False
 
-    async def start_run(
-        self, run_name: str, config: Optional[Dict[str, Any]] = None
-    ) -> str:
+    async def start_run(self, run_name: str, config: Optional[Dict[str, Any]] = None) -> str:
         """Start a new monitoring run.
 
         Args:

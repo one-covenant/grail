@@ -79,11 +79,7 @@ def configure_logging(verbosity: int) -> None:
 
     # Log selected network at startup
     def _network_label(n: str) -> str:
-        return (
-            "public testnet"
-            if n == "test"
-            else ("mainnet" if n == "finney" else "custom")
-        )
+        return "public testnet" if n == "test" else ("mainnet" if n == "finney" else "custom")
 
     logging.getLogger(__name__).info(
         f"Network: {NETWORK} ({_network_label(NETWORK)}), NETUID={NETUID}"
@@ -102,9 +98,7 @@ def _initialize_monitoring(verbosity: int) -> None:
     try:
         # Check if monitoring is enabled
         if not MonitoringConfig.is_monitoring_enabled():
-            logging.getLogger(__name__).debug(
-                "Monitoring disabled by configuration"
-            )
+            logging.getLogger(__name__).debug("Monitoring disabled by configuration")
             return
 
         # Get base configuration from environment
@@ -131,15 +125,11 @@ def _initialize_monitoring(verbosity: int) -> None:
         backend_type = config.pop("backend_type", "wandb")
         initialize_monitoring(backend_type, **config)
 
-        logging.getLogger(__name__).info(
-            f"Monitoring initialized with {backend_type} backend"
-        )
+        logging.getLogger(__name__).info(f"Monitoring initialized with {backend_type} backend")
 
     except Exception as e:
         # Don't let monitoring failures break the CLI
-        logging.getLogger(__name__).warning(
-            f"Failed to initialize monitoring: {e}"
-        )
+        logging.getLogger(__name__).warning(f"Failed to initialize monitoring: {e}")
 
 
 app = typer.Typer(
@@ -198,9 +188,7 @@ def _register_subcommands() -> None:
         "grail.cli.train",
     ):
         module = importlib.import_module(mod_name)
-        register: Optional[Callable[[typer.Typer], None]] = getattr(
-            module, "register", None
-        )
+        register: Optional[Callable[[typer.Typer], None]] = getattr(module, "register", None)
         if callable(register):
             register(app)
 

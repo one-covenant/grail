@@ -83,9 +83,7 @@ def get_current_chain() -> Dict[str, Any]:
     return {"name": _current_chain, **DRAND_CHAINS[_current_chain]}
 
 
-def get_drand_beacon(
-    round_id: Optional[int] = None, use_fallback: bool = True
-) -> dict:
+def get_drand_beacon(round_id: Optional[int] = None, use_fallback: bool = True) -> dict:
     """
     Fetch randomness from drand network.
 

@@ -59,9 +59,7 @@ class WandBBackend(MonitoringBackend):
             self._wandb_module = self._import_wandb()
 
             if self._wandb_module is None:
-                logger.warning(
-                    "wandb not available, monitoring will be disabled"
-                )
+                logger.warning("wandb not available, monitoring will be disabled")
                 self._initialized = False
                 return
 
@@ -91,18 +89,12 @@ class WandBBackend(MonitoringBackend):
 
     async def _ensure_wandb_run(self) -> None:
         """Ensure wandb run is initialized (lazy initialization)."""
-        if (
-            self._wandb_run_started
-            or not self._initialized
-            or self._wandb_module is None
-        ):
+        if self._wandb_run_started or not self._initialized or self._wandb_module is None:
             return
 
         try:
             # Run wandb.init() in thread pool to avoid blocking
-            run = await asyncio.get_event_loop().run_in_executor(
-                None, self._sync_wandb_init
-            )
+            run = await asyncio.get_event_loop().run_in_executor(None, self._sync_wandb_init)
             if run is not None:
                 self._wandb_run_started = True
                 logger.debug("WandB run started successfully")
@@ -178,9 +170,7 @@ class WandBBackend(MonitoringBackend):
 
             # Log to wandb in thread pool without step parameter
             # wandb will use timestamp as x-axis as configured
-            await asyncio.get_event_loop().run_in_executor(
-                None, self._wandb_module.log, data
-            )
+            await asyncio.get_event_loop().run_in_executor(None, self._wandb_module.log, data)
 
         except Exception as e:
             logger.warning(f"Failed to log metric {metric.name}: {e}")
@@ -220,9 +210,7 @@ class WandBBackend(MonitoringBackend):
 
             # Log all metrics in one call without step parameter
             # wandb will use timestamp as x-axis as configured
-            await asyncio.get_event_loop().run_in_executor(
-                None, self._wandb_module.log, data
-            )
+            await asyncio.get_event_loop().run_in_executor(None, self._wandb_module.log, data)
 
         except Exception as e:
             logger.warning(f"Failed to log metrics batch: {e}")
@@ -254,9 +242,7 @@ class WandBBackend(MonitoringBackend):
                 value = value.item()
             elif isinstance(value, (int, float)):
                 # Ensure it's a Python native type, not numpy
-                value = (
-                    float(value) if isinstance(value, float) else int(value)
-                )
+                value = float(value) if isinstance(value, float) else int(value)
 
         return {name: value}
 
@@ -271,11 +257,7 @@ class WandBBackend(MonitoringBackend):
             # Normalize to a 1D numpy array
             array_like: Optional[np.ndarray] = None
             # Handle torch tensors without importing torch explicitly
-            if (
-                hasattr(value, "detach")
-                and hasattr(value, "cpu")
-                and hasattr(value, "numpy")
-            ):
+            if hasattr(value, "detach") and hasattr(value, "cpu") and hasattr(value, "numpy"):
                 try:
                     array_like = value.detach().cpu().numpy().ravel()
                 except Exception:
@@ -309,9 +291,7 @@ class WandBBackend(MonitoringBackend):
         except Exception:
             return None
 
-    def _add_temporal_context(
-        self, data: Dict[str, Any], metric: MetricData
-    ) -> None:
+    def _add_temporal_context(self, data: Dict[str, Any], metric: MetricData) -> None:
         """Add temporal context to the data for better visualization.
 
         Args:
@@ -365,9 +345,7 @@ class WandBBackend(MonitoringBackend):
             # Schedule async logging without blocking
             asyncio.create_task(self.log_metric(metric))
 
-    async def log_artifact(
-        self, name: str, data: Any, artifact_type: str
-    ) -> None:
+    async def log_artifact(self, name: str, data: Any, artifact_type: str) -> None:
         """Log artifacts to wandb.
 
         Args:
@@ -381,9 +359,7 @@ class WandBBackend(MonitoringBackend):
         try:
             if artifact_type == "model":
                 # For model files, use wandb.save
-                await asyncio.get_event_loop().run_in_executor(
-                    None, self._wandb_module.save, data
-                )
+                await asyncio.get_event_loop().run_in_executor(None, self._wandb_module.save, data)
             elif artifact_type == "plot":
                 # For plots, log as wandb object
                 await asyncio.get_event_loop().run_in_executor(
@@ -391,9 +367,7 @@ class WandBBackend(MonitoringBackend):
                 )
             elif artifact_type == "file":
                 # For general files, use wandb.save
-                await asyncio.get_event_loop().run_in_executor(
-                    None, self._wandb_module.save, data
-                )
+                await asyncio.get_event_loop().run_in_executor(None, self._wandb_module.save, data)
             elif artifact_type == "text":
                 # Represent text samples as a wandb.Table for consistent rendering
                 # across dashboards and to avoid media-vs-string key conflicts.
@@ -422,26 +396,18 @@ class WandBBackend(MonitoringBackend):
                         data.get("nonce"),
                         self._to_optional_float(data.get("reward")),
                         self._to_optional_float(data.get("advantage")),
-                        (
-                            bool(data.get("success"))
-                            if data.get("success") is not None
-                            else None
-                        ),
+                        (bool(data.get("success")) if data.get("success") is not None else None),
                         str(data.get("text") or ""),
                     ]
                     table = self._tables.get(name)
                     if table is None:
-                        table = self._wandb_module.Table(
-                            columns=base_columns, log_mode="MUTABLE"
-                        )
+                        table = self._wandb_module.Table(columns=base_columns, log_mode="MUTABLE")
                         self._tables[name] = table
                     table.add_data(*row)
                 else:
                     table = self._tables.get(name)
                     if table is None:
-                        table = self._wandb_module.Table(
-                            columns=["text"], log_mode="MUTABLE"
-                        )
+                        table = self._wandb_module.Table(columns=["text"], log_mode="MUTABLE")
                         self._tables[name] = table
                     table.add_data(str(data))
 
@@ -486,9 +452,7 @@ class WandBBackend(MonitoringBackend):
         """
         if self._initialized and self.run and self._wandb_module:
             try:
-                await asyncio.get_event_loop().run_in_executor(
-                    None, self._wandb_module.finish
-                )
+                await asyncio.get_event_loop().run_in_executor(None, self._wandb_module.finish)
                 self.run = None
                 self._initialized = False
             except Exception as e:
@@ -500,11 +464,7 @@ class WandBBackend(MonitoringBackend):
         Returns:
             True if wandb is healthy, False otherwise
         """
-        return (
-            self._initialized
-            and self._wandb_module is not None
-            and self.run is not None
-        )
+        return self._initialized and self._wandb_module is not None and self.run is not None
 
     async def shutdown(self) -> None:
         """Shutdown the wandb backend and cleanup resources."""

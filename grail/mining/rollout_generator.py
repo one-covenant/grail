@@ -169,9 +169,7 @@ class RolloutGenerator(ABC):
             state = self.reset_environment(env)
 
             # Generate rollout with logprobs tracking
-            rollout = self._generate_single_rollout(
-                problem, env, state, randomness_hex, wallet
-            )
+            rollout = self._generate_single_rollout(problem, env, state, randomness_hex, wallet)
             rollouts.append(rollout)
 
         # Compute GRPO advantages across the group
@@ -239,9 +237,7 @@ class RolloutGenerator(ABC):
         all_logprobs = [0.0] * prompt_length + logprobs
 
         # Parse and execute actions from generated text
-        generated_text = self.tokenizer.decode(
-            completion_ids, skip_special_tokens=True
-        )
+        generated_text = self.tokenizer.decode(completion_ids, skip_special_tokens=True)
         action = self.parse_action(generated_text, env, state)
 
         # Execute trajectory in environment
@@ -251,16 +247,13 @@ class RolloutGenerator(ABC):
 
         # Step through environment with parsed action
         next_state, reward, done, info = self.step_environment(env, action)
-        trajectory_entry = self.create_trajectory_entry(
-            state, action, reward, info
-        )
+        trajectory_entry = self.create_trajectory_entry(state, action, reward, info)
         trajectory.append(trajectory_entry)
         total_reward += reward
 
         if "success" not in info:
             logger.warning(
-                "step_environment did not return 'success' in info; "
-                "defaulting to False"
+                "step_environment did not return 'success' in info; " "defaulting to False"
             )
         success = bool(info.get("success", False))
 
@@ -276,15 +269,11 @@ class RolloutGenerator(ABC):
         from ..grail import r_vec_from_randomness, dot_mod_q, sign_s_vals
 
         # Compute s_vals for GRAIL proof
-        r_vec = r_vec_from_randomness(
-            randomness_hex, resolve_hidden_size(self.model)
-        )
+        r_vec = r_vec_from_randomness(randomness_hex, resolve_hidden_size(self.model))
         s_vals = []
 
         with torch.inference_mode():
-            token_tensor = torch.tensor([all_token_ids], dtype=torch.long).to(
-                self.device
-            )
+            token_tensor = torch.tensor([all_token_ids], dtype=torch.long).to(self.device)
             model_outputs = self.model(token_tensor, output_hidden_states=True)
             # Last layer hidden states
             h_layer = model_outputs.hidden_states[-1][0]
@@ -311,9 +300,7 @@ class RolloutGenerator(ABC):
             beacon={"randomness": randomness_hex},
         )
 
-    def _extract_logprobs(
-        self, scores: List[torch.Tensor], token_ids: List[int]
-    ) -> List[float]:
+    def _extract_logprobs(self, scores: List[torch.Tensor], token_ids: List[int]) -> List[float]:
         """Extract log probabilities for generated tokens."""
         logprobs = []
         for i, token_id in enumerate(token_ids):
@@ -352,9 +339,7 @@ class RolloutGenerator(ABC):
         pass
 
     @abstractmethod
-    def create_prompt(
-        self, problem: Any, env: Any, state: Any, trajectory: List
-    ) -> str:
+    def create_prompt(self, problem: Any, env: Any, state: Any, trajectory: List) -> str:
         """Create a prompt for the model based on current state."""
         pass
 
@@ -369,9 +354,7 @@ class RolloutGenerator(ABC):
         (next_state, reward, done, info)."""
         pass
 
-    def create_trajectory_entry(
-        self, state: Any, action: Any, reward: float, info: Dict
-    ) -> Any:
+    def create_trajectory_entry(self, state: Any, action: Any, reward: float, info: Dict) -> Any:
         """Create an entry for the trajectory list.
 
         Default implementation returns a minimal tuple:
@@ -384,9 +367,7 @@ class RolloutGenerator(ABC):
         return (0, action, reward)
 
     @abstractmethod
-    def get_final_info(
-        self, env: Any, trajectory: List, total_reward: float
-    ) -> Dict:
+    def get_final_info(self, env: Any, trajectory: List, total_reward: float) -> Dict:
         """Get final information to include in the rollout result."""
         pass
 

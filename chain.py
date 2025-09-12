@@ -87,18 +87,14 @@ class ChainManager:
     def start_commitment_fetcher(self):
         """Attach to the already-running event loop."""
         if self._fetch_task is None:
-            self._fetch_task = asyncio.create_task(
-                self._fetch_commitments_periodically()
-            )
+            self._fetch_task = asyncio.create_task(self._fetch_commitments_periodically())
 
     async def _fetch_commitments_periodically(self):
         """Background task to periodically fetch commitments."""
         while True:
             try:
                 # Create new subtensor instance for metagraph sync
-                await asyncio.to_thread(
-                    lambda: self.metagraph.sync(subtensor=self.subtensor)
-                )
+                await asyncio.to_thread(lambda: self.metagraph.sync(subtensor=self.subtensor))
 
                 # Create new subtensor instance for commitments
                 commitments = await self.get_commitments()
@@ -137,9 +133,7 @@ class ChainManager:
             wallet (bt.wallet): Wallet to sign the commitment
             bucket (Bucket): Bucket configuration to commit
         """
-        concatenated = (
-            bucket.account_id + bucket.access_key_id + bucket.secret_access_key
-        )
+        concatenated = bucket.account_id + bucket.access_key_id + bucket.secret_access_key
         if self.netuid is not None:
             self.subtensor.commit(wallet, self.netuid, concatenated)
             logger.info(
@@ -161,13 +155,9 @@ class ChainManager:
 
             # Convert Bucket objects to concatenated strings for comparison
             commitment_str = (
-                commitment.name
-                + commitment.access_key_id
-                + commitment.secret_access_key
+                commitment.name + commitment.access_key_id + commitment.secret_access_key
             )
-            bucket_details_from_env = (
-                bucket.name + bucket.access_key_id + bucket.secret_access_key
-            )
+            bucket_details_from_env = bucket.name + bucket.access_key_id + bucket.secret_access_key
 
             logger.debug(
                 "Comparing current commitment to bucket details from the environment:\n"
@@ -237,9 +227,7 @@ class ChainManager:
             concatenated = self.subtensor.get_commitment(self.netuid, uid)
             logger.info(f"Commitment fetched: {concatenated}")
         except Exception as e:
-            raise Exception(
-                f"Couldn't get commitment from uid {uid} because {e}"
-            )
+            raise Exception(f"Couldn't get commitment from uid {uid} because {e}")
         if len(concatenated) != 128:
             raise ValueError(
                 f"Commitment '{concatenated}' is of length {len(concatenated)} but should be of length 128."
@@ -255,9 +243,7 @@ class ChainManager:
         except ValidationError as e:
             raise ValueError(f"Invalid data in commitment: {e}")
 
-    def decode_metadata(
-        self, encoded_ss58: tuple, metadata: dict
-    ) -> tuple[str, str]:
+    def decode_metadata(self, encoded_ss58: tuple, metadata: dict) -> tuple[str, str]:
         # Decode the key into an SS58 address.
         decoded_key = decode_account_id(encoded_ss58[0])
         # Get the commitment from the metadata.
@@ -265,9 +251,7 @@ class ChainManager:
         bytes_tuple = commitment[next(iter(commitment.keys()))][0]
         return decoded_key, bytes(bytes_tuple).decode()
 
-    async def get_commitments(
-        self, block: int | None = None
-    ) -> dict[int, Bucket]:
+    async def get_commitments(self, block: int | None = None) -> dict[int, Bucket]:
         """Retrieves all bucket commitments from the chain.
 
         Args:
@@ -283,25 +267,17 @@ class ChainManager:
                 module="Commitments",
                 storage_function="CommitmentOf",
                 params=[self.netuid],
-                block_hash=(
-                    None if block is None else substrate.get_block_hash(block)
-                ),
+                block_hash=(None if block is None else substrate.get_block_hash(block)),
             )
 
-            hotkey_to_uid = dict(
-                zip(self.metagraph.hotkeys, self.metagraph.uids)
-            )
+            hotkey_to_uid = dict(zip(self.metagraph.hotkeys, self.metagraph.uids))
             commitments = {}
 
             for key, value in query_result:
                 try:
-                    decoded_ss58, commitment_str = self.decode_metadata(
-                        key, value.value
-                    )
+                    decoded_ss58, commitment_str = self.decode_metadata(key, value.value)
                 except Exception as e:
-                    logger.error(
-                        f"Failed to decode metadata for key {key.value}: {e}"
-                    )
+                    logger.error(f"Failed to decode metadata for key {key.value}: {e}")
                     continue
 
                 if decoded_ss58 not in hotkey_to_uid:
@@ -309,9 +285,7 @@ class ChainManager:
 
                 uid = hotkey_to_uid[decoded_ss58]
                 if len(commitment_str) != 128:
-                    logger.error(
-                        f"Invalid commitment length for UID {uid}: {len(commitment_str)}"
-                    )
+                    logger.error(f"Invalid commitment length for UID {uid}: {len(commitment_str)}")
                     continue
 
                 try:
@@ -333,9 +307,7 @@ class ChainManager:
             self.subtensor.substrate.initialize()
             return
 
-    async def get_bucket_for_neuron(
-        self, wallet: "bt.wallet"
-    ) -> Bucket | None:
+    async def get_bucket_for_neuron(self, wallet: "bt.wallet") -> Bucket | None:
         """Get bucket configuration for a specific neuron's wallet
 
         Args:
@@ -349,9 +321,7 @@ class ChainManager:
             uid = self.metagraph.hotkeys.index(wallet.hotkey.ss58_address)
             return self.get_bucket(uid)
         except ValueError:
-            logger.warning(
-                f"Hotkey {wallet.hotkey.ss58_address} not found in metagraph"
-            )
+            logger.warning(f"Hotkey {wallet.hotkey.ss58_address} not found in metagraph")
             return None
 
     async def fetch_commitments(self):
@@ -386,17 +356,13 @@ class ChainManager:
     def update_peers_with_buckets(self):
         """Updates peers for gradient gathering, evaluation peers, and tracks inactive peers."""
         # Create mappings
-        uid_to_stake = dict(
-            zip(self.metagraph.uids.tolist(), self.metagraph.S.tolist())
-        )
+        uid_to_stake = dict(zip(self.metagraph.uids.tolist(), self.metagraph.S.tolist()))
 
         # Get currently active peers
         active_peers = set(int(uid) for uid in self.active_peers)
 
         # Track inactive peers (previously active peers that are no longer active)
-        previously_active = set(
-            self.eval_peers.keys()
-        )  # since self.eval_peers is now a dict
+        previously_active = set(self.eval_peers.keys())  # since self.eval_peers is now a dict
         newly_inactive = previously_active - active_peers
         self.inactive_peers = newly_inactive
 

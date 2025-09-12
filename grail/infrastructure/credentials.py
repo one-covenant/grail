@@ -25,9 +25,7 @@ def get_conf(key: str, default: Optional[str] = None) -> str:
     """
     value = os.getenv(key)
     if not value and default is None:
-        raise ValueError(
-            f"{key} not set. Please set the environment variable."
-        )
+        raise ValueError(f"{key} not set. Please set the environment variable.")
     return value or default or ""
 
 
@@ -69,9 +67,7 @@ def load_r2_credentials(fallback_to_single: bool = True) -> BucketCredentials:
             write_secret_access_key=get_conf("R2_WRITE_SECRET_ACCESS_KEY"),
         )
 
-        logger.info(
-            f"Successfully loaded dual R2 credentials for bucket: {bucket_id}"
-        )
+        logger.info(f"Successfully loaded dual R2 credentials for bucket: {bucket_id}")
         return credentials
 
     except ValueError as e:
@@ -79,9 +75,7 @@ def load_r2_credentials(fallback_to_single: bool = True) -> BucketCredentials:
             raise
 
         logger.warning(f"Dual credentials not found: {e}")
-        logger.info(
-            "Falling back to single credential mode (backwards compatibility)"
-        )
+        logger.info("Falling back to single credential mode (backwards compatibility)")
 
     # Fall back to single credential mode for backwards compatibility
     try:
@@ -165,9 +159,7 @@ def validate_credentials(credentials: BucketCredentials) -> bool:
         # Validate commitment length
         commitment = credentials.read_commitment
         if len(commitment) != 128:
-            logger.error(
-                f"Invalid commitment length: {len(commitment)} (expected 128)"
-            )
+            logger.error(f"Invalid commitment length: {len(commitment)} (expected 128)")
             return False
 
         return True
