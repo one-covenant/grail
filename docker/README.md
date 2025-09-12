@@ -20,8 +20,8 @@ This directory contains all Docker-related configuration files for the GRAIL pro
 ```bash
 # Copy and configure environment
 cp docker/.env.validator.example docker/.env.validator
-# Edit docker/.env.validator with your wallet details
-
+# Edit docker/.env.validator with non-sensitive config (no private keys).
+# Provide wallet secrets via Docker secrets or a bind-mounted file read at runtime.
 # Start validator with auto-updates
 docker-compose -f docker/docker-compose.validator.yml --env-file docker/.env.validator up -d
 ```
