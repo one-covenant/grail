@@ -39,8 +39,8 @@ class GrailChainManager:
         self.credentials = credentials
         self.fetch_interval = fetch_interval
 
-        network = os.getenv("BT_NETWORK") or os.getenv("GRAIL_NETWORK") or "test"
-        chain_endpoint = os.getenv("BT_CHAIN_ENDPOINT") or os.getenv("GRAIL_CHAIN_ENDPOINT")
+        network = os.getenv("BT_NETWORK", "finney")
+        chain_endpoint = os.getenv("BT_CHAIN_ENDPOINT", "wss://entrypoint-finney.opentensor.ai:443")
 
         if chain_endpoint:
             # When using a custom chain endpoint, pass it as the network parameter
