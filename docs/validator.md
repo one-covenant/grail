@@ -82,7 +82,8 @@ Set these in `.env` (see `.env.example`):
   - `BT_WALLET_COLD` (coldkey name)
   - `BT_WALLET_HOT` (hotkey name)
 - Model (read-only for validators in this release)
-  - `GRAIL_MODEL_NAME` (default network model used by Verifier)
+  - `GRAIL_MODEL_NAME` (default network model used by Verifier - use `Qwen/Qwen3-4B-Instruct-2507` in first version)
+  - `GRAIL_MAX_NEW_TOKENS` (mandatory: set to `1024` in first version)
 - Object storage (R2/S3)
   - `R2_BUCKET_ID`, `R2_ACCOUNT_ID`
   - Dual credentials (recommended):
@@ -104,6 +105,8 @@ Validators load local write credentials and use miners’ read credentials fetch
 ### Monitoring
 
 Set `GRAIL_MONITORING_BACKEND=wandb` to enable metrics; otherwise use `null`.
+
+Public dashboard: set `WANDB_ENTITY=tplr` and `WANDB_PROJECT=grail` to publish validator logs to the public W&B project for real-time scores and issue tracking. View at https://wandb.ai/tplr/grail.
 
 ---
 

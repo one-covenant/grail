@@ -57,6 +57,10 @@ WANDB_ENTITY=your_wandb_entity
 WANDB_MODE=online
 GRAIL_MONITORING_BACKEND=wandb
 
+# Model (use network default in first version)
+GRAIL_MODEL_NAME=Qwen/Qwen3-4B-Instruct-2507
+GRAIL_MAX_NEW_TOKENS=1024
+
 # Hugging Face (optional)
 HF_TOKEN=
 HF_USERNAME=

@@ -82,6 +82,8 @@ Set these in `.env` (see `.env.example` for full list and guidance):
   - `BT_WALLET_HOT` (hotkey name)
 - Model & generation (read-only for miners in this release)
   - Do not override `GRAIL_MODEL_NAME` or `GRAIL_MAX_NEW_TOKENS`.
+  - Use `Qwen/Qwen3-4B-Instruct-2507` as the network default model in the first version.
+  - Set `GRAIL_MAX_NEW_TOKENS=1024` (mandatory in first version).
   - Validators assume the network default model and generation cap; changes may cause rollouts to be rejected.
   - You may adjust `GRAIL_ROLLOUTS_PER_PROBLEM` for throughput, but ensure you finish generation before the window upload buffer (last 2 blocks).
 - Object storage (R2/S3)
@@ -118,6 +120,8 @@ Fill `R2_*` variables in `.env.example`.
 ### Monitoring
 
 Set `GRAIL_MONITORING_BACKEND=wandb` and provide `WANDB_API_KEY` (or use `null`). Metrics include rollout counts, rewards, upload durations, and success rates.
+
+Public dashboard: set `WANDB_ENTITY=tplr` and `WANDB_PROJECT=grail` to log to the public W&B project and monitor real-time scores and issues. View at https://wandb.ai/tplr/grail.
 
 ---
 
@@ -167,7 +171,7 @@ Artifacts uploaded per rollout include:
 
 ## Best Practices
 
-- Keep model-related envs at network defaults; do not override `GRAIL_MODEL_NAME` or `GRAIL_MAX_NEW_TOKENS`.
+- Keep model-related envs at network defaults; do not override `GRAIL_MODEL_NAME` or `GRAIL_MAX_NEW_TOKENS`. Use `Qwen/Qwen3-4B-Instruct-2507` and set `GRAIL_MAX_NEW_TOKENS=1024` in the first version.
 - Reserve the final 2 blocks of each window for uploads; the miner does this automatically but avoid heavy generation near the end.
 - Use `--use-drand` (default) for robust challenge derivation; fall back with `--no-drand` only if needed.
 - Ensure R2 dual-credential setup: write locally, read credentials are committed on-chain by the miner.

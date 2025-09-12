@@ -24,6 +24,9 @@
   <a href="https://github.com/tplr-ai/grail/blob/main/LICENSE">
     <img src="https://img.shields.io/github/license/tplr-ai/grail" alt="License" />
   </a> -->
+  <a href="https://wandb.ai/tplr/grail">
+    <img src="https://img.shields.io/badge/W%26B-Public%20Dashboard-FFBE00?logo=weightsandbiases" alt="Weights & Biases" />
+  </a>
   <a href="https://github.com/tplr-ai/grail/commits/main">
     <img src="https://img.shields.io/github/last-commit/tplr-ai/grail" alt="Last Commit" />
   </a>
@@ -158,9 +161,10 @@ grail validate
 ```
 
 Notes:
-- Randomness is fetched from drand; miners mix it with the window’s block hash
+- Randomness is fetched from drand; miners mix it with the window's block hash
 - Rollouts are uploaded to object storage (R2/S3); validators fetch, verify, score, and set weights
 - Validated rollouts can be exported to a Hugging Face dataset for analysis
+- Monitoring: miners and validators can log metrics to the public W&B project for real-time scores and issues: https://wandb.ai/tplr/grail
 
 ## Architecture Benefits
 
