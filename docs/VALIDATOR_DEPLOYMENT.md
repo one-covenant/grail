@@ -24,21 +24,25 @@ cd grail
 
 ### 2. Configure Environment
 
-Copy the example configuration:
+Copy the example configuration to the project root:
 
 ```bash
-cp docker/.env.validator.example docker/.env.validator
+cp .env.example .env
 ```
 
-Edit `docker/.env.validator` with your settings:
+Edit `.env` with your settings (keys shown in `.env.example`), e.g.:
 
 ```bash
-# Required: Bittensor Wallet
-WALLET_NAME=your_wallet_name
-WALLET_HOTKEY=your_hotkey_name
+# Network
+BT_NETWORK=finney
+BT_CHAIN_ENDPOINT=
+NETUID=81
 
-# Required: R2/S3 Storage Credentials
-R2_ENDPOINT_URL=https://your-account-id.r2.cloudflarestorage.com
+# Wallet
+BT_WALLET_COLD=your_wallet_name
+BT_WALLET_HOT=your_hotkey_name
+
+# Cloudflare R2 (dual credentials)
 R2_BUCKET_ID=your-bucket-name
 R2_ACCOUNT_ID=your-account-id
 R2_WRITE_ACCESS_KEY_ID=your-write-access-key
@@ -46,8 +50,16 @@ R2_WRITE_SECRET_ACCESS_KEY=your-write-secret-key
 R2_READ_ACCESS_KEY_ID=your-read-access-key
 R2_READ_SECRET_ACCESS_KEY=your-read-secret-key
 
-# Optional: Monitoring (recommended)
+# Monitoring (optional)
 WANDB_API_KEY=your_wandb_api_key
+WANDB_PROJECT=grail
+WANDB_ENTITY=your_wandb_entity
+WANDB_MODE=online
+GRAIL_MONITORING_BACKEND=wandb
+
+# Hugging Face (optional)
+HF_TOKEN=
+HF_USERNAME=
 ```
 
 ### 3. Deploy with Docker Compose
@@ -55,7 +67,9 @@ WANDB_API_KEY=your_wandb_api_key
 Start the validator and Watchtower:
 
 ```bash
-docker-compose -f docker/docker-compose.validator.yml --env-file docker/.env.validator up -d
+docker compose \
+  --env-file .env \
+  -f docker/docker-compose.validator.yml up -d
 ```
 
 ### 4. Monitor Logs
@@ -108,24 +122,14 @@ The current configuration uses:
 
 ### Environment Variables
 
-**Required** variables in `docker/.env.validator`:
-- `WALLET_NAME` - Your Bittensor wallet name
-- `WALLET_HOTKEY` - Your hotkey name
-- `R2_ENDPOINT_URL` - R2/S3 endpoint URL
-- `R2_BUCKET_ID` - Storage bucket name
-- `R2_ACCOUNT_ID` - Account ID for storage
-- `R2_WRITE_ACCESS_KEY_ID` - Write access key
-- `R2_WRITE_SECRET_ACCESS_KEY` - Write secret key
-- `R2_READ_ACCESS_KEY_ID` - Read access key
-- `R2_READ_SECRET_ACCESS_KEY` - Read secret key
+Use the variables from the root `.env` (see `.env.example`):
 
-**Optional** variables:
-- `NETUID` - Network UID (default: 81)
-- `SUBTENSOR_NETWORK` - Network to connect to (default: finney)
-- `GRAIL_MODEL_NAME` - Model to use (default: Qwen/Qwen2-0.5B-Instruct)
-- `WANDB_API_KEY` - For monitoring with Weights & Biases
-- `WANDB_PROJECT` - WandB project name (default: grail-validator)
-- `HF_TOKEN` - Hugging Face token for dataset uploads
+- `BT_WALLET_COLD`, `BT_WALLET_HOT`
+- `BT_NETWORK`, `BT_CHAIN_ENDPOINT`, `NETUID`
+- `R2_BUCKET_ID`, `R2_ACCOUNT_ID`, `R2_WRITE_ACCESS_KEY_ID`, `R2_WRITE_SECRET_ACCESS_KEY`, `R2_READ_ACCESS_KEY_ID`, `R2_READ_SECRET_ACCESS_KEY`
+- `GRAIL_MODEL_NAME`, `GRAIL_MAX_NEW_TOKENS`, `GRAIL_ROLLOUTS_PER_PROBLEM`
+- `WANDB_API_KEY`, `WANDB_PROJECT`, `WANDB_ENTITY`, `WANDB_MODE`, `WANDB_TAGS`, `WANDB_NOTES`, `WANDB_RESUME`, `GRAIL_MONITORING_BACKEND`
+- `HF_TOKEN`, `HF_USERNAME`
 
 **Burn Mechanism** (optional):
 - `GRAIL_BURN_UID` - UID to burn emissions to (reduces total emissions)

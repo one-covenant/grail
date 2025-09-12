@@ -6,7 +6,6 @@ This directory contains all Docker-related configuration files for the GRAIL pro
 
 ### Core Files
 - **`Dockerfile`** - Main Docker image definition for GRAIL miners and validators
-- **`.env.validator.example`** - Example environment configuration for validators
 
 ### Docker Compose Files
 - **`docker-compose.validator.yml`** - Production deployment with Watchtower for automatic updates
@@ -18,12 +17,14 @@ This directory contains all Docker-related configuration files for the GRAIL pro
 ### Deploy a Validator
 
 ```bash
-# Copy and configure environment
-cp docker/.env.validator.example docker/.env.validator
-# Edit docker/.env.validator with non-sensitive config (no private keys).
+# Copy and configure environment (project root)
+cp .env.example .env
+# Edit .env with non-sensitive config (no private keys)
 # Provide wallet secrets via Docker secrets or a bind-mounted file read at runtime.
 # Start validator with auto-updates
-docker-compose -f docker/docker-compose.validator.yml --env-file docker/.env.validator up -d
+docker compose \
+  --env-file .env \
+  -f docker/docker-compose.validator.yml up -d
 ```
 
 ### Local Testing
