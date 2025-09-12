@@ -127,6 +127,10 @@ The current configuration uses:
 - `WANDB_PROJECT` - WandB project name (default: grail-validator)
 - `HF_TOKEN` - Hugging Face token for dataset uploads
 
+**Burn Mechanism** (optional):
+- `GRAIL_BURN_UID` - UID to burn emissions to (reduces total emissions)
+- `GRAIL_BURN_PERCENTAGE` - Percentage of total emissions to burn (0-100, default: 0)
+
 ## Advanced Deployment
 
 ### Using Specific Image Tags

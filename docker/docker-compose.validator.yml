@@ -50,6 +50,10 @@ services:
       - GRAIL_METRIC_BUFFER_SIZE=${GRAIL_METRIC_BUFFER_SIZE:-100}
       - GRAIL_METRIC_FLUSH_INTERVAL=${GRAIL_METRIC_FLUSH_INTERVAL:-30.0}
       
+      # Emission burn configuration
+      - GRAIL_BURN_UID=${GRAIL_BURN_UID:-}
+      - GRAIL_BURN_PERCENTAGE=${GRAIL_BURN_PERCENTAGE:-0.0}
+      
       # Axon configuration (optional overrides)
       - AXON_PORT=${AXON_PORT:-}
       - AXON_IP=${AXON_IP:-}
