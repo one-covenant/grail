@@ -45,6 +45,7 @@ from ..shared.constants import (
     WINDOW_LENGTH,
 )
 from . import console
+from ..shared.subnet import get_own_uid_on_subnet
 
 # --------------------------------------------------------------------------- #
 #                  Future Training/Checkpoint Integration (commented)        #
@@ -410,6 +411,13 @@ async def _run_validation_service(
                 target_window_hash = await subtensor.get_block_hash(target_window)
                 # Single per-window randomness value reused across all checks
                 window_rand = _compute_window_randomness(target_window_hash, use_drand)
+                # Log a compact per-window stochastic seed for traceability
+                try:
+                    seed_u64 = int(str(window_rand)[:16], 16)
+                    if monitor:
+                        await monitor.log_gauge("sampling/window_rand_u64", seed_u64)
+                except Exception:
+                    pass
                 hotkeys_to_check = _determine_hotkeys_to_check(test_mode, wallet, meta)
                 (
                     window_inference_counts,
@@ -452,19 +460,19 @@ async def _run_validation_service(
 
                 # Monitoring metrics
                 if monitor:
-                    await monitor.log_counter("validation.windows_processed")
+                    await monitor.log_counter("validation/windows_processed")
                     await monitor.log_gauge(
-                        "validation.total_rollouts_processed", total_rollouts_processed
+                        "validation/total_rollouts_processed", total_rollouts_processed
                     )
-                    await monitor.log_gauge("validation.valid_rollouts", total_valid_rollouts)
-                    await monitor.log_gauge("validation.invalid_signatures", invalid_signatures)
-                    await monitor.log_gauge("validation.invalid_proofs", invalid_proofs)
-                    await monitor.log_gauge("validation.processing_errors", processing_errors)
-                    await monitor.log_gauge("validation.files_found", files_found)
-                    await monitor.log_gauge("validation.failed_wallets_window", failed_wallets)
+                    await monitor.log_gauge("validation/valid_rollouts", total_valid_rollouts)
+                    await monitor.log_gauge("validation/invalid_signatures", invalid_signatures)
+                    await monitor.log_gauge("validation/invalid_proofs", invalid_proofs)
+                    await monitor.log_gauge("validation/processing_errors", processing_errors)
+                    await monitor.log_gauge("validation/files_found", files_found)
+                    await monitor.log_gauge("validation/failed_wallets_window", failed_wallets)
                     if total_rollouts_processed > 0:
                         success_rate = total_valid_rollouts / total_rollouts_processed
-                        await monitor.log_gauge("validation.success_rate", success_rate)
+                        await monitor.log_gauge("validation/success_rate", success_rate)
 
                 # Uploads
                 if all_valid_rollouts:
@@ -477,6 +485,25 @@ async def _run_validation_service(
                 # Update inference counts
                 for hotkey, metrics in window_inference_counts.items():
                     inference_counts[hotkey][target_window] = metrics
+
+                # Compute active miner UIDs over the last rolling windows (includes failures)
+                active_uids = _get_active_uids(
+                    meta.hotkeys, list(meta.uids), inference_counts, target_window
+                )
+                active_miners = len(active_uids)
+                logger.info(
+                    f"👷 Active miners (last {WEIGHT_ROLLING_WINDOWS} windows): {active_miners}"
+                )
+                logger.info(
+                    f"👷 Active miner UIDs (last {WEIGHT_ROLLING_WINDOWS} windows): {active_uids}"
+                )
+                if monitor:
+                    await monitor.log_gauge("validation/active_miners", active_miners)
+                    await monitor.log_artifact(
+                        "validation/active_miners_uids",
+                        {"window": target_window, "text": ",".join(str(u) for u in active_uids)},
+                        "text",
+                    )
 
                 # Compute and set weights
                 weights, non_zero_weights = _compute_weights(
@@ -493,13 +520,26 @@ async def _run_validation_service(
                     logger.info("⚖️  No miners received weights this window")
 
                 if monitor:
-                    await monitor.log_gauge("validation.miners_with_weights", len(non_zero_weights))
-                    await monitor.log_gauge("validation.total_miners", len(meta.hotkeys))
+                    await monitor.log_gauge("validation/miners_with_weights", len(non_zero_weights))
+                    await monitor.log_gauge("validation/total_registered_miners", len(meta.hotkeys))
                     if weights:
                         max_weight = max(weights)
                         avg_weight = sum(weights) / len(weights)
-                        await monitor.log_gauge("validation.max_weight", max_weight)
-                        await monitor.log_gauge("validation.average_weight", avg_weight)
+                        await monitor.log_gauge("validation/max_weight", max_weight)
+                        await monitor.log_gauge("validation/average_weight", avg_weight)
+                        # Additional distribution stats (top 5 minimal set)
+                        stats = _compute_weight_stats(weights)
+                        await monitor.log_gauge("weights/stats/min", stats["min"])
+                        await monitor.log_gauge("weights/stats/mean", stats["mean"])
+                        await monitor.log_gauge("weights/stats/max", stats["max"])
+                        await monitor.log_gauge("weights/stats/gini", stats["gini"])
+                # Concise distribution summary
+                if weights:
+                    stats = _compute_weight_stats(weights)
+                    logger.info(
+                        "weights: min=%.6f mean=%.6f max=%.6f gini=%.6f",
+                        stats["min"], stats["mean"], stats["max"], stats["gini"],
+                    )
                 # Global submission context (per loop)
                 if monitor:
                     await monitor.log_gauge(
@@ -541,6 +581,14 @@ async def _run_validation_service(
                         # Precompute top miners for per-miner logging on submission
                         top_miners = _build_top_miners(
                             meta.hotkeys, meta.uids, weights, TOP_K_WEIGHTS_LOGGED
+                        )
+                        logger.debug(
+                            "set_weights args: wallet=%s netuid=%s uids=%s weights=%s wait_for_inclusion=%s",
+                            wallet.hotkey.ss58_address if wallet and wallet.hotkey else "None",
+                            NETUID,
+                            meta.uids,
+                            weights,
+                            False,
                         )
                         await subtensor.set_weights(
                             wallet=wallet,
@@ -660,10 +708,18 @@ async def _initialize_monitor(wallet: bt.wallet) -> Any:
     monitor = get_monitoring_manager()
     if monitor:
         validation_config = MonitoringConfig.for_validation(wallet.name)
+        try:
+            subtensor = await get_subtensor()
+        except Exception:
+            subtensor = None
+        uid = None
+        if subtensor is not None:
+            uid = await get_own_uid_on_subnet(subtensor, 81, wallet.hotkey.ss58_address)
+        run_name = f"validator-{uid}" if uid is not None else f"validation_{wallet.name}"
         run_id = await monitor.start_run(
-            f"validation_{wallet.name}", validation_config.get("hyperparameters", {})
+            run_name, validation_config.get("hyperparameters", {})
         )
-        logger.info(f"Started monitoring run: {run_id}")
+        logger.info(f"Started monitoring run: {run_id} (name={run_name})")
 
     return monitor
 
@@ -743,6 +799,61 @@ def _build_top_miners(
     pairs = [(hk, uid, float(weights[i])) for i, (hk, uid) in enumerate(zip(hotkeys, uids))]
     pairs.sort(key=lambda x: x[2], reverse=True)
     return pairs[:k]
+
+
+def _compute_weight_stats(weights: list[float]) -> dict[str, float]:
+    """Compute minimal weight distribution stats relevant for validators.
+
+    Returns keys: min, mean, max, gini.
+    """
+    try:
+        n = len(weights)
+        if n == 0:
+            return {"min": 0.0, "mean": 0.0, "max": 0.0, "gini": 0.0}
+        w_min = float(min(weights))
+        w_max = float(max(weights))
+        w_mean = float(math.fsum(weights) / n)
+        total = math.fsum(weights)
+        if total <= 0.0:
+            gini = 0.0
+        else:
+            # Gini using sorted weights: (2*sum(i*w_i))/(n*sum) - (n+1)/n
+            sorted_w = sorted(float(w) for w in weights)
+            cumulative_indexed_sum = 0.0
+            for i, w in enumerate(sorted_w, start=1):
+                cumulative_indexed_sum += i * w
+            gini = (2.0 * cumulative_indexed_sum) / (n * total) - (n + 1.0) / n
+            if gini < 0.0:
+                gini = 0.0
+        return {"min": w_min, "mean": w_mean, "max": w_max, "gini": float(gini)}
+    except Exception:
+        return {"min": 0.0, "mean": 0.0, "max": 0.0, "gini": 0.0}
+
+
+def _get_active_uids(
+    meta_hotkeys: list[str],
+    meta_uids: list[int],
+    inference_counts: defaultdict[str, defaultdict[int, dict[str, int]]],
+    target_window: int,
+) -> list[int]:
+    """Return UIDs of miners active in the last WEIGHT_ROLLING_WINDOWS windows."""
+    recent_windows = range(
+        max(0, target_window - (WEIGHT_ROLLING_WINDOWS - 1) * WINDOW_LENGTH),
+        target_window + 1,
+        WINDOW_LENGTH,
+    )
+    active_uids: list[int] = []
+    for hotkey, uid in zip(meta_hotkeys, meta_uids):
+        hk_windows = inference_counts[hotkey]
+        for w in recent_windows:
+            metrics = hk_windows.get(w)
+            if metrics and (
+                int(metrics.get("total", 0)) > 0
+                or int(metrics.get(FAILURE_FLAG_KEY, 0)) == 1
+            ):
+                active_uids.append(int(uid))
+                break
+    return active_uids
 
 
 async def _process_window(
@@ -1067,7 +1178,7 @@ async def _process_wallet_window(
 
                 challenge_rand = window_rand
                 if monitor:
-                    with monitor.timer("validation.rollout_verification"):
+                    with monitor.timer("validation/rollout_verification"):
                         is_valid, checks = verifier.verify_rollout(
                             commit_data,
                             inference["proof"],
@@ -1142,7 +1253,7 @@ async def _process_wallet_window(
                         )
                         if monitor:
                             await monitor.log_artifact(
-                                f"validation/{uid_str}/sample_text",
+                                f"{uid_str}/validation/sample_text",
                                 {
                                     "window": target_window,
                                     "wallet": wallet_addr,
@@ -1187,7 +1298,7 @@ async def _process_wallet_window(
             f"soft_failures={soft_failures}/{total_planned_checks})"
         )
         if monitor:
-            await monitor.log_gauge(f"validation/{uid_str}/had_failure", 1.0)
+            await monitor.log_gauge(f"{uid_str}/had_failure", 1.0)
         return True, metrics, [], (pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err)
 
     # Verify GRPO groups after processing checked inferences
@@ -1276,7 +1387,7 @@ async def _process_wallet_window(
             f"{len(unique_solutions)} unique"
         )
     if monitor:
-        await monitor.log_gauge(f"validation/{uid_str}/had_failure", 0.0)
+        await monitor.log_gauge(f"{uid_str}/had_failure", 0.0)
 
     return (
         True,
@@ -1358,30 +1469,42 @@ def _compute_weights(
         superlinear_score = base_score**SUPERLINEAR_EXPONENT
         raw_scores.append(superlinear_score)
 
-    # Normalize weights
+    # Normalize and capture pre-burn non-zero indices
     denom = math.fsum(raw_scores)
-    weights = [score / denom for score in raw_scores] if denom > 0.0 else [0.0] * len(meta_hotkeys)
+    if denom > 0.0:
+        pre_burn_weights = [score / denom for score in raw_scores]
+    else:
+        pre_burn_weights = [0.0] * len(meta_hotkeys)
+    pre_burn_nonzero_indices = [i for i, w in enumerate(pre_burn_weights) if w > 0.0]
 
-    # Apply burn mechanism if configured
+    # Start from pre-burn weights
+    weights = list(pre_burn_weights)
+
+    # Apply burn mechanism in a mass-preserving way
     burn_uid = GRAIL_BURN_UID
     burn_percentage = GRAIL_BURN_PERCENTAGE
+    burn_index = None
 
     if burn_uid is not None and burn_uid >= 0 and burn_percentage > 0 and meta_uids is not None:
         try:
             burn_uid = int(burn_uid)
-            # Ensure burn percentage is between 0 and 100
             burn_percentage = max(0.0, min(100.0, burn_percentage))
             burn_fraction = burn_percentage / 100.0
 
-            # Find the index of the burn UID in the meta_uids list
             if burn_uid in meta_uids:
                 burn_index = meta_uids.index(burn_uid)
 
-                # Scale down all weights by (1 - burn_fraction)
-                weights = [w * (1 - burn_fraction) for w in weights]
-
-                # Allocate burn_fraction to the burn UID
-                weights[burn_index] = burn_fraction
+                if denom <= 0.0:
+                    # No signal: allocate 100% to burn UID
+                    weights = [0.0] * len(meta_hotkeys)
+                    weights[burn_index] = 1.0
+                else:
+                    # Scale existing mass and add burn on top; then defensively renormalize
+                    weights = [w * (1.0 - burn_fraction) for w in pre_burn_weights]
+                    weights[burn_index] += burn_fraction
+                    total_w = math.fsum(weights)
+                    if total_w > 0.0:
+                        weights = [w / total_w for w in weights]
 
                 logger.info(
                     f"🔥 Burn mechanism active: Allocating {burn_percentage:.1f}% "
@@ -1402,8 +1525,12 @@ def _compute_weights(
             "GRAIL_BURN_UID or GRAIL_BURN_PERCENTAGE not set. Please set them in .env!"
         )
 
+    # Compose non-zero miner list from pre-burn winners plus burn UID
+    allowed_indices = set(pre_burn_nonzero_indices)
+    if burn_index is not None:
+        allowed_indices.add(burn_index)
     non_zero_weights = [
-        (meta_hotkeys[i], weights[i]) for i in range(len(weights)) if weights[i] > 0
+        (meta_hotkeys[i], weights[i]) for i in allowed_indices if weights[i] > 0.0
     ]
 
     return weights, non_zero_weights

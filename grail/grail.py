@@ -631,7 +631,7 @@ class Verifier:
                 try:
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
-                        asyncio.create_task(monitor.log_counter("grail.verification_failures"))
+                        asyncio.create_task(monitor.log_counter("validation/grail/verification_failures"))
                 except RuntimeError:
                     pass
             return False, checks
@@ -700,7 +700,7 @@ class Verifier:
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    asyncio.create_task(monitor.log_counter("grail.verification_successes"))
+                    asyncio.create_task(monitor.log_counter("validation/grail/verification_successes"))
             except RuntimeError:
                 pass
         return True, checks
