@@ -41,6 +41,8 @@ from ..shared.constants import (
     ROLLOUTS_PER_PROBLEM,
     SUPERLINEAR_EXPONENT,
     WINDOW_LENGTH,
+    GRAIL_BURN_UID,
+    GRAIL_BURN_PERCENTAGE,
 )
 from . import console
 
@@ -1361,10 +1363,15 @@ def _compute_weights(
     weights = [score / denom for score in raw_scores] if denom > 0.0 else [0.0] * len(meta_hotkeys)
     
     # Apply burn mechanism if configured
-    burn_uid = os.getenv("GRAIL_BURN_UID")
-    burn_percentage = float(os.getenv("GRAIL_BURN_PERCENTAGE", "0.0"))
+    burn_uid = GRAIL_BURN_UID
+    burn_percentage = GRAIL_BURN_PERCENTAGE
     
-    if burn_uid and burn_percentage > 0 and meta_uids is not None:
+    if (
+        burn_uid is not None 
+        and burn_uid >= 0 
+        and burn_percentage > 0 
+        and meta_uids is not None
+    ):
         try:
             burn_uid = int(burn_uid)
             # Ensure burn percentage is between 0 and 100
@@ -1392,6 +1399,9 @@ def _compute_weights(
                 )
         except (ValueError, TypeError) as e:
             logger.error(f"Invalid burn configuration: {e}")
+    else:
+        logger.info(f"Burn uid {burn_uid} or burn percentage {burn_percentage} not set, burn mechanism disabled")
+        raise ValueError("GRAIL_BURN_UID or GRAIL_BURN_PERCENTAGE not set. Please set them in .env!")
     
     non_zero_weights = [
         (meta_hotkeys[i], weights[i]) for i in range(len(weights)) if weights[i] > 0

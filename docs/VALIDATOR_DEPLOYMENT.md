@@ -60,6 +60,10 @@ GRAIL_MONITORING_BACKEND=wandb
 # Hugging Face (optional)
 HF_TOKEN=
 HF_USERNAME=
+
+# Emission Burn Mechanism (required)
+GRAIL_BURN_UID=0
+GRAIL_BURN_PERCENTAGE=10.0
 ```
 
 ### 3. Deploy with Docker Compose
@@ -131,9 +135,9 @@ Use the variables from the root `.env` (see `.env.example`):
 - `WANDB_API_KEY`, `WANDB_PROJECT`, `WANDB_ENTITY`, `WANDB_MODE`, `WANDB_TAGS`, `WANDB_NOTES`, `WANDB_RESUME`, `GRAIL_MONITORING_BACKEND`
 - `HF_TOKEN`, `HF_USERNAME`
 
-**Burn Mechanism** (optional):
+**Burn Mechanism** (required):
 - `GRAIL_BURN_UID` - UID to burn emissions to (reduces total emissions)
-- `GRAIL_BURN_PERCENTAGE` - Percentage of total emissions to burn (0-100, default: 0)
+- `GRAIL_BURN_PERCENTAGE` - Percentage of total emissions to burn (0-100)
 
 ## Advanced Deployment
 
