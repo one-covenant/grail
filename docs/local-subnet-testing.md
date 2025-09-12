@@ -209,6 +209,4 @@ For more realistic testing:
 
 ## Next Steps
 
-- Review the [R2 Credentials Design](./r2_credentials_design.md) for storage configuration
-- Check [Docker Compose Integration Setup](./docker_compose_integration_setup.md) for production setup
 - Monitor your subnet with the Bittensor CLI tools
