@@ -2,41 +2,47 @@
 # --------------------------------------------------------------------------- #
 #                             Imports                                         #
 # --------------------------------------------------------------------------- #
-import os
-import time
-import typer
-import random
 import asyncio
-import logging
 import hashlib
 import json
-import traceback
+import logging
 import math
-import bittensor as bt
+import os
+import random
+import time
+import traceback
 from collections import defaultdict
-from typing import Any, Tuple, Optional, DefaultDict, Dict, List
-
-from grail.infrastructure.drand import get_round_at_time, get_drand_beacon
 from types import SimpleNamespace
+from typing import Any, DefaultDict, Dict, List, Optional, Tuple
 
-from ..grail import Verifier
-from . import console
+import bittensor as bt
+import typer
+
+from grail.infrastructure.drand import get_drand_beacon, get_round_at_time
 
 from ..environments import create_sat_reward_vector
-from ..infrastructure.network import create_subtensor
+from ..grail import Verifier
+from ..infrastructure.chain import GrailChainManager
 from ..infrastructure.comms import (
+    PROTOCOL_VERSION,
     file_exists,
     get_file,
-    upload_valid_rollouts,
-    upload_to_huggingface,
     login_huggingface,
-    PROTOCOL_VERSION,
+    upload_to_huggingface,
+    upload_valid_rollouts,
 )
 from ..infrastructure.credentials import load_r2_credentials
-from ..infrastructure.chain import GrailChainManager
-from ..shared.constants import NETUID, WINDOW_LENGTH, MODEL_NAME, SUPERLINEAR_EXPONENT, ROLLOUTS_PER_PROBLEM
+from ..infrastructure.network import create_subtensor
 from ..monitoring import get_monitoring_manager
 from ..monitoring.config import MonitoringConfig
+from ..shared.constants import (
+    MODEL_NAME,
+    NETUID,
+    ROLLOUTS_PER_PROBLEM,
+    SUPERLINEAR_EXPONENT,
+    WINDOW_LENGTH,
+)
+from . import console
 
 # --------------------------------------------------------------------------- #
 #                  Future Training/Checkpoint Integration (commented)        #
@@ -77,21 +83,24 @@ logger = logging.getLogger("grail")
 # --------------------------------------------------------------------------- #
 # Sampling and validation parameters. Keep these centralized to avoid magic
 # numbers scattered through validation logic and to make tuning straightforward.
-MAX_SAMPLES_PER_MINER = 20                # If <= this many rollouts, check all
-SAMPLE_RATE = 0.1                          # Fraction of GRPO groups to spot-check
+MAX_SAMPLES_PER_MINER = 20  # If <= this many rollouts, check all
+SAMPLE_RATE = 0.1  # Fraction of GRPO groups to spot-check
 STOCHASTIC_CHECK_FAILURE_THRESHOLD = 0.05  # Soft-failure fraction to gate wallet
-REWARD_REL_TOL = 0.02                      # Relative tolerance on reward bounds
-REWARD_ABS_TOL = 1e-6                      # Absolute tolerance on reward bounds
-GRPO_ADV_SUM_TOLERANCE = 0.01              # Sum of advantages should be ~0
-DEBUG_TEXT_LOG_LIMIT_PER_WALLET = 5        # Max sample texts logged per wallet
+REWARD_REL_TOL = 0.02  # Relative tolerance on reward bounds
+REWARD_ABS_TOL = 1e-6  # Absolute tolerance on reward bounds
+GRPO_ADV_SUM_TOLERANCE = 0.01  # Sum of advantages should be ~0
+DEBUG_TEXT_LOG_LIMIT_PER_WALLET = 5  # Max sample texts logged per wallet
 SOFT_CHECK_KEY = "token_distribution_valid"  # Soft heuristic key from verifier
-HARD_CHECK_KEYS = (                         # Hard checks required for validity
+HARD_CHECK_KEYS = (  # Hard checks required for validity
     "tokens_valid",
     "proof_valid",
     "sat_problem_valid",
     "termination_valid",
     "solution_valid",
 )
+
+# Per-wallet per-window failure flag for gating across rolling windows
+FAILURE_FLAG_KEY = "had_failure"
 
 # Submit weights to chain at most once per this many blocks
 WEIGHT_SUBMISSION_INTERVAL_BLOCKS = 360
@@ -100,7 +109,7 @@ WEIGHT_SUBMISSION_INTERVAL_BLOCKS = 360
 WEIGHT_ROLLING_WINDOWS = 12
 
 # Number of miners to log in detail on submission
-#TODO: reduce this later
+# TODO: reduce this later
 TOP_K_WEIGHTS_LOGGED = 256
 
 # Required fields for SAT rollouts validation
@@ -124,9 +133,7 @@ REQUIRED_ROLLOUT_FIELDS = [
 def get_conf(key: str, default: Any = None) -> Any:
     v = os.getenv(key)
     if not v and default is None:
-        console.print(
-            f"[red]{key} not set.[/red]\nRun:\n    af set {key} <value>"
-        )
+        console.print(f"[red]{key} not set.[/red]\nRun:\n    af set {key} <value>")
         raise typer.Exit(code=1)
     return v or default
 
@@ -151,9 +158,8 @@ async def get_subtensor() -> bt.subtensor:
 #                        Helper Functions                                     #
 # --------------------------------------------------------------------------- #
 
-def parse_filename(
-    filename: str
-) -> Tuple[Optional[str], Optional[int], Optional[int]]:
+
+def parse_filename(filename: str) -> Tuple[Optional[str], Optional[int], Optional[int]]:
     """Parse filename to extract wallet, block, nonce"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -166,9 +172,7 @@ def parse_filename(
     return None, None, None
 
 
-def parse_window_filename(
-    filename: str
-) -> Tuple[Optional[str], Optional[int]]:
+def parse_window_filename(filename: str) -> Tuple[Optional[str], Optional[int]]:
     """Parse window filename to extract wallet and window_start"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -208,9 +212,7 @@ def verify_rollout_signature(rollout_data: dict) -> bool:
             return False
 
         keypair = bt.Keypair(ss58_address=hotkey)
-        result = keypair.verify(
-            data=challenge, signature=bytes.fromhex(signature)
-        )
+        result = keypair.verify(data=challenge, signature=bytes.fromhex(signature))
         return bool(result)
     except Exception:
         return False
@@ -226,6 +228,7 @@ miner_inference_counts: DefaultDict[str, list] = defaultdict(
 #                               CLI                                           #
 # --------------------------------------------------------------------------- #
 
+
 def register(app: typer.Typer) -> None:
     app.command("validate")(validate)
 
@@ -238,20 +241,18 @@ HEARTBEAT = time.monotonic()
 
 
 async def watchdog(timeout: int = 600) -> None:
-    global HEARTBEAT
     while True:
         await asyncio.sleep(timeout // 3)
         elapsed = time.monotonic() - HEARTBEAT
         if elapsed > timeout:
-            logging.error(
-                f"[WATCHDOG] Process stalled {elapsed:.0f}s — exiting process."
-            )
+            logging.error(f"[WATCHDOG] Process stalled {elapsed:.0f}s — exiting process.")
             os._exit(1)
 
 
 # --------------------------------------------------------------------------- #
 #                               Validator                                     #
 # --------------------------------------------------------------------------- #
+
 
 def validate(
     use_drand: bool = typer.Option(
@@ -330,26 +331,27 @@ async def _run_validation_service(
     This function manages lifecycle and orchestration. It delegates window/work
     processing to helpers and keeps the outer loop small and readable.
     """
+
     async def _validation_loop() -> None:
         subtensor = None
         credentials, chain_manager = await _initialize_credentials_and_chain(wallet)
         monitor = await _initialize_monitor(wallet)
         # Rolling window metrics per hotkey, keyed by window_start -> metric dict
         # Metrics include: valid, checked, total, estimated_valid, successful, unique
-        inference_counts: DefaultDict[
-            str, DefaultDict[int, Dict[str, int]]
-        ] = defaultdict(lambda: defaultdict(dict))
+        inference_counts: DefaultDict[str, DefaultDict[int, Dict[str, int]]] = defaultdict(
+            lambda: defaultdict(dict)
+        )
         last_processed_window = -1
         last_weights_interval_submitted = -1
-        
+
         while True:
             try:
                 global HEARTBEAT
                 HEARTBEAT = time.monotonic()
-                
+
                 if subtensor is None:
                     subtensor = await get_subtensor()
-                
+
                 meta = await subtensor.metagraph(NETUID)
                 # Build hotkey -> uid mapping for per-miner logging namespaces
                 uid_by_hotkey = {hk: uid for hk, uid in zip(meta.hotkeys, meta.uids)}
@@ -359,7 +361,7 @@ async def _run_validation_service(
                     await asyncio.sleep(5)
                     logger.debug(f"Waiting for new window {target_window}")
                     continue
-                
+
                 if monitor:
                     monitor.set_block_context(current_block, target_window)
                 # ------------------------------------------------------------------ #
@@ -402,15 +404,11 @@ async def _run_validation_service(
                 #     )
                 # Using base model directly without waiting for state
                 logger.info("🚀 Using base model for verification")
-                
+
                 target_window_hash = await subtensor.get_block_hash(target_window)
                 # Single per-window randomness value reused across all checks
-                window_rand = _compute_window_randomness(
-                    target_window_hash, use_drand
-                )
-                hotkeys_to_check = _determine_hotkeys_to_check(
-                    test_mode, wallet, meta
-                )
+                window_rand = _compute_window_randomness(target_window_hash, use_drand)
+                hotkeys_to_check = _determine_hotkeys_to_check(test_mode, wallet, meta)
                 (
                     window_inference_counts,
                     total_valid_rollouts,
@@ -434,44 +432,39 @@ async def _run_validation_service(
                     sat_reward_low=sat_reward_low,
                     sat_reward_high=sat_reward_high,
                 )
-                
+
                 # Log summary
                 logger.info(
                     f"📁 Found {files_found} window files from "
                     f"{len(meta.hotkeys)} active hotkeys"
                 )
                 logger.info(
-                    f"🏁 Total valid rollouts in window {target_window}: "
-                    f"{total_valid_rollouts}"
+                    f"🏁 Total valid rollouts in window {target_window}: " f"{total_valid_rollouts}"
                 )
-                
+                # Aggregate had_failure across wallets for visibility
+                failed_wallets = sum(
+                    1
+                    for m in window_inference_counts.values()
+                    if int(m.get(FAILURE_FLAG_KEY, 0)) == 1
+                )
+                logger.info(f"🚫 Wallets gated this window: {failed_wallets}")
+
                 # Monitoring metrics
                 if monitor:
                     await monitor.log_counter("validation.windows_processed")
                     await monitor.log_gauge(
                         "validation.total_rollouts_processed", total_rollouts_processed
                     )
-                    await monitor.log_gauge(
-                        "validation.valid_rollouts", total_valid_rollouts
-                    )
-                    await monitor.log_gauge(
-                        "validation.invalid_signatures", invalid_signatures
-                    )
-                    await monitor.log_gauge(
-                        "validation.invalid_proofs", invalid_proofs
-                    )
-                    await monitor.log_gauge(
-                        "validation.processing_errors", processing_errors
-                    )
+                    await monitor.log_gauge("validation.valid_rollouts", total_valid_rollouts)
+                    await monitor.log_gauge("validation.invalid_signatures", invalid_signatures)
+                    await monitor.log_gauge("validation.invalid_proofs", invalid_proofs)
+                    await monitor.log_gauge("validation.processing_errors", processing_errors)
                     await monitor.log_gauge("validation.files_found", files_found)
+                    await monitor.log_gauge("validation.failed_wallets_window", failed_wallets)
                     if total_rollouts_processed > 0:
-                        success_rate = (
-                            total_valid_rollouts / total_rollouts_processed
-                        )
-                        await monitor.log_gauge(
-                            "validation.success_rate", success_rate
-                        )
-                
+                        success_rate = total_valid_rollouts / total_rollouts_processed
+                        await monitor.log_gauge("validation.success_rate", success_rate)
+
                 # Uploads
                 if all_valid_rollouts:
                     await _upload_rollouts(
@@ -479,11 +472,11 @@ async def _run_validation_service(
                         all_valid_rollouts=all_valid_rollouts,
                         credentials=credentials,
                     )
-                
+
                 # Update inference counts
                 for hotkey, metrics in window_inference_counts.items():
                     inference_counts[hotkey][target_window] = metrics
-                
+
                 # Compute and set weights
                 weights, non_zero_weights = _compute_weights(
                     meta_hotkeys=meta.hotkeys,
@@ -491,30 +484,20 @@ async def _run_validation_service(
                     target_window=target_window,
                 )
                 if non_zero_weights:
-                    logger.info(
-                        f"⚖️  Setting weights for {len(non_zero_weights)} miners"
-                    )
+                    logger.info(f"⚖️  Setting weights for {len(non_zero_weights)} miners")
                     for hotkey, weight in non_zero_weights[:5]:
                         logger.info(f"   {hotkey}: {weight:.4f}")
                 else:
                     logger.info("⚖️  No miners received weights this window")
-                
+
                 if monitor:
-                    await monitor.log_gauge(
-                        "validation.miners_with_weights", len(non_zero_weights)
-                    )
-                    await monitor.log_gauge(
-                        "validation.total_miners", len(meta.hotkeys)
-                    )
+                    await monitor.log_gauge("validation.miners_with_weights", len(non_zero_weights))
+                    await monitor.log_gauge("validation.total_miners", len(meta.hotkeys))
                     if weights:
                         max_weight = max(weights)
                         avg_weight = sum(weights) / len(weights)
-                        await monitor.log_gauge(
-                            "validation.max_weight", max_weight
-                        )
-                        await monitor.log_gauge(
-                            "validation.average_weight", avg_weight
-                        )
+                        await monitor.log_gauge("validation.max_weight", max_weight)
+                        await monitor.log_gauge("validation.average_weight", avg_weight)
                 # Global submission context (per loop)
                 if monitor:
                     await monitor.log_gauge(
@@ -538,23 +521,20 @@ async def _run_validation_service(
                         SUPERLINEAR_EXPONENT,
                     )
                 logger.debug(
-                    "Weights context prepared: interval_blocks=%s block=%s window=%s rolling=%s superlinear=%s",
+                    "Weights context prepared: interval_blocks=%s block=%s "
+                    "window=%s rolling=%s superlinear=%s",
                     WEIGHT_SUBMISSION_INTERVAL_BLOCKS,
                     current_block,
                     target_window,
                     WEIGHT_ROLLING_WINDOWS,
                     SUPERLINEAR_EXPONENT,
                 )
-                
+
                 # Throttle on-chain weight submissions to once per 360-block interval
-                current_interval = int(
-                    current_block // WEIGHT_SUBMISSION_INTERVAL_BLOCKS
-                )
+                current_interval = int(current_block // WEIGHT_SUBMISSION_INTERVAL_BLOCKS)
                 if current_interval != last_weights_interval_submitted:
                     if not non_zero_weights:
-                        logger.debug(
-                            "Skipping weight submission: all weights are zero"
-                        )
+                        logger.debug("Skipping weight submission: all weights are zero")
                     else:
                         # Precompute top miners for per-miner logging on submission
                         top_miners = _build_top_miners(
@@ -569,15 +549,14 @@ async def _run_validation_service(
                         )
                         last_weights_interval_submitted = current_interval
                         if monitor:
-                            await monitor.log_gauge(
-                                "weights/submission/submitted", 1.0
-                            )
+                            await monitor.log_gauge("weights/submission/submitted", 1.0)
                             await monitor.log_gauge(
                                 "weights/submission/interval_index",
                                 current_interval,
                             )
                         logger.info(
-                            "Submitted weights: interval=%s block=%s miners_with_weights=%s total_miners=%s rolling=%s superlinear=%s",
+                            "Submitted weights: interval=%s block=%s "
+                            "miners_with_weights=%s total_miners=%s rolling=%s superlinear=%s",
                             current_interval,
                             current_block,
                             len(non_zero_weights),
@@ -594,15 +573,9 @@ async def _run_validation_service(
                                 uid_ns = f"{uid}/weights"
                                 await monitor.log_gauge(f"{uid_ns}/weight", w)
                                 await monitor.log_gauge(f"{uid_ns}/base_score", b)
-                                await monitor.log_gauge(
-                                    f"{uid_ns}/superlinear_score", s
-                                )
-                                await monitor.log_gauge(
-                                    f"{uid_ns}/inputs/unique_rolling", tu
-                                )
-                                await monitor.log_gauge(
-                                    f"{uid_ns}/inputs/successful_rolling", ts
-                                )
+                                await monitor.log_gauge(f"{uid_ns}/superlinear_score", s)
+                                await monitor.log_gauge(f"{uid_ns}/inputs/unique_rolling", tu)
+                                await monitor.log_gauge(f"{uid_ns}/inputs/successful_rolling", ts)
                                 await monitor.log_gauge(
                                     f"{uid_ns}/inputs/estimated_valid_rolling",
                                     tev,
@@ -612,7 +585,9 @@ async def _run_validation_service(
                                 hk, inference_counts, target_window
                             )
                             logger.info(
-                                "Weight uid=%s hotkey=%s weight=%.6f base=%.6f unique_rolling=%d successful_rolling=%d estimated_valid_rolling=%d",
+                                "Weight uid=%s hotkey=%s weight=%.6f base=%.6f "
+                                "unique_rolling=%d successful_rolling=%d "
+                                "estimated_valid_rolling=%d",
                                 uid,
                                 hk,
                                 w,
@@ -628,9 +603,7 @@ async def _run_validation_service(
                         )
                 else:
                     if monitor:
-                        await monitor.log_gauge(
-                            "weights/submission/submitted", 0.0
-                        )
+                        await monitor.log_gauge("weights/submission/submitted", 0.0)
                         await monitor.log_gauge(
                             "weights/submission/interval_index", current_interval
                         )
@@ -641,7 +614,7 @@ async def _run_validation_service(
                         last_weights_interval_submitted,
                     )
                 last_processed_window = target_window
-                
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -651,14 +624,10 @@ async def _run_validation_service(
                 await asyncio.sleep(10)
                 continue
 
-    await asyncio.gather(
-        _validation_loop(), watchdog(timeout=(60 * 10))
-    )
+    await asyncio.gather(_validation_loop(), watchdog(timeout=(60 * 10)))
 
 
-async def _initialize_credentials_and_chain(
-    wallet: bt.wallet
-) -> Tuple[Any, GrailChainManager]:
+async def _initialize_credentials_and_chain(wallet: bt.wallet) -> Tuple[Any, GrailChainManager]:
     """Load storage credentials and initialize chain manager.
 
     Returns:
@@ -671,14 +640,12 @@ async def _initialize_credentials_and_chain(
     except Exception as e:
         logger.error(f"Failed to load R2 credentials: {e}")
         raise
-    
+
     config = SimpleNamespace(netuid=NETUID)
     chain_manager = GrailChainManager(config, wallet, credentials)
     await chain_manager.initialize()
-    logger.info(
-        "✅ Initialized chain manager and committed read credentials"
-    )
-    
+    logger.info("✅ Initialized chain manager and committed read credentials")
+
     return credentials, chain_manager
 
 
@@ -692,11 +659,10 @@ async def _initialize_monitor(wallet: bt.wallet) -> Any:
     if monitor:
         validation_config = MonitoringConfig.for_validation(wallet.name)
         run_id = await monitor.start_run(
-            f"validation_{wallet.name}",
-            validation_config.get("hyperparameters", {})
+            f"validation_{wallet.name}", validation_config.get("hyperparameters", {})
         )
         logger.info(f"Started monitoring run: {run_id}")
-    
+
     return monitor
 
 
@@ -706,9 +672,7 @@ def _determine_target_window(current_block: int) -> int:
     return current_window - WINDOW_LENGTH
 
 
-def _compute_window_randomness(
-    target_window_hash: str, use_drand: bool
-) -> str:
+def _compute_window_randomness(target_window_hash: str, use_drand: bool) -> str:
     """Derive deterministic per-window randomness, optionally including drand."""
     if use_drand:
         try:
@@ -718,26 +682,17 @@ def _compute_window_randomness(
                 (target_window_hash + drand_beacon["randomness"]).encode()
             ).hexdigest()
         except Exception:
-            return hashlib.sha256(
-                target_window_hash.encode()
-            ).hexdigest()
-    
-    return hashlib.sha256(
-        target_window_hash.encode()
-    ).hexdigest()
+            return hashlib.sha256(target_window_hash.encode()).hexdigest()
+
+    return hashlib.sha256(target_window_hash.encode()).hexdigest()
 
 
-def _determine_hotkeys_to_check(
-    test_mode: bool, wallet: bt.wallet, meta: Any
-) -> List[str]:
+def _determine_hotkeys_to_check(test_mode: bool, wallet: bt.wallet, meta: Any) -> List[str]:
     """Choose which hotkeys to validate based on test/prod mode."""
     if test_mode:
-        logger.info(
-            f"🧪 TEST MODE: Checking files for own hotkey "
-            f"{wallet.hotkey.ss58_address}"
-        )
+        logger.info(f"🧪 TEST MODE: Checking files for own hotkey " f"{wallet.hotkey.ss58_address}")
         return [wallet.hotkey.ss58_address]
-    
+
     logger.info(f"Checking files for {len(meta.hotkeys)} active hotkeys")
     logger.info(f"Active hotkeys: {meta.hotkeys}")
     return list(meta.hotkeys)
@@ -766,9 +721,7 @@ def _aggregate_weight_inputs(
         total_unique += int(metrics.get("unique", 0))
         total_successful += int(metrics.get("successful", 0))
         total_estimated_valid += int(metrics.get("estimated_valid", 0))
-    unique_score = (
-        min(1.0, total_unique / 10.0) if total_unique > 0 else 0.0
-    )
+    unique_score = min(1.0, total_unique / 10.0) if total_unique > 0 else 0.0
     # NOTE: at this stage we only give weights to unique scores
     base_score = max(0.0, min(1.0, 1.0 * unique_score + 0.0 * 0.0 + 0.0 * 0.0))
     superlinear_score = base_score**SUPERLINEAR_EXPONENT
@@ -785,10 +738,7 @@ def _build_top_miners(
     hotkeys: List[str], uids: List[int], weights: List[float], k: int
 ) -> List[Tuple[str, int, float]]:
     """Return top-k (hotkey, uid, weight) sorted by weight desc."""
-    pairs = [
-        (hk, uid, float(weights[i]))
-        for i, (hk, uid) in enumerate(zip(hotkeys, uids))
-    ]
+    pairs = [(hk, uid, float(weights[i])) for i, (hk, uid) in enumerate(zip(hotkeys, uids))]
     pairs.sort(key=lambda x: x[2], reverse=True)
     return pairs[:k]
 
@@ -814,12 +764,12 @@ async def _process_window(
     all_valid_rollouts: List[dict] = []
     # Limit how many sample texts we log per wallet (debug noise control)
     text_logs_emitted_by_wallet: DefaultDict[str, int] = defaultdict(int)
-    
+
     total_rollouts_processed = 0
     invalid_signatures = 0
     invalid_proofs = 0
     processing_errors = 0
-    
+
     for wallet_addr in hotkeys_to_check:
         try:
             (
@@ -849,12 +799,7 @@ async def _process_window(
                 window_inference_counts[wallet_addr] = metrics
             if published_rollouts:
                 all_valid_rollouts.extend(published_rollouts)
-            (
-                pr_total,
-                pr_invalid_sig,
-                pr_invalid_proof,
-                pr_processing_err
-            ) = processed_counts
+            (pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err) = processed_counts
             total_rollouts_processed += pr_total
             invalid_signatures += pr_invalid_sig
             invalid_proofs += pr_invalid_proof
@@ -862,10 +807,10 @@ async def _process_window(
         except Exception as e:
             logger.warning(f"Error processing wallet {wallet_addr}: {e}")
             continue
-    
+
     for metrics in window_inference_counts.values():
         total_valid_rollouts += metrics.get("estimated_valid", 0)
-    
+
     return (
         window_inference_counts,
         total_valid_rollouts,
@@ -905,35 +850,31 @@ async def _process_wallet_window(
     if not exists:
         logger.debug(f"No file found for {wallet_addr} at {filename}")
         return False, None, [], (0, 0, 0, 0)
-    
+
     logger.info(f"📁 Found file for hotkey {wallet_addr}")
     # Resolve miner UID (fallback to wallet address string)
     uid_str = str(uid_by_hotkey.get(wallet_addr, wallet_addr))
     window_data = await get_file(
-        filename,
-        credentials=miner_bucket if miner_bucket else credentials,
-        use_write=False
+        filename, credentials=miner_bucket if miner_bucket else credentials, use_write=False
     )
     if not window_data:
         logger.warning(f"Could not download {filename}")
         return True, None, [], (0, 0, 0, 0)
-    
+
     file_wallet_addr = window_data.get("wallet")
     window_start = window_data.get("window_start")
     inferences = window_data.get("inferences", [])
     if file_wallet_addr != wallet_addr:
         logger.warning(
-            f"Wallet mismatch in {filename}: expected {wallet_addr}, "
-            f"got {file_wallet_addr}"
+            f"Wallet mismatch in {filename}: expected {wallet_addr}, " f"got {file_wallet_addr}"
         )
         return True, None, [], (0, 0, 0, 0)
     if window_start != target_window:
         logger.warning(
-            f"Window mismatch in {filename}: expected {target_window}, "
-            f"got {window_start}"
+            f"Window mismatch in {filename}: expected {target_window}, " f"got {window_start}"
         )
         return True, None, [], (0, 0, 0, 0)
-    
+
     total_inferences = len(inferences)
     groups_map = defaultdict(list)
     for idx, inf in enumerate(inferences):
@@ -942,36 +883,28 @@ async def _process_wallet_window(
             groups_map[group_id].append(idx)
         else:
             groups_map[f"single_{idx}"] = [idx]
-    
+
     # Determine whether to check all rollouts or sample GRPO groups.
     # Sampling is deterministic per wallet+window via a seeded RNG to keep
     # validators consistent and discourage gaming.
     if total_inferences <= MAX_SAMPLES_PER_MINER:
         indices_to_check = list(range(total_inferences))
-        logger.info(
-            f"🔍 Verifying all {total_inferences} rollouts from {wallet_addr}"
-        )
+        logger.info(f"🔍 Verifying all {total_inferences} rollouts from {wallet_addr}")
     else:
         indices_to_check = []
         num_groups = len(groups_map)
-        
+
         # Choose how many GRPO groups to spot-check (at least 1, at most all).
-        groups_to_check = max(
-            1, min(num_groups, int(num_groups * SAMPLE_RATE))
-        )
-        
+        groups_to_check = max(1, min(num_groups, int(num_groups * SAMPLE_RATE)))
+
         # Derive a deterministic RNG seed from miner wallet,
         # window randomness, and validator hotkey.
         # Selection is stable per validator and window, and
         # harder to game via order-dependent behavior.
         # We take the first 8 bytes of the SHA-256 to get
         # a 64-bit integer seed.
-        seed_material = (
-            f"{wallet_addr}:{window_rand}:{wallet.hotkey.ss58_address}"
-        ).encode()
-        seed_int = int.from_bytes(
-            hashlib.sha256(seed_material).digest()[:8], "big"
-        )
+        seed_material = (f"{wallet_addr}:{window_rand}:{wallet.hotkey.ss58_address}").encode()
+        seed_int = int.from_bytes(hashlib.sha256(seed_material).digest()[:8], "big")
         rng = random.Random(seed_int)
 
         def _group_digest(gidxs: list[int]) -> str:
@@ -984,20 +917,15 @@ async def _process_wallet_window(
             dig = hashlib.sha256()
             for i in sorted(gidxs):
                 commit_json = json.dumps(
-                    inferences[i].get("commit", {}),
-                    sort_keys=True,
-                    separators=(",", ":")
+                    inferences[i].get("commit", {}), sort_keys=True, separators=(",", ":")
                 )
                 dig.update(hashlib.sha256(commit_json.encode()).digest())
             return dig.hexdigest()
-            
+
         # Canonicalize group ordering by sorting ids by their
         # content-derived digest. This avoids dict insertion
         # order or arbitrary ids affecting RNG sampling.
-        group_keys = sorted(
-            list(groups_map.keys()),
-            key=lambda gid: _group_digest(groups_map[gid])
-        )
+        group_keys = sorted(list(groups_map.keys()), key=lambda gid: _group_digest(groups_map[gid]))
         # Deterministically sample groups without replacement using the seeded RNG.
         selected_groups = rng.sample(group_keys, groups_to_check)
         for group_id in selected_groups:
@@ -1009,7 +937,7 @@ async def _process_wallet_window(
             f"rollouts from {groups_to_check}/{num_groups} groups "
             f"({SAMPLE_RATE*100:.0f}% of groups)"
         )
-    
+
     # Per-wallet counters for metrics and gating
     valid_count = 0
     checked_count = 0
@@ -1022,21 +950,18 @@ async def _process_wallet_window(
     hard_failure = False
     soft_gate_triggered = False
     total_planned_checks = len(indices_to_check)
-    
+
     # Compute soft failure threshold for wallet gating
     soft_fail_cutoff = max(
-        1,
-        math.ceil(
-            STOCHASTIC_CHECK_FAILURE_THRESHOLD * max(1, total_planned_checks)
-        )
+        1, math.ceil(STOCHASTIC_CHECK_FAILURE_THRESHOLD * max(1, total_planned_checks))
     )
-    
+
     # Per-wallet processing counters
     pr_total = 0
     pr_invalid_sig = 0
     pr_invalid_proof = 0
     pr_processing_err = 0
-    
+
     for _, inference_idx in enumerate(indices_to_check):
         inference = inferences[inference_idx]
         checked_count += 1
@@ -1108,9 +1033,7 @@ async def _process_wallet_window(
                     rollout_meta = commit_data.get("rollout", {})
                     total_reward = rollout_meta.get("total_reward", None)
                     if not isinstance(total_reward, (int, float)):
-                        logger.debug(
-                            "Missing or invalid total_reward; skipping inference"
-                        )
+                        logger.debug("Missing or invalid total_reward; skipping inference")
                         continue
                     low = float(sat_reward_low)
                     high = float(sat_reward_high)
@@ -1118,16 +1041,12 @@ async def _process_wallet_window(
                     lo = (
                         float("-inf")
                         if low == float("-inf")
-                        else low - max(
-                            abs(low) * REWARD_REL_TOL, REWARD_ABS_TOL
-                        )
+                        else low - max(abs(low) * REWARD_REL_TOL, REWARD_ABS_TOL)
                     )
                     hi = (
                         float("inf")
                         if high == float("inf")
-                        else high + max(
-                            abs(high) * REWARD_REL_TOL, REWARD_ABS_TOL
-                        )
+                        else high + max(abs(high) * REWARD_REL_TOL, REWARD_ABS_TOL)
                     )
                     if not (lo <= tr <= hi):
                         hard_failure = True
@@ -1139,13 +1058,11 @@ async def _process_wallet_window(
                         break
                 except Exception:
                     pass
-                
+
                 if rollout_group:
-                    base_sat_seed = (
-                        f"{wallet_addr}-{target_window_hash}-{rollout_group}"
-                    )
+                    base_sat_seed = f"{wallet_addr}-{target_window_hash}-{rollout_group}"
                     commit_data.setdefault("sat_problem", {})["seed"] = base_sat_seed
-                
+
                 challenge_rand = window_rand
                 if monitor:
                     with monitor.timer("validation.rollout_verification"):
@@ -1164,12 +1081,10 @@ async def _process_wallet_window(
                         challenge_randomness=challenge_rand,
                         log_identity=uid_str,
                     )
-                
+
                 pr_total += 1
                 # Hard checks are cryptographic/proof constraints; any failure rejects wallet
-                hard_valid = all(
-                    checks.get(k, False) for k in HARD_CHECK_KEYS
-                )
+                hard_valid = all(checks.get(k, False) for k in HARD_CHECK_KEYS)
                 soft_valid = checks.get(SOFT_CHECK_KEY, True)
                 if not hard_valid:
                     pr_invalid_proof += 1
@@ -1190,39 +1105,27 @@ async def _process_wallet_window(
                         )
                         break
             except Exception as e:
-                logger.warning(
-                    f"Rollout verification error for {wallet_addr}: {e}"
-                )
+                logger.warning(f"Rollout verification error for {wallet_addr}: {e}")
                 continue
-            
+
             valid_count += 1
-            if (logger.isEnabledFor(logging.DEBUG) and
-                text_logs_emitted_by_wallet[wallet_addr] < text_log_limit):
+            if (
+                logger.isEnabledFor(logging.DEBUG)
+                and text_logs_emitted_by_wallet[wallet_addr] < text_log_limit
+            ):
                 try:
                     tokens = commit_data.get("tokens", [])
                     if isinstance(tokens, list) and tokens:
                         rollout_meta = commit_data.get("rollout", {})
-                        prompt_len = int(
-                            rollout_meta.get("prompt_length", 0) or 0
-                        )
-                        completion_len = int(
-                            rollout_meta.get("completion_length", 0) or 0
-                        )
+                        prompt_len = int(rollout_meta.get("prompt_length", 0) or 0)
+                        completion_len = int(rollout_meta.get("completion_length", 0) or 0)
                         if completion_len > 0 and prompt_len >= 0:
-                            completion_ids = tokens[
-                                prompt_len: prompt_len + completion_len
-                            ]
+                            completion_ids = tokens[prompt_len : prompt_len + completion_len]
                         else:
                             completion_ids = tokens[prompt_len:]
-                        text = verifier.tokenizer.decode(
-                            completion_ids, skip_special_tokens=False
-                        )
-                        reward_val = rollout_meta.get(
-                            "total_reward", float("nan")
-                        )
-                        adv_val = rollout_meta.get(
-                            "advantage", float("nan")
-                        )
+                        text = verifier.tokenizer.decode(completion_ids, skip_special_tokens=False)
+                        reward_val = rollout_meta.get("total_reward", float("nan"))
+                        adv_val = rollout_meta.get("advantage", float("nan"))
                         success_val = rollout_meta.get("success", False)
                         logger.debug(
                             "TEXT[validate] window=%s wallet=%s nonce=%s "
@@ -1252,23 +1155,19 @@ async def _process_wallet_window(
                         text_logs_emitted_by_wallet[wallet_addr] += 1
                 except Exception:
                     pass
-            
+
             rollout_meta = inference.get("commit", {}).get("rollout", {})
             if rollout_meta.get("success", False):
                 successful_rollouts += 1
                 assignment = rollout_meta.get("assignment", [])
-                solution_hash = hashlib.sha256(
-                    str(assignment).encode()
-                ).hexdigest()
+                solution_hash = hashlib.sha256(str(assignment).encode()).hexdigest()
                 unique_solutions.add(solution_hash)
             wallet_rollouts_buffer.append(inference)
         except Exception as e:
-            logger.debug(
-                f"Error processing inference from {wallet_addr}: {e}"
-            )
+            logger.debug(f"Error processing inference from {wallet_addr}: {e}")
             pr_processing_err += 1
             continue
-    
+
     # Handle wallet rejection due to hard or soft failures
     if hard_failure or soft_gate_triggered:
         metrics = {
@@ -1278,28 +1177,29 @@ async def _process_wallet_window(
             "estimated_valid": 0,
             "successful": 0,
             "unique": 0,
+            FAILURE_FLAG_KEY: 1,
         }
         logger.info(
             f"❌ Wallet {wallet_addr} rejected for window {target_window} "
             f"(hard_failure={hard_failure}, "
             f"soft_failures={soft_failures}/{total_planned_checks})"
         )
-        return True, metrics, [], (
-            pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err
-        )
-    
+        if monitor:
+            await monitor.log_gauge(f"validation/{uid_str}/had_failure", 1.0)
+        return True, metrics, [], (pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err)
+
     # Verify GRPO groups after processing checked inferences
     # This ensures grouped rollouts follow GRPO constraints (shared base problem,
     # advantages sum to zero, etc.) even when spot-checking
     grpo_valid_groups = 0
     grpo_invalid_groups = 0
     grpo_incomplete_groups = 0
-    
+
     for group_id, group_rollouts in rollout_groups.items():
         # Skip single rollout "groups" (non-GRPO)
         if str(group_id).startswith("single_"):
             continue
-        
+
         # Verify group has multiple rollouts (GRPO requirement)
         if len(group_rollouts) < 2:
             logger.debug(
@@ -1309,7 +1209,7 @@ async def _process_wallet_window(
             )
             grpo_incomplete_groups += 1
             continue
-        
+
         # Check if this looks like a complete group (should have 4 rollouts for GRPO)
         expected_group_size = ROLLOUTS_PER_PROBLEM
         if len(group_rollouts) != expected_group_size:
@@ -1319,9 +1219,7 @@ async def _process_wallet_window(
             )
         advantages = []
         for r in group_rollouts:
-            adv = r.get("commit", {}).get("rollout", {}).get(
-                "advantage", 0.0
-            )
+            adv = r.get("commit", {}).get("rollout", {}).get("advantage", 0.0)
             advantages.append(adv)
         advantage_sum = sum(advantages)
         if abs(advantage_sum) > GRPO_ADV_SUM_TOLERANCE:
@@ -1337,8 +1235,7 @@ async def _process_wallet_window(
             base_seeds.append(sat_problem.get("seed"))
         if len(set(base_seeds)) != 1:
             logger.debug(
-                f"GRPO group {group_id} has different base problems: "
-                f"{set(base_seeds)}"
+                f"GRPO group {group_id} has different base problems: " f"{set(base_seeds)}"
             )
             grpo_invalid_groups += 1
             continue
@@ -1348,23 +1245,19 @@ async def _process_wallet_window(
         )
         grpo_valid_groups += 1
     if rollout_groups:
-        total_groups_checked = (
-            grpo_valid_groups + grpo_invalid_groups + grpo_incomplete_groups
-        )
+        total_groups_checked = grpo_valid_groups + grpo_invalid_groups + grpo_incomplete_groups
         if total_groups_checked > 0:
             logger.info(
                 f"GRPO groups checked: {grpo_valid_groups} valid, "
                 f"{grpo_invalid_groups} invalid, {grpo_incomplete_groups} "
                 f"incomplete (spot-check artifact)"
             )
-    
+
     # Calculate estimated total valid rollouts based on sampling
     # Extrapolate from sample to estimate total for weight computation
-    sample_pass_rate = (
-        (valid_count / checked_count) if checked_count > 0 else 0
-    )
+    sample_pass_rate = (valid_count / checked_count) if checked_count > 0 else 0
     estimated_valid = int(total_inferences * sample_pass_rate)
-    
+
     # Store metrics for this miner
     metrics = {
         "valid": valid_count,
@@ -1373,6 +1266,7 @@ async def _process_wallet_window(
         "estimated_valid": estimated_valid,
         "successful": successful_rollouts,
         "unique": len(unique_solutions),
+        FAILURE_FLAG_KEY: 0,
     }
     if wallet_rollouts_buffer:
         logger.info(
@@ -1381,17 +1275,20 @@ async def _process_wallet_window(
             f"{successful_rollouts} successful, "
             f"{len(unique_solutions)} unique"
         )
-    
-    return True, metrics, wallet_rollouts_buffer, (
-        pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err
+    if monitor:
+        await monitor.log_gauge(f"validation/{uid_str}/had_failure", 0.0)
+
+    return (
+        True,
+        metrics,
+        wallet_rollouts_buffer,
+        (pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err),
     )
 
 
 def _compute_weights(
     meta_hotkeys: List[str],
-    inference_counts: DefaultDict[
-        str, DefaultDict[int, Dict[str, int]]
-    ],
+    inference_counts: DefaultDict[str, DefaultDict[int, Dict[str, int]]],
     target_window: int,
 ) -> Tuple[List[float], List[Tuple[str, float]]]:
     """Compute normalized weights over the last N windows.
@@ -1415,57 +1312,58 @@ def _compute_weights(
     """
     EMPTY_METRICS: Dict[str, int] = {}
     raw_scores = []
-    
+
     for _, hotkey in enumerate(meta_hotkeys):
         # Calculate score over last 12 windows
         recent_windows = range(
             max(0, target_window - (WEIGHT_ROLLING_WINDOWS - 1) * WINDOW_LENGTH),
             target_window + 1,
-            WINDOW_LENGTH
+            WINDOW_LENGTH,
         )
+        # Gate weight to zero if any recent window had a failure
+        gated_due_to_failures = False
+        for w in recent_windows:
+            if int(inference_counts[hotkey].get(w, EMPTY_METRICS).get(FAILURE_FLAG_KEY, 0)) == 1:
+                gated_due_to_failures = True
+                break
+        if gated_due_to_failures:
+            logger.debug(
+                "Gating weight for %s due to failures in last %s windows",
+                hotkey,
+                WEIGHT_ROLLING_WINDOWS,
+            )
+            raw_scores.append(0.0)
+            continue
         total_unique = 0
         total_successful = 0
         total_estimated_valid = 0
-        
+
         for w in recent_windows:
             metrics = inference_counts[hotkey].get(w, EMPTY_METRICS)
             total_unique += metrics.get("unique", 0)
             total_successful += metrics.get("successful", 0)
             total_estimated_valid += metrics.get("estimated_valid", 0)
-        
+
         # Scoring formula: prioritize unique solutions, then successful, then valid
         # Base performance score in [0, 1]
-        unique_score = (
-            min(1.0, total_unique / 10.0) if total_unique > 0 else 0
-        )
-        success_score = (
-            min(1.0, total_successful / 20.0) if total_successful > 0 else 0
-        )
-        valid_score = (
-            min(1.0, total_estimated_valid / 50.0)
-            if total_estimated_valid > 0 else 0
-        )
+        unique_score = min(1.0, total_unique / 10.0) if total_unique > 0 else 0
+        success_score = min(1.0, total_successful / 20.0) if total_successful > 0 else 0
+        valid_score = min(1.0, total_estimated_valid / 50.0) if total_estimated_valid > 0 else 0
         # NOTE: at this stage we only give weights to unique scores
-        base_score = (
-            1.0 * unique_score + 0.0 * success_score + 0.0 * valid_score
-        )
+        base_score = 1.0 * unique_score + 0.0 * success_score + 0.0 * valid_score
         base_score = max(0.0, min(1.0, base_score))
-        
+
         # Apply superlinear curve: emphasizes higher performers and penalizes splitting
         superlinear_score = base_score**SUPERLINEAR_EXPONENT
         raw_scores.append(superlinear_score)
-    
+
     # Normalize weights
     denom = math.fsum(raw_scores)
-    weights = (
-        [score / denom for score in raw_scores]
-        if denom > 0.0 else [0.0] * len(meta_hotkeys)
-    )
+    weights = [score / denom for score in raw_scores] if denom > 0.0 else [0.0] * len(meta_hotkeys)
     non_zero_weights = [
-        (meta_hotkeys[i], weights[i])
-        for i in range(len(weights)) if weights[i] > 0
+        (meta_hotkeys[i], weights[i]) for i in range(len(weights)) if weights[i] > 0
     ]
-    
+
     return weights, non_zero_weights
 
 
@@ -1473,16 +1371,12 @@ async def _upload_rollouts(
     target_window: int, all_valid_rollouts: List[dict], credentials: Any
 ) -> None:
     """Upload validated rollouts to object storage and Hugging Face."""
-    upload_success = await upload_valid_rollouts(
-        target_window, all_valid_rollouts, credentials
-    )
+    upload_success = await upload_valid_rollouts(target_window, all_valid_rollouts, credentials)
     if upload_success:
-        logger.info(
-            f"📤 Uploaded {len(all_valid_rollouts)} valid rollouts for training"
-        )
+        logger.info(f"📤 Uploaded {len(all_valid_rollouts)} valid rollouts for training")
     else:
         logger.warning("⚠️ Failed to upload valid rollouts for training")
-    
+
     # Upload to Hugging Face dataset for community access
     try:
         hf_success = await upload_to_huggingface(
@@ -1490,14 +1384,10 @@ async def _upload_rollouts(
         )
         if hf_success:
             logger.info(
-                "🤗 Uploaded {} rollouts to Hugging Face dataset".format(
-                    len(all_valid_rollouts)
-                )
+                "🤗 Uploaded {} rollouts to Hugging Face dataset".format(len(all_valid_rollouts))
             )
         else:
-            logger.debug(
-                "Failed to upload to Hugging Face (may need HF_TOKEN)"
-            )
+            logger.debug("Failed to upload to Hugging Face (may need HF_TOKEN)")
     except Exception as e:
         logger.debug(f"Hugging Face upload error: {e}")
 
@@ -1505,6 +1395,7 @@ async def _upload_rollouts(
 # --------------------------------------------------------------------------- #
 #                          Main Entry Point                                   #
 # --------------------------------------------------------------------------- #
+
 
 def main() -> None:
     validate()
