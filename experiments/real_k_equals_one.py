@@ -5,10 +5,10 @@ Uses the actual model/verifier; bypasses signature verification only.
 """
 
 
-def main():
+def main() -> None:
     import grail.grail as gg
 
-    gg.verify_commit_signature = lambda commit, addr: True
+    gg.verify_commit_signature = lambda commit, wallet_address: True
     verifier = gg.Verifier(model_name=gg.MODEL_NAME)
 
     tokens = list(range(1, 1 + max(gg.CHALLENGE_K, 24)))
@@ -30,12 +30,24 @@ def main():
     s_cheat[idx] = s_true[idx]
 
     model_name = getattr(verifier.model, "name_or_path", gg.MODEL_NAME)
-    commit = {"beacon": {"round": 1, "randomness": commit_rand}, "model": {"name": model_name, "layer_index": gg.LAYER_INDEX}, "tokens": tokens, "s_vals": s_cheat, "signature": "00"}
+    commit = {
+        "beacon": {"round": 1, "randomness": commit_rand},
+        "model": {"name": model_name, "layer_index": gg.LAYER_INDEX},
+        "tokens": tokens,
+        "s_vals": s_cheat,
+        "signature": "00",
+    }
     proof_pkg = {"round_R1": {"randomness": open_rand}, "indices": indices}
 
     # Verifier-enforced randomness and minimum k
     verifier_rand = "feedbead"
-    ok = verifier.verify(commit, proof_pkg, prover_address="stub", challenge_randomness=verifier_rand, min_k=gg.CHALLENGE_K)
+    ok = verifier.verify(
+        commit,
+        proof_pkg,
+        prover_address="stub",
+        challenge_randomness=verifier_rand,
+        min_k=gg.CHALLENGE_K,
+    )
     print("Exploit: k=1 ->", "PASS" if ok else "FAIL")
     print(f"Opened index {idx}; only that position is correct")
 

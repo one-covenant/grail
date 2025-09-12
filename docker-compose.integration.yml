@@ -1,0 +1,217 @@
+services:
+  s3:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/ready" ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - minio-data:/data
+
+  # One-time job to create the bucket used in tests
+  s3-setup:
+    image: minio/mc:latest
+    depends_on:
+      s3:
+        condition: service_healthy
+    entrypoint: [ "/bin/sh", "-c" ]
+    command: >
+      "mc alias set local http://s3:9000 minioadmin minioadmin && \
+       mc mb -p local/grail || true"
+
+  miner-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      s3-setup:
+        condition: service_completed_successfully
+    volumes:
+      - ${HOME:-/root}/.bittensor/wallets:/root/.bittensor/wallets
+      - logs:/app/logs
+    env_file:
+      - .env
+    environment:
+      NODE_TYPE: miner
+      # Chain / network
+      BT_NETWORK: ${BT_NETWORK:-test}
+      BT_CHAIN_ENDPOINT: ${BT_CHAIN_ENDPOINT:-}
+      NETUID: ${NETUID:-81}
+      # Wallets (service-specific defaults)
+      BT_WALLET_COLD: ${BT_WALLET_COLD:-minerA}
+      BT_WALLET_HOT: ${BT_WALLET_HOT:-hotA}
+      # Model / app config
+      GRAIL_MODEL_NAME: ${GRAIL_MODEL_NAME:-Qwen/Qwen2-0.5B-Instruct}
+      GRAIL_MAX_NEW_TOKENS: ${GRAIL_MAX_NEW_TOKENS:-100}
+      GRAIL_ROLLOUTS_PER_PROBLEM: ${GRAIL_ROLLOUTS_PER_PROBLEM:-4}
+      GRAIL_MONITORING_BACKEND: ${GRAIL_MONITORING_BACKEND:-wandb}
+      # WandB / monitoring
+      WANDB_MODE: ${WANDB_MODE:-online}
+      WANDB_PROJECT: ${WANDB_PROJECT:-grail}
+      WANDB_ENTITY: ${WANDB_ENTITY:-tplr}
+      WANDB_TAGS: ${WANDB_TAGS:-grail,bittensor,production}
+      WANDB_NOTES: ${WANDB_NOTES:-}
+      WANDB_RESUME: ${WANDB_RESUME:-allow}
+      WANDB_API_KEY: ${WANDB_API_KEY:-}
+      # Hugging Face (optional)
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_USERNAME: ${HF_USERNAME:-}
+      # Object storage
+      R2_ENDPOINT_URL: http://s3:9000
+      R2_FORCE_PATH_STYLE: "true"
+      R2_BUCKET_ID: ${R2_BUCKET_ID:-grail-test}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_WRITE_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID:-minioadmin}
+      R2_WRITE_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY:-minioadmin}
+      R2_READ_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID:-minioadmin}
+      R2_READ_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY:-minioadmin}
+      # Metrics tuning
+      GRAIL_METRIC_BUFFER_SIZE: ${GRAIL_METRIC_BUFFER_SIZE:-100}
+      GRAIL_METRIC_FLUSH_INTERVAL: ${GRAIL_METRIC_FLUSH_INTERVAL:-30.0}
+      # Testing ergonomics
+      GRAIL_WINDOW_LENGTH: "3"
+      CUDA_VISIBLE_DEVICES: "0"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ '0' ]
+              capabilities: [ gpu ]
+    command: [ "-vv", "mine", "--no-drand" ]
+
+  miner-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      s3-setup:
+        condition: service_completed_successfully
+    volumes:
+      - ${HOME:-/root}/.bittensor/wallets:/root/.bittensor/wallets
+      - logs:/app/logs
+    env_file:
+      - .env
+    environment:
+      NODE_TYPE: miner
+      # Chain / network
+      BT_NETWORK: ${BT_NETWORK:-test}
+      BT_CHAIN_ENDPOINT: ${BT_CHAIN_ENDPOINT:-}
+      NETUID: ${NETUID:-81}
+      # Wallets (service-specific defaults)
+      BT_WALLET_COLD: ${BT_WALLET_COLD:-minerB}
+      BT_WALLET_HOT: ${BT_WALLET_HOT:-hotB}
+      # Model / app config
+      GRAIL_MODEL_NAME: ${GRAIL_MODEL_NAME:-Qwen/Qwen2-0.5B-Instruct}
+      GRAIL_MAX_NEW_TOKENS: ${GRAIL_MAX_NEW_TOKENS:-100}
+      GRAIL_ROLLOUTS_PER_PROBLEM: ${GRAIL_ROLLOUTS_PER_PROBLEM:-4}
+      GRAIL_MONITORING_BACKEND: ${GRAIL_MONITORING_BACKEND:-wandb}
+      # WandB / monitoring
+      WANDB_MODE: ${WANDB_MODE:-online}
+      WANDB_PROJECT: ${WANDB_PROJECT:-grail}
+      WANDB_ENTITY: ${WANDB_ENTITY:-tplr}
+      WANDB_TAGS: ${WANDB_TAGS:-grail,bittensor,production}
+      WANDB_NOTES: ${WANDB_NOTES:-}
+      WANDB_RESUME: ${WANDB_RESUME:-allow}
+      WANDB_API_KEY: ${WANDB_API_KEY:-}
+      # Hugging Face (optional)
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_USERNAME: ${HF_USERNAME:-}
+      # Object storage
+      R2_ENDPOINT_URL: http://s3:9000
+      R2_FORCE_PATH_STYLE: "true"
+      R2_BUCKET_ID: ${R2_BUCKET_ID:-grail-test}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_WRITE_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID:-minioadmin}
+      R2_WRITE_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY:-minioadmin}
+      R2_READ_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID:-minioadmin}
+      R2_READ_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY:-minioadmin}
+      # Metrics tuning
+      GRAIL_METRIC_BUFFER_SIZE: ${GRAIL_METRIC_BUFFER_SIZE:-100}
+      GRAIL_METRIC_FLUSH_INTERVAL: ${GRAIL_METRIC_FLUSH_INTERVAL:-30.0}
+      # Testing ergonomics
+      GRAIL_WINDOW_LENGTH: "3"
+      CUDA_VISIBLE_DEVICES: "1"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ '1' ]
+              capabilities: [ gpu ]
+    command: [ "-vv", "mine", "--no-drand" ]
+
+  validator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      miner-1:
+        condition: service_started
+      miner-2:
+        condition: service_started
+    volumes:
+      - ${HOME:-/root}/.bittensor/wallets:/root/.bittensor/wallets
+      - logs:/app/logs
+    env_file:
+      - .env
+    environment:
+      NODE_TYPE: validator
+      # Chain / network
+      BT_NETWORK: ${BT_NETWORK:-test}
+      BT_CHAIN_ENDPOINT: ${BT_CHAIN_ENDPOINT:-}
+      NETUID: ${NETUID:-81}
+      # Wallets (service-specific defaults)
+      BT_WALLET_COLD: ${BT_WALLET_COLD:-validator}
+      BT_WALLET_HOT: ${BT_WALLET_HOT:-hotV}
+      # Model / app config
+      GRAIL_MODEL_NAME: ${GRAIL_MODEL_NAME:-Qwen/Qwen2-0.5B-Instruct}
+      GRAIL_MAX_NEW_TOKENS: ${GRAIL_MAX_NEW_TOKENS:-100}
+      GRAIL_ROLLOUTS_PER_PROBLEM: ${GRAIL_ROLLOUTS_PER_PROBLEM:-4}
+      GRAIL_MONITORING_BACKEND: ${GRAIL_MONITORING_BACKEND:-wandb}
+      # WandB / monitoring
+      WANDB_MODE: ${WANDB_MODE:-online}
+      WANDB_PROJECT: ${WANDB_PROJECT:-grail}
+      WANDB_ENTITY: ${WANDB_ENTITY:-tplr}
+      WANDB_TAGS: ${WANDB_TAGS:-grail,bittensor,production}
+      WANDB_NOTES: ${WANDB_NOTES:-}
+      WANDB_RESUME: ${WANDB_RESUME:-allow}
+      WANDB_API_KEY: ${WANDB_API_KEY:-}
+      # Hugging Face (optional)
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_USERNAME: ${HF_USERNAME:-}
+      # Object storage
+      R2_ENDPOINT_URL: http://s3:9000
+      R2_FORCE_PATH_STYLE: "true"
+      R2_BUCKET_ID: ${R2_BUCKET_ID:-grail-test}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_WRITE_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID:-minioadmin}
+      R2_WRITE_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY:-minioadmin}
+      R2_READ_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID:-minioadmin}
+      R2_READ_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY:-minioadmin}
+      # Metrics tuning
+      GRAIL_METRIC_BUFFER_SIZE: ${GRAIL_METRIC_BUFFER_SIZE:-100}
+      GRAIL_METRIC_FLUSH_INTERVAL: ${GRAIL_METRIC_FLUSH_INTERVAL:-30.0}
+      # Testing ergonomics
+      GRAIL_WINDOW_LENGTH: "3"
+      CUDA_VISIBLE_DEVICES: "2"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ '2' ]
+              capabilities: [ gpu ]
+    command: [ "-vv", "validate", "--no-drand" ]
+
+volumes:
+  minio-data: {}
+  logs: {}

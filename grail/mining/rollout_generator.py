@@ -5,15 +5,79 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Tuple
 from dataclasses import dataclass
+
 # Imports for type hints only - actual types are Any in method signatures
 import bittensor as bt
 
+from ..shared.constants import MAX_NEW_TOKENS
+from ..shared.hf_compat import resolve_hidden_size
+
+
 logger = logging.getLogger(__name__)
+
+
+# Qwen-style reasoning/solution tagging and system prompt
+REASONING_START = "<start_working_out>"
+REASONING_END = "<end_working_out>"
+SOLUTION_START = "<SOLUTION>"
+SOLUTION_END = "</SOLUTION>"
+
+ADVANTAGE_STD_MIN = 1e-8
+
+SYSTEM_PROMPT = (
+    "You are given a problem.\n"
+    "Think about the problem and provide your working out.\n"
+    f"Place it between {REASONING_START} and {REASONING_END}.\n"
+    f"Then, provide your solution between {SOLUTION_START}{SOLUTION_END}"
+    # TODO: replace shorting logic with a better approach later
+    "Keep the reasoning succinct (≤25 steps, ≤500 tokens)."
+)
+
+
+# TODO: We need to build a module that makes the chat template
+# 'model' agnostic and task agnostic for reasoning tasks later on
+def _build_qwen_chat_template(
+    system_prompt: str,
+    reasoning_start: str,
+) -> str:
+    # Keep Jinja2 template exactly as specified; substitute via string
+    # replace
+    # TODO: later support jinja files for different system prompts,
+    # prompts, etc
+    chat_template = (
+        "{% if messages[0]['role'] == 'system' %}"
+        "{{ messages[0]['content'] + eos_token }}"
+        "{% set loop_messages = messages[1:] %}"
+        "{% else %}"
+        "{{ '{system_prompt}' + eos_token }}"
+        "{% set loop_messages = messages %}"
+        "{% endif %}"
+        "{% for message in loop_messages %}"
+        "{% if message['role'] == 'user' %}"
+        "{{ message['content'] }}"
+        "{% elif message['role'] == 'assistant' %}"
+        "{{ message['content'] + eos_token }}"
+        "{% endif %}"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}{{ '{reasoning_start}' }}"
+        "{% endif %}"
+    )
+
+    chat_template = chat_template.replace(
+        "'{system_prompt}'",
+        f"'{system_prompt}'",
+    )
+    chat_template = chat_template.replace(
+        """'{reasoning_start}'""",
+        f"'{reasoning_start}'",
+    )
+    return chat_template
 
 
 @dataclass
 class GRPORollout:
     """Single rollout for GRPO training with GRAIL proof support."""
+
     # Token data for GRAIL proof
     tokens: List[int]  # All tokens (prompt + completion)
     token_logprobs: List[float]  # Logprobs for all tokens
@@ -47,7 +111,7 @@ class RolloutGenerator(ABC):
         model: Any,  # AutoModelForCausalLM instance
         tokenizer: Any,  # AutoTokenizer instance
         device: str = "cuda",
-        rollouts_per_problem: int = 4
+        rollouts_per_problem: int = 4,
     ):
         """
         Initialize with support for multiple rollouts.
@@ -64,11 +128,19 @@ class RolloutGenerator(ABC):
         self.device = device
         self.rollouts_per_problem = rollouts_per_problem
 
+        # Inject Qwen-style chat template with system prompt and reasoning
+        # start token
+        try:
+            tpl = _build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
+            # Set only if not already matching to avoid unnecessary churn
+            if getattr(self.tokenizer, "chat_template", None) != tpl:
+                self.tokenizer.chat_template = tpl
+        except Exception:
+            # Non-fatal: fallback to tokenizer default template
+            logger.debug("Unable to set custom chat_template; using default.")
+
     def generate_grpo_rollouts(
-        self,
-        problem: Any,
-        randomness_hex: str,
-        wallet: bt.wallet
+        self, problem: Any, randomness_hex: str, wallet: bt.wallet
     ) -> List[GRPORollout]:
         """
         Generate multiple rollouts for GRPO training with GRAIL proofs.
@@ -90,15 +162,14 @@ class RolloutGenerator(ABC):
         """
         rollouts = []
 
-        for i in range(self.rollouts_per_problem):
+        # TODO: super inefficient! add dynamic batching; vllm-support; etc soon
+        for _ in range(self.rollouts_per_problem):
             # Initialize environment
             env = self.create_environment(problem)
             state = self.reset_environment(env)
 
             # Generate rollout with logprobs tracking
-            rollout = self._generate_single_rollout(
-                problem, env, state, randomness_hex, wallet
-            )
+            rollout = self._generate_single_rollout(problem, env, state, randomness_hex, wallet)
             rollouts.append(rollout)
 
         # Compute GRPO advantages across the group
@@ -117,16 +188,23 @@ class RolloutGenerator(ABC):
         env: Any,
         state: Any,
         randomness_hex: str,
-        wallet: bt.wallet
+        wallet: bt.wallet,
     ) -> GRPORollout:
         """Generate a single rollout with logprob tracking and GRAIL proof."""
         # Create prompt
         prompt = self.create_prompt(problem, env, state, [])
-        # Tokenize with explicit attention mask to ensure proper
-        # distinction between content and padding tokens
-        tokenized = self.tokenizer(
-            prompt, return_tensors="pt", return_attention_mask=True
+
+        # Apply chat template if available
+        messages = [{"role": "user", "content": prompt}]
+        prompt_with_template = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
         )
+        tokenized = self.tokenizer(
+            prompt_with_template,
+            return_tensors="pt",
+            return_attention_mask=True,
+        )
+
         prompt_ids = tokenized.input_ids.to(self.device)
         attention_mask = tokenized.attention_mask.to(self.device)
         prompt_length = prompt_ids.shape[1]
@@ -139,9 +217,13 @@ class RolloutGenerator(ABC):
                 max_new_tokens=self.get_max_tokens(),
                 temperature=self.get_temperature(),
                 do_sample=True,
+                top_p=0.95,
+                top_k=50,
+                repetition_penalty=1.1,
                 output_scores=True,
                 return_dict_in_generate=True,
-                pad_token_id=self.tokenizer.eos_token_id
+                pad_token_id=self.tokenizer.eos_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
             )
 
         # Extract generated tokens and logprobs
@@ -155,9 +237,7 @@ class RolloutGenerator(ABC):
         all_logprobs = [0.0] * prompt_length + logprobs
 
         # Parse and execute actions from generated text
-        generated_text = self.tokenizer.decode(
-            completion_ids, skip_special_tokens=True
-        )
+        generated_text = self.tokenizer.decode(completion_ids, skip_special_tokens=True)
         action = self.parse_action(generated_text, env, state)
 
         # Execute trajectory in environment
@@ -167,37 +247,33 @@ class RolloutGenerator(ABC):
 
         # Step through environment with parsed action
         next_state, reward, done, info = self.step_environment(env, action)
-        trajectory_entry = self.create_trajectory_entry(
-            state, action, reward, info
-        )
+        trajectory_entry = self.create_trajectory_entry(state, action, reward, info)
         trajectory.append(trajectory_entry)
         total_reward += reward
 
-        # Continue stepping if needed (for multi-step environments)
-        state = next_state
-        while not done and len(trajectory) < self.get_max_tokens():
-            # For subsequent steps, we might need to generate more actions
-            # This depends on the environment - for SAT, we usually make
-            # all assignments at once
-            break
+        if "success" not in info:
+            logger.warning(
+                "step_environment did not return 'success' in info; " "defaulting to False"
+            )
+        success = bool(info.get("success", False))
 
-        # Check final success
-        final_info = self.get_final_info(env, trajectory, total_reward)
-        success = final_info.get('success', False)
+        # Continue stepping if needed (for multi-step environments)
+        # state = next_state
+        # while not done and len(trajectory) < self.get_max_tokens():
+        #     # For subsequent steps, we might need to generate more actions
+        #     # This depends on the environment - for SAT, we usually make
+        #     # all assignments at once
+        #     break
 
         # Generate GRAIL proof components (using existing grail.py logic)
-        from .grail import r_vec_from_randomness, dot_mod_q, sign_commit_binding, LAYER_INDEX
+        from ..grail import r_vec_from_randomness, dot_mod_q, sign_s_vals
 
         # Compute s_vals for GRAIL proof
-        r_vec = r_vec_from_randomness(
-            randomness_hex, self.model.config.hidden_size
-        )
+        r_vec = r_vec_from_randomness(randomness_hex, resolve_hidden_size(self.model))
         s_vals = []
 
         with torch.inference_mode():
-            token_tensor = torch.tensor(
-                [all_token_ids], dtype=torch.long
-            ).to(self.device)
+            token_tensor = torch.tensor([all_token_ids], dtype=torch.long).to(self.device)
             model_outputs = self.model(token_tensor, output_hidden_states=True)
             # Last layer hidden states
             h_layer = model_outputs.hidden_states[-1][0]
@@ -207,9 +283,8 @@ class RolloutGenerator(ABC):
                     s_val = dot_mod_q(h_layer[pos], r_vec)
                     s_vals.append(s_val)
 
-        # Sign commit binding using wallet
-        model_id = getattr(self.model, "name_or_path", "unknown")
-        signature = sign_commit_binding(all_token_ids, randomness_hex, model_id, LAYER_INDEX, s_vals, wallet)
+        # Sign s_vals using wallet
+        signature = sign_s_vals(s_vals, wallet)
 
         return GRPORollout(
             tokens=all_token_ids,
@@ -222,12 +297,10 @@ class RolloutGenerator(ABC):
             success=success,
             s_vals=s_vals,
             signature=signature,
-            beacon={"randomness": randomness_hex}
+            beacon={"randomness": randomness_hex},
         )
 
-    def _extract_logprobs(
-        self, scores: List[torch.Tensor], token_ids: List[int]
-    ) -> List[float]:
+    def _extract_logprobs(self, scores: List[torch.Tensor], token_ids: List[int]) -> List[float]:
         """Extract log probabilities for generated tokens."""
         logprobs = []
         for i, token_id in enumerate(token_ids):
@@ -239,90 +312,21 @@ class RolloutGenerator(ABC):
                 logprobs.append(0.0)
         return logprobs
 
+    # TODO: optimize with torch tensors for efficiency; support off-policy
+    # variants later
     def _compute_grpo_advantages(self, rewards: List[float]) -> List[float]:
         """
-        Compute GRPO advantages: reward - mean(group_rewards).
-        This is the core of GRPO - advantages sum to zero within each group.
+        GRPO advantages with per-group baseline and variance normalization.
+        Ensures zero-mean within group; scales by std for stability.
         """
-        if not rewards:
+        n = len(rewards)
+        if n == 0:
             return []
-        mean_reward = sum(rewards) / len(rewards)
-        return [r - mean_reward for r in rewards]
-
-    def _get_model_decision(
-        self, prompt: str, env: Any, state: Any
-    ) -> Tuple[List[int], Any]:
-        """
-        Get model's decision for the current state.
-
-        Args:
-            prompt: The prompt to send to the model
-            env: The environment instance
-            state: Current environment state
-
-        Returns:
-            Tuple of (tokens generated, action to take)
-        """
-        # Tokenize with explicit attention mask to ensure proper
-        # distinction between content and padding tokens
-        tokenized = self.tokenizer(
-            prompt, return_tensors="pt", return_attention_mask=True
-        )
-        input_ids = tokenized.input_ids.to(self.device)
-        attention_mask = tokenized.attention_mask.to(self.device)
-
-        with torch.inference_mode():
-            try:
-                gen = self.model.generate(
-                    input_ids,
-                    attention_mask=attention_mask,
-                    max_new_tokens=self.get_max_tokens(),
-                    temperature=self.get_temperature(),
-                    do_sample=True,
-                    pad_token_id=self.tokenizer.eos_token_id,
-                    top_p=0.95,
-                    top_k=50,
-                    repetition_penalty=1.1,
-                    eos_token_id=self.tokenizer.eos_token_id
-                )
-            except RuntimeError as e:
-                if "inf" in str(e) or "nan" in str(e):
-                    # Fallback to greedy decoding if sampling fails
-                    logger.debug(
-                        f"Sampling failed, using greedy decoding: {e}"
-                    )
-                    gen = self.model.generate(
-                        input_ids,
-                        attention_mask=attention_mask,
-                        max_new_tokens=self.get_max_tokens(),
-                        do_sample=False,
-                        pad_token_id=self.tokenizer.eos_token_id,
-                        eos_token_id=self.tokenizer.eos_token_id
-                    )
-                else:
-                    raise
-
-        # Extract tokens and parse action
-        tokens = gen[0].tolist()
-
-        # Validate tokens are within vocabulary range
-        vocab_size = len(self.tokenizer)
-        invalid_tokens = [t for t in tokens if t < 0 or t >= vocab_size]
-        if invalid_tokens:
-            logger.warning(
-                f"Found invalid tokens: {invalid_tokens[:5]}... "
-                "Clamping to valid range"
-            )
-            tokens = [max(0, min(t, vocab_size - 1)) for t in tokens]
-
-        generated_text = self.tokenizer.decode(
-            gen[0][len(input_ids[0]):], skip_special_tokens=True
-        )
-        action = self.parse_action(generated_text, env, state)
-
-        return tokens, action
-
-    # Abstract methods that subclasses must implement
+        mean_reward = sum(rewards) / n
+        centered = [r - mean_reward for r in rewards]
+        std = (sum(a * a for a in centered) / n) ** 0.5
+        denom = max(std, ADVANTAGE_STD_MIN)
+        return [a / denom for a in centered]
 
     @abstractmethod
     def create_environment(self, problem: Any) -> Any:
@@ -335,9 +339,7 @@ class RolloutGenerator(ABC):
         pass
 
     @abstractmethod
-    def create_prompt(
-        self, problem: Any, env: Any, state: Any, trajectory: List
-    ) -> str:
+    def create_prompt(self, problem: Any, env: Any, state: Any, trajectory: List) -> str:
         """Create a prompt for the model based on current state."""
         pass
 
@@ -352,17 +354,20 @@ class RolloutGenerator(ABC):
         (next_state, reward, done, info)."""
         pass
 
-    @abstractmethod
-    def create_trajectory_entry(
-        self, state: Any, action: Any, reward: float, info: Dict
-    ) -> Any:
-        """Create an entry for the trajectory list."""
-        pass
+    def create_trajectory_entry(self, state: Any, action: Any, reward: float, info: Dict) -> Any:
+        """Create an entry for the trajectory list.
+
+        Default implementation returns a minimal tuple:
+        (step_index, action, reward).
+
+        For single-step environments, the step_index is 0. Subclasses can
+        override to include richer information if needed.
+        """
+        # NOTE step_index is 0 because we're focusing on single-turn RL
+        return (0, action, reward)
 
     @abstractmethod
-    def get_final_info(
-        self, env: Any, trajectory: List, total_reward: float
-    ) -> Dict:
+    def get_final_info(self, env: Any, trajectory: List, total_reward: float) -> Dict:
         """Get final information to include in the rollout result."""
         pass
 
@@ -370,7 +375,7 @@ class RolloutGenerator(ABC):
 
     def get_max_tokens(self) -> int:
         """Maximum new tokens to generate per decision."""
-        return 20
+        return int(MAX_NEW_TOKENS)
 
     def get_temperature(self) -> float:
         """Temperature for sampling."""

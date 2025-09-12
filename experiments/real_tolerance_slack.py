@@ -3,10 +3,10 @@ Real-model experiment: Tolerance admits incorrect s_vals within ±TOLERANCE.
 """
 
 
-def run_case(delta: int):
+def run_case(delta: int) -> None:
     import grail.grail as gg
 
-    gg.verify_commit_signature = lambda commit, addr: True
+    gg.verify_commit_signature = lambda commit, wallet_address: True
     verifier = gg.Verifier(model_name=gg.MODEL_NAME)
 
     tokens = list(range(1, 1 + max(gg.CHALLENGE_K, 24)))
@@ -26,7 +26,13 @@ def run_case(delta: int):
     indices = gg.indices_from_root(tokens, verifier_rand, len(tokens), k)
 
     model_name = getattr(verifier.model, "name_or_path", gg.MODEL_NAME)
-    commit = {"beacon": {"round": 1, "randomness": commit_rand}, "model": {"name": model_name, "layer_index": gg.LAYER_INDEX}, "tokens": tokens, "s_vals": s_cheat, "signature": "00"}
+    commit = {
+        "beacon": {"round": 1, "randomness": commit_rand},
+        "model": {"name": model_name, "layer_index": gg.LAYER_INDEX},
+        "tokens": tokens,
+        "s_vals": s_cheat,
+        "signature": "00",
+    }
     proof_pkg = {"round_R1": {"randomness": verifier_rand}, "indices": indices}
     ok = verifier.verify(
         commit,
@@ -38,7 +44,7 @@ def run_case(delta: int):
     return ok, gg.TOLERANCE
 
 
-def main():
+def main() -> None:
     ok2, tol = run_case(delta=2)
     print(f"Exploit: tolerance +2 (<= {tol}) ->", "PASS" if ok2 else "FAIL")
     ok4, tol = run_case(delta=4)

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "grail"
-version = "0.0.0"
+dynamic = ["version"]
 description = "GRAIL – Guaranteed Rollout Authenticity via Inference Ledger"
 readme = "README.md"
 license = {text = "MIT"}
@@ -13,7 +13,7 @@ authors = [
     {name = "distriburedstatemachine"},
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
@@ -25,22 +25,24 @@ classifiers = [
 ]
 requires-python = ">=3.9"
 dependencies = [
-    "torch>=2.0.0",
+    "torch>=2.4.1",
     "numpy>=1.20.0",
-    "transformers>=4.20.0",
+    "transformers>=4.55.0",
     "matplotlib>=3.5.0",
     "safetensors>=0.3.0",
-    "click>=8.0.0",
     "python-dotenv>=0.19.0",
     "aiobotocore>=2.0.0",
     "botocore>=1.24.0",
-    "bittensor>=7.0.0",
+    "bittensor==9.10.1",
     "trl>=0.7.0",
     "accelerate>=0.20.0",
     "pydantic>=2.3,<3.0.0",
     "requests>=2.28.0",
     "huggingface-hub>=0.20.0",
     "datasets>=2.14.0",
+    "typer==0.16.1",
+    "rich==14.1.0",
+    "wandb>=0.21.3"
 ]
 
 [project.optional-dependencies]
@@ -51,26 +53,25 @@ dev = [
     "flake8>=5.0.0",
     "mypy>=1.0.0",
     "pre-commit>=2.20.0",
-    "bittensor-cli",
+    "bittensor-cli>=9.10.2",
     "zstandard>=0.21.0",  # Optional: better compression than gzip
 ]
 experiments = [
-    "vllm>=0.2.0",
     "jupyter>=1.0.0",
     "notebook>=6.4.0",
     "seaborn>=0.11.0",
 ]
 all = [
-    "grail[dev,experiments]",
+    "grail[dev]",
 ]
 
 [project.scripts]
-grail = "grail:main"
+grail = "grail.cli:main"
 
 [project.urls]
-Repository = "https://tplr/your-org/grail"
-Documentation = "https://github.com/your-org/grail/blob/main/SPEC.md"
-Issues = "https://github.com/your-org/grail/issues"
+Repository = "https://tplr.ai/grail"
+Documentation = "https://github.com/tplr-ai/grail/blob/main/SPEC.md"
+Issues = "https://github.com/tplr-ai/grail/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["grail"]
@@ -79,7 +80,7 @@ packages = ["grail"]
 path = "grail/__init__.py"
 
 [tool.black]
-line-length = 88
+line-length = 100
 target-version = ['py39', 'py310', 'py311']
 include = '\.pyi?$'
 extend-exclude = '''
@@ -115,7 +116,25 @@ strict_equality = true
 
 [[tool.mypy.overrides]]
 module = [
+    # External libs commonly present at runtime but not in type-check env
+    "bittensor",
     "bittensor.*",
+    "torch",
+    "transformers",
+    "datasets",
+    "huggingface_hub",
+    "aiobotocore",
+    "aiobotocore.*",
+    "botocore",
+    "botocore.*",
+    "safetensors",
+    "safetensors.*",
+    "rich",
+    "rich.*",
+    "typer",
+    "dotenv",
+    "wandb",
+    "requests",
     "trl.*",
     "accelerate.*",
     "vllm.*",
@@ -158,3 +177,13 @@ exclude_lines = [
     "class .*\\bProtocol\\):",
     "@(abc\\.)?abstractmethod",
 ] 
+
+[tool.flake8]
+max-line-length = 100
+extend-ignore = ["E203", "W503"]
+max-complexity = 12
+
+[dependency-groups]
+dev = [
+    "flake8==7.3.0",
+]
