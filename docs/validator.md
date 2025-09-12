@@ -63,8 +63,7 @@ cp .env.example .env
 # Edit .env with your wallet names, network, and R2 credentials
 
 # Run validator (Typer CLI)
-grail -vv validate --test-mode      # validate own files only
-# grail -vv validate --no-test-mode # validate all miners on the subnet
+grail -vv validate      # validate all miners on the subnet
 ```
 
 ---
@@ -191,5 +190,3 @@ Normalize to weights across miners; set on-chain with `set_weights`.
 - SAT environment & rewards: `grail/environments/sat.py`
 - Storage & downloads: `grail/infrastructure/comms.py`
 - Credentials & chain: `grail/infrastructure/credentials.py`, `grail/infrastructure/chain.py`
-
-
