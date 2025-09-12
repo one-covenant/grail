@@ -36,9 +36,7 @@ class SATProblem:
         text += f"Variables: {self.num_vars}\n"
         text += "Clauses:\n"
         for i, clause in enumerate(self.clauses):
-            clause_str = " OR ".join(
-                [f"{'NOT ' if lit < 0 else ''}x{abs(lit)}" for lit in clause]
-            )
+            clause_str = " OR ".join([f"{'NOT ' if lit < 0 else ''}x{abs(lit)}" for lit in clause])
             text += f"  ({clause_str})\n"
         return text
 
@@ -156,8 +154,7 @@ class SATParser(Parser):
                     and len(ans_closes) == 1
                     and trailing_after_answer == 0
                     and bool(re.fullmatch(r"[\s01]*", answer_text or ""))
-                    and self._exact_token_count(answer_text)
-                    == problem.num_vars
+                    and self._exact_token_count(answer_text) == problem.num_vars
                 )
             else:
                 # Malformed; treat as no answer
@@ -165,9 +162,7 @@ class SATParser(Parser):
                 answer_text = ""
                 trailing_after_answer = 0
 
-        answer_has_only_bits_spaces = bool(
-            re.fullmatch(r"[\s01]*", answer_text or "")
-        )
+        answer_has_only_bits_spaces = bool(re.fullmatch(r"[\s01]*", answer_text or ""))
 
         # Determine assignment strictly from <SOLUTION> block;
         # otherwise default all-false
@@ -193,8 +188,7 @@ class SATParser(Parser):
 
         # Best-effort: debug-only logging, no PII and no thinking text
         logger.debug(
-            "SATParser: has_answer=%s, has_thinking=%s, strict=%s, "
-            "trailing=%d",
+            "SATParser: has_answer=%s, has_thinking=%s, strict=%s, " "trailing=%d",
             has_answer,
             has_thinking,
             strict_format_ok,
@@ -204,9 +198,7 @@ class SATParser(Parser):
         return parsed
 
 
-def _normalize_assignment(
-    parsed: Dict[str, Any], problem: SATProblem
-) -> List[bool]:
+def _normalize_assignment(parsed: Dict[str, Any], problem: SATProblem) -> List[bool]:
     """Accepts parsed dict from SATParser, returns List[bool]."""
     assignment_any = parsed.get("assignment", [])
     try:
@@ -216,9 +208,7 @@ def _normalize_assignment(
         return [False] * problem.num_vars
 
 
-def sat_correctness_reward(
-    parsed_or_assignment: Any, problem: SATProblem
-) -> float:
+def sat_correctness_reward(parsed_or_assignment: Any, problem: SATProblem) -> float:
     """Primary correctness reward.
 
     GRPO best-practice gating: only consider correctness when there is a
@@ -232,18 +222,13 @@ def sat_correctness_reward(
         return -0.2
 
     has_answer = bool(parsed_or_assignment.get("has_answer"))
-    only_bits_spaces = bool(
-        parsed_or_assignment.get("answer_has_only_bits_spaces")
-    )
+    only_bits_spaces = bool(parsed_or_assignment.get("answer_has_only_bits_spaces"))
     trailing_after = int(parsed_or_assignment.get("trailing_after_answer", 0))
     answer_text = parsed_or_assignment.get("answer_text", "")
     bits = re.findall(r"[01]", answer_text)
 
     well_formed = (
-        has_answer
-        and only_bits_spaces
-        and trailing_after == 0
-        and len(bits) == problem.num_vars
+        has_answer and only_bits_spaces and trailing_after == 0 and len(bits) == problem.num_vars
     )
 
     if not well_formed:
@@ -409,9 +394,7 @@ class SATRolloutGenerator(RolloutGenerator):
         prompt = f"SAT Problem:\n{problem.to_text()}\n{instructions}"
         return prompt
 
-    def parse_action(
-        self, text: str, env: SATProblem, state: Dict[str, Any]
-    ) -> List[bool]:
+    def parse_action(self, text: str, env: SATProblem, state: Dict[str, Any]) -> List[bool]:
         """Parse completion text into boolean assignment using reward parser
         output.
 
@@ -450,10 +433,7 @@ class SATRolloutGenerator(RolloutGenerator):
         reward = self.reward_vector.compute_reward(completion, env)
         # Optional: warn if reward outside declarative bounds
         try:
-            if (
-                hasattr(self.reward_vector, "has_bounds")
-                and self.reward_vector.has_bounds()
-            ):
+            if hasattr(self.reward_vector, "has_bounds") and self.reward_vector.has_bounds():
                 low, high = self.reward_vector.reward_bounds()
                 if reward < low or reward > high:
                     # Lazy import to avoid circular logger config
@@ -485,9 +465,7 @@ class SATRolloutGenerator(RolloutGenerator):
             for clause in env.clauses:
                 for lit in clause:
                     var_idx = abs(lit) - 1
-                    if (lit > 0 and action[var_idx]) or (
-                        lit < 0 and not action[var_idx]
-                    ):
+                    if (lit > 0 and action[var_idx]) or (lit < 0 and not action[var_idx]):
                         satisfied_clauses += 1
                         break
 

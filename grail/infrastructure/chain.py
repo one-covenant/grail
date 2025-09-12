@@ -39,12 +39,8 @@ class GrailChainManager:
         self.credentials = credentials
         self.fetch_interval = fetch_interval
 
-        network = (
-            os.getenv("BT_NETWORK") or os.getenv("GRAIL_NETWORK") or "test"
-        )
-        chain_endpoint = os.getenv("BT_CHAIN_ENDPOINT") or os.getenv(
-            "GRAIL_CHAIN_ENDPOINT"
-        )
+        network = os.getenv("BT_NETWORK") or os.getenv("GRAIL_NETWORK") or "test"
+        chain_endpoint = os.getenv("BT_CHAIN_ENDPOINT") or os.getenv("GRAIL_CHAIN_ENDPOINT")
 
         if chain_endpoint:
             # When using a custom chain endpoint, pass it as the network parameter
@@ -76,22 +72,16 @@ class GrailChainManager:
             # Compare existing commitment with our read credentials
             our_commitment = self._create_bucket_from_read_creds()
 
-            if not existing or not self._commitments_match(
-                existing, our_commitment
-            ):
+            if not existing or not self._commitments_match(existing, our_commitment):
                 if not existing:
                     logger.info(
                         "No existing commitment found, committing read credentials to chain"
                     )
                 else:
-                    logger.info(
-                        "Commitment mismatch, updating read credentials on chain"
-                    )
+                    logger.info("Commitment mismatch, updating read credentials on chain")
                 self.commit_read_credentials()
             else:
-                logger.info(
-                    "Existing commitment matches current read credentials"
-                )
+                logger.info("Existing commitment matches current read credentials")
 
         except ValueError:
             logger.warning(
@@ -107,9 +97,7 @@ class GrailChainManager:
             name=self.credentials.bucket_name[:32].ljust(32),
             account_id=self.credentials.account_id[:32].ljust(32),
             access_key_id=self.credentials.read_access_key_id[:32].ljust(32),
-            secret_access_key=self.credentials.read_secret_access_key[
-                :64
-            ].ljust(64),
+            secret_access_key=self.credentials.read_secret_access_key[:64].ljust(64),
         )
 
     def _commitments_match(self, bucket1: Bucket, bucket2: Bucket) -> bool:
@@ -117,8 +105,7 @@ class GrailChainManager:
         return (
             bucket1.name.strip() == bucket2.name.strip()
             and bucket1.access_key_id.strip() == bucket2.access_key_id.strip()
-            and bucket1.secret_access_key.strip()
-            == bucket2.secret_access_key.strip()
+            and bucket1.secret_access_key.strip() == bucket2.secret_access_key.strip()
         )
 
     def commit_read_credentials(self) -> None:
@@ -141,12 +128,8 @@ class GrailChainManager:
     def start_commitment_fetcher(self) -> None:
         """Start background task to periodically fetch commitments"""
         if self._fetch_task is None:
-            self._fetch_task = asyncio.create_task(
-                self._fetch_commitments_periodically()
-            )
-            logger.info(
-                f"Started commitment fetcher with {self.fetch_interval}s interval"
-            )
+            self._fetch_task = asyncio.create_task(self._fetch_commitments_periodically())
+            logger.info(f"Started commitment fetcher with {self.fetch_interval}s interval")
 
     async def _fetch_commitments_periodically(self) -> None:
         """Background task to periodically fetch commitments"""
@@ -155,9 +138,7 @@ class GrailChainManager:
                 await asyncio.sleep(self.fetch_interval)
 
                 # Sync metagraph
-                await asyncio.to_thread(
-                    lambda: self.metagraph.sync(subtensor=self.subtensor)
-                )
+                await asyncio.to_thread(lambda: self.metagraph.sync(subtensor=self.subtensor))
 
                 # Fetch commitments
                 await self.fetch_commitments()
@@ -177,17 +158,13 @@ class GrailChainManager:
             commitments = await self.get_commitments()
             if commitments:
                 self.commitments = commitments
-                logger.debug(
-                    f"Fetched {len(commitments)} commitments from chain"
-                )
+                logger.debug(f"Fetched {len(commitments)} commitments from chain")
             else:
                 logger.warning("No commitments fetched from chain")
         except Exception as e:
             logger.error(f"Failed to fetch commitments: {e}")
 
-    async def get_commitments(
-        self, block: Optional[int] = None
-    ) -> Dict[int, Bucket]:
+    async def get_commitments(self, block: Optional[int] = None) -> Dict[int, Bucket]:
         """
         Retrieve all bucket commitments from the chain.
 
@@ -205,27 +182,19 @@ class GrailChainManager:
                 module="Commitments",
                 storage_function="CommitmentOf",
                 params=[self.netuid],
-                block_hash=(
-                    None if block is None else substrate.get_block_hash(block)
-                ),
+                block_hash=(None if block is None else substrate.get_block_hash(block)),
             )
 
             # Create hotkey to UID mapping
-            hotkey_to_uid = dict(
-                zip(self.metagraph.hotkeys, self.metagraph.uids)
-            )
+            hotkey_to_uid = dict(zip(self.metagraph.hotkeys, self.metagraph.uids))
             commitments = {}
 
             for key, value in query_result:
                 try:
                     # Decode the commitment
-                    decoded_ss58, commitment_str = self._decode_metadata(
-                        key, value.value
-                    )
+                    decoded_ss58, commitment_str = self._decode_metadata(key, value.value)
                 except Exception as e:
-                    logger.error(
-                        f"Failed to decode metadata for key {key.value}: {e}"
-                    )
+                    logger.error(f"Failed to decode metadata for key {key.value}: {e}")
                     continue
 
                 # Skip if hotkey not in metagraph
@@ -260,9 +229,7 @@ class GrailChainManager:
                     logger.debug(f"Retrieved bucket commitment for UID {uid}")
 
                 except ValidationError as e:
-                    logger.error(
-                        f"Failed to validate bucket for UID {uid}: {e}"
-                    )
+                    logger.error(f"Failed to validate bucket for UID {uid}: {e}")
                     continue
 
             return commitments
@@ -274,9 +241,7 @@ class GrailChainManager:
             self.subtensor.substrate.initialize()
             return {}
 
-    def _decode_metadata(
-        self, encoded_ss58: tuple, metadata: dict
-    ) -> tuple[str, str]:
+    def _decode_metadata(self, encoded_ss58: tuple, metadata: dict) -> tuple[str, str]:
         """Decode metadata from chain query result"""
         # Decode the key into an SS58 address
         decoded_key = decode_account_id(encoded_ss58[0])

@@ -14,12 +14,8 @@ def main() -> None:
     tokens = list(range(1, 1 + max(gg.CHALLENGE_K, 24)))
     commit_rand = "a1b2c3d4"
 
-    r_vec = gg.r_vec_from_randomness(
-        commit_rand, verifier.model.config.hidden_size
-    )
-    full_ids = gg.torch.tensor(
-        tokens, dtype=gg.torch.long, device=verifier.device
-    ).unsqueeze(0)
+    r_vec = gg.r_vec_from_randomness(commit_rand, verifier.model.config.hidden_size)
+    full_ids = gg.torch.tensor(tokens, dtype=gg.torch.long, device=verifier.device).unsqueeze(0)
     with gg.torch.no_grad():
         outs = verifier.model(full_ids, output_hidden_states=True)
     h_layer = outs.hidden_states[gg.LAYER_INDEX][0]

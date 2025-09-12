@@ -96,9 +96,7 @@ class Tier3TestRunner:
             self.log_files[name] = f
             self.log_locks[name] = threading.Lock()
             f.write(
-                f"==== {name} log started at "
-                f"{time.strftime('%Y-%m-%d %H:%M:%S')} ===="
-                "\n"
+                f"==== {name} log started at " f"{time.strftime('%Y-%m-%d %H:%M:%S')} ====" "\n"
             )
             f.flush()
             logger.info(f"{name} log file: {log_path}")
@@ -132,9 +130,7 @@ class Tier3TestRunner:
                             if lock:
                                 with lock:
                                     ts = time.strftime("%Y-%m-%d %H:%M:%S")
-                                    self.log_files[name].write(
-                                        f"{ts} [{prefix}] {text}"
-                                    )
+                                    self.log_files[name].write(f"{ts} [{prefix}] {text}")
                                     self.log_files[name].flush()
             except Exception as e:
                 if self.running:
@@ -163,9 +159,7 @@ class Tier3TestRunner:
         env.update(
             {
                 "GRAIL_MODEL_NAME": model_name,
-                "WANDB_RUN_NAME": (
-                    f'tier3-miner-{index}-{model_name.split("/")[-1]}'
-                ),
+                "WANDB_RUN_NAME": (f'tier3-miner-{index}-{model_name.split("/")[-1]}'),
                 "WANDB_TAGS": f'tier3,miner,{model_name.split("/")[-1]}',
                 "CUDA_VISIBLE_DEVICES": str(gpu_id),
             }
@@ -179,10 +173,7 @@ class Tier3TestRunner:
         cmd = ["uv", "run", "grail", "-vv", "mine"]
 
         hotkey_info = f" with hotkey '{hotkey}'" if hotkey else ""
-        logger.info(
-            f"Starting {name} with model: {model_name} on GPU {gpu_id}"
-            + hotkey_info
-        )
+        logger.info(f"Starting {name} with model: {model_name} on GPU {gpu_id}" + hotkey_info)
 
         # Ensure per-process log file exists and announce its path
         miner_log_path = self._ensure_log_file(name)
@@ -201,9 +192,7 @@ class Tier3TestRunner:
 
         return process
 
-    def start_validator(
-        self, model_name: str, test_mode: bool = False
-    ) -> subprocess.Popen:
+    def start_validator(self, model_name: str, test_mode: bool = False) -> subprocess.Popen:
         """Start validator with specific model.
 
         Args:
@@ -230,17 +219,11 @@ class Tier3TestRunner:
         cmd = ["uv", "run", "grail", "-vv", "validate"]
         if not test_mode:
             cmd.append("--no-test-mode")
-            logger.info(
-                "Running validator in production mode (will check all miners)"
-            )
+            logger.info("Running validator in production mode (will check all miners)")
         else:
-            logger.info(
-                "Running validator in test mode (will only check own files)"
-            )
+            logger.info("Running validator in test mode (will only check own files)")
 
-        logger.info(
-            f"Starting {name} with model: {model_name} on GPU {gpu_id}"
-        )
+        logger.info(f"Starting {name} with model: {model_name} on GPU {gpu_id}")
 
         # Ensure per-process log file exists and announce its path
         validator_log_path = self._ensure_log_file(name)
@@ -313,23 +296,16 @@ class Tier3TestRunner:
         # Start all miners first
         logger.info("\n🚀 Starting miners...")
         for i, model in enumerate(miner_models):
-            hotkey = (
-                miner_hotkeys[i]
-                if miner_hotkeys and i < len(miner_hotkeys)
-                else None
-            )
+            hotkey = miner_hotkeys[i] if miner_hotkeys and i < len(miner_hotkeys) else None
             self.start_miner(i, model, hotkey)
             if i < len(miner_models) - 1:  # Don't sleep after last miner
                 time.sleep(2)  # Stagger startup
 
         # Wait for miners to fully initialize and register on network
         logger.info(
-            f"\n⏳ Waiting {validator_delay} seconds for miners to initialize "
-            "and register..."
+            f"\n⏳ Waiting {validator_delay} seconds for miners to initialize " "and register..."
         )
-        logger.info(
-            "   This ensures miners are ready before validator starts checking"
-        )
+        logger.info("   This ensures miners are ready before validator starts checking")
 
         # Show countdown for long waits
         if validator_delay > 10:
@@ -346,24 +322,18 @@ class Tier3TestRunner:
 
         logger.info("\nAll services started. Press Ctrl+C to stop.")
         logger.info("Check WandB for detailed metrics and logs.")
-        logger.info(
-            f"WandB project: {self.base_env.get('WANDB_PROJECT', 'unknown')}"
-        )
+        logger.info(f"WandB project: {self.base_env.get('WANDB_PROJECT', 'unknown')}")
         logger.info("=" * 60 + "\n")
 
         # Wait for processes
         try:
-            while self.running and any(
-                p.poll() is None for p in self.processes.values()
-            ):
+            while self.running and any(p.poll() is None for p in self.processes.values()):
                 time.sleep(1)
 
                 # Check for crashed processes
                 for name, process in self.processes.items():
                     if process.poll() is not None and self.running:
-                        logger.warning(
-                            f"{name} exited with code: {process.poll()}"
-                        )
+                        logger.warning(f"{name} exited with code: {process.poll()}")
         except KeyboardInterrupt:
             pass
         finally:
@@ -373,9 +343,7 @@ class Tier3TestRunner:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description=(
-            "Run Tier 3 integration test with multiple miners and a validator"
-        ),
+        description=("Run Tier 3 integration test with multiple miners and a validator"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -403,9 +371,7 @@ Examples:
         type=str,
         help="Comma-separated list of model names for miners",
     )
-    miner_group.add_argument(
-        "--n-miners", type=int, help="Number of miners to run with same model"
-    )
+    miner_group.add_argument("--n-miners", type=int, help="Number of miners to run with same model")
 
     parser.add_argument(
         "--miner-model",
@@ -435,10 +401,7 @@ Examples:
         "--hotkeys",
         type=str,
         default="hk1,hk2,hk3",
-        help=(
-            "Comma-separated list of hotkey names for miners "
-            '(default: "hk1,hk2,hk3")'
-        ),
+        help=("Comma-separated list of hotkey names for miners " '(default: "hk1,hk2,hk3")'),
     )
 
     # Validator delay configuration
@@ -446,10 +409,7 @@ Examples:
         "--validator-delay",
         type=int,
         default=30,
-        help=(
-            "Seconds to wait after starting miners before starting validator "
-            "(default: 30)"
-        ),
+        help=("Seconds to wait after starting miners before starting validator " "(default: 30)"),
     )
 
     args = parser.parse_args()
@@ -466,21 +426,15 @@ Examples:
     # Check if number of hotkeys matches number of miners
     if len(miner_hotkeys) < len(miner_models):
         logger.error(
-            f"Error: Not enough hotkeys ({len(miner_hotkeys)}) for "
-            f"{len(miner_models)} miners"
+            f"Error: Not enough hotkeys ({len(miner_hotkeys)}) for " f"{len(miner_models)} miners"
         )
         logger.error(f"Provided hotkeys: {miner_hotkeys}")
-        logger.error(
-            "Either provide more hotkeys with --hotkeys or reduce number of "
-            "miners"
-        )
+        logger.error("Either provide more hotkeys with --hotkeys or reduce number of " "miners")
         sys.exit(1)
     elif len(miner_hotkeys) > len(miner_models):
         # Just use the first N hotkeys
         miner_hotkeys = miner_hotkeys[: len(miner_models)]
-        logger.info(
-            f"Using first {len(miner_models)} hotkeys: {miner_hotkeys}"
-        )
+        logger.info(f"Using first {len(miner_models)} hotkeys: {miner_hotkeys}")
 
     # Validate number of services vs GPUs
     total_services = len(miner_models) + 1  # +1 for validator
@@ -491,10 +445,7 @@ Examples:
             f"Error: Cannot run {len(miner_models)} miners + 1 validator = "
             f"{total_services} services"
         )
-        logger.error(
-            f"Only {available_gpus} GPUs available starting from GPU "
-            f"{args.start_gpu}"
-        )
+        logger.error(f"Only {available_gpus} GPUs available starting from GPU " f"{args.start_gpu}")
         sys.exit(1)
     elif total_services > available_gpus - 2:
         logger.warning(
@@ -502,8 +453,7 @@ Examples:
             f"{total_services} services"
         )
         logger.warning(
-            f"Using GPUs {args.start_gpu} through "
-            f"{args.start_gpu + total_services - 1}"
+            f"Using GPUs {args.start_gpu} through " f"{args.start_gpu + total_services - 1}"
         )
         response = input("Continue? (y/N): ")
         if response.lower() != "y":
@@ -511,9 +461,7 @@ Examples:
 
     # Run the test
     runner = Tier3TestRunner(start_gpu=args.start_gpu)
-    runner.run(
-        miner_models, args.validator, miner_hotkeys, args.validator_delay
-    )
+    runner.run(miner_models, args.validator, miner_hotkeys, args.validator_delay)
 
 
 if __name__ == "__main__":

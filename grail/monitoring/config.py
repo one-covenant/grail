@@ -48,9 +48,7 @@ class MonitoringConfig:
             "tags": tags,
             "notes": os.getenv("WANDB_NOTES", "GRAIL production monitoring"),
             "buffer_size": int(os.getenv("GRAIL_METRIC_BUFFER_SIZE", "100")),
-            "flush_interval": float(
-                os.getenv("GRAIL_METRIC_FLUSH_INTERVAL", "30.0")
-            ),
+            "flush_interval": float(os.getenv("GRAIL_METRIC_FLUSH_INTERVAL", "30.0")),
             "resume": os.getenv("WANDB_RESUME", "allow"),
         }
 
@@ -78,9 +76,7 @@ class MonitoringConfig:
                 "hyperparameters": {
                     "operation_type": "mining",
                     "wallet_name": wallet_part,
-                    "model_name": os.getenv(
-                        "GRAIL_MODEL_NAME", "microsoft/DialoGPT-medium"
-                    ),
+                    "model_name": os.getenv("GRAIL_MODEL_NAME", "microsoft/DialoGPT-medium"),
                 },
             }
         )
@@ -142,12 +138,8 @@ class MonitoringConfig:
                 "hyperparameters": {
                     "operation_type": "training",
                     "wallet_name": wallet_part,
-                    "model_name": os.getenv(
-                        "GRAIL_MODEL_NAME", "microsoft/DialoGPT-medium"
-                    ),
-                    "rollouts_per_problem": int(
-                        os.getenv("GRAIL_ROLLOUTS_PER_PROBLEM", "4")
-                    ),
+                    "model_name": os.getenv("GRAIL_MODEL_NAME", "microsoft/DialoGPT-medium"),
+                    "rollouts_per_problem": int(os.getenv("GRAIL_ROLLOUTS_PER_PROBLEM", "4")),
                 },
             }
         )
@@ -218,9 +210,7 @@ class MonitoringConfig:
         # Validate backend type
         valid_backends = ["wandb", "null"]
         if config.get("backend_type") not in valid_backends:
-            errors.append(
-                f"Invalid backend_type. Must be one of: {valid_backends}"
-            )
+            errors.append(f"Invalid backend_type. Must be one of: {valid_backends}")
 
         # Validate numeric fields
         numeric_fields = {
@@ -233,9 +223,7 @@ class MonitoringConfig:
                 try:
                     expected_type(config[field])
                 except (ValueError, TypeError):
-                    errors.append(
-                        f"Invalid {field}: must be {expected_type.__name__}"
-                    )
+                    errors.append(f"Invalid {field}: must be {expected_type.__name__}")
 
         # Validate buffer size
         if "buffer_size" in config and config["buffer_size"] <= 0:

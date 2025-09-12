@@ -115,9 +115,7 @@ class MonitoringBackend(ABC):
         pass
 
     @abstractmethod
-    async def log_artifact(
-        self, name: str, data: Any, artifact_type: str
-    ) -> None:
+    async def log_artifact(self, name: str, data: Any, artifact_type: str) -> None:
         """Log artifacts like model checkpoints, plots, etc.
 
         Args:
