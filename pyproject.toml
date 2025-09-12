@@ -7,11 +7,8 @@ name = "grail"
 dynamic = ["version"]
 description = "GRAIL – Guaranteed Rollout Authenticity via Inference Ledger"
 readme = "README.md"
-license = {text = "MIT"}
-authors = [
-    {name = "unconst"},
-    {name = "distriburedstatemachine"},
-]
+license = { text = "MIT" }
+authors = [{ name = "unconst" }, { name = "distriburedstatemachine" }]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Developers",
@@ -42,7 +39,7 @@ dependencies = [
     "datasets>=2.14.0",
     "typer==0.16.1",
     "rich==14.1.0",
-    "wandb>=0.21.3"
+    "wandb>=0.21.3",
 ]
 
 [project.optional-dependencies]
@@ -54,16 +51,10 @@ dev = [
     "mypy>=1.0.0",
     "pre-commit>=2.20.0",
     "bittensor-cli>=9.10.2",
-    "zstandard>=0.21.0",  # Optional: better compression than gzip
+    "zstandard>=0.21.0",      # Optional: better compression than gzip
 ]
-experiments = [
-    "jupyter>=1.0.0",
-    "notebook>=6.4.0",
-    "seaborn>=0.11.0",
-]
-all = [
-    "grail[dev]",
-]
+experiments = ["jupyter>=1.0.0", "notebook>=6.4.0", "seaborn>=0.11.0"]
+all = ["grail[dev]"]
 
 [project.scripts]
 grail = "grail.cli:main"
@@ -146,11 +137,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = [
-    "--strict-markers",
-    "--strict-config",
-    "--verbose",
-]
+addopts = ["--strict-markers", "--strict-config", "--verbose"]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
@@ -158,11 +145,7 @@ markers = [
 
 [tool.coverage.run]
 source = ["grail"]
-omit = [
-    "*/tests/*",
-    "*/experiments/*",
-    "*/__pycache__/*",
-]
+omit = ["*/tests/*", "*/experiments/*", "*/__pycache__/*"]
 
 [tool.coverage.report]
 exclude_lines = [
@@ -176,7 +159,7 @@ exclude_lines = [
     "if __name__ == .__main__.:",
     "class .*\\bProtocol\\):",
     "@(abc\\.)?abstractmethod",
-] 
+]
 
 [tool.flake8]
 max-line-length = 100
@@ -187,6 +170,9 @@ max-complexity = 12
 dev = [
     "flake8==7.3.0",
     "ruff>=0.8.0",
+    "pytest==8.3.2",
+    "pytest-asyncio==0.23.8",
+    "pytest-mock==3.14.0",
 ]
 
 [tool.ruff]
@@ -204,10 +190,10 @@ select = [
     "UP", # pyupgrade
 ]
 ignore = [
-    "E501",  # line too long (handled by formatter)
-    "B008",  # do not perform function calls in argument defaults
-    "C901",  # too complex
-    "W191",  # indentation contains tabs
+    "E501", # line too long (handled by formatter)
+    "B008", # do not perform function calls in argument defaults
+    "C901", # too complex
+    "W191", # indentation contains tabs
 ]
 
 [tool.ruff.format]
