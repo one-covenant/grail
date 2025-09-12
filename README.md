@@ -18,12 +18,12 @@
 </p>
 
 <p align="center">
-  <a href="https://codecov.io/gh/tplr-ai/grail">
+  <!-- <a href="https://codecov.io/gh/tplr-ai/grail">
     <img src="https://codecov.io/gh/tplr-ai/grail/branch/main/graph/badge.svg" alt="Codecov" />
   </a>
   <a href="https://github.com/tplr-ai/grail/blob/main/LICENSE">
     <img src="https://img.shields.io/github/license/tplr-ai/grail" alt="License" />
-  </a>
+  </a> -->
   <a href="https://github.com/tplr-ai/grail/commits/main">
     <img src="https://img.shields.io/github/last-commit/tplr-ai/grail" alt="Last Commit" />
   </a>
