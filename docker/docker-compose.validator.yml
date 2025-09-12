@@ -8,11 +8,11 @@ services:
     command: validate
     environment:
       # Core Bittensor configuration
-      - BT_WALLET_COLD=${WALLET_NAME}
-      - BT_WALLET_HOT=${WALLET_HOTKEY}
-      - NETUID=${NETUID:-81}
-      - BT_NETWORK=${SUBTENSOR_NETWORK:-finney}
-      - BT_CHAIN_ENDPOINT=${SUBTENSOR_CHAIN_ENDPOINT:-}
+      - BT_WALLET_COLD=${BT_WALLET_COLD}
+      - BT_WALLET_HOT=${BT_WALLET_HOT}
+      - NETUID=${NETUID}
+      - BT_NETWORK=${BT_NETWORK}
+      - BT_CHAIN_ENDPOINT=${BT_CHAIN_ENDPOINT}
       
       # Model configuration
       - GRAIL_MODEL_NAME=${GRAIL_MODEL_NAME:-Qwen/Qwen2-0.5B-Instruct}
@@ -20,41 +20,34 @@ services:
       - GRAIL_ROLLOUTS_PER_PROBLEM=${GRAIL_ROLLOUTS_PER_PROBLEM:-4}
       
       # R2/S3 Object Storage (REQUIRED for validators)
-      - R2_ENDPOINT_URL=${R2_ENDPOINT_URL}
       - R2_BUCKET_ID=${R2_BUCKET_ID}
       - R2_ACCOUNT_ID=${R2_ACCOUNT_ID}
       - R2_WRITE_ACCESS_KEY_ID=${R2_WRITE_ACCESS_KEY_ID}
       - R2_WRITE_SECRET_ACCESS_KEY=${R2_WRITE_SECRET_ACCESS_KEY}
       - R2_READ_ACCESS_KEY_ID=${R2_READ_ACCESS_KEY_ID}
       - R2_READ_SECRET_ACCESS_KEY=${R2_READ_SECRET_ACCESS_KEY}
-      - R2_FORCE_PATH_STYLE=${R2_FORCE_PATH_STYLE:-false}
       
       # Monitoring configuration
-      - WANDB_API_KEY=${WANDB_API_KEY:-}
-      - WANDB_PROJECT=${WANDB_PROJECT:-grail-validator}
-      - WANDB_ENTITY=${WANDB_ENTITY:-}
-      - WANDB_MODE=${WANDB_MODE:-online}
-      - WANDB_TAGS=${WANDB_TAGS:-grail,validator,production}
-      - WANDB_NOTES=${WANDB_NOTES:-}
-      - WANDB_RESUME=${WANDB_RESUME:-allow}
-      - GRAIL_MONITORING_BACKEND=${GRAIL_MONITORING_BACKEND:-wandb}
+      - WANDB_API_KEY=${WANDB_API_KEY}
+      - WANDB_PROJECT=${WANDB_PROJECT}
+      - WANDB_ENTITY=${WANDB_ENTITY}
+      - WANDB_MODE=${WANDB_MODE}
+      - WANDB_TAGS=${WANDB_TAGS}
+      - WANDB_NOTES=${WANDB_NOTES}
+      - WANDB_RESUME=${WANDB_RESUME}
+      - GRAIL_MONITORING_BACKEND=${GRAIL_MONITORING_BACKEND}
       
       # Hugging Face configuration
-      - HF_TOKEN=${HF_TOKEN:-}
-      - HF_USERNAME=${HF_USERNAME:-}
+      - HF_TOKEN=${HF_TOKEN}
+      - HF_USERNAME=${HF_USERNAME}
       - HF_HOME=/root/.cache/huggingface
       
       # Performance tuning
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
       - TRANSFORMERS_NO_ADVISORY_WARNINGS=1
-      - GRAIL_METRIC_BUFFER_SIZE=${GRAIL_METRIC_BUFFER_SIZE:-100}
-      - GRAIL_METRIC_FLUSH_INTERVAL=${GRAIL_METRIC_FLUSH_INTERVAL:-30.0}
-      
-      # Axon configuration (optional overrides)
-      - AXON_PORT=${AXON_PORT:-}
-      - AXON_IP=${AXON_IP:-}
-      - AXON_EXTERNAL_PORT=${AXON_EXTERNAL_PORT:-}
-      - AXON_EXTERNAL_IP=${AXON_EXTERNAL_IP:-}
+      - GRAIL_METRIC_BUFFER_SIZE=${GRAIL_METRIC_BUFFER_SIZE}
+      - GRAIL_METRIC_FLUSH_INTERVAL=${GRAIL_METRIC_FLUSH_INTERVAL}
+
       
     volumes:
       # Persistent storage for wallet and cache
