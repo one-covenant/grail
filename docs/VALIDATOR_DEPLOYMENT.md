@@ -33,9 +33,18 @@ cp docker/.env.validator.example docker/.env.validator
 Edit `docker/.env.validator` with your settings:
 
 ```bash
-# Required settings
+# Required: Bittensor Wallet
 WALLET_NAME=your_wallet_name
 WALLET_HOTKEY=your_hotkey_name
+
+# Required: R2/S3 Storage Credentials
+R2_ENDPOINT_URL=https://your-account-id.r2.cloudflarestorage.com
+R2_BUCKET_ID=your-bucket-name
+R2_ACCOUNT_ID=your-account-id
+R2_WRITE_ACCESS_KEY_ID=your-write-access-key
+R2_WRITE_SECRET_ACCESS_KEY=your-write-secret-key
+R2_READ_ACCESS_KEY_ID=your-read-access-key
+R2_READ_SECRET_ACCESS_KEY=your-read-secret-key
 
 # Optional: Monitoring (recommended)
 WANDB_API_KEY=your_wandb_api_key
@@ -99,15 +108,24 @@ The current configuration uses:
 
 ### Environment Variables
 
-Required variables in `docker/.env.validator`:
+**Required** variables in `docker/.env.validator`:
 - `WALLET_NAME` - Your Bittensor wallet name
 - `WALLET_HOTKEY` - Your hotkey name
+- `R2_ENDPOINT_URL` - R2/S3 endpoint URL
+- `R2_BUCKET_ID` - Storage bucket name
+- `R2_ACCOUNT_ID` - Account ID for storage
+- `R2_WRITE_ACCESS_KEY_ID` - Write access key
+- `R2_WRITE_SECRET_ACCESS_KEY` - Write secret key
+- `R2_READ_ACCESS_KEY_ID` - Read access key
+- `R2_READ_SECRET_ACCESS_KEY` - Read secret key
 
-Optional variables:
+**Optional** variables:
 - `NETUID` - Network UID (default: 81)
 - `SUBTENSOR_NETWORK` - Network to connect to (default: finney)
+- `GRAIL_MODEL_NAME` - Model to use (default: Qwen/Qwen2-0.5B-Instruct)
 - `WANDB_API_KEY` - For monitoring with Weights & Biases
 - `WANDB_PROJECT` - WandB project name (default: grail-validator)
+- `HF_TOKEN` - Hugging Face token for dataset uploads
 
 ## Advanced Deployment
 
