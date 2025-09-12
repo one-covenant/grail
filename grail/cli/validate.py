@@ -93,6 +93,16 @@ HARD_CHECK_KEYS = (                         # Hard checks required for validity
     "solution_valid",
 )
 
+# Submit weights to chain at most once per this many blocks
+WEIGHT_SUBMISSION_INTERVAL_BLOCKS = 360
+
+# Number of windows to include when computing rolling weights
+WEIGHT_ROLLING_WINDOWS = 12
+
+# Number of miners to log in detail on submission
+#TODO: reduce this later
+TOP_K_WEIGHTS_LOGGED = 256
+
 # Required fields for SAT rollouts validation
 REQUIRED_ROLLOUT_FIELDS = [
     "window_start",
@@ -330,6 +340,7 @@ async def _run_validation_service(
             str, DefaultDict[int, Dict[str, int]]
         ] = defaultdict(lambda: defaultdict(dict))
         last_processed_window = -1
+        last_weights_interval_submitted = -1
         
         while True:
             try:
@@ -340,6 +351,8 @@ async def _run_validation_service(
                     subtensor = await get_subtensor()
                 
                 meta = await subtensor.metagraph(NETUID)
+                # Build hotkey -> uid mapping for per-miner logging namespaces
+                uid_by_hotkey = {hk: uid for hk, uid in zip(meta.hotkeys, meta.uids)}
                 current_block = await subtensor.get_current_block()
                 target_window = _determine_target_window(current_block)
                 if target_window <= last_processed_window or target_window < 0:
@@ -417,6 +430,7 @@ async def _run_validation_service(
                     credentials=credentials,
                     chain_manager=chain_manager,
                     monitor=monitor,
+                    uid_by_hotkey=uid_by_hotkey,
                     sat_reward_low=sat_reward_low,
                     sat_reward_high=sat_reward_high,
                 )
@@ -501,14 +515,131 @@ async def _run_validation_service(
                         await monitor.log_gauge(
                             "validation.average_weight", avg_weight
                         )
-                
-                await subtensor.set_weights(
-                    wallet=wallet,
-                    netuid=NETUID,
-                    uids=meta.uids,
-                    weights=weights,
-                    wait_for_inclusion=False,
+                # Global submission context (per loop)
+                if monitor:
+                    await monitor.log_gauge(
+                        "weights/submission/interval_blocks",
+                        WEIGHT_SUBMISSION_INTERVAL_BLOCKS,
+                    )
+                    await monitor.log_gauge(
+                        "weights/submission/current_block",
+                        current_block,
+                    )
+                    await monitor.log_gauge(
+                        "weights/submission/target_window",
+                        target_window,
+                    )
+                    await monitor.log_gauge(
+                        "weights/config/rolling_windows",
+                        WEIGHT_ROLLING_WINDOWS,
+                    )
+                    await monitor.log_gauge(
+                        "weights/config/superlinear_exponent",
+                        SUPERLINEAR_EXPONENT,
+                    )
+                logger.debug(
+                    "Weights context prepared: interval_blocks=%s block=%s window=%s rolling=%s superlinear=%s",
+                    WEIGHT_SUBMISSION_INTERVAL_BLOCKS,
+                    current_block,
+                    target_window,
+                    WEIGHT_ROLLING_WINDOWS,
+                    SUPERLINEAR_EXPONENT,
                 )
+                
+                # Throttle on-chain weight submissions to once per 360-block interval
+                current_interval = int(
+                    current_block // WEIGHT_SUBMISSION_INTERVAL_BLOCKS
+                )
+                if current_interval != last_weights_interval_submitted:
+                    if not non_zero_weights:
+                        logger.debug(
+                            "Skipping weight submission: all weights are zero"
+                        )
+                    else:
+                        # Precompute top miners for per-miner logging on submission
+                        top_miners = _build_top_miners(
+                            meta.hotkeys, meta.uids, weights, TOP_K_WEIGHTS_LOGGED
+                        )
+                        await subtensor.set_weights(
+                            wallet=wallet,
+                            netuid=NETUID,
+                            uids=meta.uids,
+                            weights=weights,
+                            wait_for_inclusion=False,
+                        )
+                        last_weights_interval_submitted = current_interval
+                        if monitor:
+                            await monitor.log_gauge(
+                                "weights/submission/submitted", 1.0
+                            )
+                            await monitor.log_gauge(
+                                "weights/submission/interval_index",
+                                current_interval,
+                            )
+                        logger.info(
+                            "Submitted weights: interval=%s block=%s miners_with_weights=%s total_miners=%s rolling=%s superlinear=%s",
+                            current_interval,
+                            current_block,
+                            len(non_zero_weights),
+                            len(meta.hotkeys),
+                            WEIGHT_ROLLING_WINDOWS,
+                            SUPERLINEAR_EXPONENT,
+                        )
+                        # Log detailed per-miner metrics for top-K on submission
+                        if monitor:
+                            for hk, uid, w in top_miners:
+                                tu, ts, tev, b, s = _aggregate_weight_inputs(
+                                    hk, inference_counts, target_window
+                                )
+                                uid_ns = f"{uid}/weights"
+                                await monitor.log_gauge(f"{uid_ns}/weight", w)
+                                await monitor.log_gauge(f"{uid_ns}/base_score", b)
+                                await monitor.log_gauge(
+                                    f"{uid_ns}/superlinear_score", s
+                                )
+                                await monitor.log_gauge(
+                                    f"{uid_ns}/inputs/unique_rolling", tu
+                                )
+                                await monitor.log_gauge(
+                                    f"{uid_ns}/inputs/successful_rolling", ts
+                                )
+                                await monitor.log_gauge(
+                                    f"{uid_ns}/inputs/estimated_valid_rolling",
+                                    tev,
+                                )
+                        for hk, uid, w in top_miners:
+                            tu, ts, tev, b, s = _aggregate_weight_inputs(
+                                hk, inference_counts, target_window
+                            )
+                            logger.info(
+                                "Weight uid=%s hotkey=%s weight=%.6f base=%.6f unique_rolling=%d successful_rolling=%d estimated_valid_rolling=%d",
+                                uid,
+                                hk,
+                                w,
+                                b,
+                                tu,
+                                ts,
+                                tev,
+                            )
+                        logger.info(
+                            "Submitted weights (interval %s, block %s)",
+                            current_interval,
+                            current_block,
+                        )
+                else:
+                    if monitor:
+                        await monitor.log_gauge(
+                            "weights/submission/submitted", 0.0
+                        )
+                        await monitor.log_gauge(
+                            "weights/submission/interval_index", current_interval
+                        )
+                    logger.debug(
+                        "Skipping weight submission (360-block throttle). "
+                        "interval=%s, last_submitted=%s",
+                        current_interval,
+                        last_weights_interval_submitted,
+                    )
                 last_processed_window = target_window
                 
             except asyncio.CancelledError:
@@ -612,6 +743,56 @@ def _determine_hotkeys_to_check(
     return list(meta.hotkeys)
 
 
+def _aggregate_weight_inputs(
+    hotkey: str,
+    inference_counts: DefaultDict[str, DefaultDict[int, Dict[str, int]]],
+    target_window: int,
+) -> Tuple[int, int, int, float, float]:
+    """Aggregate rolling inputs and derive base/superlinear scores.
+
+    Returns: (unique_sum, successful_sum, estimated_valid_sum,
+              base_score, superlinear_score)
+    """
+    recent_windows = range(
+        max(0, target_window - (WEIGHT_ROLLING_WINDOWS - 1) * WINDOW_LENGTH),
+        target_window + 1,
+        WINDOW_LENGTH,
+    )
+    total_unique = 0
+    total_successful = 0
+    total_estimated_valid = 0
+    for w in recent_windows:
+        metrics = inference_counts[hotkey].get(w, {})
+        total_unique += int(metrics.get("unique", 0))
+        total_successful += int(metrics.get("successful", 0))
+        total_estimated_valid += int(metrics.get("estimated_valid", 0))
+    unique_score = (
+        min(1.0, total_unique / 10.0) if total_unique > 0 else 0.0
+    )
+    # NOTE: at this stage we only give weights to unique scores
+    base_score = max(0.0, min(1.0, 1.0 * unique_score + 0.0 * 0.0 + 0.0 * 0.0))
+    superlinear_score = base_score**SUPERLINEAR_EXPONENT
+    return (
+        total_unique,
+        total_successful,
+        total_estimated_valid,
+        base_score,
+        superlinear_score,
+    )
+
+
+def _build_top_miners(
+    hotkeys: List[str], uids: List[int], weights: List[float], k: int
+) -> List[Tuple[str, int, float]]:
+    """Return top-k (hotkey, uid, weight) sorted by weight desc."""
+    pairs = [
+        (hk, uid, float(weights[i]))
+        for i, (hk, uid) in enumerate(zip(hotkeys, uids))
+    ]
+    pairs.sort(key=lambda x: x[2], reverse=True)
+    return pairs[:k]
+
+
 async def _process_window(
     hotkeys_to_check: List[str],
     target_window: int,
@@ -622,6 +803,7 @@ async def _process_window(
     credentials: Any,
     chain_manager: GrailChainManager,
     monitor: Any,
+    uid_by_hotkey: Dict[str, int],
     sat_reward_low: float,
     sat_reward_high: float,
 ) -> Tuple[Dict[str, Dict[str, int]], int, int, int, int, int, int, List[dict]]:
@@ -655,6 +837,7 @@ async def _process_window(
                 credentials=credentials,
                 chain_manager=chain_manager,
                 monitor=monitor,
+                uid_by_hotkey=uid_by_hotkey,
                 text_logs_emitted_by_wallet=text_logs_emitted_by_wallet,
                 text_log_limit=DEBUG_TEXT_LOG_LIMIT_PER_WALLET,
                 sat_reward_low=sat_reward_low,
@@ -705,6 +888,7 @@ async def _process_wallet_window(
     credentials: Any,
     chain_manager: GrailChainManager,
     monitor: Any,
+    uid_by_hotkey: Dict[str, int],
     text_logs_emitted_by_wallet: DefaultDict[str, int],
     text_log_limit: int,
     sat_reward_low: float,
@@ -723,6 +907,8 @@ async def _process_wallet_window(
         return False, None, [], (0, 0, 0, 0)
     
     logger.info(f"📁 Found file for hotkey {wallet_addr}")
+    # Resolve miner UID (fallback to wallet address string)
+    uid_str = str(uid_by_hotkey.get(wallet_addr, wallet_addr))
     window_data = await get_file(
         filename,
         credentials=miner_bucket if miner_bucket else credentials,
@@ -967,14 +1153,16 @@ async def _process_wallet_window(
                             commit_data,
                             inference["proof"],
                             wallet_addr,
-                            challenge_randomness=challenge_rand
+                            challenge_randomness=challenge_rand,
+                            log_identity=uid_str,
                         )
                 else:
                     is_valid, checks = verifier.verify_rollout(
                         commit_data,
                         inference["proof"],
                         wallet_addr,
-                        challenge_randomness=challenge_rand
+                        challenge_randomness=challenge_rand,
+                        log_identity=uid_str,
                     )
                 
                 pr_total += 1
@@ -1049,7 +1237,7 @@ async def _process_wallet_window(
                         )
                         if monitor:
                             await monitor.log_artifact(
-                                f"validation/{wallet_addr}/sample_text",
+                                f"validation/{uid_str}/sample_text",
                                 {
                                     "window": target_window,
                                     "wallet": wallet_addr,
@@ -1206,14 +1394,32 @@ def _compute_weights(
     ],
     target_window: int,
 ) -> Tuple[List[float], List[Tuple[str, float]]]:
-    """Compute normalized weights from rolling window metrics."""
+    """Compute normalized weights over the last N windows.
+
+    Args:
+        meta_hotkeys: Hotkeys in metagraph order.
+        inference_counts: hotkey -> window_start -> metrics dict.
+        target_window: Right edge (inclusive) of the range.
+
+    Method:
+        Sum metrics over the last WEIGHT_ROLLING_WINDOWS windows
+        (step=WINDOW_LENGTH; missing windows -> 0). Convert to capped
+        scores in [0, 1]; only 'unique' is currently weighted. Apply
+        x**SUPERLINEAR_EXPONENT, then L1-normalize across miners. If the
+        sum is zero, return an all-zero vector.
+
+    Returns:
+        (weights, non_zero_weights)
+        weights: floats aligned to meta_hotkeys; sums to 1.0 or all zeros.
+        non_zero_weights: (hotkey, weight) pairs where weight > 0.0.
+    """
     EMPTY_METRICS: Dict[str, int] = {}
     raw_scores = []
     
     for _, hotkey in enumerate(meta_hotkeys):
-        # Calculate score over last 3 windows
+        # Calculate score over last 12 windows
         recent_windows = range(
-            max(0, target_window - 2 * WINDOW_LENGTH),
+            max(0, target_window - (WEIGHT_ROLLING_WINDOWS - 1) * WINDOW_LENGTH),
             target_window + 1,
             WINDOW_LENGTH
         )
@@ -1239,6 +1445,7 @@ def _compute_weights(
             min(1.0, total_estimated_valid / 50.0)
             if total_estimated_valid > 0 else 0
         )
+        # NOTE: at this stage we only give weights to unique scores
         base_score = (
             1.0 * unique_score + 0.0 * success_score + 0.0 * valid_score
         )

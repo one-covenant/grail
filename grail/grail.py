@@ -621,6 +621,7 @@ class Verifier:
         *,
         challenge_randomness: str,
         min_k: int = CHALLENGE_K,
+        log_identity: Optional[str] = None,
     ) -> Tuple[bool, Dict[str, bool]]:
         """
         Verify SAT rollout with GRAIL proof.
@@ -636,8 +637,10 @@ class Verifier:
             - solution_valid: if success is claimed, assignment solves the instance
         """
         monitor = get_monitoring_manager()
-        # Record current wallet for namespaced debug metrics
-        self._current_wallet = prover_address
+        # Record current logging identity for namespaced debug metrics
+        self._current_wallet = (
+            log_identity if log_identity is not None else prover_address
+        )
 
         # Initialize checks map with conservative defaults
         checks: Dict[str, bool] = {
@@ -1137,9 +1140,9 @@ class Verifier:
                 if not loop.is_running():
                     return
 
-                # Namespace metrics per-wallet to create separate tabs in W&B
+                # Namespace metrics per-miner using uid-first layout in W&B
                 wallet_ns = (
-                    f"sampling_shape_check/{self._current_wallet}"
+                    f"{self._current_wallet}/sampling_shape_check"
                     if getattr(self, "_current_wallet", None)
                     else "sampling_shape_check"
                 )
