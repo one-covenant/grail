@@ -44,8 +44,8 @@ from ..shared.constants import (
     SUPERLINEAR_EXPONENT,
     WINDOW_LENGTH,
 )
-from . import console
 from ..shared.subnet import get_own_uid_on_subnet
+from . import console
 
 # --------------------------------------------------------------------------- #
 #                  Future Training/Checkpoint Integration (commented)        #
@@ -538,7 +538,10 @@ async def _run_validation_service(
                     stats = _compute_weight_stats(weights)
                     logger.info(
                         "weights: min=%.6f mean=%.6f max=%.6f gini=%.6f",
-                        stats["min"], stats["mean"], stats["max"], stats["gini"],
+                        stats["min"],
+                        stats["mean"],
+                        stats["max"],
+                        stats["gini"],
                     )
                 # Global submission context (per loop)
                 if monitor:
@@ -716,9 +719,7 @@ async def _initialize_monitor(wallet: bt.wallet) -> Any:
         if subtensor is not None:
             uid = await get_own_uid_on_subnet(subtensor, 81, wallet.hotkey.ss58_address)
         run_name = f"validator-{uid}" if uid is not None else f"validation_{wallet.name}"
-        run_id = await monitor.start_run(
-            run_name, validation_config.get("hyperparameters", {})
-        )
+        run_id = await monitor.start_run(run_name, validation_config.get("hyperparameters", {}))
         logger.info(f"Started monitoring run: {run_id} (name={run_name})")
 
     return monitor
@@ -848,8 +849,7 @@ def _get_active_uids(
         for w in recent_windows:
             metrics = hk_windows.get(w)
             if metrics and (
-                int(metrics.get("total", 0)) > 0
-                or int(metrics.get(FAILURE_FLAG_KEY, 0)) == 1
+                int(metrics.get("total", 0)) > 0 or int(metrics.get(FAILURE_FLAG_KEY, 0)) == 1
             ):
                 active_uids.append(int(uid))
                 break
@@ -1529,9 +1529,7 @@ def _compute_weights(
     allowed_indices = set(pre_burn_nonzero_indices)
     if burn_index is not None:
         allowed_indices.add(burn_index)
-    non_zero_weights = [
-        (meta_hotkeys[i], weights[i]) for i in allowed_indices if weights[i] > 0.0
-    ]
+    non_zero_weights = [(meta_hotkeys[i], weights[i]) for i in allowed_indices if weights[i] > 0.0]
 
     return weights, non_zero_weights
 

@@ -28,8 +28,8 @@ from ..infrastructure.network import create_subtensor
 from ..monitoring import get_monitoring_manager
 from ..monitoring.config import MonitoringConfig
 from ..shared.constants import LAYER_INDEX, MODEL_NAME, ROLLOUTS_PER_PROBLEM, WINDOW_LENGTH
-from . import console
 from ..shared.subnet import get_own_uid_on_subnet
+from . import console
 
 # --------------------------------------------------------------------------- #
 #                       Constants & global singletons                         #
@@ -831,9 +831,7 @@ def mine(
             if subtensor_for_uid is not None:
                 uid = await get_own_uid_on_subnet(subtensor_for_uid, 81, wallet.hotkey.ss58_address)
             run_name = f"miner-{uid}" if uid is not None else f"mining_{wallet.name}"
-            run_id = await monitor.start_run(
-                run_name, mining_config.get("hyperparameters", {})
-            )
+            run_id = await monitor.start_run(run_name, mining_config.get("hyperparameters", {}))
             logger.info(f"Started monitoring run: {run_id} (name={run_name})")
 
         while True:
