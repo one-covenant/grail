@@ -986,9 +986,7 @@ async def _process_wallet_window(
     if file_wallet_addr != wallet_addr:
         got_uid = uid_by_hotkey.get(file_wallet_addr)
         got_id = got_uid if got_uid is not None else "unknown"
-        logger.warning(
-            f"UID mismatch in {filename}: expected {uid_str}, got {got_id}"
-        )
+        logger.warning(f"UID mismatch in {filename}: expected {uid_str}, got {got_id}")
         return True, None, [], (0, 0, 0, 0)
     if window_start != target_window:
         logger.warning(
