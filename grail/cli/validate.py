@@ -445,7 +445,7 @@ async def _run_validation_service(
 
                 # Log summary
                 logger.info(
-                    f"📁 Found {files_found} window files from {len(meta.hotkeys)} active hotkeys"
+                    f"📁 Found {files_found} window files from {len(meta.uids)} registered UIDs"
                 )
                 logger.info(
                     f"🏁 Total valid rollouts in window {target_window}: {total_valid_rollouts}"
@@ -456,7 +456,7 @@ async def _run_validation_service(
                     for m in window_inference_counts.values()
                     if int(m.get(FAILURE_FLAG_KEY, 0)) == 1
                 )
-                logger.info(f"🚫 Wallets gated this window: {failed_wallets}")
+                logger.info(f"🚫 UIDs gated this window: {failed_wallets}")
 
                 # Monitoring metrics
                 if monitor:
@@ -515,7 +515,9 @@ async def _run_validation_service(
                 if non_zero_weights:
                     logger.info(f"⚖️  Setting weights for {len(non_zero_weights)} miners")
                     for hotkey, weight in non_zero_weights[:5]:
-                        logger.info(f"   {hotkey}: {weight:.4f}")
+                        uid = uid_by_hotkey.get(hotkey, None)
+                        display = uid if uid is not None else hotkey
+                        logger.info(f"   uid {display}: {weight:.4f}")
                 else:
                     logger.info("⚖️  No miners received weights this window")
 
@@ -748,12 +750,15 @@ def _compute_window_randomness(target_window_hash: str, use_drand: bool) -> str:
 
 def _determine_hotkeys_to_check(test_mode: bool, wallet: bt.wallet, meta: Any) -> list[str]:
     """Choose which hotkeys to validate based on test/prod mode."""
+    uid_by_hotkey = dict(zip(meta.hotkeys, meta.uids))
     if test_mode:
-        logger.info(f"🧪 TEST MODE: Checking files for own hotkey {wallet.hotkey.ss58_address}")
+        own_uid = uid_by_hotkey.get(wallet.hotkey.ss58_address)
+        msg_id = own_uid if own_uid is not None else wallet.hotkey.ss58_address
+        logger.info(f"🧪 TEST MODE: Checking files for own uid {msg_id}")
         return [wallet.hotkey.ss58_address]
 
-    logger.info(f"Checking files for {len(meta.hotkeys)} active hotkeys")
-    logger.info(f"Active hotkeys: {meta.hotkeys}")
+    logger.info(f"Checking files for {len(meta.uids)} registered UIDs")
+    logger.info(f"UIDs to Check: {list(meta.uids)}")
     return list(meta.hotkeys)
 
 
@@ -918,7 +923,8 @@ async def _process_window(
             invalid_proofs += pr_invalid_proof
             processing_errors += pr_processing_err
         except Exception as e:
-            logger.warning(f"Error processing wallet {wallet_addr}: {e}")
+            uid_str = str(uid_by_hotkey.get(wallet_addr, wallet_addr))
+            logger.warning(f"Error processing uid {uid_str}: {e}")
             continue
 
     for metrics in window_inference_counts.values():
@@ -955,18 +961,18 @@ async def _process_wallet_window(
     """Validate a single wallet window file and return metrics and rollouts."""
     filename = f"grail/windows/{wallet_addr}-window-{target_window}.json"
     miner_bucket = chain_manager.get_bucket_for_hotkey(wallet_addr)
+    # Resolve miner UID (fallback to wallet address string)
+    uid_str = str(uid_by_hotkey.get(wallet_addr, wallet_addr))
     exists = await file_exists(
         filename,
         credentials=miner_bucket if miner_bucket else credentials,
         use_write=False,
     )
     if not exists:
-        logger.debug(f"No file found for {wallet_addr} at {filename}")
+        logger.debug(f"No file found for uid {uid_str} at {filename}")
         return False, None, [], (0, 0, 0, 0)
 
-    logger.info(f"📁 Found file for hotkey {wallet_addr}")
-    # Resolve miner UID (fallback to wallet address string)
-    uid_str = str(uid_by_hotkey.get(wallet_addr, wallet_addr))
+    logger.info(f"📁 Found file for uid {uid_str}")
     window_data = await get_file(
         filename, credentials=miner_bucket if miner_bucket else credentials, use_write=False
     )
@@ -978,8 +984,10 @@ async def _process_wallet_window(
     window_start = window_data.get("window_start")
     inferences = window_data.get("inferences", [])
     if file_wallet_addr != wallet_addr:
+        got_uid = uid_by_hotkey.get(file_wallet_addr)
+        got_id = got_uid if got_uid is not None else "unknown"
         logger.warning(
-            f"Wallet mismatch in {filename}: expected {wallet_addr}, got {file_wallet_addr}"
+            f"UID mismatch in {filename}: expected {uid_str}, got {got_id}"
         )
         return True, None, [], (0, 0, 0, 0)
     if window_start != target_window:
@@ -1002,7 +1010,7 @@ async def _process_wallet_window(
     # validators consistent and discourage gaming.
     if total_inferences <= MAX_SAMPLES_PER_MINER:
         indices_to_check = list(range(total_inferences))
-        logger.info(f"🔍 Verifying all {total_inferences} rollouts from {wallet_addr}")
+        logger.info(f"🔍 Verifying all {total_inferences} rollouts from uid {uid_str}")
     else:
         indices_to_check = []
         num_groups = len(groups_map)
@@ -1096,30 +1104,30 @@ async def _process_wallet_window(
             if not all(field in inference for field in required_fields):
                 hard_failure = True
                 logger.warning(
-                    f"Missing required fields in inference from {wallet_addr}; "
-                    f"invalidating wallet for window {target_window}"
+                    f"Missing required fields in inference from uid {uid_str}; "
+                    f"invalidating uid for window {target_window}"
                 )
                 break
             if inference["window_start"] != target_window:
                 hard_failure = True
                 logger.warning(
-                    f"Window mismatch in inference from {wallet_addr}; "
-                    f"invalidating wallet for window {target_window}"
+                    f"Window mismatch in inference from uid {uid_str}; "
+                    f"invalidating uid for window {target_window}"
                 )
                 break
             if inference["block_hash"] != target_window_hash:
                 hard_failure = True
                 logger.warning(
-                    f"Block hash mismatch in inference from {wallet_addr}; "
-                    f"invalidating wallet for window {target_window}"
+                    f"Block hash mismatch in inference from uid {uid_str}; "
+                    f"invalidating uid for window {target_window}"
                 )
                 break
             nonce = inference["nonce"]
             if nonce in nonces_seen:
                 hard_failure = True
                 logger.warning(
-                    f"Duplicate nonce {nonce} in window from {wallet_addr}; "
-                    f"invalidating wallet for window {target_window}"
+                    f"Duplicate nonce {nonce} in window from uid {uid_str}; "
+                    f"invalidating uid for window {target_window}"
                 )
                 break
             nonces_seen.add(nonce)
@@ -1127,17 +1135,16 @@ async def _process_wallet_window(
                 pr_invalid_sig += 1
                 hard_failure = True
                 logger.warning(
-                    f"Invalid signature for {wallet_addr}; "
-                    f"invalidating wallet for window {target_window}"
+                    f"Invalid signature for uid {uid_str}; "
+                    f"invalidating uid for window {target_window}"
                 )
                 break
             expected_seed = f"{wallet_addr}-{target_window_hash}-{nonce}"
             if inference.get("sat_seed") != expected_seed:
                 hard_failure = True
                 logger.warning(
-                    f"Invalid SAT seed in inference from {wallet_addr}: "
-                    f"expected {expected_seed}, got {inference.get('sat_seed')}; "
-                    f"invalidating wallet for window {target_window}"
+                    f"Invalid SAT seed in inference from uid {uid_str}: "
+                    f"invalidating uid for window {target_window}"
                 )
                 break
             try:
@@ -1166,7 +1173,7 @@ async def _process_wallet_window(
                         logger.warning(
                             f"Reward {tr:.6f} outside tolerant bounds "
                             f"[{lo:.6f}, {hi:.6f}] (base=[{low:.6f}, {high:.6f}]); "
-                            f"invalidating wallet for window {target_window}"
+                            f"invalidating uid for window {target_window}"
                         )
                         break
                 except Exception:
@@ -1203,8 +1210,8 @@ async def _process_wallet_window(
                     pr_invalid_proof += 1
                     hard_failure = True
                     logger.warning(
-                        f"Hard verification failed for {wallet_addr}; "
-                        f"invalidating wallet for window {target_window}"
+                        f"Hard verification failed for uid {uid_str}; "
+                        f"invalidating uid for window {target_window}"
                     )
                     break
                 if not soft_valid:
@@ -1213,12 +1220,12 @@ async def _process_wallet_window(
                         soft_gate_triggered = True
                         logger.warning(
                             f"Soft-check failures threshold reached "
-                            f"({soft_failures}/{total_planned_checks}) for {wallet_addr}; "
-                            f"invalidating wallet for window {target_window}"
+                            f"({soft_failures}/{total_planned_checks}) for uid {uid_str}; "
+                            f"invalidating uid for window {target_window}"
                         )
                         break
             except Exception as e:
-                logger.warning(f"Rollout verification error for {wallet_addr}: {e}")
+                logger.warning(f"Rollout verification error for uid {uid_str}: {e}")
                 continue
 
             valid_count += 1
@@ -1241,10 +1248,10 @@ async def _process_wallet_window(
                         adv_val = rollout_meta.get("advantage", float("nan"))
                         success_val = rollout_meta.get("success", False)
                         logger.debug(
-                            "TEXT[validate] window=%s wallet=%s nonce=%s "
+                            "TEXT[validate] window=%s uid=%s nonce=%s "
                             "reward=%.3f adv=%.3f success=%s text=%s",
                             target_window,
-                            wallet_addr,
+                            uid_str,
                             nonce,
                             float(reward_val),
                             float(adv_val),
@@ -1256,7 +1263,7 @@ async def _process_wallet_window(
                                 f"{uid_str}/validation/sample_text",
                                 {
                                     "window": target_window,
-                                    "wallet": wallet_addr,
+                                    "uid": uid_str,
                                     "nonce": nonce,
                                     "reward": float(reward_val),
                                     "advantage": float(adv_val),
@@ -1277,7 +1284,7 @@ async def _process_wallet_window(
                 unique_solutions.add(solution_hash)
             wallet_rollouts_buffer.append(inference)
         except Exception as e:
-            logger.debug(f"Error processing inference from {wallet_addr}: {e}")
+            logger.debug(f"Error processing inference from uid {uid_str}: {e}")
             pr_processing_err += 1
             continue
 
@@ -1293,7 +1300,7 @@ async def _process_wallet_window(
             FAILURE_FLAG_KEY: 1,
         }
         logger.info(
-            f"❌ Wallet {wallet_addr} rejected for window {target_window} "
+            f"❌ UID {uid_str} rejected for window {target_window} "
             f"(hard_failure={hard_failure}, "
             f"soft_failures={soft_failures}/{total_planned_checks})"
         )
@@ -1381,7 +1388,7 @@ async def _process_wallet_window(
     }
     if wallet_rollouts_buffer:
         logger.info(
-            f"✅ {wallet_addr}: {valid_count}/{checked_count} checked, "
+            f"✅ uid {uid_str}: {valid_count}/{checked_count} checked, "
             f"~{estimated_valid}/{total_inferences} estimated valid, "
             f"{successful_rollouts} successful, "
             f"{len(unique_solutions)} unique"
