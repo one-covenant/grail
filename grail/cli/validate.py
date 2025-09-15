@@ -622,28 +622,28 @@ async def _run_validation_service(
                                 uid = uid_by_hotkey.get(hk)
                                 if uid is not None:
                                     uid_weight_map[uid] = w
-                            
+
                             # Log summary with window prominently displayed
                             logger.info(
                                 f"🏆 Window {target_window} - Successful miners: {len(submission_successful_uids)} UIDs"
                             )
-                            
+
                             # Log detailed UID information
                             uid_details = []
                             for uid in sorted(submission_successful_uids):
                                 weight = uid_weight_map.get(uid, 0.0)
                                 uid_details.append(f"UID:{uid} (weight:{weight:.4f})")
-                            
-                            logger.info(
-                                f"Window {target_window} UIDs: {', '.join(uid_details)}"
-                            )
-                            
+
+                            logger.info(f"Window {target_window} UIDs: {', '.join(uid_details)}")
+
                             # Log all UIDs in a single row
                             await monitor.log_artifact(
                                 "weights/submission/successful_miners",
                                 {
                                     "window": target_window,
-                                    "text": ",".join(str(uid) for uid in sorted(submission_successful_uids)),
+                                    "text": ",".join(
+                                        str(uid) for uid in sorted(submission_successful_uids)
+                                    ),
                                 },
                                 "text",
                             )
