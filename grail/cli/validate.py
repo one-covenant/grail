@@ -411,13 +411,7 @@ async def _run_validation_service(
                 target_window_hash = await subtensor.get_block_hash(target_window)
                 # Single per-window randomness value reused across all checks
                 window_rand = _compute_window_randomness(target_window_hash, use_drand)
-                # Log a compact per-window stochastic seed for traceability
-                try:
-                    seed_u64 = int(str(window_rand)[:16], 16)
-                    if monitor:
-                        await monitor.log_gauge("sampling/window_rand_u64", seed_u64)
-                except Exception:
-                    pass
+
                 hotkeys_to_check = _determine_hotkeys_to_check(test_mode, wallet, meta)
                 (
                     window_inference_counts,
@@ -514,6 +508,7 @@ async def _run_validation_service(
                 )
                 if non_zero_weights:
                     logger.info(f"⚖️  Setting weights for {len(non_zero_weights)} miners")
+                    logger.info(f"Displaying weights for first 5 miners: {non_zero_weights[:5]}")
                     for hotkey, weight in non_zero_weights[:5]:
                         uid = uid_by_hotkey.get(hotkey, None)
                         display = uid if uid is not None else hotkey
@@ -601,12 +596,41 @@ async def _run_validation_service(
                         wait_for_inclusion=False,
                     )
                     last_weights_interval_submitted = current_interval
+
+                    # Log successful miners during weight submission
+                    submission_successful_uids = [
+                        uid_by_hotkey.get(hk)
+                        for hk, _ in non_zero_weights
+                        if uid_by_hotkey.get(hk) is not None
+                    ]
+
                     if monitor:
                         await monitor.log_gauge("weights/submission/submitted", 1.0)
                         await monitor.log_gauge(
                             "weights/submission/interval_index",
                             current_interval,
                         )
+                        # Log successful miners at submission time
+                        await monitor.log_gauge(
+                            "weights/submission/successful_miners_count",
+                            len(submission_successful_uids),
+                        )
+                        if submission_successful_uids:
+                            await monitor.log_artifact(
+                                "weights/submission/successful_miners_uids",
+                                {
+                                    "interval": current_interval,
+                                    "block": current_block,
+                                    "window": target_window,
+                                    "successful_miners_count": len(submission_successful_uids),
+                                    "successful_miners_uids": submission_successful_uids,
+                                    "uids_text": ",".join(
+                                        str(uid) for uid in submission_successful_uids
+                                    ),
+                                },
+                                "json",
+                            )
+
                     logger.info(
                         "Submitted weights: interval=%s block=%s "
                         "miners_with_weights=%s total_miners=%s rolling=%s superlinear=%s",
@@ -616,6 +640,9 @@ async def _run_validation_service(
                         len(meta.hotkeys),
                         WEIGHT_ROLLING_WINDOWS,
                         SUPERLINEAR_EXPONENT,
+                    )
+                    logger.info(
+                        f"🎯 Weight submission successful miners: {len(submission_successful_uids)} UIDs: {submission_successful_uids}"
                     )
                     # Log detailed per-miner metrics for top-K on submission
                     if monitor:
