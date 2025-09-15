@@ -1504,7 +1504,7 @@ def _compute_weights(
 
         # Scoring formula: prioritize unique solutions, then successful, then valid
         # Base performance score (unbounded to differentiate high performers)
-        unique_score = total_unique # NOTE: made unique score unbounded!
+        unique_score = total_unique  # NOTE: made unique score unbounded!
         success_score = min(1.0, total_successful / 20.0) if total_successful > 0 else 0
         valid_score = min(1.0, total_estimated_valid / 50.0) if total_estimated_valid > 0 else 0
         # NOTE: at this stage we only give weights to unique scores
