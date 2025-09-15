@@ -56,7 +56,7 @@ services:
 
     volumes:
       # Persistent storage for wallet and cache
-      - ${HOME}/.bittensor:/root/.bittensor:ro
+      - ${HOME}/.bittensor:/root/.bittensor
       - validator-cache:/root/.cache
       - validator-data:/app/data
       
