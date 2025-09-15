@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   validator:
-    image: ghcr.io/tplr-ai/grail:latest
+    image: ghcr.io/one-covenant/grail:latest
     container_name: grail-validator
     restart: unless-stopped
     tty: true
