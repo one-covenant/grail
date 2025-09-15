@@ -825,9 +825,10 @@ def _aggregate_weight_inputs(
         total_unique += int(metrics.get("unique", 0))
         total_successful += int(metrics.get("successful", 0))
         total_estimated_valid += int(metrics.get("estimated_valid", 0))
-    unique_score = min(1.0, total_unique / 10.0) if total_unique > 0 else 0.0
+    # Unbounded unique score to match _compute_weights logic
+    unique_score = total_unique
     # NOTE: at this stage we only give weights to unique scores
-    base_score = max(0.0, min(1.0, 1.0 * unique_score + 0.0 * 0.0 + 0.0 * 0.0))
+    base_score = max(0.0, 1.0 * unique_score + 0.0 * 0.0 + 0.0 * 0.0)
     superlinear_score = base_score**SUPERLINEAR_EXPONENT
     return (
         total_unique,
@@ -1502,13 +1503,14 @@ def _compute_weights(
             total_estimated_valid += metrics.get("estimated_valid", 0)
 
         # Scoring formula: prioritize unique solutions, then successful, then valid
-        # Base performance score in [0, 1]
-        unique_score = min(1.0, total_unique / 10.0) if total_unique > 0 else 0
+        # Base performance score (unbounded to differentiate high performers)
+        unique_score = total_unique # NOTE: made unique score unbounded!
         success_score = min(1.0, total_successful / 20.0) if total_successful > 0 else 0
         valid_score = min(1.0, total_estimated_valid / 50.0) if total_estimated_valid > 0 else 0
         # NOTE: at this stage we only give weights to unique scores
         base_score = 1.0 * unique_score + 0.0 * success_score + 0.0 * valid_score
-        base_score = max(0.0, min(1.0, base_score))
+        # Remove upper bound to allow differentiation between high performers
+        base_score = max(0.0, base_score)
 
         # Apply superlinear curve: emphasizes higher performers and penalizes splitting
         superlinear_score = base_score**SUPERLINEAR_EXPONENT
