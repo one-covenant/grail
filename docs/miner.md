@@ -31,16 +31,18 @@ Grail miners:
 
 ## Prerequisites
 
-- Linux with a GPU driver (CUDA for NVIDIA) or CPU-only is acceptable if you can meet window timing
+- Linux with NVIDIA A100 GPU and CUDA drivers installed
 - Python (via `uv venv`) and Git
 - Bittensor wallet (cold/hot) registered on the target subnet
 - Cloudflare R2 (or S3-compatible) bucket and credentials
   - **Create a Bucket: Name it the same as your account ID and set the region to ENAM.**
 - Optional: WandB account for monitoring
 
-Hardware guidance:
-- Any hardware is acceptable as long as you can generate and upload within the window. The codebase has been primarily tested on NVIDIA A100/H100.
-- Network bandwidth needs are modest; uploads are JSON rollouts.
+Hardware requirements:
+- **NVIDIA A100 GPU is required** for the current version
+- The codebase has been optimized and tested on NVIDIA A100
+- GPU-agnostic verification is coming soon, which will enable support for other hardware configurations
+- Network bandwidth needs are modest; uploads are JSON rollouts
 
 ---
 
@@ -61,8 +63,11 @@ uv sync
 cp .env.example .env
 # Edit .env with your wallet names, network, and R2 credentials
 
-# Run miner (uses Typer CLI)
-grail -vv mine 
+# Run miner
+grail mine 
+
+# Run miner in debug mode
+grail -vv mine
 ```
 
 ---
@@ -130,7 +135,7 @@ Public dashboard: set `WANDB_ENTITY=tplr` and `WANDB_PROJECT=grail` to log to th
 From an activated venv with `.env` configured:
 
 ```bash
-grail mine --use-drand   # default; mix drand + block-hash for randomness
+grail mine   # default; mix drand + block-hash for randomness
 # grail mine --no-drand  # fallback to block-hash only
 ```
 
@@ -161,7 +166,8 @@ Artifacts uploaded per rollout include:
 
 ## Troubleshooting
 
-- CUDA OOM or driver errors: reduce `GRAIL_MAX_NEW_TOKENS`; ensure drivers match CUDA runtime; periodically clear cache.
+- CUDA OOM or driver errors: Ensure you're using an NVIDIA A100 GPU; verify drivers match CUDA runtime; periodically clear cache.
+- GPU not detected: Currently requires NVIDIA A100. Check `nvidia-smi` output to verify GPU availability.
 - No uploads: check `R2_*` variables and bucket permissions; verify network/firewall.
 - Not receiving weights: ensure uploads succeed; validator will score the previous complete window.
 - Drand failures: miner automatically falls back to block-hash; you can use `--no-drand`.
@@ -171,20 +177,18 @@ Artifacts uploaded per rollout include:
 
 ## Best Practices
 
+- **Use NVIDIA A100 GPU** for optimal performance; this is currently required for proper GRAIL proof generation and verification.
 - Keep model-related envs at network defaults; do not override `GRAIL_MODEL_NAME` or `GRAIL_MAX_NEW_TOKENS`. Use `Qwen/Qwen3-4B-Instruct-2507` and set `GRAIL_MAX_NEW_TOKENS=1024` in the first version.
 - Reserve the final 2 blocks of each window for uploads; the miner does this automatically but avoid heavy generation near the end.
 - Use `--use-drand` (default) for robust challenge derivation; fall back with `--no-drand` only if needed.
 - Ensure R2 dual-credential setup: write locally, read credentials are committed on-chain by the miner.
-- Monitor GPU memory (if using CUDA); the miner periodically empties cache, but size your rollouts to avoid OOM.
+- Monitor GPU memory on your A100; the miner periodically empties cache, but size your rollouts to avoid OOM.
 - Increase verbosity with `-vv` when diagnosing sampling, group sizes, or upload issues.
-
-## Reference
-
-- Miner entrypoint: `grail/cli/mine.py`
-- Prover & protocol: `grail/grail.py`
-- SAT environment & rewards: `grail/environments/sat.py`
-- Rollout generation: `grail/mining/rollout_generator.py`
-- Storage & uploads: `grail/infrastructure/comms.py`
-- Credentials & chain: `grail/infrastructure/credentials.py`, `grail/infrastructure/chain.py`
+- Note: GPU-agnostic verification is under development and will expand hardware support in future releases.
 
 
+## Support
+
+For issues or questions:
+- GitHub Issues: https://github.com/tplr-ai/grail/issues
+- Discord: https://discord.com/channels/799672011265015819/1354089114189955102
