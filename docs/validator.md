@@ -37,13 +37,18 @@ Grail validators:
 
 ## Prerequisites
 
-- Linux, Python via `uv venv`, Git
+- Linux, Docker and Docker Compose installed
+- **NVIDIA A100 GPU with CUDA support (required)**
+- At least 20GB RAM recommended
 - Bittensor wallet (cold/hot) registered on the target subnet
 - Cloudflare R2 (or S3-compatible) bucket and credentials
   - **Create a Bucket: Name it the same as your account ID and set the region to ENAM.**
 - Optional: WandB account for monitoring
 
-Hardware: CPU-only is fine. A GPU can speed up verification if the model forward is used more heavily, but the default verifier is optimized for practicality.
+Hardware requirements:
+- **NVIDIA A100 GPU is required** for the current version to ensure consistent verification across the network
+- GPU-agnostic verification is coming soon, which will enable support for other hardware configurations
+- The verifier has been optimized and tested on NVIDIA A100
 
 ---
 
@@ -54,16 +59,12 @@ Hardware: CPU-only is fine. A GPU can speed up verification if the model forward
 git clone https://github.com/tplr-ai/grail
 cd grail
 
-# Create venv and install
-uv venv && source .venv/bin/activate
-uv sync
-
 # Configure environment
 cp .env.example .env
 # Edit .env with your wallet names, network, and R2 credentials
 
-# Run validator (Typer CLI)
-grail -vv validate      # validate all miners on the subnet
+# Run validator with Docker Compose
+docker compose --env-file .env -f docker/docker-compose.validator.yml up -d
 ```
 
 ---
@@ -72,7 +73,7 @@ grail -vv validate      # validate all miners on the subnet
 
 ### Environment Variables
 
-Set these in `.env` (see `.env.example`):
+Set these in `.env` (see `.env.example`). This file will be used with Docker Compose:
 
 - Network & subnet
   - `BT_NETWORK` (finney|test|custom)
@@ -82,7 +83,7 @@ Set these in `.env` (see `.env.example`):
   - `BT_WALLET_COLD` (coldkey name)
   - `BT_WALLET_HOT` (hotkey name)
 - Model (read-only for validators in this release)
-  - `GRAIL_MODEL_NAME` (default network model used by Verifier - use `Qwen/Qwen3-4B-Instruct-2507` in first version)
+  - `GRAIL_MODEL_NAME` (mandatory: set to `Qwen/Qwen3-4B-Instruct-2507` in first version)
   - `GRAIL_MAX_NEW_TOKENS` (mandatory: set to `1024` in first version)
 - Object storage (R2/S3)
   - `R2_BUCKET_ID`, `R2_ACCOUNT_ID`
@@ -90,7 +91,10 @@ Set these in `.env` (see `.env.example`):
     - Read-only: `R2_READ_ACCESS_KEY_ID`, `R2_READ_SECRET_ACCESS_KEY`
     - Write: `R2_WRITE_ACCESS_KEY_ID`, `R2_WRITE_SECRET_ACCESS_KEY`
 - Monitoring
-  - `GRAIL_MONITORING_BACKEND` (wandb|null) and WandB fields
+  - `GRAIL_MONITORING_BACKEND` (wandb|null)
+  - `WANDB_API_KEY`, `WANDB_PROJECT`, `WANDB_ENTITY`, `WANDB_MODE`
+- Optional
+  - `HF_TOKEN`, `HF_USERNAME` (for Hugging Face dataset publishing)
 
 ### Wallets
 
@@ -112,13 +116,45 @@ Public dashboard: set `WANDB_ENTITY=tplr` and `WANDB_PROJECT=grail` to publish v
 
 ## Running the Validator
 
+### Standard Deployment
+
 ```bash
-grail validate --use-drand      # default; use drand-derived challenge randomness
-# grail validate --no-drand     # fallback to block-hash only
-grail -vv validate --test-mode  # verify only self (useful locally)
+# Start validator with Docker Compose (includes Watchtower for automatic updates)
+docker compose --env-file .env -f docker/docker-compose.validator.yml up -d
+
+# View validator logs
+docker logs -f grail-validator
+
+# View Watchtower logs (automatic updater)
+docker logs -f watchtower
 ```
 
-Verbosity `-v/-vv` increases logging. Most behavior is configured via `.env`.
+Most behavior is configured via `.env`.
+
+### Automatic Updates with Watchtower
+
+The Docker Compose configuration includes Watchtower, which automatically:
+- Checks for new validator images every 30 seconds
+- Pulls the latest `ghcr.io/tplr-ai/grail:latest` image
+- Gracefully restarts your validator with the new version
+- Cleans up old images to save disk space
+
+This ensures your validator always runs the latest stable version without manual intervention.
+
+### Manual Control
+
+```bash
+# Stop validator and Watchtower
+docker compose -f docker/docker-compose.validator.yml down
+
+# Update manually (if Watchtower is stopped)
+docker pull ghcr.io/tplr-ai/grail:latest
+docker compose --env-file .env -f docker/docker-compose.validator.yml up -d
+
+# Monitor resources
+docker stats grail-validator
+nvidia-smi  # GPU usage
+```
 
 ---
 
@@ -179,10 +215,39 @@ Normalize to weights across miners; set on-chain with `set_weights`.
 
 ## Troubleshooting
 
-- No files found: ensure miners committed read creds on-chain; verify bucket name and permissions.
+### Common Issues
+
+- No files found: ensure miners committed read creds on-chain; verify bucket name (should be the same as your account ID) and permissions.
 - Frequent verification failures: check model alignment (`GRAIL_MODEL_NAME`), drand connectivity; fall back with `--no-drand`.
 - Weight setting fails: wallet funding/permissions and network connectivity.
 - Test mode confusion: `--test-mode` validates only your own files; disable for production.
+
+### Docker-Specific Issues
+
+**Validator Not Starting:**
+- Check logs: `docker logs grail-validator`
+- Verify wallet path: Ensure `~/.bittensor` is accessible
+- Check GPU: Run `nvidia-smi` to verify NVIDIA A100 availability
+- GPU requirement: Currently requires NVIDIA A100 for consistent verification
+
+**Watchtower Not Updating:**
+- Check registry access: `docker pull ghcr.io/tplr-ai/grail:latest`
+- Verify Watchtower logs: `docker logs watchtower`
+- Ensure container has label `com.centurylinklabs.watchtower.enable=true`
+
+**Network Issues:**
+- Ensure ports are accessible if using external axon
+- Check firewall rules for Docker networks
+- Verify subtensor endpoint connectivity
+
+**Container Health:**
+```bash
+# Check container status
+docker ps --format "table {{.Names}}\t{{.Status}}\t{{.State}}"
+
+# Inspect container details
+docker inspect grail-validator
+```
 
 ---
 
@@ -193,3 +258,11 @@ Normalize to weights across miners; set on-chain with `set_weights`.
 - SAT environment & rewards: `grail/environments/sat.py`
 - Storage & downloads: `grail/infrastructure/comms.py`
 - Credentials & chain: `grail/infrastructure/credentials.py`, `grail/infrastructure/chain.py`
+
+---
+
+## Support
+
+For issues or questions:
+- GitHub Issues: https://github.com/tplr-ai/grail/issues
+- Discord: https://discord.com/channels/799672011265015819/1354089114189955102
