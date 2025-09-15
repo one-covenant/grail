@@ -23,27 +23,14 @@ from grail.infrastructure.drand import get_drand_beacon, get_round_at_time
 from ..environments import create_sat_reward_vector
 from ..grail import Verifier
 from ..infrastructure.chain import GrailChainManager
-from ..infrastructure.comms import (
-    PROTOCOL_VERSION,
-    file_exists,
-    get_file,
-    login_huggingface,
-    upload_to_huggingface,
-    upload_valid_rollouts,
-)
+from ..infrastructure.comms import (PROTOCOL_VERSION, file_exists, get_file, login_huggingface,
+                                    upload_to_huggingface, upload_valid_rollouts)
 from ..infrastructure.credentials import load_r2_credentials
 from ..infrastructure.network import create_subtensor
 from ..monitoring import get_monitoring_manager
 from ..monitoring.config import MonitoringConfig
-from ..shared.constants import (
-    GRAIL_BURN_PERCENTAGE,
-    GRAIL_BURN_UID,
-    MODEL_NAME,
-    NETUID,
-    ROLLOUTS_PER_PROBLEM,
-    SUPERLINEAR_EXPONENT,
-    WINDOW_LENGTH,
-)
+from ..shared.constants import (GRAIL_BURN_PERCENTAGE, GRAIL_BURN_UID, MODEL_NAME, NETUID,
+                                ROLLOUTS_PER_PROBLEM, SUPERLINEAR_EXPONENT, WINDOW_LENGTH)
 from ..shared.subnet import get_own_uid_on_subnet
 from . import console
 
@@ -577,83 +564,81 @@ async def _run_validation_service(
 
                 # Throttle on-chain weight submissions to once per 360-block interval
                 current_interval = int(current_block // WEIGHT_SUBMISSION_INTERVAL_BLOCKS)
-                if current_interval != last_weights_interval_submitted:
-                    if not non_zero_weights:
-                        logger.debug("Skipping weight submission: all weights are zero")
-                    else:
-                        # Precompute top miners for per-miner logging on submission
-                        top_miners = _build_top_miners(
-                            meta.hotkeys, meta.uids, weights, TOP_K_WEIGHTS_LOGGED
-                        )
-                        logger.debug(
-                            "set_weights args: wallet=%s netuid=%s uids=%s weights=%s wait_for_inclusion=%s",
-                            wallet.hotkey.ss58_address if wallet and wallet.hotkey else "None",
-                            NETUID,
-                            meta.uids,
-                            weights,
-                            False,
-                        )
-                        await subtensor.set_weights(
-                            wallet=wallet,
-                            netuid=NETUID,
-                            uids=meta.uids,
-                            weights=weights,
-                            wait_for_inclusion=False,
-                        )
-                        last_weights_interval_submitted = current_interval
-                        if monitor:
-                            await monitor.log_gauge("weights/submission/submitted", 1.0)
-                            await monitor.log_gauge(
-                                "weights/submission/interval_index",
-                                current_interval,
-                            )
-                        logger.info(
-                            "Submitted weights: interval=%s block=%s "
-                            "miners_with_weights=%s total_miners=%s rolling=%s superlinear=%s",
+                is_a_weight_submission_block = current_interval != last_weights_interval_submitted
+                if is_a_weight_submission_block:
+                    # Precompute top miners for per-miner logging on submission
+                    top_miners = _build_top_miners(
+                        meta.hotkeys, meta.uids, weights, TOP_K_WEIGHTS_LOGGED
+                    )
+                    logger.debug(
+                        "set_weights args: wallet=%s netuid=%s uids=%s weights=%s wait_for_inclusion=%s",
+                        wallet.hotkey.ss58_address if wallet and wallet.hotkey else "None",
+                        NETUID,
+                        meta.uids,
+                        weights,
+                        False,
+                    )
+                    await subtensor.set_weights(
+                        wallet=wallet,
+                        netuid=NETUID,
+                        uids=meta.uids,
+                        weights=weights,
+                        wait_for_inclusion=False,
+                    )
+                    last_weights_interval_submitted = current_interval
+                    if monitor:
+                        await monitor.log_gauge("weights/submission/submitted", 1.0)
+                        await monitor.log_gauge(
+                            "weights/submission/interval_index",
                             current_interval,
-                            current_block,
-                            len(non_zero_weights),
-                            len(meta.hotkeys),
-                            WEIGHT_ROLLING_WINDOWS,
-                            SUPERLINEAR_EXPONENT,
                         )
-                        # Log detailed per-miner metrics for top-K on submission
-                        if monitor:
-                            for hk, uid, w in top_miners:
-                                tu, ts, tev, b, s = _aggregate_weight_inputs(
-                                    hk, inference_counts, target_window
-                                )
-                                uid_ns = f"{uid}/weights"
-                                await monitor.log_gauge(f"{uid_ns}/weight", w)
-                                await monitor.log_gauge(f"{uid_ns}/base_score", b)
-                                await monitor.log_gauge(f"{uid_ns}/superlinear_score", s)
-                                await monitor.log_gauge(f"{uid_ns}/inputs/unique_rolling", tu)
-                                await monitor.log_gauge(f"{uid_ns}/inputs/successful_rolling", ts)
-                                await monitor.log_gauge(
-                                    f"{uid_ns}/inputs/estimated_valid_rolling",
-                                    tev,
-                                )
+                    logger.info(
+                        "Submitted weights: interval=%s block=%s "
+                        "miners_with_weights=%s total_miners=%s rolling=%s superlinear=%s",
+                        current_interval,
+                        current_block,
+                        len(non_zero_weights),
+                        len(meta.hotkeys),
+                        WEIGHT_ROLLING_WINDOWS,
+                        SUPERLINEAR_EXPONENT,
+                    )
+                    # Log detailed per-miner metrics for top-K on submission
+                    if monitor:
                         for hk, uid, w in top_miners:
                             tu, ts, tev, b, s = _aggregate_weight_inputs(
                                 hk, inference_counts, target_window
                             )
-                            logger.info(
-                                "Weight uid=%s hotkey=%s weight=%.6f base=%.6f "
-                                "unique_rolling=%d successful_rolling=%d "
-                                "estimated_valid_rolling=%d",
-                                uid,
-                                hk,
-                                w,
-                                b,
-                                tu,
-                                ts,
+                            uid_ns = f"{uid}/weights"
+                            await monitor.log_gauge(f"{uid_ns}/weight", w)
+                            await monitor.log_gauge(f"{uid_ns}/base_score", b)
+                            await monitor.log_gauge(f"{uid_ns}/superlinear_score", s)
+                            await monitor.log_gauge(f"{uid_ns}/inputs/unique_rolling", tu)
+                            await monitor.log_gauge(f"{uid_ns}/inputs/successful_rolling", ts)
+                            await monitor.log_gauge(
+                                f"{uid_ns}/inputs/estimated_valid_rolling",
                                 tev,
                             )
-                        logger.info(
-                            "Submitted weights (interval %s, block %s)",
-                            current_interval,
-                            current_block,
+                    for hk, uid, w in top_miners:
+                        tu, ts, tev, b, s = _aggregate_weight_inputs(
+                            hk, inference_counts, target_window
                         )
+                        logger.info(
+                            "Weight uid=%s hotkey=%s weight=%.6f base=%.6f "
+                            "unique_rolling=%d successful_rolling=%d "
+                            "estimated_valid_rolling=%d",
+                            uid,
+                            hk,
+                            w,
+                            b,
+                            tu,
+                            ts,
+                            tev,
+                        )
+                    logger.info(
+                        "Submitted weights (interval %s, block %s)",
+                        current_interval,
+                        current_block,
+                    )
                 else:
                     if monitor:
                         await monitor.log_gauge("weights/submission/submitted", 0.0)
