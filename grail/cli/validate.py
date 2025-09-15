@@ -616,33 +616,48 @@ async def _run_validation_service(
                             len(submission_successful_uids),
                         )
                         if submission_successful_uids:
+                            # Create a list of UID data for better visualization
+                            uid_weight_map = {}
+                            for hk, w in non_zero_weights:
+                                uid = uid_by_hotkey.get(hk)
+                                if uid is not None:
+                                    uid_weight_map[uid] = w
+                            
+                            # Log summary with window prominently displayed
+                            logger.info(
+                                f"🏆 Window {target_window} - Successful miners: {len(submission_successful_uids)} UIDs"
+                            )
+                            
+                            # Log detailed UID information
+                            uid_details = []
+                            for uid in sorted(submission_successful_uids):
+                                weight = uid_weight_map.get(uid, 0.0)
+                                uid_details.append(f"UID:{uid} (weight:{weight:.4f})")
+                            
+                            logger.info(
+                                f"Window {target_window} UIDs: {', '.join(uid_details)}"
+                            )
+                            
+                            # Log all UIDs in a single row
                             await monitor.log_artifact(
-                                "weights/submission/successful_miners_uids",
+                                "weights/submission/successful_miners",
                                 {
-                                    "interval": current_interval,
-                                    "block": current_block,
                                     "window": target_window,
-                                    "successful_miners_count": len(submission_successful_uids),
-                                    "successful_miners_uids": submission_successful_uids,
-                                    "uids_text": ",".join(
-                                        str(uid) for uid in submission_successful_uids
-                                    ),
+                                    "text": ",".join(str(uid) for uid in sorted(submission_successful_uids)),
                                 },
-                                "json",
+                                "text",
                             )
 
                     logger.info(
-                        "Submitted weights: interval=%s block=%s "
+                        "Submitted weights: interval=%s block=%s window=%s "
                         "miners_with_weights=%s total_miners=%s rolling=%s superlinear=%s",
                         current_interval,
                         current_block,
+                        target_window,
                         len(non_zero_weights),
                         len(meta.hotkeys),
                         WEIGHT_ROLLING_WINDOWS,
                         SUPERLINEAR_EXPONENT,
-                    )
-                    logger.info(
-                        f"🎯 Weight submission successful miners: {len(submission_successful_uids)} UIDs: {submission_successful_uids}"
                     )
                     # Log detailed per-miner metrics for top-K on submission
                     if monitor:
