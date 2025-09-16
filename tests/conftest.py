@@ -13,7 +13,7 @@ We provide:
 import pathlib
 import sys
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Optional
 
 import pytest
 
@@ -44,10 +44,10 @@ def build_inference(
     rollout_group: Optional[str] = None,
     total_reward: float = 0.5,
     success: bool = False,
-    assignment: Optional[List[int]] = None,
+    assignment: Optional[list[int]] = None,
     challenge: str = "C",
     sig: str = "S",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Build a single inference/rollout with all required fields for the validator.
 
@@ -55,8 +55,8 @@ def build_inference(
     - Ensures tests feed structurally valid data into the validator, focusing assertions
       on business logic (gating, sampling, GRPO checks) rather than schema errors.
     """
-    tokens: List[int] = []
-    commit: Dict[str, Any] = {
+    tokens: list[int] = []
+    commit: dict[str, Any] = {
         "rollout": {
             "total_reward": total_reward,
             "success": success,
@@ -82,7 +82,7 @@ def build_inference(
 
 
 @pytest.fixture(name="build_inference")
-def build_inference_fixture() -> Callable[..., Dict[str, Any]]:
+def build_inference_fixture() -> Callable[..., dict[str, Any]]:
     return build_inference
 
 
@@ -105,6 +105,7 @@ def chain_manager_stub() -> Any:
     Why important:
     - Keeps tests hermetic by avoiding any real storage / credentials.
     """
+
     class CM:
         def get_bucket_for_hotkey(self, _: str) -> None:
             return None
@@ -113,19 +114,19 @@ def chain_manager_stub() -> Any:
 
 
 class _TokenizerStub:
-    def decode(self, ids: List[int], skip_special_tokens: bool = False) -> str:
+    def decode(self, ids: list[int], skip_special_tokens: bool = False) -> str:
         return ""
 
 
 class _VerifierStub:
-    def __init__(self, result_fn: Callable[[Dict[str, Any], Dict[str, Any], str], Any]) -> None:
+    def __init__(self, result_fn: Callable[[dict[str, Any], dict[str, Any], str], Any]) -> None:
         self.tokenizer = _TokenizerStub()
         self._result_fn = result_fn
 
     def verify_rollout(
         self,
-        commit: Dict[str, Any],
-        proof: Dict[str, Any],
+        commit: dict[str, Any],
+        proof: dict[str, Any],
         wallet_addr: str,
         challenge_randomness: str,
         log_identity: str,
@@ -134,13 +135,14 @@ class _VerifierStub:
 
 
 @pytest.fixture
-def make_verifier_stub() -> Callable[[Callable[[Dict[str, Any], Dict[str, Any], str], Any]], Any]:
+def make_verifier_stub() -> Callable[[Callable[[dict[str, Any], dict[str, Any], str], Any]], Any]:
     """
     Factory for a deterministic Verifier stub.
 
     result_fn(commit, proof, wallet_addr) -> (is_valid: bool, checks: dict)
     """
-    def factory(result_fn: Callable[[Dict[str, Any], Dict[str, Any], str], Any]) -> Any:
+
+    def factory(result_fn: Callable[[dict[str, Any], dict[str, Any], str], Any]) -> Any:
         return _VerifierStub(result_fn)
 
     return factory
