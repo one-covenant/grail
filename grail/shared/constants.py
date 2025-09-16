@@ -59,7 +59,7 @@ SAMPLING_LOW_Q10_MAX = 0.20
 # Superlinear weighting exponent:
 # For p > 1, w_i ∝ s_i^p amplifies differences and penalizes sybil splitting:
 # splitting into k identities yields k^(1-p) * s^p < s^p.
-SUPERLINEAR_EXPONENT = 1.4
+SUPERLINEAR_EXPONENT = 2.5
 
 # ────────────────  ROLLOUTS PER PROBLEM  ────────────────
 

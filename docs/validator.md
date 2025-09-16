@@ -200,7 +200,7 @@ Base score (in [0,1]):
 ```
 base = 0.6 * min(1, unique/10) + 0.0 * min(1, successful/20) + 0.4 * min(1, valid/50)
 ```
-Apply superlinear curve (from `SUPERLINEAR_EXPONENT`, default 1.5):
+Apply superlinear curve (from `SUPERLINEAR_EXPONENT`, default 2.5):
 ```
 score = base ** SUPERLINEAR_EXPONENT
 ```
