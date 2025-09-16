@@ -18,17 +18,17 @@
 </p>
 
 <p align="center">
-  <!-- <a href="https://codecov.io/gh/tplr-ai/grail">
-    <img src="https://codecov.io/gh/tplr-ai/grail/branch/main/graph/badge.svg" alt="Codecov" />
+  <!-- <a href="https://codecov.io/gh/one-covenant/grail">
+    <img src="https://codecov.io/gh/one-covenant/grail/branch/main/graph/badge.svg" alt="Codecov" />
   </a>
-  <a href="https://github.com/tplr-ai/grail/blob/main/LICENSE">
-    <img src="https://img.shields.io/github/license/tplr-ai/grail" alt="License" />
+  <a href="https://github.com/one-covenant/grail/blob/main/LICENSE">
+    <img src="https://img.shields.io/github/license/one-covenant/grail" alt="License" />
   </a> -->
   <a href="https://wandb.ai/tplr/grail">
     <img src="https://img.shields.io/badge/W%26B-Public%20Dashboard-FFBE00?logo=weightsandbiases" alt="Weights & Biases" />
   </a>
-  <a href="https://github.com/tplr-ai/grail/commits/main">
-    <img src="https://img.shields.io/github/last-commit/tplr-ai/grail" alt="Last Commit" />
+  <a href="https://github.com/one-covenant/grail/commits/main">
+    <img src="https://img.shields.io/github/last-commit/one-covenant/grail" alt="Last Commit" />
   </a>
 </p>
 
@@ -125,7 +125,7 @@ This project uses `uv` for dependency management.
 
 ```bash
 # Clone the repository
-git clone https://github.com/tplr-ai/grail
+git clone https://github.com/one-covenant/grail
 cd grail
 
 # Create a venv

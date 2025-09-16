@@ -50,7 +50,7 @@ Hardware requirements:
 
 ```bash
 # Clone and enter
-git clone https://github.com/tplr-ai/grail
+git clone https://github.com/one-covenant/grail
 cd grail
 
 # Create venv and install
@@ -190,5 +190,5 @@ Artifacts uploaded per rollout include:
 ## Support
 
 For issues or questions:
-- GitHub Issues: https://github.com/tplr-ai/grail/issues
+- GitHub Issues: https://github.com/one-covenant/grail/issues
 - Discord: https://discord.com/channels/799672011265015819/1354089114189955102

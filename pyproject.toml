@@ -69,9 +69,9 @@ all = [
 grail = "grail.cli:main"
 
 [project.urls]
-Repository = "https://tplr.ai/grail"
-Documentation = "https://github.com/tplr-ai/grail/blob/main/SPEC.md"
-Issues = "https://github.com/tplr-ai/grail/issues"
+Repository = "https://github.com/one-covenant/grail"
+Documentation = "https://github.com/one-covenant/grail/blob/main/SPEC.md"
+Issues = "https://github.com/one-covenant/grail/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["grail"]

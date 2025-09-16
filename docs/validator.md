@@ -56,7 +56,7 @@ Hardware requirements:
 
 ```bash
 # Clone and enter
-git clone https://github.com/tplr-ai/grail
+git clone https://github.com/one-covenant/grail
 cd grail
 
 # Configure environment
@@ -135,7 +135,7 @@ Most behavior is configured via `.env`.
 
 The Docker Compose configuration includes Watchtower, which automatically:
 - Checks for new validator images every 30 seconds
-- Pulls the latest `ghcr.io/tplr-ai/grail:latest` image
+- Pulls the latest `ghcr.io/one-covenant/grail:latest` image
 - Gracefully restarts your validator with the new version
 - Cleans up old images to save disk space
 
@@ -148,7 +148,7 @@ This ensures your validator always runs the latest stable version without manual
 docker compose -f docker/docker-compose.validator.yml down
 
 # Update manually (if Watchtower is stopped)
-docker pull ghcr.io/tplr-ai/grail:latest
+docker pull ghcr.io/one-covenant/grail:latest
 docker compose --env-file .env -f docker/docker-compose.validator.yml up -d
 
 # Monitor resources
@@ -231,7 +231,7 @@ Normalize to weights across miners; set on-chain with `set_weights`.
 - GPU requirement: Currently requires NVIDIA A100 for consistent verification
 
 **Watchtower Not Updating:**
-- Check registry access: `docker pull ghcr.io/tplr-ai/grail:latest`
+- Check registry access: `docker pull ghcr.io/one-covenant/grail:latest`
 - Verify Watchtower logs: `docker logs watchtower`
 - Ensure container has label `com.centurylinklabs.watchtower.enable=true`
 
@@ -264,5 +264,5 @@ docker inspect grail-validator
 ## Support
 
 For issues or questions:
-- GitHub Issues: https://github.com/tplr-ai/grail/issues
+- GitHub Issues: https://github.com/one-covenant/grail/issues
 - Discord: https://discord.com/channels/799672011265015819/1354089114189955102
