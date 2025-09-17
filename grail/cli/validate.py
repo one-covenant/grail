@@ -112,7 +112,7 @@ FAILURE_FLAG_KEY = "had_failure"
 WEIGHT_SUBMISSION_INTERVAL_BLOCKS = 360
 
 # Number of windows to include when computing rolling weights
-WEIGHT_ROLLING_WINDOWS = WEIGHT_SUBMISSION_INTERVAL_BLOCKS / WINDOW_LENGTH
+WEIGHT_ROLLING_WINDOWS = int(WEIGHT_SUBMISSION_INTERVAL_BLOCKS / WINDOW_LENGTH)
 
 # Number of miners to log in detail on submission
 # TODO: reduce this later
