@@ -544,41 +544,26 @@ async def _run_validation_service(
                 # Log sampling and availability metrics
                 if monitor:
                     try:
-                        await monitor.log_gauge("sampling/miners_total", len(meta.hotkeys))
-                        await monitor.log_gauge("sampling/miners_active", len(active_hotkeys))
-                        await monitor.log_gauge("sampling/miners_selected", len(hotkeys_to_check))
+                        await monitor.log_gauge("miner_sampling/miners_total", len(meta.hotkeys))
+                        await monitor.log_gauge("miner_sampling/miners_active", len(active_hotkeys))
+                        await monitor.log_gauge(
+                            "miner_sampling/miners_selected", len(hotkeys_to_check)
+                        )
                         eff_rate = (
                             (len(hotkeys_to_check) / len(active_hotkeys)) if active_hotkeys else 0.0
                         )
-                        await monitor.log_gauge("sampling/rate_effective", eff_rate)
-                        # Coverage stats over last 12 windows
-                        sel_values = [int(selection_counts.get(hk, 0)) for hk in meta.hotkeys]
-                        sel_stats = _compute_count_stats(sel_values)
-                        await monitor.log_gauge("sampling/coverage/min", sel_stats["min"])
-                        await monitor.log_gauge("sampling/coverage/mean", sel_stats["mean"])
-                        await monitor.log_gauge("sampling/coverage/max", sel_stats["max"])
-                        await monitor.log_gauge("sampling/coverage/var", sel_stats["var"])
+                        await monitor.log_gauge("miner_sampling/check_rate", eff_rate)
+
                         av_values = [int(availability_counts.get(hk, 0)) for hk in meta.hotkeys]
                         av_stats = _compute_count_stats(av_values)
-                        await monitor.log_gauge("availability/coverage/min", av_stats["min"])
-                        await monitor.log_gauge("availability/coverage/mean", av_stats["mean"])
-                        await monitor.log_gauge("availability/coverage/max", av_stats["max"])
-                        await monitor.log_gauge("availability/coverage/var", av_stats["var"])
-                        # Compact artifacts (uid:count)
-                        uid_av = []
-                        uid_sel = []
-                        for hk, uid in zip(meta.hotkeys, meta.uids):
-                            uid_av.append(f"{uid}:{int(availability_counts.get(hk, 0))}")
-                            uid_sel.append(f"{uid}:{int(selection_counts.get(hk, 0))}")
-                        await monitor.log_artifact(
-                            "availability/windows_with_file",
-                            {"window": target_window, "text": ",".join(uid_av)},
-                            "text",
+                        await monitor.log_gauge(
+                            "miner_availability/min_windows_active_12w", av_stats["min"]
                         )
-                        await monitor.log_artifact(
-                            "sampling/validated_counts",
-                            {"window": target_window, "text": ",".join(uid_sel)},
-                            "text",
+                        await monitor.log_gauge(
+                            "miner_availability/avg_windows_active_12w", av_stats["mean"]
+                        )
+                        await monitor.log_gauge(
+                            "miner_availability/max_windows_active_12w", av_stats["max"]
                         )
                     except Exception:
                         pass
@@ -622,6 +607,48 @@ async def _run_validation_service(
                 logger.info(
                     f"🏁 Total valid rollouts in window {target_window}: {total_valid_rollouts}"
                 )
+                
+                # Log rollout statistics per miner
+                rollout_counts = [m.get("total", 0) for m in window_inference_counts.values()]
+                if rollout_counts:
+                    min_rollouts = min(rollout_counts)
+                    max_rollouts = max(rollout_counts)
+                    avg_rollouts = sum(rollout_counts) / len(rollout_counts)
+                    logger.info(
+                        f"📊 Rollouts per miner - min: {min_rollouts}, "
+                        f"avg: {avg_rollouts:.1f}, max: {max_rollouts}"
+                    )
+                    
+                    # Create list of (hotkey, uid, rollout_count) for top performers
+                    miner_rollout_data = []
+                    for hotkey, metrics in window_inference_counts.items():
+                        uid = uid_by_hotkey.get(hotkey, hotkey)
+                        rollout_count = metrics.get("total", 0)
+                        miner_rollout_data.append((hotkey, uid, rollout_count))
+                    
+                    # Sort by rollout count (descending) and get top 5
+                    top_miners = sorted(miner_rollout_data, key=lambda x: x[2], reverse=True)[:5]
+                    
+                    if top_miners:
+                        logger.info("🏆 Top 5 (or less) miners by rollout count:")
+                        for i, (hotkey, uid, count) in enumerate(top_miners, 1):
+                            logger.info(f"  {i}. UID {uid}: {count} rollouts")
+                        
+                        # Log to monitoring as text
+                        if monitor:
+                            text_lines = []
+                            for rank, (hotkey, uid, count) in enumerate(top_miners, 1):
+                                text_lines.append(f"{rank}. UID {uid}: {count} rollouts")
+                            
+                            await monitor.log_artifact(
+                                "validation/top_miners_by_rollout_count",
+                                {
+                                    "window": target_window,
+                                    "text": "\n".join(text_lines)
+                                },
+                                "text"
+                            )
+                
                 # Aggregate had_failure across wallets for visibility
                 failed_wallets = sum(
                     1
@@ -642,6 +669,10 @@ async def _run_validation_service(
                     await monitor.log_gauge("validation/processing_errors", processing_errors)
                     await monitor.log_gauge("validation/files_found", files_found)
                     await monitor.log_gauge("validation/failed_wallets_window", failed_wallets)
+                    if rollout_counts:
+                        await monitor.log_gauge("validation/rollouts_per_miner/min", min_rollouts)
+                        await monitor.log_gauge("validation/rollouts_per_miner/avg", avg_rollouts)
+                        await monitor.log_gauge("validation/rollouts_per_miner/max", max_rollouts)
                     if total_rollouts_processed > 0:
                         success_rate = total_valid_rollouts / total_rollouts_processed
                         await monitor.log_gauge("validation/success_rate", success_rate)
@@ -670,9 +701,9 @@ async def _run_validation_service(
                     f"👷 Active miner UIDs (last {WEIGHT_ROLLING_WINDOWS} windows): {active_uids}"
                 )
                 if monitor:
-                    await monitor.log_gauge("validation/active_miners", active_miners)
+                    await monitor.log_gauge("validation/active_miners_past_12w", active_miners)
                     await monitor.log_artifact(
-                        "validation/active_miners_uids",
+                        "validation/active_miners_uids_past_12w",
                         {"window": target_window, "text": ",".join(str(u) for u in active_uids)},
                         "text",
                     )
@@ -720,18 +751,6 @@ async def _run_validation_service(
                     )
                 # Global submission context (per loop)
                 if monitor:
-                    await monitor.log_gauge(
-                        "weights/submission/interval_blocks",
-                        WEIGHT_SUBMISSION_INTERVAL_BLOCKS,
-                    )
-                    await monitor.log_gauge(
-                        "weights/submission/current_block",
-                        current_block,
-                    )
-                    await monitor.log_gauge(
-                        "weights/submission/target_window",
-                        target_window,
-                    )
                     await monitor.log_gauge(
                         "weights/config/rolling_windows",
                         WEIGHT_ROLLING_WINDOWS,
@@ -784,10 +803,6 @@ async def _run_validation_service(
 
                     if monitor:
                         await monitor.log_gauge("weights/submission/submitted", 1.0)
-                        await monitor.log_gauge(
-                            "weights/submission/interval_index",
-                            current_interval,
-                        )
                         # Log successful miners at submission time
                         await monitor.log_gauge(
                             "weights/submission/successful_miners_count",
@@ -877,9 +892,6 @@ async def _run_validation_service(
                 else:
                     if monitor:
                         await monitor.log_gauge("weights/submission/submitted", 0.0)
-                        await monitor.log_gauge(
-                            "weights/submission/interval_index", current_interval
-                        )
                     logger.debug(
                         "Skipping weight submission (360-block throttle). "
                         "interval=%s, last_submitted=%s",
