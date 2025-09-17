@@ -1546,12 +1546,25 @@ def _compute_weights(
                     weights = [0.0] * len(meta_hotkeys)
                     weights[burn_index] = 1.0
                 else:
-                    # Scale existing mass and add burn on top; then defensively renormalize
-                    weights = [w * (1.0 - burn_fraction) for w in pre_burn_weights]
-                    weights[burn_index] += burn_fraction
-                    total_w = math.fsum(weights)
-                    if total_w > 0.0:
-                        weights = [w / total_w for w in weights]
+                    # Ensure burn UID gets exactly burn_fraction, scale others proportionally
+                    remaining_fraction = 1.0 - burn_fraction
+
+                    # Get sum of all non-burn weights
+                    non_burn_sum = sum(w for i, w in enumerate(pre_burn_weights) if i != burn_index)
+
+                    if non_burn_sum > 0:
+                        # Scale non-burn weights to sum to remaining_fraction
+                        scale_factor = remaining_fraction / non_burn_sum
+                        weights = [
+                            w * scale_factor if i != burn_index else 0
+                            for i, w in enumerate(pre_burn_weights)
+                        ]
+                    else:
+                        # All weight was on burn UID, so keep others at 0
+                        weights = [0.0] * len(meta_hotkeys)
+
+                    # Set burn UID to exact burn fraction
+                    weights[burn_index] = burn_fraction
 
                 logger.info(
                     f"🔥 Burn mechanism active: Allocating {burn_percentage:.1f}% "
