@@ -77,10 +77,10 @@ MINER_SAMPLING_ENABLED = True
 
 # Fraction of active miners (those with a window file) to validate per window.
 # Applied after MINER_SAMPLE_MIN and before MINER_SAMPLE_MAX.
-MINER_SAMPLE_RATE = 0.50
+MINER_SAMPLE_RATE = 1.0
 
 # Minimum number of active miners to validate each window (floor).
 MINER_SAMPLE_MIN = 1
 
 # Optional cap on miners validated per window. Set to None to disable.
-MINER_SAMPLE_MAX = 75
+MINER_SAMPLE_MAX = 35
