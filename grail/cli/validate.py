@@ -557,13 +557,16 @@ async def _run_validation_service(
                         av_values = [int(availability_counts.get(hk, 0)) for hk in meta.hotkeys]
                         av_stats = _compute_count_stats(av_values)
                         await monitor.log_gauge(
-                            "miner_availability/min_windows_active_12w", av_stats["min"]
+                            f"miner_availability/min_windows_active_{WEIGHT_ROLLING_WINDOWS}w",
+                            av_stats["min"],
                         )
                         await monitor.log_gauge(
-                            "miner_availability/avg_windows_active_12w", av_stats["mean"]
+                            f"miner_availability/avg_windows_active_{WEIGHT_ROLLING_WINDOWS}w",
+                            av_stats["mean"],
                         )
                         await monitor.log_gauge(
-                            "miner_availability/max_windows_active_12w", av_stats["max"]
+                            f"miner_availability/max_windows_active_{WEIGHT_ROLLING_WINDOWS}w",
+                            av_stats["max"],
                         )
                     except Exception:
                         pass
@@ -698,9 +701,11 @@ async def _run_validation_service(
                     f"👷 Active miner UIDs (last {WEIGHT_ROLLING_WINDOWS} windows): {active_uids}"
                 )
                 if monitor:
-                    await monitor.log_gauge("validation/active_miners_past_12w", active_miners)
+                    await monitor.log_gauge(
+                        f"validation/active_miners_past_{WEIGHT_ROLLING_WINDOWS}w", active_miners
+                    )
                     await monitor.log_artifact(
-                        "validation/active_miners_uids_past_12w",
+                        f"validation/active_miners_uids_past_{WEIGHT_ROLLING_WINDOWS}w",
                         {"window": target_window, "text": ",".join(str(u) for u in active_uids)},
                         "text",
                     )
