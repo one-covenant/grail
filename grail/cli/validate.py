@@ -1555,8 +1555,10 @@ def _compute_weights(
                     if non_burn_sum > 0:
                         # Scale non-burn weights to sum to remaining_fraction
                         scale_factor = remaining_fraction / non_burn_sum
-                        weights = [w * scale_factor if i != burn_index else 0
-                                   for i, w in enumerate(pre_burn_weights)]
+                        weights = [
+                            w * scale_factor if i != burn_index else 0
+                            for i, w in enumerate(pre_burn_weights)
+                        ]
                     else:
                         # All weight was on burn UID, so keep others at 0
                         weights = [0.0] * len(meta_hotkeys)
