@@ -607,7 +607,7 @@ async def _run_validation_service(
                 logger.info(
                     f"🏁 Total valid rollouts in window {target_window}: {total_valid_rollouts}"
                 )
-                
+
                 # Log rollout statistics per miner
                 rollout_counts = [m.get("total", 0) for m in window_inference_counts.values()]
                 if rollout_counts:
@@ -618,37 +618,34 @@ async def _run_validation_service(
                         f"📊 Rollouts per miner - min: {min_rollouts}, "
                         f"avg: {avg_rollouts:.1f}, max: {max_rollouts}"
                     )
-                    
+
                     # Create list of (hotkey, uid, rollout_count) for top performers
                     miner_rollout_data = []
-                    for hotkey, metrics in window_inference_counts.items():
-                        uid = uid_by_hotkey.get(hotkey, hotkey)
+                    for _hotkey, metrics in window_inference_counts.items():
+                        uid = uid_by_hotkey.get(_hotkey, _hotkey)
                         rollout_count = metrics.get("total", 0)
-                        miner_rollout_data.append((hotkey, uid, rollout_count))
-                    
+                        miner_rollout_data.append((_hotkey, uid, rollout_count))
+
                     # Sort by rollout count (descending) and get top 5
                     top_miners = sorted(miner_rollout_data, key=lambda x: x[2], reverse=True)[:5]
-                    
+
                     if top_miners:
                         logger.info("🏆 Top 5 (or less) miners by rollout count:")
-                        for i, (hotkey, uid, count) in enumerate(top_miners, 1):
+                        for i, (_hotkey, uid, count) in enumerate(top_miners, 1):
                             logger.info(f"  {i}. UID {uid}: {count} rollouts")
-                        
+
                         # Log to monitoring as text
                         if monitor:
                             text_lines = []
-                            for rank, (hotkey, uid, count) in enumerate(top_miners, 1):
+                            for rank, (_hotkey, uid, count) in enumerate(top_miners, 1):
                                 text_lines.append(f"{rank}. UID {uid}: {count} rollouts")
-                            
+
                             await monitor.log_artifact(
                                 "validation/top_miners_by_rollout_count",
-                                {
-                                    "window": target_window,
-                                    "text": "\n".join(text_lines)
-                                },
-                                "text"
+                                {"window": target_window, "text": "\n".join(text_lines)},
+                                "text",
                             )
-                
+
                 # Aggregate had_failure across wallets for visibility
                 failed_wallets = sum(
                     1
