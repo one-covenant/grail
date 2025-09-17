@@ -1248,9 +1248,11 @@ async def _process_wallet_window(
                 if not hard_valid:
                     pr_invalid_proof += 1
                     hard_failure = True
+                    failed_keys = [k for k in HARD_CHECK_KEYS if not checks.get(k, False)]
                     logger.warning(
                         f"Hard verification failed for uid {uid_str}; "
-                        f"invalidating uid for window {target_window}"
+                        f"invalidating uid for window {target_window}; "
+                        f"failed checks = {failed_keys}"
                     )
                     break
                 if not soft_valid:
