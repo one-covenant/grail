@@ -17,7 +17,10 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
 
 from .environments import generate_sat_problem
+from .environments.sat import create_sat_prompt
+from .mining.rollout_generator import REASONING_START, SYSTEM_PROMPT
 from .monitoring import get_monitoring_manager
+from .shared.chat_templates import build_qwen_chat_template
 from .shared.constants import (
     CHALLENGE_K,
     LAYER_INDEX,
@@ -559,6 +562,13 @@ class Verifier:
             .eval()
         )
 
+        # Install the same Qwen-style chat template used by miners
+        try:
+            self.tokenizer.chat_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
+        except Exception:
+            # Non-fatal: fallback to tokenizer default template
+            logger.debug("Unable to set custom chat_template; using default.")
+
         # Cache from most recent proof verification forward pass
         self._last_tokens_hash: Optional[str] = None
         self._last_step_logits: Optional[torch.Tensor] = None
@@ -584,6 +594,7 @@ class Verifier:
             - tokens_valid: commit tokens are well-formed and within model bounds
             - proof_valid: GRAIL proof validates model identity (incl. commit binding)
             - sat_problem_valid: SAT instance matches deterministic regeneration from seed
+            - prompt_valid: canonical prompt prefix exactly matches tokenized commit prefix
             - termination_valid: generation terminated correctly (max length or EOS with prob)
             - token_distribution_valid: stochastic sampling-shape heuristic passed
             - solution_valid: if success is claimed, assignment solves the instance
@@ -597,6 +608,7 @@ class Verifier:
             "tokens_valid": False,
             "proof_valid": False,
             "sat_problem_valid": False,
+            "prompt_valid": False,
             "termination_valid": False,
             # Heuristic: default to True when insufficient data
             "token_distribution_valid": True,
@@ -645,27 +657,17 @@ class Verifier:
             logger.debug("No SAT problem data in commit")
             return False, checks
 
-        # Regenerate SAT problem from seed and verify it matches
-        # Use the difficulty from the commit data, defaulting to 0.5 if not present
-        # TODO: this is problem specfic and needs to be modularized later on
-        difficulty = sat_data.get("difficulty", 0.5)
-        logger.debug(
-            f"Regenerating SAT problem from seed '{sat_data['seed']}' with difficulty {difficulty}"
-        )
-        expected_problem = generate_sat_problem(sat_data["seed"], difficulty)
-        if (
-            expected_problem.num_vars != sat_data["num_vars"]
-            or expected_problem.clauses != sat_data["clauses"]
-        ):
-            logger.debug("SAT problem doesn't match seed generation:")
-            logger.debug(
-                f"  Expected: {expected_problem.num_vars} vars, "
-                f"{len(expected_problem.clauses)} clauses"
-            )
-            logger.debug(f"  Got: {sat_data['num_vars']} vars, {len(sat_data['clauses'])} clauses")
-            logger.debug(f"  Seed: {sat_data['seed']}, Difficulty: {difficulty}")
+        expected_problem = self._verify_sat_problem(sat_data)
+        if expected_problem is None:
             return False, checks
         checks["sat_problem_valid"] = True
+
+        # Verify the canonical prompt prefix matches exactly
+        prompt_ok = self._verify_prompt_prefix(commit, expected_problem)
+        checks["prompt_valid"] = bool(prompt_ok)
+        if not prompt_ok:
+            logger.debug("Prompt prefix mismatch against canonical rendering")
+            return False, checks
 
         # Enforce termination check before solution validation
         if not self._passes_termination_check(commit):
@@ -709,6 +711,103 @@ class Verifier:
             except RuntimeError:
                 pass
         return True, checks
+
+    def _verify_sat_problem(self, sat_data: dict) -> Optional[Any]:
+        """Regenerate SAT problem deterministically and compare fields.
+
+        Returns the expected problem on success, None on mismatch.
+        """
+        try:
+            difficulty = sat_data.get("difficulty", 0.5)
+            seed = sat_data["seed"]
+            logger.debug(
+                f"Regenerating SAT problem from seed '{seed}' with difficulty {difficulty}"
+            )
+            expected_problem = generate_sat_problem(seed, difficulty)
+            if expected_problem.num_vars != sat_data.get(
+                "num_vars"
+            ) or expected_problem.clauses != sat_data.get("clauses"):
+                logger.debug("SAT problem doesn't match seed generation:")
+                logger.debug(
+                    f"  Expected: {expected_problem.num_vars} vars, "
+                    f"{len(expected_problem.clauses)} clauses"
+                )
+                logger.debug(
+                    f"  Got: {sat_data.get('num_vars')} vars, "
+                    f"{len(sat_data.get('clauses', []))} clauses"
+                )
+                logger.debug(f"  Seed: {seed}, Difficulty: {difficulty}")
+                return None
+            return expected_problem
+        except Exception as e:
+            logger.debug(f"SAT problem verification error: {e}")
+            return None
+
+    def _verify_prompt_prefix(self, commit: dict, problem: Any) -> bool:
+        """Recreate canonical prompt (system+user via chat template) and
+        enforce that commit tokens start with its exact tokenized prefix.
+        """
+        # TODO: this chat template and prompting approach should be properly versioned,
+        # modularized and get deduplicated in the newer versions
+        try:
+            # Build user prompt exactly as in SATRolloutGenerator.create_prompt
+            user_prompt = create_sat_prompt(problem)
+
+            # Render canonical prompt text through template
+            messages = [{"role": "user", "content": user_prompt}]
+            try:
+                rendered = self.tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+            except Exception:
+                # Fallback: emulate template minimalistically
+                eos = self.tokenizer.eos_token or ""
+                rendered = f"{SYSTEM_PROMPT}{eos}{user_prompt}{REASONING_START}"
+
+            # Tokenize canonical prompt text to ids
+            ids = (
+                self.tokenizer(rendered, return_tensors="pt", return_attention_mask=False)
+                .input_ids[0]
+                .tolist()
+            )
+
+            canonical_prompt_tokens = ids
+
+            # Extract commit tokens and claimed lengths
+            commit_tokens = commit.get("tokens", [])
+            if not isinstance(commit_tokens, list) or not commit_tokens:
+                return False
+            rollout_meta = commit.get("rollout", {})
+            claimed_pl = int(rollout_meta.get("prompt_length", 0) or 0)
+            claimed_cl = int(rollout_meta.get("completion_length", 0) or 0)
+
+            # Check 1: Prompt length must match canonical prompt length
+            if claimed_pl != len(canonical_prompt_tokens):
+                logger.debug(
+                    "Prompt length mismatch: claimed=%s expected=%s",
+                    claimed_pl,
+                    len(canonical_prompt_tokens),
+                )
+                return False
+
+            # Check 2: Prompt length + completion length must equal total tokens
+            if claimed_pl + claimed_cl != len(commit_tokens):
+                logger.debug(
+                    "Token count mismatch: prompt_length(%s) + completion_length(%s) = %s "
+                    "but total tokens = %s",
+                    claimed_pl,
+                    claimed_cl,
+                    claimed_pl + claimed_cl,
+                    len(commit_tokens),
+                )
+                return False
+
+            # Check 3: Prefix tokens must match canonical prompt exactly
+            prefix_ok = commit_tokens[:claimed_pl] == canonical_prompt_tokens
+            return bool(prefix_ok)
+        except Exception as e:
+            logger.debug(f"Prompt prefix verification error: {e}")
+            return False
 
     def verify(
         self,
