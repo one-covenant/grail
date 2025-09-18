@@ -11,7 +11,7 @@ import os
 import random
 import time
 import traceback
-from collections import defaultdict
+from collections import defaultdict, deque
 from types import SimpleNamespace
 from typing import Any, Optional
 
@@ -24,7 +24,6 @@ from ..environments import create_sat_reward_vector
 from ..grail import Verifier
 from ..infrastructure.chain import GrailChainManager
 from ..infrastructure.comms import (
-    PROTOCOL_VERSION,
     file_exists,
     get_file,
     login_huggingface,
@@ -38,6 +37,10 @@ from ..monitoring.config import MonitoringConfig
 from ..shared.constants import (
     GRAIL_BURN_PERCENTAGE,
     GRAIL_BURN_UID,
+    MINER_SAMPLE_MAX,
+    MINER_SAMPLE_MIN,
+    MINER_SAMPLE_RATE,
+    MINER_SAMPLING_ENABLED,
     MODEL_NAME,
     NETUID,
     ROLLOUTS_PER_PROBLEM,
@@ -109,7 +112,7 @@ FAILURE_FLAG_KEY = "had_failure"
 WEIGHT_SUBMISSION_INTERVAL_BLOCKS = 360
 
 # Number of windows to include when computing rolling weights
-WEIGHT_ROLLING_WINDOWS = 12
+WEIGHT_ROLLING_WINDOWS = int(WEIGHT_SUBMISSION_INTERVAL_BLOCKS / WINDOW_LENGTH)
 
 # Number of miners to log in detail on submission
 # TODO: reduce this later
@@ -219,6 +222,99 @@ def verify_rollout_signature(rollout_data: dict) -> bool:
         return bool(result)
     except Exception:
         return False
+
+
+# ----------------------------- Sampling Helpers ----------------------------- #
+
+
+async def _list_active_hotkeys_for_window(
+    meta_hotkeys: list[str],
+    window_start: int,
+    chain_manager: "GrailChainManager",
+    default_credentials: Any,
+    concurrency: int = 64,
+) -> list[str]:
+    """Return hotkeys with an available window file for the given window.
+
+    Active miners are those that uploaded `grail/windows/{hotkey}-window-{window_start}.json`.
+    """
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def _check(hotkey: str) -> tuple[str, bool]:
+        filename = f"grail/windows/{hotkey}-window-{window_start}.json"
+        bucket = chain_manager.get_bucket_for_hotkey(hotkey)
+        async with semaphore:
+            try:
+                exists = await file_exists(
+                    filename, credentials=bucket if bucket else default_credentials, use_write=False
+                )
+                return hotkey, bool(exists)
+            except Exception:
+                return hotkey, False
+
+    results = await asyncio.gather(*(_check(hk) for hk in meta_hotkeys))
+    return [hk for hk, ok in results if ok]
+
+
+def _compute_sample_size(active_count: int) -> int:
+    if active_count <= 0:
+        return 0
+    rate_k = int(math.ceil(active_count * float(MINER_SAMPLE_RATE)))
+    k = max(int(MINER_SAMPLE_MIN), rate_k)
+    if MINER_SAMPLE_MAX is not None:
+        try:
+            k = min(k, int(MINER_SAMPLE_MAX))
+        except Exception:
+            pass
+    return min(k, active_count)
+
+
+def _select_miners_for_window(
+    active_hotkeys: list[str],
+    target_window_hash: str,
+    selection_counts: dict[str, int],
+) -> list[str]:
+    k = _compute_sample_size(len(active_hotkeys))
+    if k == 0:
+        return []
+
+    def _tie_break(hk: str) -> int:
+        dig = hashlib.sha256(f"{target_window_hash}:{hk}".encode()).digest()
+        return int.from_bytes(dig[:8], "big")
+
+    ranked = sorted(
+        active_hotkeys, key=lambda hk: (int(selection_counts.get(hk, 0)), _tie_break(hk))
+    )
+    return ranked[:k]
+
+
+def _update_rolling(
+    history: "deque[set[str]]",
+    counts: dict[str, int],
+    new_set: set[str],
+    horizon: int,
+) -> None:
+    if len(history) >= horizon:
+        old_set = history.popleft()
+        for hk in old_set:
+            counts[hk] = max(0, int(counts.get(hk, 0)) - 1)
+    history.append(new_set)
+    for hk in new_set:
+        counts[hk] = int(counts.get(hk, 0)) + 1
+
+
+def _compute_count_stats(values: list[int]) -> dict[str, float]:
+    try:
+        n = len(values)
+        if n == 0:
+            return {"min": 0.0, "mean": 0.0, "max": 0.0, "var": 0.0}
+        v_min = float(min(values))
+        v_max = float(max(values))
+        mean_v = float(math.fsum(values) / n)
+        var_v = float(math.fsum((float(x) - mean_v) * (float(x) - mean_v) for x in values) / n)
+        return {"min": v_min, "mean": mean_v, "max": v_max, "var": var_v}
+    except Exception:
+        return {"min": 0.0, "mean": 0.0, "max": 0.0, "var": 0.0}
 
 
 # Global storage for miner state
@@ -346,6 +442,11 @@ async def _run_validation_service(
         )
         last_processed_window = -1
         last_weights_interval_submitted = -1
+        # Rolling histories (12-window horizon) for selection coverage and availability
+        selection_history: deque[set[str]] = deque(maxlen=WEIGHT_ROLLING_WINDOWS)
+        availability_history: deque[set[str]] = deque(maxlen=WEIGHT_ROLLING_WINDOWS)
+        selection_counts: dict[str, int] = {}
+        availability_counts: dict[str, int] = {}
 
         while True:
             try:
@@ -412,7 +513,71 @@ async def _run_validation_service(
                 # Single per-window randomness value reused across all checks
                 window_rand = _compute_window_randomness(target_window_hash, use_drand)
 
-                hotkeys_to_check = _determine_hotkeys_to_check(test_mode, wallet, meta)
+                # Discover active miners (those with a window file in storage)
+                active_hotkeys = await _list_active_hotkeys_for_window(
+                    meta.hotkeys, target_window, chain_manager, credentials
+                )
+                # Update availability (windows_with_file) rolling window
+                _update_rolling(
+                    availability_history,
+                    availability_counts,
+                    set(active_hotkeys),
+                    WEIGHT_ROLLING_WINDOWS,
+                )
+                # Determine subset to validate this window
+                if test_mode:
+                    hotkeys_to_check = [wallet.hotkey.ss58_address]
+                elif MINER_SAMPLING_ENABLED:
+                    hotkeys_to_check = _select_miners_for_window(
+                        active_hotkeys, target_window_hash, selection_counts
+                    )
+                else:
+                    hotkeys_to_check = active_hotkeys
+                # Update selection coverage rolling window
+                _update_rolling(
+                    selection_history,
+                    selection_counts,
+                    set(hotkeys_to_check),
+                    WEIGHT_ROLLING_WINDOWS,
+                )
+
+                # Log sampling and availability metrics
+                if monitor:
+                    try:
+                        await monitor.log_gauge("miner_sampling/miners_total", len(meta.hotkeys))
+                        await monitor.log_gauge("miner_sampling/miners_active", len(active_hotkeys))
+                        await monitor.log_gauge(
+                            "miner_sampling/miners_selected", len(hotkeys_to_check)
+                        )
+                        eff_rate = (
+                            (len(hotkeys_to_check) / len(active_hotkeys)) if active_hotkeys else 0.0
+                        )
+                        await monitor.log_gauge("miner_sampling/check_rate", eff_rate)
+
+                        av_values = [int(availability_counts.get(hk, 0)) for hk in meta.hotkeys]
+                        av_stats = _compute_count_stats(av_values)
+                        await monitor.log_gauge(
+                            f"miner_availability/min_windows_active_{WEIGHT_ROLLING_WINDOWS}w",
+                            av_stats["min"],
+                        )
+                        await monitor.log_gauge(
+                            f"miner_availability/avg_windows_active_{WEIGHT_ROLLING_WINDOWS}w",
+                            av_stats["mean"],
+                        )
+                        await monitor.log_gauge(
+                            f"miner_availability/max_windows_active_{WEIGHT_ROLLING_WINDOWS}w",
+                            av_stats["max"],
+                        )
+                    except Exception:
+                        pass
+
+                logger.info(
+                    "Sampling: total=%s active=%s selected=%s rate=%.3f",
+                    len(meta.hotkeys),
+                    len(active_hotkeys),
+                    len(hotkeys_to_check),
+                    (len(hotkeys_to_check) / len(active_hotkeys)) if active_hotkeys else 0.0,
+                )
                 (
                     window_inference_counts,
                     total_valid_rollouts,
@@ -432,6 +597,7 @@ async def _run_validation_service(
                     credentials=credentials,
                     chain_manager=chain_manager,
                     monitor=monitor,
+                    subtensor=subtensor,
                     uid_by_hotkey=uid_by_hotkey,
                     sat_reward_low=sat_reward_low,
                     sat_reward_high=sat_reward_high,
@@ -444,6 +610,45 @@ async def _run_validation_service(
                 logger.info(
                     f"🏁 Total valid rollouts in window {target_window}: {total_valid_rollouts}"
                 )
+
+                # Log rollout statistics per miner
+                rollout_counts = [m.get("total", 0) for m in window_inference_counts.values()]
+                if rollout_counts:
+                    min_rollouts = min(rollout_counts)
+                    max_rollouts = max(rollout_counts)
+                    avg_rollouts = sum(rollout_counts) / len(rollout_counts)
+                    logger.info(
+                        f"📊 Rollouts per miner - min: {min_rollouts}, "
+                        f"avg: {avg_rollouts:.1f}, max: {max_rollouts}"
+                    )
+
+                    # Create list of (hotkey, uid, rollout_count) for top performers
+                    miner_rollout_data = []
+                    for _hotkey, metrics in window_inference_counts.items():
+                        uid = uid_by_hotkey.get(_hotkey, _hotkey)
+                        rollout_count = metrics.get("total", 0)
+                        miner_rollout_data.append((_hotkey, uid, rollout_count))
+
+                    # Sort by rollout count (descending) and get top 5
+                    top_miners = sorted(miner_rollout_data, key=lambda x: x[2], reverse=True)[:5]
+
+                    if top_miners:
+                        logger.info("🏆 Top 5 (or less) miners by rollout count:")
+                        for i, (_hotkey, uid, count) in enumerate(top_miners, 1):
+                            logger.info(f"  {i}. UID {uid}: {count} rollouts")
+
+                        # Log to monitoring as text
+                        if monitor:
+                            text_lines = []
+                            for rank, (_hotkey, uid, count) in enumerate(top_miners, 1):
+                                text_lines.append(f"{rank}. UID {uid}: {count} rollouts")
+
+                            await monitor.log_artifact(
+                                "validation/top_miners_by_rollout_count",
+                                {"window": target_window, "text": "\n".join(text_lines)},
+                                "text",
+                            )
+
                 # Aggregate had_failure across wallets for visibility
                 failed_wallets = sum(
                     1
@@ -464,6 +669,10 @@ async def _run_validation_service(
                     await monitor.log_gauge("validation/processing_errors", processing_errors)
                     await monitor.log_gauge("validation/files_found", files_found)
                     await monitor.log_gauge("validation/failed_wallets_window", failed_wallets)
+                    if rollout_counts:
+                        await monitor.log_gauge("validation/rollouts_per_miner/min", min_rollouts)
+                        await monitor.log_gauge("validation/rollouts_per_miner/avg", avg_rollouts)
+                        await monitor.log_gauge("validation/rollouts_per_miner/max", max_rollouts)
                     if total_rollouts_processed > 0:
                         success_rate = total_valid_rollouts / total_rollouts_processed
                         await monitor.log_gauge("validation/success_rate", success_rate)
@@ -492,9 +701,11 @@ async def _run_validation_service(
                     f"👷 Active miner UIDs (last {WEIGHT_ROLLING_WINDOWS} windows): {active_uids}"
                 )
                 if monitor:
-                    await monitor.log_gauge("validation/active_miners", active_miners)
+                    await monitor.log_gauge(
+                        f"validation/active_miners_past_{WEIGHT_ROLLING_WINDOWS}w", active_miners
+                    )
                     await monitor.log_artifact(
-                        "validation/active_miners_uids",
+                        f"validation/active_miners_uids_past_{WEIGHT_ROLLING_WINDOWS}w",
                         {"window": target_window, "text": ",".join(str(u) for u in active_uids)},
                         "text",
                     )
@@ -542,18 +753,6 @@ async def _run_validation_service(
                     )
                 # Global submission context (per loop)
                 if monitor:
-                    await monitor.log_gauge(
-                        "weights/submission/interval_blocks",
-                        WEIGHT_SUBMISSION_INTERVAL_BLOCKS,
-                    )
-                    await monitor.log_gauge(
-                        "weights/submission/current_block",
-                        current_block,
-                    )
-                    await monitor.log_gauge(
-                        "weights/submission/target_window",
-                        target_window,
-                    )
                     await monitor.log_gauge(
                         "weights/config/rolling_windows",
                         WEIGHT_ROLLING_WINDOWS,
@@ -606,10 +805,6 @@ async def _run_validation_service(
 
                     if monitor:
                         await monitor.log_gauge("weights/submission/submitted", 1.0)
-                        await monitor.log_gauge(
-                            "weights/submission/interval_index",
-                            current_interval,
-                        )
                         # Log successful miners at submission time
                         await monitor.log_gauge(
                             "weights/submission/successful_miners_count",
@@ -699,9 +894,6 @@ async def _run_validation_service(
                 else:
                     if monitor:
                         await monitor.log_gauge("weights/submission/submitted", 0.0)
-                        await monitor.log_gauge(
-                            "weights/submission/interval_index", current_interval
-                        )
                     logger.debug(
                         "Skipping weight submission (360-block throttle). "
                         "interval=%s, last_submitted=%s",
@@ -912,11 +1104,18 @@ async def _process_window(
     credentials: Any,
     chain_manager: GrailChainManager,
     monitor: Any,
+    subtensor: bt.subtensor,
     uid_by_hotkey: dict[str, int],
     sat_reward_low: float,
     sat_reward_high: float,
 ) -> tuple[dict[str, dict[str, int]], int, int, int, int, int, int, list[dict]]:
     """Process a window across hotkeys and aggregate metrics/results."""
+    # Window timing (seconds and blocks)
+    window_t0 = time.monotonic()
+    try:
+        block_beg = await subtensor.get_current_block()
+    except Exception:
+        block_beg = None
     total_valid_rollouts = 0
     window_inference_counts: dict[str, dict[str, int]] = {}
     files_found = 0
@@ -929,8 +1128,18 @@ async def _process_window(
     invalid_proofs = 0
     processing_errors = 0
 
+    miner_seconds_list: list[float] = []
+    miner_blocks_list: list[int] = []
+
     for wallet_addr in hotkeys_to_check:
         try:
+            # Per-miner timing (seconds and blocks) measured around the call
+            t0 = time.monotonic()
+            try:
+                b0 = await subtensor.get_current_block()
+            except Exception:
+                b0 = None
+
             (
                 found_file,
                 metrics,
@@ -952,6 +1161,15 @@ async def _process_window(
                 sat_reward_low=sat_reward_low,
                 sat_reward_high=sat_reward_high,
             )
+            t1 = time.monotonic()
+            try:
+                b1 = await subtensor.get_current_block()
+            except Exception:
+                b1 = None
+            sec = t1 - t0
+            blk = (b1 - b0) if (b0 is not None and b1 is not None) else 0
+            miner_seconds_list.append(float(sec))
+            miner_blocks_list.append(int(blk))
             if found_file:
                 files_found += 1
             if metrics is not None:
@@ -970,6 +1188,40 @@ async def _process_window(
 
     for metrics in window_inference_counts.values():
         total_valid_rollouts += metrics.get("estimated_valid", 0)
+
+    # Window timing end
+    window_t1 = time.monotonic()
+    try:
+        block_end = await subtensor.get_current_block()
+    except Exception:
+        block_end = None
+    window_seconds = window_t1 - window_t0
+    window_blocks = (
+        (block_end - block_beg) if (block_beg is not None and block_end is not None) else 0
+    )
+
+    # Aggregate per-miner timing stats
+    def _stat(xs: list[float]) -> tuple[float, float, float]:
+        if not xs:
+            return 0.0, 0.0, 0.0
+        return float(min(xs)), float(sum(xs) / len(xs)), float(max(xs))
+
+    sec_min, sec_mean, sec_max = _stat(miner_seconds_list)
+    blk_min, blk_mean, blk_max = _stat([float(x) for x in miner_blocks_list])
+
+    # TODO: these monitoring measures need to be optimized later on
+    if monitor:
+        try:
+            await monitor.log_gauge("window_timing/window_seconds", float(window_seconds))
+            await monitor.log_gauge("window_timing/window_blocks", float(window_blocks))
+            await monitor.log_gauge("window_timing/miner_seconds/min", float(sec_min))
+            await monitor.log_gauge("window_timing/miner_seconds/mean", float(sec_mean))
+            await monitor.log_gauge("window_timing/miner_seconds/max", float(sec_max))
+            await monitor.log_gauge("window_timing/miner_blocks/min", float(blk_min))
+            await monitor.log_gauge("window_timing/miner_blocks/mean", float(blk_mean))
+            await monitor.log_gauge("window_timing/miner_blocks/max", float(blk_max))
+        except Exception:
+            pass
 
     return (
         window_inference_counts,
@@ -1345,7 +1597,12 @@ async def _process_wallet_window(
         )
         if monitor:
             await monitor.log_gauge(f"{uid_str}/had_failure", 1.0)
-        return True, metrics, [], (pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err)
+        return (
+            True,
+            metrics,
+            [],
+            (pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err),
+        )
 
     # Verify GRPO groups after processing checked inferences
     # This ensures grouped rollouts follow GRPO constraints (shared base problem,
@@ -1606,9 +1863,7 @@ async def _upload_rollouts(
 
     # Upload to Hugging Face dataset for community access
     try:
-        hf_success = await upload_to_huggingface(
-            all_valid_rollouts, target_window, PROTOCOL_VERSION
-        )
+        hf_success = await upload_to_huggingface(all_valid_rollouts, target_window)
         if hf_success:
             logger.info(f"🤗 Uploaded {len(all_valid_rollouts)} rollouts to Hugging Face dataset")
         else:
