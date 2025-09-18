@@ -647,6 +647,7 @@ class Verifier:
 
         # Regenerate SAT problem from seed and verify it matches
         # Use the difficulty from the commit data, defaulting to 0.5 if not present
+        # TODO: this is problem specfic and needs to be modularized later on
         difficulty = sat_data.get("difficulty", 0.5)
         logger.debug(
             f"Regenerating SAT problem from seed '{sat_data['seed']}' with difficulty {difficulty}"

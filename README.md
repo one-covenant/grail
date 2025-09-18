@@ -71,7 +71,6 @@ Modular environments, currently:
 #### 4. Communication & Storage (`grail/infrastructure/comms.py`)
 Object-storage utilities for miner/validator coordination:
 - Upload mined rollouts (`sink_window_inferences`), publish validated rollouts (`upload_valid_rollouts`)
-- Optional dataset export to Hugging Face (`upload_to_huggingface`)
 
 #### 5. Randomness & Chain
 - Randomness (`grail/infrastructure/drand.py`): Robust drand v2-first client with fallbacks and a mock beacon for testing
@@ -163,7 +162,6 @@ grail validate
 Notes:
 - Randomness is fetched from drand; miners mix it with the window's block hash
 - Rollouts are uploaded to object storage (R2/S3); validators fetch, verify, score, and set weights
-- Validated rollouts can be exported to a Hugging Face dataset for analysis
 - Monitoring: miners and validators can log metrics to the public W&B project for real-time scores and issues: https://wandb.ai/tplr/grail
 
 ## Architecture Benefits

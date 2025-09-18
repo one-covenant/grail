@@ -209,7 +209,6 @@ Normalize to weights across miners; set on-chain with `set_weights`.
 ### Publishing
 
 - Upload all valid rollouts to R2/S3 for training (`upload_valid_rollouts`).
-- Optionally export to a public Hugging Face dataset (`upload_to_huggingface`).
 
 ---
 
