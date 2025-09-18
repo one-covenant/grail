@@ -60,6 +60,17 @@ class SATProblem:
         return True
 
 
+def create_sat_prompt(problem: "SATProblem") -> str:
+    """Create a SAT prompt for the given problem."""
+    instructions = (
+        "Provide your final assignment between <SOLUTION></SOLUTION> as "
+        "space-separated 0/1 values for x1..xN (e.g., "
+        "<SOLUTION>0 1 0 1</SOLUTION>).\n"
+    )
+    prompt = f"SAT Problem:\n{problem.to_text()}\n{instructions}"
+    return prompt
+
+
 def generate_sat_problem(seed: str, difficulty: float = 0.5) -> SATProblem:
     """Generate a SAT problem from seed with controlled difficulty."""
     # Use seed for deterministic generation
@@ -386,13 +397,7 @@ class SATRolloutGenerator(RolloutGenerator):
         trajectory: list,
     ) -> str:
         """Create minimal prompt with problem and solution format hint."""
-        instructions = (
-            "Provide your final assignment between <SOLUTION></SOLUTION> as "
-            "space-separated 0/1 values for x1..xN (e.g., "
-            "<SOLUTION>0 1 0 1</SOLUTION>).\n"
-        )
-        prompt = f"SAT Problem:\n{problem.to_text()}\n{instructions}"
-        return prompt
+        return create_sat_prompt(problem)
 
     def parse_action(self, text: str, env: SATProblem, state: dict[str, Any]) -> list[bool]:
         """Parse completion text into boolean assignment using reward parser

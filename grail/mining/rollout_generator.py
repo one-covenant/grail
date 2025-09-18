@@ -9,6 +9,7 @@ from typing import Any
 import bittensor as bt
 import torch
 
+from ..shared.chat_templates import build_qwen_chat_template
 from ..shared.constants import MAX_NEW_TOKENS
 from ..shared.hf_compat import resolve_hidden_size
 
@@ -31,46 +32,6 @@ SYSTEM_PROMPT = (
     # TODO: replace shorting logic with a better approach later
     "Keep the reasoning succinct (≤25 steps, ≤500 tokens)."
 )
-
-
-# TODO: We need to build a module that makes the chat template
-# 'model' agnostic and task agnostic for reasoning tasks later on
-def _build_qwen_chat_template(
-    system_prompt: str,
-    reasoning_start: str,
-) -> str:
-    # Keep Jinja2 template exactly as specified; substitute via string
-    # replace
-    # TODO: later support jinja files for different system prompts,
-    # prompts, etc
-    chat_template = (
-        "{% if messages[0]['role'] == 'system' %}"
-        "{{ messages[0]['content'] + eos_token }}"
-        "{% set loop_messages = messages[1:] %}"
-        "{% else %}"
-        "{{ '{system_prompt}' + eos_token }}"
-        "{% set loop_messages = messages %}"
-        "{% endif %}"
-        "{% for message in loop_messages %}"
-        "{% if message['role'] == 'user' %}"
-        "{{ message['content'] }}"
-        "{% elif message['role'] == 'assistant' %}"
-        "{{ message['content'] + eos_token }}"
-        "{% endif %}"
-        "{% endfor %}"
-        "{% if add_generation_prompt %}{{ '{reasoning_start}' }}"
-        "{% endif %}"
-    )
-
-    chat_template = chat_template.replace(
-        "'{system_prompt}'",
-        f"'{system_prompt}'",
-    )
-    chat_template = chat_template.replace(
-        """'{reasoning_start}'""",
-        f"'{reasoning_start}'",
-    )
-    return chat_template
 
 
 @dataclass
@@ -130,7 +91,7 @@ class RolloutGenerator(ABC):
         # Inject Qwen-style chat template with system prompt and reasoning
         # start token
         try:
-            tpl = _build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
+            tpl = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
             # Set only if not already matching to avoid unnecessary churn
             if getattr(self.tokenizer, "chat_template", None) != tpl:
                 self.tokenizer.chat_template = tpl

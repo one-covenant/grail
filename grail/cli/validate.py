@@ -101,6 +101,7 @@ HARD_CHECK_KEYS = (  # Hard checks required for validity
     "tokens_valid",
     "proof_valid",
     "sat_problem_valid",
+    "prompt_valid",
     "termination_valid",
     "solution_valid",
 )
@@ -622,33 +623,6 @@ async def _run_validation_service(
                         f"avg: {avg_rollouts:.1f}, max: {max_rollouts}"
                     )
 
-                    # Create list of (hotkey, uid, rollout_count) for top performers
-                    miner_rollout_data = []
-                    for _hotkey, metrics in window_inference_counts.items():
-                        uid = uid_by_hotkey.get(_hotkey, _hotkey)
-                        rollout_count = metrics.get("total", 0)
-                        miner_rollout_data.append((_hotkey, uid, rollout_count))
-
-                    # Sort by rollout count (descending) and get top 5
-                    top_miners = sorted(miner_rollout_data, key=lambda x: x[2], reverse=True)[:5]
-
-                    if top_miners:
-                        logger.info("🏆 Top 5 (or less) miners by rollout count:")
-                        for i, (_hotkey, uid, count) in enumerate(top_miners, 1):
-                            logger.info(f"  {i}. UID {uid}: {count} rollouts")
-
-                        # Log to monitoring as text
-                        if monitor:
-                            text_lines = []
-                            for rank, (_hotkey, uid, count) in enumerate(top_miners, 1):
-                                text_lines.append(f"{rank}. UID {uid}: {count} rollouts")
-
-                            await monitor.log_artifact(
-                                "validation/top_miners_by_rollout_count",
-                                {"window": target_window, "text": "\n".join(text_lines)},
-                                "text",
-                            )
-
                 # Aggregate had_failure across wallets for visibility
                 failed_wallets = sum(
                     1
@@ -669,6 +643,21 @@ async def _run_validation_service(
                     await monitor.log_gauge("validation/processing_errors", processing_errors)
                     await monitor.log_gauge("validation/files_found", files_found)
                     await monitor.log_gauge("validation/failed_wallets_window", failed_wallets)
+                    # Aggregate prompt prefix validity across wallets for this window
+                    try:
+                        agg_prompt_valid = sum(
+                            int(m.get("prompt_valid", 0)) for m in window_inference_counts.values()
+                        )
+                        agg_prompt_mismatch = sum(
+                            int(m.get("prompt_mismatch", 0))
+                            for m in window_inference_counts.values()
+                        )
+                        await monitor.log_gauge("validation/prompt_valid", float(agg_prompt_valid))
+                        await monitor.log_gauge(
+                            "validation/prompt_mismatches", float(agg_prompt_mismatch)
+                        )
+                    except Exception:
+                        pass
                     if rollout_counts:
                         await monitor.log_gauge("validation/rollouts_per_miner/min", min_rollouts)
                         await monitor.log_gauge("validation/rollouts_per_miner/avg", avg_rollouts)
@@ -685,9 +674,22 @@ async def _run_validation_service(
                         credentials=credentials,
                     )
 
-                # Update inference counts
+                # Update inference counts (must occur before score-based logging)
                 for hotkey, metrics in window_inference_counts.items():
                     inference_counts[hotkey][target_window] = metrics
+
+                # Top-miner logs (use already-computed metrics; scores include current window)
+                if rollout_counts:
+                    await _log_top_miners_by_rollout_count(
+                        window_inference_counts, uid_by_hotkey, target_window, monitor
+                    )
+                    # TODO: the unique identifier logic needs to improve before we uncomment this
+                    # await _log_top_miners_by_unique_rollouts(
+                    #     window_inference_counts, uid_by_hotkey, target_window, monitor
+                    # )
+                    await _log_top_miners_by_score(
+                        inference_counts, uid_by_hotkey, target_window, monitor
+                    )
 
                 # Compute active miner UIDs over the last rolling windows (includes failures)
                 active_uids = _get_active_uids(
@@ -1362,6 +1364,9 @@ async def _process_wallet_window(
     hard_failure = False
     soft_gate_triggered = False
     total_planned_checks = len(indices_to_check)
+    # Prompt-prefix validity metrics
+    prompt_valid_count = 0
+    prompt_mismatch_count = 0
 
     # Compute soft failure threshold for wallet gating
     soft_fail_cutoff = max(
@@ -1497,6 +1502,19 @@ async def _process_wallet_window(
                 # Hard checks are cryptographic/proof constraints; any failure rejects wallet
                 hard_valid = all(checks.get(k, False) for k in HARD_CHECK_KEYS)
                 soft_valid = checks.get(SOFT_CHECK_KEY, True)
+                # Track prompt validity as a metric (not gating)
+                try:
+                    if (
+                        bool(checks.get("tokens_valid"))
+                        and bool(checks.get("proof_valid"))
+                        and bool(checks.get("sat_problem_valid"))
+                    ):
+                        if bool(checks.get("prompt_valid")):
+                            prompt_valid_count += 1
+                        else:
+                            prompt_mismatch_count += 1
+                except Exception:
+                    pass
                 if not hard_valid:
                     pr_invalid_proof += 1
                     hard_failure = True
@@ -1588,6 +1606,8 @@ async def _process_wallet_window(
             "estimated_valid": 0,
             "successful": 0,
             "unique": 0,
+            "prompt_valid": 0,
+            "prompt_mismatch": prompt_mismatch_count,
             FAILURE_FLAG_KEY: 1,
         }
         logger.info(
@@ -1597,6 +1617,11 @@ async def _process_wallet_window(
         )
         if monitor:
             await monitor.log_gauge(f"{uid_str}/had_failure", 1.0)
+            try:
+                await monitor.log_gauge(f"{uid_str}/prompt_valid", float(0))
+                await monitor.log_gauge(f"{uid_str}/prompt_mismatch", float(prompt_mismatch_count))
+            except Exception:
+                pass
         return (
             True,
             metrics,
@@ -1680,6 +1705,8 @@ async def _process_wallet_window(
         "estimated_valid": estimated_valid,
         "successful": successful_rollouts,
         "unique": len(unique_solutions),
+        "prompt_valid": prompt_valid_count,
+        "prompt_mismatch": prompt_mismatch_count,
         FAILURE_FLAG_KEY: 0,
     }
     if wallet_rollouts_buffer:
@@ -1691,6 +1718,11 @@ async def _process_wallet_window(
         )
     if monitor:
         await monitor.log_gauge(f"{uid_str}/had_failure", 0.0)
+        try:
+            await monitor.log_gauge(f"{uid_str}/prompt_valid", float(prompt_valid_count))
+            await monitor.log_gauge(f"{uid_str}/prompt_mismatch", float(prompt_mismatch_count))
+        except Exception:
+            pass
 
     return (
         True,
@@ -1870,6 +1902,135 @@ async def _upload_rollouts(
             logger.debug("Failed to upload to Hugging Face (may need HF_TOKEN)")
     except Exception as e:
         logger.debug(f"Hugging Face upload error: {e}")
+
+
+# --------------------------------------------------------------------------- #
+#                          Miner Logging Helpers                              #
+# --------------------------------------------------------------------------- #
+
+
+async def _log_top_miners_by_rollout_count(
+    window_inference_counts: dict[str, dict[str, Any]],
+    uid_by_hotkey: dict[str, str],
+    target_window: int,
+    monitor: Optional[Any],
+    top_n: int = 5,
+) -> None:
+    """Log top miners by total rollout count."""
+    # Create list of (hotkey, uid, rollout_count) for top performers
+    miner_rollout_data = []
+    for hotkey, metrics in window_inference_counts.items():
+        uid = uid_by_hotkey.get(hotkey, hotkey)
+        rollout_count = metrics.get("total", 0)
+        miner_rollout_data.append((hotkey, uid, rollout_count))
+
+    # Sort by rollout count (descending) and get top N
+    top_miners = sorted(miner_rollout_data, key=lambda x: x[2], reverse=True)[:top_n]
+
+    if top_miners:
+        logger.info(f"🏆 Top {min(len(top_miners), top_n)} miners by rollout count:")
+        for i, (_hotkey, uid, count) in enumerate(top_miners, 1):
+            logger.info(f"  {i}. UID {uid}: {count} rollouts")
+
+        # Log to monitoring as text
+        if monitor:
+            text_lines = []
+            for rank, (_hotkey, uid, count) in enumerate(top_miners, 1):
+                text_lines.append(f"{rank}. UID {uid}: {count} rollouts")
+
+            await monitor.log_artifact(
+                "validation/top_miners_by_rollout_count",
+                {"window": target_window, "text": "\n".join(text_lines)},
+                "text",
+            )
+
+
+async def _log_top_miners_by_unique_rollouts(
+    window_inference_counts: dict[str, dict[str, Any]],
+    uid_by_hotkey: dict[str, str],
+    target_window: int,
+    monitor: Optional[Any],
+    top_n: int = 5,
+) -> None:
+    """Log top miners by unique rollouts count."""
+    # Create list of (hotkey, uid, unique_count) for top performers
+    miner_unique_data = []
+    for hotkey, metrics in window_inference_counts.items():
+        uid = uid_by_hotkey.get(hotkey, hotkey)
+        unique_count = metrics.get("unique", 0)
+        miner_unique_data.append((hotkey, uid, unique_count))
+
+    # Sort by unique count (descending) and get top N
+    top_miners = sorted(miner_unique_data, key=lambda x: x[2], reverse=True)[:top_n]
+
+    if top_miners:
+        logger.info(f"🌟 Top {min(len(top_miners), top_n)} miners by unique rollouts:")
+        for i, (_hotkey, uid, count) in enumerate(top_miners, 1):
+            logger.info(f"  {i}. UID {uid}: {count} unique rollouts")
+
+        # Log to monitoring as text
+        if monitor:
+            text_lines = []
+            for rank, (_hotkey, uid, count) in enumerate(top_miners, 1):
+                text_lines.append(f"{rank}. UID {uid}: {count} unique rollouts")
+
+            await monitor.log_artifact(
+                "validation/top_miners_by_unique_rollouts",
+                {"window": target_window, "text": "\n".join(text_lines)},
+                "text",
+            )
+
+
+async def _log_top_miners_by_score(
+    inference_counts: defaultdict[str, defaultdict[int, dict[str, int]]],
+    uid_by_hotkey: dict[str, str],
+    target_window: int,
+    monitor: Optional[Any],
+    top_n: int = 5,
+) -> None:
+    """Log top miners by highest score (base_score and superlinear_score)."""
+    # Create list of (hotkey, uid, base_score, superlinear_score)
+    # for top performers
+    miner_score_data = []
+    for hotkey in inference_counts.keys():
+        uid = uid_by_hotkey.get(hotkey, hotkey)
+        try:
+            # Calculate scores using the same logic as _aggregate_weight_inputs
+            (
+                total_unique,
+                total_successful,
+                total_estimated_valid,
+                base_score,
+                superlinear_score,
+            ) = _aggregate_weight_inputs(hotkey, inference_counts, target_window)
+            miner_score_data.append((hotkey, uid, base_score, superlinear_score))
+        except Exception as e:
+            logger.debug(f"Error calculating score for hotkey {hotkey}: {e}")
+            continue
+
+    # Sort by superlinear_score (descending) and get top N
+    top_miners = sorted(miner_score_data, key=lambda x: x[3], reverse=True)[:top_n]
+
+    if top_miners:
+        logger.info(f"🎯 Top {min(len(top_miners), top_n)} miners by score:")
+        for i, (_hotkey, uid, base_score, superlinear_score) in enumerate(top_miners, 1):
+            logger.info(
+                f"  {i}. UID {uid}: base={base_score:.2f}, superlinear={superlinear_score:.2f}"
+            )
+
+        # Log to monitoring as text
+        if monitor:
+            text_lines = []
+            for rank, (_hotkey, uid, base_score, superlinear_score) in enumerate(top_miners, 1):
+                text_lines.append(
+                    f"{rank}. UID {uid}: base={base_score:.2f}, superlinear={superlinear_score:.2f}"
+                )
+
+            await monitor.log_artifact(
+                "validation/top_miners_by_score",
+                {"window": target_window, "text": "\n".join(text_lines)},
+                "text",
+            )
 
 
 # --------------------------------------------------------------------------- #
