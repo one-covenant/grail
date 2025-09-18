@@ -79,8 +79,8 @@ Object-storage utilities for miner/validator coordination:
 #### 6. CLI (`grail/cli/`)
 Typer-based CLI with subcommands: `mine`, `validate` (and experimental `train`).
 
-Best practices for miners:
-- Do not override model-related environment variables (`GRAIL_MODEL_NAME`, `GRAIL_MAX_NEW_TOKENS`).
+ Best practices for miners:
+- Do not override model-related environment variables (`GRAIL_MODEL_NAME`, `GRAIL_MAX_NEW_TOKENS`, `GRAIL_ROLLOUTS_PER_PROBLEM`).
 - Leave the final 2 blocks of each window for upload; generation should stop near the end automatically.
 - Prefer `uv sync` for reproducible installs.
 

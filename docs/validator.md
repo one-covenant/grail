@@ -181,7 +181,7 @@ For each downloaded inference:
 - Window and block-hash must match the validator’s `target_window` and hash.
 - Nonce must be unique within a miner’s window file.
 - Signature check: hotkey verifies `challenge = sat_seed + block_hash + nonce`.
-- SAT seed must equal `{wallet_addr}-{target_window_hash}-{nonce}` (for GRPO rollouts, base seed `{wallet_addr}-{target_window_hash}-{rollout_group}` is reconstructed).
+- SAT seed must equal `{wallet_addr}-{target_window_hash}-{nonce}` (for GRPO rollouts, base seed `{wallet_addr}-{target_window_hash}-{rollout_group}` is reconstructed). Note: GRPO group size is fixed at 4 (`GRAIL_ROLLOUTS_PER_PROBLEM=4`) in this release and must not be changed by miners.
 - Challenge randomness for GRAIL proof: mix drand randomness (current round) with `target_window_hash`; fallback to hash-only on failures.
 - Verifier (`grail/grail.py`) checks token validity, sketch proof, model identity, and SAT reconstruction.
 

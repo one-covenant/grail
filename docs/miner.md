@@ -90,7 +90,7 @@ Set these in `.env` (see `.env.example` for full list and guidance):
   - Use `Qwen/Qwen3-4B-Instruct-2507` as the network default model in the first version.
   - Set `GRAIL_MAX_NEW_TOKENS=1024` (mandatory in first version).
   - Validators assume the network default model and generation cap; changes may cause rollouts to be rejected.
-  - You may adjust `GRAIL_ROLLOUTS_PER_PROBLEM` for throughput, but ensure you finish generation before the window upload buffer (last 2 blocks).
+  - `GRAIL_ROLLOUTS_PER_PROBLEM` is fixed at 4 in this release and must not be changed. Throughput tuning should be done via other parameters; still ensure generation finishes before the upload buffer (last 2 blocks).
 - Object storage (R2/S3)
   - `R2_BUCKET_ID`, `R2_ACCOUNT_ID`
   - Dual credentials (recommended):
