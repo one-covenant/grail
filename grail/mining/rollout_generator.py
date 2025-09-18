@@ -9,7 +9,14 @@ from typing import Any
 import bittensor as bt
 import torch
 
-from ..shared.constants import MAX_NEW_TOKENS
+from ..shared.constants import (
+    MAX_NEW_TOKENS,
+    INFERENCE_BACKEND,
+    VLLM_BASE_URL,
+    VLLM_MODEL,
+    VLLM_TIMEOUT_S,
+    VLLM_MAX_RETRIES,
+)
 from ..shared.hf_compat import resolve_hidden_size
 
 logger = logging.getLogger(__name__)
@@ -161,15 +168,138 @@ class RolloutGenerator(ABC):
         """
         rollouts = []
 
-        # TODO: super inefficient! add dynamic batching; vllm-support; etc soon
-        for _ in range(self.rollouts_per_problem):
-            # Initialize environment
-            env = self.create_environment(problem)
-            state = self.reset_environment(env)
+        # Initialize environment once per GRPO group
+        env = self.create_environment(problem)
+        state = self.reset_environment(env)
 
-            # Generate rollout with logprobs tracking
-            rollout = self._generate_single_rollout(problem, env, state, randomness_hex, wallet)
-            rollouts.append(rollout)
+        # vLLM fast-path: batch-generate n=rollouts_per_problem completions for the same prompt
+        use_vllm = (
+            INFERENCE_BACKEND == "vllm" and isinstance(VLLM_BASE_URL, str) and len(VLLM_BASE_URL) > 0
+        )
+        if use_vllm:
+            try:
+                from ..inference.vllm_client import VLLMClient
+
+                # Render prompt once
+                prompt = self.create_prompt(problem, env, state, [])
+                messages = [{"role": "user", "content": prompt}]
+                prompt_with_template = self.tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+
+                client = VLLMClient(
+                    base_url=VLLM_BASE_URL,
+                    model=VLLM_MODEL or None,
+                    timeout=float(VLLM_TIMEOUT_S),
+                    max_retries=int(VLLM_MAX_RETRIES),
+                )
+
+                comps = client.generate(
+                    prompt_with_template,
+                    n=self.rollouts_per_problem,
+                    max_tokens=self.get_max_tokens(),
+                    temperature=self.get_temperature(),
+                    top_p=0.95,
+                    top_k=50,
+                    repetition_penalty=1.1,
+                    stop=None,
+                    ignore_eos=False,
+                )
+
+                # Tokenize prompt once to compute prompt length and ids for proof pass
+                tok = self.tokenizer(
+                    prompt_with_template,
+                    return_tensors="pt",
+                    return_attention_mask=True,
+                )
+                prompt_ids = tok.input_ids.to(self.device)
+                prompt_length = int(prompt_ids.shape[1])
+
+                for comp in comps:
+                    # Decode completion text → parse action & reward
+                    generated_text = comp.text
+                    action = self.parse_action(generated_text, env, state)
+
+                    # Build trajectory and reward
+                    trajectory = []
+                    total_reward = 0.0
+                    _next_state, reward, _done, info = self.step_environment(env, action)
+                    trajectory_entry = self.create_trajectory_entry(state, action, reward, info)
+                    trajectory.append(trajectory_entry)
+                    total_reward += float(reward)
+                    success = bool(info.get("success", False))
+
+                    # Compose tokens by locally re-tokenizing completion and concatenating
+                    completion_ids = self.tokenizer(
+                        generated_text, return_tensors="pt", add_special_tokens=False
+                    ).input_ids[0].tolist()
+                    all_token_ids = prompt_ids[0].tolist() + completion_ids
+
+                    # GRAIL proof + local logits in a single HF forward pass
+                    from ..grail import dot_mod_q, r_vec_from_randomness, sign_s_vals
+
+                    r_vec = r_vec_from_randomness(randomness_hex, resolve_hidden_size(self.model))
+                    s_vals: list[int] = []
+                    with torch.inference_mode():
+                        token_tensor = torch.tensor([all_token_ids], dtype=torch.long).to(self.device)
+                        model_outputs = self.model(token_tensor, output_hidden_states=True)
+                        h_layer = model_outputs.hidden_states[-1][0]
+                        for pos in range(len(all_token_ids)):
+                            if pos < h_layer.size(0):
+                                s_val = dot_mod_q(h_layer[pos], r_vec)
+                                s_vals.append(s_val)
+                        # Local token logprobs to match HF miner when server logprobs are missing
+                        need_local_lp = (
+                            comp.token_logprobs is None
+                            or len(comp.token_logprobs) != len(completion_ids)
+                        )
+                        if need_local_lp and hasattr(model_outputs, "logits"):
+                            logits = model_outputs.logits[0]  # [T, V]
+                            comp_logprobs: list[float] = []
+                            for t_idx in range(prompt_length, len(all_token_ids)):
+                                prev_t = t_idx - 1
+                                if prev_t < 0 or prev_t >= logits.size(0):
+                                    comp_logprobs.append(0.0)
+                                    continue
+                                step_logits = logits[prev_t]
+                                # log softmax for numerical stability
+                                log_probs = torch.log_softmax(step_logits, dim=-1)
+                                tok_id = int(all_token_ids[t_idx])
+                                comp_logprobs.append(float(log_probs[tok_id].item()))
+                            all_logprobs = [0.0] * prompt_length + comp_logprobs[: len(completion_ids)]
+                        else:
+                            # Use server-provided completion logprobs when available
+                            if comp.token_logprobs is not None and len(comp.token_logprobs) == len(completion_ids):
+                                all_logprobs = [0.0] * prompt_length + list(comp.token_logprobs)
+                            else:
+                                all_logprobs = [0.0] * prompt_length + [0.0] * len(completion_ids)
+                    signature = sign_s_vals(s_vals, wallet)
+
+                    rollouts.append(
+                        GRPORollout(
+                            tokens=all_token_ids,
+                            token_logprobs=all_logprobs,
+                            prompt_length=prompt_length,
+                            completion_length=len(completion_ids),
+                            reward=float(total_reward),
+                            advantage=0.0,
+                            trajectory=trajectory,
+                            success=success,
+                            s_vals=s_vals,
+                            signature=signature,
+                            beacon={"randomness": randomness_hex},
+                        )
+                    )
+
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"vLLM backend failed, falling back to HF: {e}")
+                use_vllm = False
+
+        # HF fallback or when backend explicitly set to hf
+        if not use_vllm:
+            for _ in range(self.rollouts_per_problem):
+                rollout = self._generate_single_rollout(problem, env, state, randomness_hex, wallet)
+                rollouts.append(rollout)
 
         # Compute GRPO advantages across the group
         rewards = [r.reward for r in rollouts]
