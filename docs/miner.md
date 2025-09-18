@@ -52,16 +52,25 @@ Hardware requirements:
 # Clone and enter
 git clone https://github.com/one-covenant/grail
 cd grail
-
-# Create venv and install
-uv venv && source .venv/bin/activate
-
 # Recommended (reproducible, uses lockfile and installs extras)
 uv sync
 
+source .venv/bin/activate
+
+# Optional install vllm and use as backend
+
+uv pip install vllm 
+
+vllm serve Qwen/Qwen3-4B-Instruct-2507 \
+  --port 8000 --tensor-parallel-size 1 \
+  --dtype bfloat16 --max-model-len 8192 \
+  --gpu-memory-utilization 0.65 --enforce-eager \
+  --generation-config vllm \
+  --trust-remote-code
+
 # Configure environment
 cp .env.example .env
-# Edit .env with your wallet names, network, and R2 credentials
+# Edit .env with your wallet names, network, R2 credentials and vllm/hf backend selection
 
 # Run miner
 grail mine 

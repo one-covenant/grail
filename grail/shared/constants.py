@@ -18,6 +18,13 @@ WINDOW_LENGTH = 30
 MODEL_NAME = os.getenv("GRAIL_MODEL_NAME", "Qwen/Qwen3-4B-Instruct-2507")
 LAYER_INDEX = -1
 
+# Inference backend selection
+INFERENCE_BACKEND = os.getenv("INFERENCE_BACKEND", "hf").lower()
+VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "")
+VLLM_MODEL = os.getenv("VLLM_MODEL", "Qwen/Qwen3-4B-Instruct-2507")
+VLLM_TIMEOUT_S = float(os.getenv("VLLM_TIMEOUT_S", "30"))
+VLLM_MAX_RETRIES = int(os.getenv("VLLM_MAX_RETRIES", "2"))
+
 # ────────────────  LOGGING  ────────────────
 
 TRACE = 5
