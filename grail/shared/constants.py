@@ -40,7 +40,7 @@ SANITY_CHECK_DRIFT_THRESHOLD = 0.1
 
 # ────────────────  TOKEN SAMPLING DIST CHECK HPs  ────────────────
 
-SAMPLING_MIN_STEPS = 8
+SAMPLING_MIN_STEPS = 30
 SAMPLING_LOW_P = 0.10
 SAMPLING_HIGH_P = 0.90
 SAMPLING_LOW_FRAC_MIN = 0.20
@@ -53,6 +53,10 @@ SAMPLING_BC_THRESHOLD = 0.58
 SAMPLING_MEDIAN_LOW_MAX = 0.30
 # NOTE: this parameter so far has been a good indicator of bimodality
 SAMPLING_LOW_Q10_MAX = 0.20
+
+# Extra sanity gates for sampling shape checks
+SAMPLING_MIN_TOKEN_PROB = 1e-5
+SAMPLING_INITIAL_WINDOW_STEPS = 30
 
 # ────────────────  VALIDATOR-SPECIFIC CONSTANTS  ────────────────
 

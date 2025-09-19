@@ -17,8 +17,11 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
 
 from .environments import generate_sat_problem
-from .environments.sat import create_sat_prompt
-from .mining.rollout_generator import REASONING_START, SYSTEM_PROMPT
+from .environments.sat import SATParser, create_sat_prompt
+from .mining.rollout_generator import (
+    REASONING_START,
+    SYSTEM_PROMPT,
+)
 from .monitoring import get_monitoring_manager
 from .shared.chat_templates import build_qwen_chat_template
 from .shared.constants import (
@@ -31,10 +34,12 @@ from .shared.constants import (
     RNG_LABEL,
     SAMPLING_BC_THRESHOLD,
     SAMPLING_HIGH_P,
+    SAMPLING_INITIAL_WINDOW_STEPS,
     SAMPLING_LOW_P,
     SAMPLING_LOW_Q10_MAX,
     SAMPLING_MEDIAN_LOW_MAX,
     SAMPLING_MIN_STEPS,
+    SAMPLING_MIN_TOKEN_PROB,
     SANITY_CHECK_DRIFT_THRESHOLD,
     TOLERANCE,
 )
@@ -679,16 +684,11 @@ class Verifier:
         checks["termination_valid"] = True
 
         # Verify the solution if claimed successful
-        # TODO: This is actually exploitable and the logic should improve later
         rollout = commit.get("rollout", {})
         if rollout.get("success", False):
-            # Check that the assignment actually solves the problem
-            assignment = rollout.get("assignment", [])
-            if not expected_problem.check_solution(assignment):
-                logger.debug("Claimed solution doesn't actually solve SAT problem")
-                checks["solution_valid"] = False
+            solution_valid = self._validate_solution(commit, rollout, expected_problem, checks)
+            if not solution_valid:
                 return False, checks
-            checks["solution_valid"] = True
 
         logger.debug("SAT rollout verification successful - model identity confirmed")
 
@@ -808,6 +808,102 @@ class Verifier:
         except Exception as e:
             logger.debug(f"Prompt prefix verification error: {e}")
             return False
+
+    def _decode_completion_text(self, commit: dict) -> Optional[str]:
+        """Decode completion text from tokens using prompt/completion lengths.
+
+        Returns None if decoding is not possible.
+        """
+        try:
+            tokens = commit.get("tokens", [])
+            if not isinstance(tokens, list) or not tokens:
+                return None
+            rollout_meta = commit.get("rollout", {})
+            prompt_len = int(rollout_meta.get("prompt_length", 0) or 0)
+            completion_len = int(rollout_meta.get("completion_length", 0) or 0)
+            if completion_len > 0 and prompt_len >= 0:
+                completion_ids = tokens[prompt_len : prompt_len + completion_len]
+            else:
+                completion_ids = tokens[prompt_len:]
+            if not completion_ids:
+                return None
+            text = str(self.tokenizer.decode(completion_ids, skip_special_tokens=False))
+            return text
+        except Exception as e:
+            logger.debug(f"Failed to decode completion text: {e}")
+            return None
+
+    def _extract_assignment_from_tokens(self, commit: dict, problem: Any) -> Optional[list[bool]]:
+        """Extract assignment by decoding completion tokens and using SATParser."""
+        try:
+            text = self._decode_completion_text(commit)
+            if text is None:
+                return None
+            parser = SATParser()
+            parsed = parser.parse(text, problem)
+            if not isinstance(parsed, dict):
+                return None
+            values_any = parsed.get("assignment", [])
+            try:
+                values_any = values_any[: problem.num_vars]
+            except Exception:
+                return None
+            return [bool(x) for x in values_any]
+        except Exception as e:
+            logger.debug(f"Failed to extract assignment via SATParser: {e}")
+            return None
+
+    def _validate_solution(
+        self,
+        commit: dict,
+        rollout: dict,
+        expected_problem: Any,
+        checks: dict[str, bool],
+    ) -> bool:
+        """
+        Validate the solution assignment for a claimed successful SAT rollout.
+
+        Args:
+            commit: The commit data containing tokens
+            rollout: The rollout data containing claimed assignment
+            expected_problem: The expected SAT problem instance
+            checks: Dictionary to update with validation results
+
+        Returns:
+            True if solution is valid, False otherwise
+        """
+        # Extract assignment from tokens (via SATParser) and compare
+        token_assignment = self._extract_assignment_from_tokens(commit, expected_problem)
+        claimed_assignment = rollout.get("assignment", [])
+
+        if token_assignment is None:
+            logger.debug("Missing assignment parsed from tokens for claimed success")
+            checks["solution_valid"] = False
+            return False
+
+        # Enforce strict structure for claimed assignment
+        if (
+            not isinstance(claimed_assignment, list)
+            or len(claimed_assignment) != expected_problem.num_vars
+            or not all(isinstance(v, bool) for v in claimed_assignment)
+        ):
+            logger.debug("Invalid claimed assignment structure in commit payload")
+            checks["solution_valid"] = False
+            return False
+
+        if token_assignment != claimed_assignment:
+            logger.debug("Assignment mismatch between tokens and commit payload")
+            checks["solution_valid"] = False
+            return False
+
+        # Finally, check that the assignment actually solves the problem
+        if not expected_problem.check_solution(token_assignment):
+            logger.debug("Token-derived assignment does not solve SAT problem")
+            checks["solution_valid"] = False
+            return False
+
+        checks["solution_valid"] = True
+        return True
 
     def verify(
         self,
@@ -1101,19 +1197,60 @@ class Verifier:
         """Return (ok, stats) where ok=False indicates suspicious distribution"""
         probs = self._collect_chosen_token_probs(commit)
         n = 0 if probs is None else len(probs)
-        if probs is None or n < SAMPLING_MIN_STEPS:
-            return True, {"n": float(n), "reason": "insufficient"}
 
+        # considering that we're focusing on reasoning, we're always going to have more tokens than SAMPLING_MIN_STEPS
+        if probs is None or n < SAMPLING_MIN_STEPS:
+            return False, {"n": float(n), "reason": "insufficient"}
+
+        # capture exploits if another model is used for token generation but the prefill has happened using the main model
         metrics = self._bimodality_metrics(probs)
 
-        # Simplified decision: unimodal-low via median; bimodal via BC gated by q10
+        # Existing decisions: unimodal-low via median; bimodal via BC gated by q10
         suspicious_unimodal_low = metrics.get("median", 1.0) <= SAMPLING_MEDIAN_LOW_MAX
         low_q10 = metrics.get("q10", 1.0) <= SAMPLING_LOW_Q10_MAX
         suspicious_bimodal = low_q10 and (metrics.get("bc", 0.0) >= SAMPLING_BC_THRESHOLD)
-        suspicious = suspicious_unimodal_low or suspicious_bimodal
 
-        # Verbose-mode monitoring: log histogram of chosen-token probabilities
-        self._log_verbose_monitoring_metrics(probs, metrics)
+        # Sanity gate: forbid extremely low chosen-token probability anywhere
+        # This captures prefixes like "Check if <SOLUTION>..." where early tokens are near-0 prob.
+        min_p = float(min(probs))
+        low_prob_violation = min_p <= SAMPLING_MIN_TOKEN_PROB
+
+        # Sometimes people end up putting some prefix for their completion such as
+        # Check if <SOLUTION>{answer}</SOLUTION> satisfies all clauses:
+        # and the the dist still stays unimoadal but the probs of some of the initial tokens
+        # becomes too low like some even get the value of 0 somtimes. To capture these exploits
+        # we can do a sanity check to make sure there's no tokens with value lower than 1e-5 (a constant value)
+        # and also look at the probability of the initial 40 tokens (another constant) and check dist for bimodality the same way
+        k = min(int(SAMPLING_INITIAL_WINDOW_STEPS), len(probs))
+        initial_metrics = self._bimodality_metrics(probs[:k]) if k > 0 else {}
+        low_q10_init = initial_metrics.get("q10", 1.0) <= SAMPLING_LOW_Q10_MAX
+        suspicious_bimodal_initial = low_q10_init and (
+            initial_metrics.get("bc", 0.0) >= SAMPLING_BC_THRESHOLD
+        )
+
+        logger.debug(f"uid: {self._current_wallet}")
+        logger.debug(f"low_prob_violation: {low_prob_violation}")
+        logger.debug(f"suspicious_bimodal_initial: {suspicious_bimodal_initial}")
+        logger.debug(f"suspicious_unimodal_low: {suspicious_unimodal_low}")
+        logger.debug(f"suspicious_bimodal: {suspicious_bimodal}")
+
+        suspicious = (
+            suspicious_unimodal_low
+            or suspicious_bimodal
+            or low_prob_violation
+            or suspicious_bimodal_initial
+        )
+
+        # Include brief context in metrics for debugging/telemetry
+        metrics["min_p"] = min_p
+        metrics["low_prob_violation"] = bool(low_prob_violation)
+        if k > 0:
+            metrics["initial_q10"] = float(initial_metrics.get("q10", 0.0))
+            metrics["initial_bc"] = float(initial_metrics.get("bc", 0.0))
+
+        # Verbose-mode monitoring: log histogram of chosen-token probabilities (debug mode only)
+        if logger.isEnabledFor(logging.DEBUG):
+            self._log_verbose_monitoring_metrics(probs, metrics)
 
         return (not suspicious), metrics
 
