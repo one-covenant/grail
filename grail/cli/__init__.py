@@ -111,10 +111,7 @@ def configure_logging(verbosity: int) -> None:
     # Optionally forward logs to Grafana Loki if configured via environment
     try:
         # Support multiple Loki endpoints (comma-separated) to dual-ship
-        raw_urls = (
-            os.environ.get("GRAIL_OBS_LOKI_URL")
-            or os.environ.get("GRAIL_LOKI_URL")
-        )
+        raw_urls = os.environ.get("GRAIL_OBS_LOKI_URL") or os.environ.get("GRAIL_LOKI_URL")
         if not raw_urls:
             raw_urls = os.environ.get("LOKI_URL", "")
         loki_urls = [u.strip() for u in raw_urls.split(",") if u.strip()]
@@ -134,13 +131,11 @@ def configure_logging(verbosity: int) -> None:
                         k, v = part.split("=", 1)
                         tags[k.strip()] = v.strip()
 
-            username = (
-                os.environ.get("GRAIL_OBS_LOKI_USERNAME")
-                or os.environ.get("GRAIL_LOKI_USERNAME")
+            username = os.environ.get("GRAIL_OBS_LOKI_USERNAME") or os.environ.get(
+                "GRAIL_LOKI_USERNAME"
             )
-            password = (
-                os.environ.get("GRAIL_OBS_LOKI_PASSWORD")
-                or os.environ.get("GRAIL_LOKI_PASSWORD")
+            password = os.environ.get("GRAIL_OBS_LOKI_PASSWORD") or os.environ.get(
+                "GRAIL_LOKI_PASSWORD"
             )
             auth = (username, password) if username and password else None
 
@@ -149,6 +144,7 @@ def configure_logging(verbosity: int) -> None:
                 try:
                     # Use LokiQueueHandler for automatic queue management
                     from multiprocessing import Queue
+
                     loki_handler = logging_loki.LokiQueueHandler(
                         Queue(-1),
                         url=loki_url,
@@ -160,18 +156,13 @@ def configure_logging(verbosity: int) -> None:
                     # the handler applies formatter to records
                     loki_handler.setFormatter(
                         logging.Formatter(
-                            fmt=(
-                                "%(asctime)s %(levelname)s "
-                                "[%(name)s] %(message)s"
-                            ),
+                            fmt=("%(asctime)s %(levelname)s [%(name)s] %(message)s"),
                             datefmt="%Y-%m-%d %H:%M:%S",
                         )
                     )
                     root.addHandler(loki_handler)
                 except Exception as e:
-                    logger.warning(
-                        f"Failed to add Loki handler for {loki_url}: {e}"
-                    )
+                    logger.warning(f"Failed to add Loki handler for {loki_url}: {e}")
 
             count = len(loki_urls)
             logger.info(f"Grafana Loki logging enabled for {count} endpoints")
@@ -311,9 +302,7 @@ def _register_subcommands() -> None:
         "grail.cli.train",
     ):
         module = importlib.import_module(mod_name)
-        register: Callable[[typer.Typer], None] | None = getattr(
-            module, "register", None
-        )
+        register: Callable[[typer.Typer], None] | None = getattr(module, "register", None)
         if callable(register):
             register(app)
 
