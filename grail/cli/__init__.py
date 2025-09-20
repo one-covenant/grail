@@ -11,8 +11,11 @@ from __future__ import annotations
 import atexit
 import logging
 import os
+import socket
+import uuid
 from typing import Callable, cast
 
+import logging_loki  # type: ignore[import-untyped]
 import typer
 from dotenv import load_dotenv
 from rich.console import Console
@@ -20,8 +23,7 @@ from rich.logging import RichHandler
 
 from ..monitoring import initialize_monitoring
 from ..monitoring.config import MonitoringConfig
-from ..observability import ContextFilter, JsonLogFormatter
-from ..observability.loki import LokiHandler
+from ..observability import ContextFilter
 from ..shared.constants import NETUID, NETWORK
 
 # Load environment variables once for the whole CLI at import time so that
@@ -35,6 +37,7 @@ except Exception:
 
 console = Console()
 logger = logging.getLogger(__name__)
+TRACE_ID = str(uuid.uuid4())
 
 
 def configure_logging(verbosity: int) -> None:
@@ -60,7 +63,7 @@ def configure_logging(verbosity: int) -> None:
     ]:
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
-    handler = RichHandler(
+    console_handler = RichHandler(
         console=console,
         rich_tracebacks=True,
         show_time=True,
@@ -72,74 +75,104 @@ def configure_logging(verbosity: int) -> None:
         "%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
 
     root = logging.getLogger()
     root.handlers.clear()
     root.setLevel(level)
-    root.addHandler(handler)
+    root.addHandler(console_handler)
 
-    # Attach a context filter so all records carry consistent fields
+    # Attach filters so all records carry consistent fields and a level tag
     root.addFilter(ContextFilter())
+
+    class LokiLevelTagFilter(logging.Filter):
+        """Ensure each record carries a 'tags' dict with a 'level' key.
+
+        The python-logging-loki handler already adds a 'severity' label. We
+        add an explicit 'level' tag too to make queries more ergonomic
+        (e.g., {level="INFO"}).
+        """
+
+        def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
+            try:
+                tags = getattr(record, "tags", None)
+                if not isinstance(tags, dict):
+                    tags = {}
+                if "level" not in tags:
+                    tags["level"] = record.levelname
+                record.tags = tags
+            except Exception:
+                # Never fail logging due to tagging issues
+                pass
+            return True
+
+    root.addFilter(LokiLevelTagFilter())
 
     # Optionally forward logs to Grafana Loki if configured via environment
     try:
         # Support multiple Loki endpoints (comma-separated) to dual-ship
-        raw_urls = os.environ.get("GRAIL_OBS_LOKI_URL") or os.environ.get("GRAIL_LOKI_URL")
+        raw_urls = (
+            os.environ.get("GRAIL_OBS_LOKI_URL")
+            or os.environ.get("GRAIL_LOKI_URL")
+        )
         if not raw_urls:
             raw_urls = os.environ.get("LOKI_URL", "")
         loki_urls = [u.strip() for u in raw_urls.split(",") if u.strip()]
         if loki_urls:
             labels_env = os.environ.get("GRAIL_LOKI_LABELS", "")
-            labels: dict[str, str] = {"app": "grail"}
+            # Default tags for Loki; allow overrides via env
+            tags: dict[str, str] = {
+                "app": "grail",
+                "host": socket.gethostname(),
+                "pid": str(os.getpid()),
+                "trace_id": TRACE_ID,
+            }
             if labels_env:
                 for part in labels_env.split(","):
                     part = part.strip()
                     if part and "=" in part:
                         k, v = part.split("=", 1)
-                        labels[k.strip()] = v.strip()
+                        tags[k.strip()] = v.strip()
 
-            tenant_id = os.environ.get("GRAIL_OBS_LOKI_TENANT_ID") or os.environ.get(
-                "GRAIL_LOKI_TENANT_ID"
+            username = (
+                os.environ.get("GRAIL_OBS_LOKI_USERNAME")
+                or os.environ.get("GRAIL_LOKI_USERNAME")
             )
-            username = os.environ.get("GRAIL_OBS_LOKI_USERNAME") or os.environ.get(
-                "GRAIL_LOKI_USERNAME"
-            )
-            password = os.environ.get("GRAIL_OBS_LOKI_PASSWORD") or os.environ.get(
-                "GRAIL_LOKI_PASSWORD"
+            password = (
+                os.environ.get("GRAIL_OBS_LOKI_PASSWORD")
+                or os.environ.get("GRAIL_LOKI_PASSWORD")
             )
             auth = (username, password) if username and password else None
-            timeout_env = (
-                os.environ.get("GRAIL_OBS_LOKI_TIMEOUT_S")
-                or os.environ.get("GRAIL_LOKI_TIMEOUT_S")
-                or "2.5"
-            )
-            timeout_s = float(timeout_env)
-            batch_env = (
-                os.environ.get("GRAIL_OBS_LOKI_BATCH_SIZE")
-                or os.environ.get("GRAIL_LOKI_BATCH_SIZE")
-                or "1"
-            )
-            batch_size = int(batch_env)
-            batch_interval_env = (
-                os.environ.get("GRAIL_OBS_LOKI_BATCH_INTERVAL_S")
-                or os.environ.get("GRAIL_LOKI_BATCH_INTERVAL_S")
-                or "1.0"
-            )
-            batch_interval_s = float(batch_interval_env)
 
+            # Create LokiQueueHandler for each endpoint
             for loki_url in loki_urls:
-                loki_handler = LokiHandler(
-                    url=loki_url,
-                    labels=labels,
-                    tenant_id=tenant_id,
-                    auth=auth,
-                    timeout=timeout_s,
-                    batch_size=batch_size,
-                    batch_interval=batch_interval_s,
-                )
-                loki_handler.setFormatter(JsonLogFormatter())
-                root.addHandler(loki_handler)
+                try:
+                    # Use LokiQueueHandler for automatic queue management
+                    from multiprocessing import Queue
+                    loki_handler = logging_loki.LokiQueueHandler(
+                        Queue(-1),
+                        url=loki_url,
+                        tags=tags,
+                        auth=auth,
+                        version="1",
+                    )
+                    # Ensure Loki line content includes level/metadata if
+                    # the handler applies formatter to records
+                    loki_handler.setFormatter(
+                        logging.Formatter(
+                            fmt=(
+                                "%(asctime)s %(levelname)s "
+                                "[%(name)s] %(message)s"
+                            ),
+                            datefmt="%Y-%m-%d %H:%M:%S",
+                        )
+                    )
+                    root.addHandler(loki_handler)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to add Loki handler for {loki_url}: {e}"
+                    )
+
             count = len(loki_urls)
             logger.info(f"Grafana Loki logging enabled for {count} endpoints")
     except Exception as e:
@@ -278,7 +311,9 @@ def _register_subcommands() -> None:
         "grail.cli.train",
     ):
         module = importlib.import_module(mod_name)
-        register: Callable[[typer.Typer], None] | None = getattr(module, "register", None)
+        register: Callable[[typer.Typer], None] | None = getattr(
+            module, "register", None
+        )
         if callable(register):
             register(app)
 
