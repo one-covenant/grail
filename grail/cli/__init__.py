@@ -23,8 +23,8 @@ from rich.logging import RichHandler
 
 from ..monitoring import initialize_monitoring
 from ..monitoring.config import MonitoringConfig
-from ..observability import ContextFilter
 from ..shared.constants import NETUID, NETWORK
+from ..shared.logging import ContextFilter
 
 # Load environment variables once for the whole CLI at import time so that
 # modules imported during subcommand registration can read them.

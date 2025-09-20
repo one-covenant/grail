@@ -1,7 +1,8 @@
-"""Context filter for enriching LogRecord with runtime metadata.
+"""Shared logging utilities for GRAIL.
 
-Attach this filter to the root logger so all handlers receive consistent
-context fields for correlation and querying.
+Currently provides a `ContextFilter` that enriches each `LogRecord` with
+standard fields sourced from environment variables so logs are consistent
+across modules, miners, and validators.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import os
 
 
 class ContextFilter(logging.Filter):
-    """Inject standard fields into each LogRecord if missing.
+    """Inject standard fields into each `LogRecord` if missing.
 
     Fields: service, env, version, network, netuid, wallet, hotkey, run_id.
     Values are sourced from environment variables when available.
@@ -58,4 +59,4 @@ class ContextFilter(logging.Filter):
         return True
 
 
-# end
+__all__ = ["ContextFilter"]
