@@ -1088,9 +1088,29 @@ class Verifier:
             start_t = max(1, prompt_len)
             end_t = min(start_t + completion_len, logits.size(0))
 
+            from mining.rollout_generator import RolloutGenerator
+            dummy_rolloutgenerator = RolloutGenerator()
             probs_list: list[float] = []
             for t in range(start_t, end_t):
                 step_logits = logits[t - 1]
+                temperature = dummy_rolloutgenerator.get_temperature()
+                step_logits = step_logits / temperature
+                top_k = 50
+                if top_k > 0:
+                    top_k_logits, top_k_indices = torch.topk(step_logits, k=min(top_k, step_logits.size(-1)))
+                    step_logits = torch.full_like(step_logits, float("-inf"))
+                    step_logits.scatter_(-1, top_k_indices, top_k_logits)
+
+                top_p = 0.95
+                if top_p < 1.0:
+                    sorted_logits, sorted_indices = torch.sort(step_logits, descending=True)
+                    cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=1)
+                    sorted_indices_to_remove = cumulative_probs > top_p
+                    sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
+                    sorted_indices_to_remove[0] = 0
+                    indices_to_remove = sorted_indices_to_remove.scatter(0, sorted_indices, sorted_indices_to_remove)
+                    step_logits[indices_to_remove] = float("-inf")
+
                 step_probs = torch.softmax(step_logits, dim=-1)
                 tok_id = int(tokens[t])
                 probs_list.append(float(step_probs[tok_id].item()))
