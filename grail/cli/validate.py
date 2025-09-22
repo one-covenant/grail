@@ -1502,6 +1502,26 @@ async def _process_wallet_window(
                 # Hard checks are cryptographic/proof constraints; any failure rejects wallet
                 hard_valid = all(checks.get(k, False) for k in HARD_CHECK_KEYS)
                 soft_valid = checks.get(SOFT_CHECK_KEY, True)
+
+                # Log specific check failures for debugging
+                if not hard_valid:
+                    # Find the first hard check that failed (due to early return pattern)
+                    failed_hard_check = None
+                    for k in HARD_CHECK_KEYS:
+                        if not checks.get(k, False):
+                            failed_hard_check = k
+                            break
+                    if failed_hard_check:
+                        logger.debug(
+                            f"CHECK_FAILURE uid={uid_str} window={target_window} "
+                            f"type=hard failed_check={failed_hard_check}"
+                        )
+                if not soft_valid:
+                    logger.debug(
+                        f"CHECK_FAILURE uid={uid_str} window={target_window} "
+                        f"type=soft failed_check={SOFT_CHECK_KEY}"
+                    )
+
                 # Track prompt validity as a metric (not gating)
                 try:
                     if (
