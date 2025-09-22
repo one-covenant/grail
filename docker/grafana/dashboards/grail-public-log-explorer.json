@@ -1,0 +1,174 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "dashboard",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Main Dashboard",
+      "tooltip": "Go to main metrics dashboard",
+      "type": "link",
+      "url": "/d/grail-logs"
+    }
+  ],
+  "liveNow": true,
+  "panels": [
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "Live log stream with advanced filtering capabilities. Use the controls above to filter by level, hotkey, quick search presets, or custom regex patterns.",
+      "gridPos": { "h": 22, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "{app=~\"$app\", level=~\"$level\", hotkey=~\"$hotkey\"} |~ \"$quick\" |~ \"$search\"",
+          "refId": "A"
+        }
+      ],
+      "title": "📋 GRAIL Live Logs",
+      "type": "logs"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["grail", "public", "logs", "explorer", "live"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "All", "value": "$__all" },
+        "datasource": { "type": "loki", "uid": "loki" },
+        "definition": "label_values({app=~\".+\"}, app)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".+",
+        "label": "🏷️ App",
+        "multi": false,
+        "name": "app",
+        "options": [],
+        "query": "label_values({app=~\".+\"}, app)",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 0,
+        "type": "query"
+      },
+      {
+        "current": { "selected": false, "text": "All", "value": "$__all" },
+        "datasource": { "type": "loki", "uid": "loki" },
+        "definition": "label_values({app=~\"$app\"}, level)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "📊 Level",
+        "multi": true,
+        "name": "level",
+        "options": [],
+        "query": "label_values({app=~\"$app\"}, level)",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 0,
+        "type": "query"
+      },
+      {
+        "current": { "selected": false, "text": "All", "value": "$__all" },
+        "datasource": { "type": "loki", "uid": "loki" },
+        "definition": "label_values({app=~\"$app\"}, hotkey)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "🔑 Hotkey",
+        "multi": true,
+        "name": "hotkey",
+        "options": [],
+        "query": "label_values({app=~\"$app\"}, hotkey)",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 0,
+        "type": "query"
+      },
+      {
+        "name": "quick",
+        "type": "custom",
+        "label": "🔍 Quick Search",
+        "hide": 0,
+        "query": ".*,(?i)error|\\u274c|exception|fail,(?i)warn|warning,(?i)info,(?i)debug,rollouts,mining,validation,hotkey,auth,(?i)timeout,(?i)retry,(?i)success|✅,(?i)start|begin,(?i)complete|finish",
+        "options": [
+          {"text": "🔍 All", "value": ".*", "selected": true},
+          {"text": "❌ Errors", "value": "(?i)error|\\u274c|exception|fail", "selected": false},
+          {"text": "⚠️ Warnings", "value": "(?i)warn|warning", "selected": false},
+          {"text": "ℹ️ Info", "value": "(?i)info", "selected": false},
+          {"text": "🐛 Debug", "value": "(?i)debug", "selected": false},
+          {"text": "🚀 Rollouts", "value": "rollouts", "selected": false},
+          {"text": "⛏️ Mining", "value": "mining", "selected": false},
+          {"text": "✅ Validation", "value": "validation", "selected": false},
+          {"text": "🔐 Auth", "value": "auth", "selected": false},
+          {"text": "⏱️ Timeout", "value": "(?i)timeout", "selected": false},
+          {"text": "🔄 Retry", "value": "(?i)retry", "selected": false},
+          {"text": "✅ Success", "value": "(?i)success|✅", "selected": false},
+          {"text": "🏁 Start/Begin", "value": "(?i)start|begin", "selected": false},
+          {"text": "🎯 Complete", "value": "(?i)complete|finish", "selected": false}
+        ],
+        "current": {"text": "🔍 All", "value": ".*", "selected": true},
+        "skipUrlSync": false
+      },
+      {
+        "name": "search",
+        "type": "textbox",
+        "label": "🔎 Custom Search (regex)",
+        "hide": 0,
+        "query": "",
+        "current": {"text": ".*", "value": ".*"},
+        "skipUrlSync": false
+      },
+      {
+        "name": "filters",
+        "type": "adhoc",
+        "datasource": { "type": "loki", "uid": "loki" },
+        "hide": 0,
+        "label": "🏷️ Advanced Filters"
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {
+    "refresh_intervals": ["5s", "10s", "30s", "1m", "5m", "15m", "30m", "1h", "2h", "1d"],
+    "time_options": ["5m", "15m", "1h", "6h", "12h", "24h", "2d", "7d", "30d"]
+  },
+  "timezone": "",
+  "title": "🔍 GRAIL Public Log Explorer",
+  "uid": "grail-log-explorer",
+  "version": 4,
+  "weekStart": ""
+}
