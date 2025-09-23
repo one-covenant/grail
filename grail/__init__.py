@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-__version__ = "0.0.14"
+__version__ = "0.0.15"
 
 from dotenv import load_dotenv
 
