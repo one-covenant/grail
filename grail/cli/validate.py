@@ -130,6 +130,7 @@ REQUIRED_ROLLOUT_FIELDS = [
     "challenge",
     "hotkey",
     "signature",
+    "rollout_group",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -1237,6 +1238,53 @@ async def _process_window(
     )
 
 
+async def _handle_wallet_hard_failure(
+    uid_str: str,
+    target_window: int,
+    hard_failure: bool,
+    soft_failures: int,
+    total_planned_checks: int,
+    checked_count: int,
+    total_inferences: int,
+    prompt_mismatch_count: int,
+    pr_total: int,
+    pr_invalid_sig: int,
+    pr_invalid_proof: int,
+    pr_processing_err: int,
+    monitor: Any,
+) -> tuple[bool, dict[str, int], list[dict], tuple[int, int, int, int]]:
+    """Handle wallet rejection due to hard or soft failures."""
+    metrics = {
+        "valid": 0,
+        "checked": checked_count,
+        "total": total_inferences,
+        "estimated_valid": 0,
+        "successful": 0,
+        "unique": 0,
+        "prompt_valid": 0,
+        "prompt_mismatch": prompt_mismatch_count,
+        FAILURE_FLAG_KEY: 1,
+    }
+    logger.info(
+        f"❌ UID {uid_str} rejected for window {target_window} "
+        f"(hard_failure={hard_failure}, "
+        f"soft_failures={soft_failures}/{total_planned_checks})"
+    )
+    if monitor:
+        await monitor.log_gauge(f"{uid_str}/had_failure", 1.0)
+        try:
+            await monitor.log_gauge(f"{uid_str}/prompt_valid", float(0))
+            await monitor.log_gauge(f"{uid_str}/prompt_mismatch", float(prompt_mismatch_count))
+        except Exception:
+            pass
+    return (
+        True,
+        metrics,
+        [],
+        (pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err),
+    )
+
+
 async def _process_wallet_window(
     wallet_addr: str,
     target_window: int,
@@ -1294,12 +1342,12 @@ async def _process_wallet_window(
     # Build group membership and assign canonical indices in file order (simple, deterministic)
     group_index_by_id: dict[str, int] = {}
     for idx, inf in enumerate(inferences):
-        group_id = inf.get("rollout_group")
-        if group_id is None:
-            group_id = f"single_{idx}"
-        groups_map[group_id].append(idx)
-        if group_id not in group_index_by_id:
-            group_index_by_id[group_id] = len(group_index_by_id)  # 0, 1, 2, ...
+        raw_gid = inf.get("rollout_group")
+        if raw_gid is not None:  # Only process inferences with rollout_group
+            group_id = str(raw_gid)
+            groups_map[group_id].append(idx)
+            if group_id not in group_index_by_id:
+                group_index_by_id[group_id] = len(group_index_by_id)  # 0, 1, 2, ...
 
     # Determine whether to check all rollouts or sample GRPO groups.
     # Sampling is deterministic per wallet+window via a seeded RNG to keep
@@ -1385,25 +1433,14 @@ async def _process_wallet_window(
     for _, inference_idx in enumerate(indices_to_check):
         inference = inferences[inference_idx]
         checked_count += 1
-        rollout_group = inference.get("rollout_group")
-        if rollout_group:
-            rollout_groups[rollout_group].append(inference)
+
         try:
-            required_fields = [
-                "window_start",
-                "nonce",
-                "sat_seed",
-                "block_hash",
-                "commit",
-                "proof",
-                "challenge",
-                "hotkey",
-                "signature",
-            ]
-            if not all(field in inference for field in required_fields):
+            required_fields = REQUIRED_ROLLOUT_FIELDS
+            missing_fields = [field for field in required_fields if field not in inference]
+            if missing_fields:
                 hard_failure = True
                 logger.warning(
-                    f"Missing required fields in inference from uid {uid_str}; "
+                    f"Missing required fields {missing_fields} in inference from uid {uid_str}; "
                     f"invalidating uid for window {target_window}"
                 )
                 break
@@ -1478,9 +1515,13 @@ async def _process_wallet_window(
                 except Exception:
                     pass
 
+                # rollout_group is guaranteed to be non-None due to hard failure check above
+                rollout_group = str(inference.get("rollout_group"))
+                rollout_groups[rollout_group].append(inference)
+
                 # Derive canonical SAT seed/difficulty based on deterministic file-order index
-                gid = rollout_group if rollout_group is not None else f"single_{inference_idx}"
-                idx = group_index_by_id.get(str(gid), 0)
+                gid = rollout_group
+                idx = group_index_by_id.get(gid, 0)
                 can_seed, can_diff = derive_canonical_sat(wallet_addr, target_window_hash, idx)
                 satp = commit_data.setdefault("sat_problem", {})
                 satp["seed"] = can_seed
@@ -1626,98 +1667,82 @@ async def _process_wallet_window(
 
     # Handle wallet rejection due to hard or soft failures
     if hard_failure or soft_gate_triggered:
-        metrics = {
-            "valid": 0,
-            "checked": checked_count,
-            "total": total_inferences,
-            "estimated_valid": 0,
-            "successful": 0,
-            "unique": 0,
-            "prompt_valid": 0,
-            "prompt_mismatch": prompt_mismatch_count,
-            FAILURE_FLAG_KEY: 1,
-        }
-        logger.info(
-            f"❌ UID {uid_str} rejected for window {target_window} "
-            f"(hard_failure={hard_failure}, "
-            f"soft_failures={soft_failures}/{total_planned_checks})"
-        )
-        if monitor:
-            await monitor.log_gauge(f"{uid_str}/had_failure", 1.0)
-            try:
-                await monitor.log_gauge(f"{uid_str}/prompt_valid", float(0))
-                await monitor.log_gauge(f"{uid_str}/prompt_mismatch", float(prompt_mismatch_count))
-            except Exception:
-                pass
-        return (
-            True,
-            metrics,
-            [],
-            (pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err),
+        return await _handle_wallet_hard_failure(
+            uid_str,
+            target_window,
+            hard_failure,
+            soft_failures,
+            total_planned_checks,
+            checked_count,
+            total_inferences,
+            prompt_mismatch_count,
+            pr_total,
+            pr_invalid_sig,
+            pr_invalid_proof,
+            pr_processing_err,
+            monitor,
         )
 
-    # Verify GRPO groups after processing checked inferences
-    # This ensures grouped rollouts follow GRPO constraints (shared base problem,
-    # advantages sum to zero, etc.) even when spot-checking
-    grpo_valid_groups = 0
-    grpo_invalid_groups = 0
-    grpo_incomplete_groups = 0
-
+    # Verify GRPO groups - hard requirement validation
     for group_id, group_rollouts in rollout_groups.items():
-        # Skip single rollout "groups" (non-GRPO)
-        if str(group_id).startswith("single_"):
-            continue
-
-        # Verify group has multiple rollouts (GRPO requirement)
-        if len(group_rollouts) < 2:
-            logger.debug(
-                f"GRPO group {group_id} has only {len(group_rollouts)} "
-                f"rollouts in checked sample, may be incomplete due to "
-                f"spot-checking"
-            )
-            grpo_incomplete_groups += 1
-            continue
-
         # Check if this looks like a complete group (should have 4 rollouts for GRPO)
         expected_group_size = ROLLOUTS_PER_PROBLEM
         if len(group_rollouts) != expected_group_size:
-            logger.debug(
+            hard_failure = True
+            logger.warning(
                 f"GRPO group {group_id} has {len(group_rollouts)} rollouts, "
-                f"expected {expected_group_size}"
+                f"expected {expected_group_size} for uid {uid_str}; "
+                f"invalidating uid for window {target_window}"
             )
+            break
+
+        # Verify advantages sum to approximately zero
         advantages = []
         for r in group_rollouts:
             adv = r.get("commit", {}).get("rollout", {}).get("advantage", 0.0)
             advantages.append(adv)
         advantage_sum = sum(advantages)
+
         if abs(advantage_sum) > GRPO_ADV_SUM_TOLERANCE:
-            logger.debug(
+            hard_failure = True
+            logger.warning(
                 f"GRPO group {group_id} advantages don't sum to 0: "
-                f"{advantage_sum} (advantages: {advantages})"
+                f"{advantage_sum} (tolerance: {GRPO_ADV_SUM_TOLERANCE}) for uid {uid_str}; "
+                f"invalidating uid for window {target_window}"
             )
-            grpo_invalid_groups += 1
-            continue
+            break
+
+        # Verify all rollouts share the same base SAT problem
         base_seeds = []
         for r in group_rollouts:
             sat_problem = r.get("commit", {}).get("sat_problem", {})
             base_seeds.append(sat_problem.get("seed"))
+
         if len(set(base_seeds)) != 1:
-            logger.debug(f"GRPO group {group_id} has different base problems: {set(base_seeds)}")
-            grpo_invalid_groups += 1
-            continue
-        logger.debug(
-            f"✅ GRPO group {group_id} verified: {len(group_rollouts)} "
-            f"rollouts, advantages sum to {advantage_sum:.6f}"
-        )
-        grpo_valid_groups += 1
-    if rollout_groups:
-        total_groups_checked = grpo_valid_groups + grpo_invalid_groups + grpo_incomplete_groups
-        if total_groups_checked > 0:
-            logger.info(
-                f"GRPO groups checked: {grpo_valid_groups} valid, "
-                f"{grpo_invalid_groups} invalid, {grpo_incomplete_groups} "
-                f"incomplete (spot-check artifact)"
+            hard_failure = True
+            logger.warning(
+                f"GRPO group {group_id} has different base problems: {set(base_seeds)} "
+                f"for uid {uid_str}; invalidating uid for window {target_window}"
             )
+            break
+
+    # Check for hard failure after GRPO validation
+    if hard_failure:
+        return await _handle_wallet_hard_failure(
+            uid_str,
+            target_window,
+            hard_failure,
+            soft_failures,
+            total_planned_checks,
+            checked_count,
+            total_inferences,
+            prompt_mismatch_count,
+            pr_total,
+            pr_invalid_sig,
+            pr_invalid_proof,
+            pr_processing_err,
+            monitor,
+        )
 
     # Calculate estimated total valid rollouts based on sampling
     # Extrapolate from sample to estimate total for weight computation
