@@ -118,10 +118,52 @@ class SATParser(Parser):
         - answer_has_only_bits_spaces: bool
     """
 
-    _ANSWER_OPEN = re.compile(r"<\s*SOLUTION\s*>", re.IGNORECASE)
-    _ANSWER_CLOSE = re.compile(r"<\s*/\s*SOLUTION\s*>", re.IGNORECASE)
-    _THINK_OPEN = re.compile(r"<\s*start_working_out\s*>", re.IGNORECASE)
-    _THINK_CLOSE = re.compile(r"<\s*end_working_out\s*>", re.IGNORECASE)
+    # Strict tag names (no internal whitespace permitted)
+    _TAG_SOLUTION_OPEN = "SOLUTION"
+    _TAG_SOLUTION_CLOSE = "SOLUTION"
+    _TAG_THINK_OPEN = "start_working_out"
+    _TAG_THINK_CLOSE = "end_working_out"
+
+    # Strict, reusable tag regexes built from the names above.
+    # Note: case-insensitive, but no spaces allowed inside angle brackets.
+    _ANSWER_OPEN = re.compile(rf"<{_TAG_SOLUTION_OPEN}>", re.IGNORECASE)
+    _ANSWER_CLOSE = re.compile(rf"</{_TAG_SOLUTION_CLOSE}>", re.IGNORECASE)
+    _THINK_OPEN = re.compile(rf"<{_TAG_THINK_OPEN}>", re.IGNORECASE)
+    _THINK_CLOSE = re.compile(rf"</{_TAG_THINK_CLOSE}>", re.IGNORECASE)
+
+    # First <SOLUTION>...</SOLUTION> anywhere.
+    _ANSWER_PAIR = re.compile(
+        (
+            rf"<{_TAG_SOLUTION_OPEN}>"
+            r"(?P<content>.*?)"
+            rf"</{_TAG_SOLUTION_CLOSE}>"
+        ),
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    # First <start_working_out>...</end_working_out> block.
+    _THINK_BLOCK = re.compile(
+        (
+            rf"<{_TAG_THINK_OPEN}>"
+            r".*?"
+            rf"</{_TAG_THINK_CLOSE}>"
+        ),
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    # First <SOLUTION> after the first thinking block.
+    _THINK_THEN_ANSWER_PAIR = re.compile(
+        (
+            rf"<{_TAG_THINK_OPEN}>"
+            r".*?"
+            rf"</{_TAG_THINK_CLOSE}>"
+            r".*?"
+            rf"<{_TAG_SOLUTION_OPEN}>"
+            r"(?P<content>.*?)"
+            rf"</{_TAG_SOLUTION_CLOSE}>"
+        ),
+        re.IGNORECASE | re.DOTALL,
+    )
 
     def _exact_token_count(self, answer_text: str) -> int:
         # Count 0/1 tokens separated by whitespace
@@ -131,38 +173,37 @@ class SATParser(Parser):
     def parse(self, completion: str, problem: SATProblem) -> dict[str, Any]:
         text = completion or ""
 
-        # Find tag spans (case-insensitive)
-        think_opens = list(self._THINK_OPEN.finditer(text))
-        think_closes = list(self._THINK_CLOSE.finditer(text))
-        ans_opens = list(self._ANSWER_OPEN.finditer(text))
-        ans_closes = list(self._ANSWER_CLOSE.finditer(text))
-
-        has_thinking = len(think_opens) > 0 and len(think_closes) > 0
-        has_answer = len(ans_opens) > 0 and len(ans_closes) > 0
+        # Presence flags and counts via strict regexes
+        has_thinking = bool(self._THINK_BLOCK.search(text))
+        has_answer = bool(self._ANSWER_PAIR.search(text))
+        num_ans_opens = len(self._ANSWER_OPEN.findall(text))
+        num_ans_closes = len(self._ANSWER_CLOSE.findall(text))
 
         answer_text = ""
         trailing_after_answer = 0
         strict_format_ok = False
 
         if has_answer:
-            # Use the first open and first close after it
-            open_idx = ans_opens[0].end()
-            # Find the first closing tag that appears after the first open tag
-            close_match = None
-            for m in ans_closes:
-                if m.start() >= open_idx:
-                    close_match = m
-                    break
-            if close_match is not None:
-                close_idx = close_match.start()
-                answer_text = text[open_idx:close_idx]
+            pair_match = None
+
+            if has_thinking:
+                # Prefer the first <SOLUTION> that appears after the first
+                # thinking block.
+                pair_match = self._THINK_THEN_ANSWER_PAIR.search(text)
+
+            if pair_match is None:
+                # Fallback: first <SOLUTION> anywhere
+                pair_match = self._ANSWER_PAIR.search(text)
+
+            if pair_match is not None:
+                answer_text = pair_match.group("content")
                 # Everything after </SOLUTION>
-                trailing_after_answer = len(text) - close_match.end()
+                trailing_after_answer = len(text) - pair_match.end()
                 # Strict format: exactly one answer pair, no trailing,
                 # bits-only, exact count
                 strict_format_ok = (
-                    len(ans_opens) == 1
-                    and len(ans_closes) == 1
+                    num_ans_opens == 1
+                    and num_ans_closes == 1
                     and trailing_after_answer == 0
                     and bool(re.fullmatch(r"[\s01]*", answer_text or ""))
                     and self._exact_token_count(answer_text) == problem.num_vars
@@ -185,7 +226,7 @@ class SATParser(Parser):
                 actions.append(0)
             assignment = [bool(x) for x in actions[: problem.num_vars]]
         else:
-            assignment = [False] * problem.num_vars
+            assignment = []
 
         parsed: dict[str, Any] = {
             "assignment": assignment,
@@ -417,8 +458,7 @@ class SATRolloutGenerator(RolloutGenerator):
             values_any = values_any[: env.num_vars]
             return [bool(x) for x in values_any]
 
-        # Fallback: if parser returned non-dict unexpectedly
-        return [False] * env.num_vars
+        return []
 
     def step_environment(
         self, env: SATProblem, action: list[bool]
