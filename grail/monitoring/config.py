@@ -179,7 +179,7 @@ class MonitoringConfig:
         # Override settings for debugging
         config.update(
             {
-                "mode": "offline",  # Don't send to cloud during debugging
+                "mode": "online",  # Send to cloud during debugging as well
                 "buffer_size": 10,  # Smaller buffer for faster feedback
                 "flush_interval": 5.0,  # More frequent flushing
                 "tags": ["debug", "development"] + config["tags"],
