@@ -52,11 +52,11 @@ SAMPLING_BC_THRESHOLD = 0.58
 # Minimal sampling shape hyperparameters (median gate for unimodal-low)
 SAMPLING_MEDIAN_LOW_MAX = 0.30
 # NOTE: this parameter so far has been a good indicator of bimodality
-SAMPLING_LOW_Q10_MAX = 0.20
+SAMPLING_LOW_Q10_MAX = 0.15
 
 # Extra sanity gates for sampling shape checks
 SAMPLING_MIN_TOKEN_PROB = 1e-5
-SAMPLING_INITIAL_WINDOW_STEPS = 30
+SAMPLING_INITIAL_WINDOW_STEPS = 35
 
 # ────────────────  VALIDATOR-SPECIFIC CONSTANTS  ────────────────
 
