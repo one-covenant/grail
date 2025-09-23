@@ -42,6 +42,12 @@ from .shared.constants import (
     SAMPLING_MIN_TOKEN_PROB,
     SANITY_CHECK_DRIFT_THRESHOLD,
     TOLERANCE,
+    SKETCH_ALGO_ID,
+    INT_SKETCH_S,
+    INT_SKETCH_R,
+    INT_SKETCH_H,
+    INT_SKETCH_TOLERANCE,
+    ACCEPT_LEGACY_ALGO,
 )
 from .shared.hf_compat import resolve_max_context_length, resolve_vocab_size
 
@@ -56,6 +62,7 @@ logger = logging.getLogger(__name__)
 #  Constants are now imported from .shared.constants
 
 COMMIT_DOMAIN = b"grail-commit-v1"
+SKETCH_DOMAIN = b"sketch-algo"
 
 
 def prf(label: bytes, *parts: bytes, out_bytes: int) -> bytes:
@@ -151,7 +158,16 @@ def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
     Note:
         Uses big-endian byte order for cross-platform consistency
     """
-    # Input validation
+    # If using integer sketch, return small bounded r directly (int64)
+    if str(SKETCH_ALGO_ID) == "intdot_v1":
+        vec_small = _derive_small_r(rand_hex, d_model, R=INT_SKETCH_R)
+        try:
+            setattr(vec_small, "_is_small_r", True)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        return vec_small
+
+    # Input validation (legacy path)
     if d_model <= 0:
         raise ValueError(f"d_model must be positive, got {d_model}")
     if d_model > 100000:  # Reasonable upper limit
@@ -219,6 +235,114 @@ def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
         f"first 4 values: {tensor[:4].tolist()}"
     )
     return tensor
+# Legacy (float-projection) r-vec derivation preserved for backward-compat
+def r_vec_from_randomness_legacy(rand_hex: str, d_model: int) -> torch.Tensor:
+    # Input validation
+    if d_model <= 0:
+        raise ValueError(f"d_model must be positive, got {d_model}")
+    if d_model > 100000:
+        raise ValueError(f"d_model too large: {d_model} (max 100000)")
+    if not rand_hex:
+        raise ValueError("rand_hex cannot be empty")
+    clean_hex = rand_hex.strip().replace("0x", "").replace("0X", "")
+    if not clean_hex:
+        raise ValueError(f"Empty randomness hex string after cleaning: '{rand_hex}'")
+    if len(clean_hex) % 2 != 0:
+        clean_hex = "0" + clean_hex
+    raw = prf(RNG_LABEL["sketch"], bytes.fromhex(clean_hex), out_bytes=4 * d_model)
+    try:
+        import numpy as np
+
+        ints_array = np.frombuffer(raw, dtype=">i4").astype(np.int32, copy=False)
+        tensor = torch.from_numpy(ints_array.copy())
+    except Exception:
+        ints = struct.unpack(">" + "i" * d_model, raw)
+        tensor = torch.tensor(ints, dtype=torch.int32)
+    return tensor
+
+
+
+# New: small-bounded coefficients for integer sketch
+def r_small_vec_from_randomness(rand_hex: str, d_model: int, R: int = INT_SKETCH_R) -> torch.Tensor:
+    """Public helper to derive small symmetric r in [-R, R] as torch int64.
+
+    Sets a marker attribute `_is_small_r` for dot_mod_q to select integer path.
+    """
+    vec = _derive_small_r(rand_hex, d_model, R=R)
+    try:
+        setattr(vec, "_is_small_r", True)  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    return vec
+
+# ─────────────────────  INTEGER SKETCH (GPU-agnostic)  ─────────────────────
+
+def _quantize_hidden_cpu(hidden: torch.Tensor, S: int = INT_SKETCH_S, H: int = INT_SKETCH_H) -> torch.Tensor:
+    """Deterministically quantize a hidden vector on CPU.
+
+    Uses coarse fixed-point rounding and clamps to [-H, H]. Returns int64 tensor.
+    """
+    # Ensure CPU for deterministic rounding
+    hv = hidden.detach().to("cpu", copy=True).to(torch.float64)
+    q = torch.round(hv * float(S)).to(torch.int64)
+    if H is not None:
+        q = torch.clamp(q, -int(H), int(H))
+    return q
+
+
+def _derive_small_r(rand_hex: str, d_model: int, R: int = INT_SKETCH_R) -> torch.Tensor:
+    """Derive small symmetric coefficients in [-R, R] deterministically.
+
+    Uses PRF output interpreted as signed 16-bit words to map into [-R, R].
+    Returns int64 tensor on CPU.
+    """
+    clean_hex = rand_hex.strip().replace("0x", "").replace("0X", "")
+    if len(clean_hex) % 2 != 0:
+        clean_hex = "0" + clean_hex
+    # 2 bytes per dimension using i2 slices (big-endian)
+    raw = prf(RNG_LABEL["sketch"], bytes.fromhex(clean_hex), out_bytes=2 * d_model)
+    try:
+        import numpy as np
+
+        arr = np.frombuffer(raw, dtype=">i2").astype("int64", copy=False)
+        # Map into [-R, R]
+        arr = (np.abs(arr) % (2 * int(R) + 1)) - int(R)
+        return torch.from_numpy(arr.copy()).to(torch.int64)
+    except Exception:
+        # Fallback without numpy
+        ints = []
+        for i in range(0, len(raw), 2):
+            w = int.from_bytes(raw[i : i + 2], "big", signed=True)
+            v = (abs(w) % (2 * int(R) + 1)) - int(R)
+            ints.append(int(v))
+        return torch.tensor(ints, dtype=torch.int64)
+
+
+def _int_sketch_mod_q(q_vec: torch.Tensor, r_vec_small: torch.Tensor, Q: int = PRIME_Q) -> int:
+    """Compute int64 modular dot product with periodic reduction.
+
+    Args:
+        q_vec: int64 tensor (quantized hidden)
+        r_vec_small: int64 tensor in [-R, R]
+        Q: prime modulus
+    Returns:
+        int in [0, Q)
+    """
+    # Ensure CPU int64
+    a = q_vec.to("cpu", dtype=torch.int64)
+    b = r_vec_small.to("cpu", dtype=torch.int64)
+    if a.numel() != b.numel():
+        n = min(a.numel(), b.numel())
+        a = a[:n]
+        b = b[:n]
+    # Blocked accumulation to keep values bounded
+    acc = 0
+    block = 4096
+    for start in range(0, a.numel(), block):
+        end = min(start + block, a.numel())
+        prod = (a[start:end] * b[start:end]).sum().item()
+        acc = (acc + int(prod)) % int(Q)
+    return int(acc)
 
 
 def indices_from_root(tokens: list[int], rand_hex: str, seq_len: int, k: int) -> list[int]:
@@ -298,15 +422,28 @@ def int_to_bytes(i: int) -> bytes:
 
 
 def dot_mod_q(hidden: torch.Tensor, r_vec: torch.Tensor) -> int:
-    # Ensure both tensors are on the same device
+    """Compute sketch value s = <h, r> mod Q using configured algorithm.
+
+    - Legacy (dotfp_v0): float projection with scale 1024 (existing behavior)
+    - intdot_v1: integer-only bounded-sensitivity dot on CPU
+    """
+    algo = str(SKETCH_ALGO_ID)
+    if algo == "intdot_v1":
+        # Ensure deterministic verification path
+        try:
+            torch.backends.cuda.matmul.allow_tf32 = False  # type: ignore
+            torch.backends.cudnn.allow_tf32 = False  # type: ignore
+        except Exception:
+            pass
+        q = _quantize_hidden_cpu(hidden)
+        r_small = r_vec.to("cpu", dtype=torch.int64)
+        return _int_sketch_mod_q(q, r_small)
+
+    # Legacy path (default)
     device = hidden.device
     r_vec = r_vec.to(device)
-
-    # Scale and convert to float for computation (avoid int64 issues on CUDA)
     scaled = torch.round(hidden * 1024)
     prod = torch.dot(scaled, r_vec.float())
-
-    # Convert to int and apply modulo
     return int(prod.item()) % PRIME_Q
 
 
@@ -464,10 +601,64 @@ def build_commit_binding(
     model_name: str,
     layer_index: int,
     s_vals: list[int],
+    *,
+    sketch_algo_id: Optional[str] = None,
+    sketch_params: Optional[dict] = None,
 ) -> bytes:
     """Build domain-separated commit binding to be signed.
 
     Format: SHA256(COMMIT_DOMAIN || len(x)||x for each x in
+    [tokens_hash, rand_bytes, model_name_bytes, layer_index_be, s_vals_hash]).
+    """
+
+    def _len_bytes(b: bytes) -> bytes:
+        return len(b).to_bytes(4, "big")
+
+    rand_clean = randomness_hex.strip().replace("0x", "").replace("0X", "")
+    if len(rand_clean) % 2 != 0:
+        rand_clean = "0" + rand_clean
+    rand_bytes = bytes.fromhex(rand_clean)
+    tokens_h = hash_tokens(tokens)
+    svals_h = hash_s_vals(s_vals)
+    model_b = (model_name or "").encode("utf-8")
+    layer_b = int(layer_index).to_bytes(4, "big", signed=True)
+
+    h = hashlib.sha256()
+    h.update(COMMIT_DOMAIN)
+    # Include sketch algorithm binding for GPU-agnostic scheme
+    algo_effective = sketch_algo_id if sketch_algo_id is not None else str(SKETCH_ALGO_ID)
+    algo_id = (str(algo_effective) or "").encode("utf-8")
+    h.update(_len_bytes(algo_id))
+    h.update(algo_id)
+    # Include integer sketch params to avoid ambiguity (string-encoded)
+    if sketch_params is None:
+        params = f"S={INT_SKETCH_S},R={INT_SKETCH_R},H={INT_SKETCH_H}".encode("utf-8")
+    else:
+        try:
+            S = int(sketch_params.get("S", INT_SKETCH_S))
+            R = int(sketch_params.get("R", INT_SKETCH_R))
+            H = int(sketch_params.get("H", INT_SKETCH_H))
+        except Exception:
+            S, R, H = int(INT_SKETCH_S), int(INT_SKETCH_R), int(INT_SKETCH_H)
+        params = f"S={S},R={R},H={H}".encode("utf-8")
+    h.update(_len_bytes(params))
+    h.update(params)
+    for part in (tokens_h, rand_bytes, model_b, layer_b, svals_h):
+        h.update(_len_bytes(part))
+        h.update(part)
+    return h.digest()
+
+
+def build_commit_binding_v0(
+    tokens: list[int],
+    randomness_hex: str,
+    model_name: str,
+    layer_index: int,
+    s_vals: list[int],
+) -> bytes:
+    """Legacy commit binding without sketch algorithm fields.
+
+    Format: SHA256(COMMIT_DOMAIN || len(x)||x for x in
     [tokens_hash, rand_bytes, model_name_bytes, layer_index_be, s_vals_hash]).
     """
 
@@ -498,11 +689,23 @@ def sign_commit_binding(
     layer_index: int,
     s_vals: list[int],
     wallet: bt.wallet,
+    *,
+    sketch_algo_id: Optional[str] = None,
+    sketch_params: Optional[dict] = None,
 ) -> bytes:
     """Sign the commit-binding message with wallet hotkey."""
     if not hasattr(wallet, "hotkey") or not hasattr(wallet.hotkey, "sign"):
         raise TypeError("Wallet must provide hotkey.sign()")
-    msg = build_commit_binding(tokens, randomness_hex, model_name, layer_index, s_vals)
+    # For deterministic signatures, sign the binding that matches current algo id
+    msg = build_commit_binding(
+        tokens,
+        randomness_hex,
+        model_name,
+        layer_index,
+        s_vals,
+        sketch_algo_id=sketch_algo_id,
+        sketch_params=sketch_params,
+    )
     return wallet.hotkey.sign(msg)  # type: ignore
 
 
@@ -519,7 +722,17 @@ def verify_commit_signature(commit: dict, wallet_address: str) -> bool:
         sig = bytes.fromhex(commit["signature"])
     except Exception:
         return False
-    msg = build_commit_binding(tokens, randomness, model_name, layer_index, s_vals)
+    # Choose expected binding format based on declared algo id (if present)
+    sketch_info = commit.get("sketch", {}) if isinstance(commit.get("sketch"), dict) else {}
+    commit_algo = str(sketch_info.get("algo_id", ""))
+    expected_algo = str(SKETCH_ALGO_ID)
+    if commit_algo and commit_algo != expected_algo and not bool(ACCEPT_LEGACY_ALGO):
+        return False
+    # If commit includes algo field, verify using v1 binding. Otherwise try legacy v0 first.
+    if commit_algo:
+        msg = build_commit_binding(tokens, randomness, model_name, layer_index, s_vals)
+    else:
+        msg = build_commit_binding_v0(tokens, randomness, model_name, layer_index, s_vals)
     try:
         keypair = bt.Keypair(ss58_address=wallet_address)
         return keypair.verify(data=msg, signature=sig)  # type: ignore
@@ -1243,6 +1456,23 @@ class Verifier:
                 commit_layer=int(model_info.get("layer_index")),
             )
             return False
+        # Determine sketch algorithm to use
+        commit_sketch = commit.get("sketch", {}) if isinstance(commit.get("sketch"), dict) else {}
+        commit_algo_id = str(commit_sketch.get("algo_id", ""))
+        algo_id = str(SKETCH_ALGO_ID)
+
+        # Enforce algorithm id match unless legacy acceptance is enabled
+        if commit_algo_id and commit_algo_id != algo_id and not bool(ACCEPT_LEGACY_ALGO):
+            self._debug(
+                "proof_valid",
+                status="fail",
+                reason="algo_mismatch",
+                commit_algo=commit_algo_id,
+                expected_algo=algo_id,
+            )
+            return False
+
+        # Derive r based on active algorithm (function handles both cases)
         r_vec = r_vec_from_randomness(beacon["randomness"], self.model.config.hidden_size)
 
         # Determine number of indices to open (enforce minimum)
@@ -1325,7 +1555,10 @@ class Verifier:
             diff = abs(local - committed_s_val)
             mod_diff = min(diff, PRIME_Q - diff)  # Handle wraparound
 
-            if mod_diff > TOLERANCE:
+            # Use larger tolerance for integer sketch path
+            tol = int(INT_SKETCH_TOLERANCE) if algo_id == "intdot_v1" else int(TOLERANCE)
+
+            if mod_diff > tol:
                 logger.debug(
                     f"Sketch mismatch at index {i} ({local} vs {committed_s_val}, diff={mod_diff})"
                 )
@@ -1337,7 +1570,7 @@ class Verifier:
                     local=int(local),
                     committed=int(committed_s_val),
                     mod_diff=int(mod_diff),
-                    tolerance=int(TOLERANCE),
+                    tolerance=int(tol),
                 )
                 return False
 

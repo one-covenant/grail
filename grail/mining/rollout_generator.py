@@ -225,6 +225,12 @@ class RolloutGenerator(ABC):
 
         # Generate GRAIL proof components (using existing grail.py logic)
         from ..grail import dot_mod_q, r_vec_from_randomness, sign_s_vals
+        from ..shared.constants import (
+            SKETCH_ALGO_ID,
+            INT_SKETCH_S,
+            INT_SKETCH_R,
+            INT_SKETCH_H,
+        )
 
         # Compute s_vals for GRAIL proof
         r_vec = r_vec_from_randomness(randomness_hex, resolve_hidden_size(self.model))
@@ -244,6 +250,9 @@ class RolloutGenerator(ABC):
         # Sign s_vals using wallet
         signature = sign_s_vals(s_vals, wallet)
 
+        # Include algo in beacon for readability (redundant to commit binding)
+        beacon = {"randomness": randomness_hex}
+
         return GRPORollout(
             tokens=all_token_ids,
             token_logprobs=all_logprobs,
@@ -255,7 +264,7 @@ class RolloutGenerator(ABC):
             success=success,
             s_vals=s_vals,
             signature=signature,
-            beacon={"randomness": randomness_hex},
+            beacon=beacon,
         )
 
     def _extract_logprobs(self, scores: list[torch.Tensor], token_ids: list[int]) -> list[float]:

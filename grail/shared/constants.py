@@ -29,6 +29,20 @@ CHALLENGE_K = 16
 TOLERANCE = 3
 RNG_LABEL = {"sketch": b"sketch", "open": b"open", "sat": b"sat"}
 
+# Integer-sketch configuration (for GPU-agnostic verification)
+# Default algorithm id. Set to "dotfp_v0" to use legacy float-projection.
+SKETCH_ALGO_ID = os.getenv("GRAIL_SKETCH_ALGO_ID", "intdot_v1")
+
+# Integer sketch parameters (can be tuned via env)
+INT_SKETCH_S = int(os.getenv("GRAIL_INT_SKETCH_S", "128"))
+INT_SKETCH_R = int(os.getenv("GRAIL_INT_SKETCH_R", "8191"))
+INT_SKETCH_H = int(os.getenv("GRAIL_INT_SKETCH_H", "32767"))
+# Recommended starting tolerance for integer sketch
+INT_SKETCH_TOLERANCE = int(os.getenv("GRAIL_INT_SKETCH_TOLERANCE", "300000"))
+
+# Allow validators to accept legacy (dotfp_v0) commits during migration
+ACCEPT_LEGACY_ALGO = os.getenv("GRAIL_ACCEPT_LEGACY_ALGO", "true").lower() in {"1", "true", "yes"}
+
 # ────────────────  TERMINATION VALIDATION HPs  ────────────────
 
 MAX_NEW_TOKENS = int(os.getenv("GRAIL_MAX_NEW_TOKENS", "1024"))

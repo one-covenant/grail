@@ -27,6 +27,12 @@ from ..infrastructure.network import create_subtensor
 from ..monitoring import get_monitoring_manager
 from ..monitoring.config import MonitoringConfig
 from ..shared.constants import LAYER_INDEX, MODEL_NAME, ROLLOUTS_PER_PROBLEM, WINDOW_LENGTH
+from ..shared.constants import (
+    SKETCH_ALGO_ID,
+    INT_SKETCH_S,
+    INT_SKETCH_R,
+    INT_SKETCH_H,
+)
 from ..shared.subnet import get_own_uid_on_subnet
 from . import console
 
@@ -432,6 +438,8 @@ def package_rollout_data(
         LAYER_INDEX,
         rollout.s_vals,
         wallet,
+        sketch_algo_id=str(SKETCH_ALGO_ID),
+        sketch_params={"S": int(INT_SKETCH_S), "R": int(INT_SKETCH_R), "H": int(INT_SKETCH_H)},
     )
 
     assignment = extract_assignment_from_rollout(rollout)
@@ -458,6 +466,11 @@ def package_rollout_data(
             },
             "signature": commit_sig.hex(),
             "beacon": rollout.beacon,
+            # Bind sketch algorithm id and params for verifier clarity
+            "sketch": {
+                "algo_id": str(SKETCH_ALGO_ID),
+                "params": {"S": int(INT_SKETCH_S), "R": int(INT_SKETCH_R), "H": int(INT_SKETCH_H)},
+            },
             "sat_problem": {
                 "seed": sat_seed_base,
                 "num_vars": sat_problem.num_vars,
