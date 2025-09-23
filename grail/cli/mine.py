@@ -18,7 +18,7 @@ import torch
 import typer
 
 from ..environments import SATRolloutGenerator, generate_sat_problem
-from ..grail import Prover, sign_commit_binding, derive_canonical_sat
+from ..grail import Prover, derive_canonical_sat, sign_commit_binding
 from ..infrastructure.chain import GrailChainManager
 from ..infrastructure.comms import sink_window_inferences
 from ..infrastructure.credentials import load_r2_credentials
