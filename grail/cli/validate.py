@@ -32,9 +32,9 @@ from ..infrastructure.comms import (
 )
 from ..infrastructure.credentials import load_r2_credentials
 from ..infrastructure.network import create_subtensor
+from ..logging_utils import MinerPrefixFilter, miner_log_context
 from ..monitoring import get_monitoring_manager
 from ..monitoring.config import MonitoringConfig
-from ..logging_utils import MinerPrefixFilter, miner_log_context
 from ..shared.constants import (
     GRAIL_BURN_PERCENTAGE,
     GRAIL_BURN_UID,
@@ -138,6 +138,7 @@ REQUIRED_ROLLOUT_FIELDS = [
 # --------------------------------------------------------------------------- #
 #                             Utility helpers                                 #
 # --------------------------------------------------------------------------- #
+
 
 def get_conf(key: str, default: Any = None) -> Any:
     v = os.getenv(key)
@@ -948,7 +949,7 @@ async def _run_validation_service(
                             ts,
                             tev,
                         )
-                        
+
                     logger.info(
                         "Submitted weights (interval %s, block %s)",
                         current_interval,
@@ -1368,7 +1369,7 @@ async def _process_wallet_window(
     miner_bucket = chain_manager.get_bucket_for_hotkey(wallet_addr)
     # Resolve miner UID (fallback to wallet address string)
     uid_str = str(uid_by_hotkey.get(wallet_addr, wallet_addr))
-    
+
     with miner_log_context(uid_str, target_window):
         exists = await file_exists(
             filename,
@@ -1414,9 +1415,9 @@ async def _process_wallet_window(
                 if group_id not in group_index_by_id:
                     group_index_by_id[group_id] = len(group_index_by_id)  # 0, 1, 2, ...
 
-    # Determine whether to check all rollouts or sample GRPO groups.
-    # Sampling is deterministic per wallet+window via a seeded RNG to keep
-    # validators consistent and discourage gaming.
+        # Determine whether to check all rollouts or sample GRPO groups.
+        # Sampling is deterministic per wallet+window via a seeded RNG to keep
+        # validators consistent and discourage gaming.
         if total_inferences <= MAX_SAMPLES_PER_MINER:
             indices_to_check = list(range(total_inferences))
             logger.info(f"🔍 Verifying all {total_inferences} rollouts")
@@ -1505,48 +1506,32 @@ async def _process_wallet_window(
             if missing_fields:
                 hard_failure = True
                 logger.warning(
-                    f"Missing required fields {missing_fields} in inference; "
-                    f"invalidating uid"
+                    f"Missing required fields {missing_fields} in inference; invalidating uid"
                 )
                 break
             if inference["window_start"] != target_window:
                 hard_failure = True
-                logger.warning(
-                    f"Window mismatch in inference; "
-                    f"invalidating uid"
-                )
+                logger.warning("Window mismatch in inference; invalidating uid")
                 break
             if inference["block_hash"] != target_window_hash:
                 hard_failure = True
-                logger.warning(
-                    f"Block hash mismatch in inference; "
-                    f"invalidating uid"
-                )
+                logger.warning("Block hash mismatch in inference; invalidating uid")
                 break
             nonce = inference["nonce"]
             if nonce in nonces_seen:
                 hard_failure = True
-                logger.warning(
-                    f"Duplicate nonce {nonce} in window; "
-                    f"invalidating uid"
-                )
+                logger.warning(f"Duplicate nonce {nonce} in window; invalidating uid")
                 break
             nonces_seen.add(nonce)
             if not verify_rollout_signature(inference):
                 pr_invalid_sig += 1
                 hard_failure = True
-                logger.warning(
-                    f"Invalid signature; "
-                    f"invalidating uid"
-                )
+                logger.warning("Invalid signature; invalidating uid")
                 break
             expected_seed = f"{wallet_addr}-{target_window_hash}-{nonce}"
             if inference.get("sat_seed") != expected_seed:
                 hard_failure = True
-                logger.warning(
-                    f"Invalid SAT seed in inference; "
-                    f"invalidating uid"
-                )
+                logger.warning("Invalid SAT seed in inference; invalidating uid")
                 break
             try:
                 commit_data = inference["commit"]
@@ -1554,7 +1539,7 @@ async def _process_wallet_window(
                     rollout_meta = commit_data.get("rollout", {})
                     total_reward = rollout_meta.get("total_reward", None)
                     if not isinstance(total_reward, (int, float)):
-                        logger.debug(f"Missing or invalid total_reward; skipping inference")
+                        logger.debug("Missing or invalid total_reward; skipping inference")
                         continue
                     low = float(sat_reward_low)
                     high = float(sat_reward_high)
@@ -1625,15 +1610,9 @@ async def _process_wallet_window(
                             failed_hard_check = k
                             break
                     if failed_hard_check:
-                        logger.debug(
-                            f"CHECK_FAILURE "
-                            f"type=hard failed_check={failed_hard_check}"
-                        )
+                        logger.debug(f"CHECK_FAILURE type=hard failed_check={failed_hard_check}")
                 if not soft_valid:
-                    logger.debug(
-                        f"CHECK_FAILURE "
-                        f"type=soft failed_check={SOFT_CHECK_KEY}"
-                    )
+                    logger.debug(f"CHECK_FAILURE type=soft failed_check={SOFT_CHECK_KEY}")
 
                 # Track prompt validity as a metric (not gating)
                 try:
@@ -1651,10 +1630,7 @@ async def _process_wallet_window(
                 if not hard_valid:
                     pr_invalid_proof += 1
                     hard_failure = True
-                    logger.warning(
-                        f"Hard verification failed; "
-                        f"invalidating uid"
-                    )
+                    logger.warning("Hard verification failed; invalidating uid")
                     break
                 if not soft_valid:
                     soft_failures += 1
@@ -1682,7 +1658,7 @@ async def _process_wallet_window(
                         prompt_len = int(rollout_meta.get("prompt_length"))
                         completion_len = int(rollout_meta.get("completion_length", 0) or 0)
                         if completion_len > 0 and prompt_len >= 0:
-                            completion_ids = tokens[prompt_len:prompt_len + completion_len]
+                            completion_ids = tokens[prompt_len : prompt_len + completion_len]
                         else:
                             completion_ids = tokens[prompt_len:]
                         text = verifier.tokenizer.decode(completion_ids, skip_special_tokens=False)
@@ -1819,7 +1795,7 @@ async def _process_wallet_window(
         "prompt_valid": prompt_valid_count,
         "prompt_mismatch": prompt_mismatch_count,
         FAILURE_FLAG_KEY: 0,
-        }
+    }
     with miner_log_context(uid_str, target_window):
         if wallet_rollouts_buffer:
             logger.info(

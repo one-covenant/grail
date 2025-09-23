@@ -18,6 +18,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
 
 from .environments import generate_sat_problem
 from .environments.sat import SATParser, create_sat_prompt
+from .logging_utils import MinerPrefixFilter, miner_log_context
 from .mining.rollout_generator import (
     REASONING_START,
     SYSTEM_PROMPT,
@@ -44,7 +45,6 @@ from .shared.constants import (
     TOLERANCE,
 )
 from .shared.hf_compat import resolve_max_context_length, resolve_vocab_size
-from .logging_utils import MinerPrefixFilter, miner_log_context
 
 # Enable CUDA debugging for better error messages
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
@@ -133,7 +133,7 @@ def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
     # Add cache attribute to function
     if not hasattr(r_vec_from_randomness, "_cache"):
         # Initialize a simple dict cache; attribute added dynamically
-        setattr(r_vec_from_randomness, "_cache", {})
+        r_vec_from_randomness._cache = {}
     """
     Generate random projection vector from drand randomness.
 
@@ -215,11 +215,10 @@ def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
     # Cache the result (limit cache size to prevent memory issues)
     if len(cache) < 100:
         cache[cache_key] = tensor.clone()
-        setattr(r_vec_from_randomness, "_cache", cache)
+        r_vec_from_randomness._cache = cache
 
     logger.debug(
-        f"Generated sketch vector with shape={tensor.shape}, "
-        f"first 4 values: {tensor[:4].tolist()}"
+        f"Generated sketch vector with shape={tensor.shape}, first 4 values: {tensor[:4].tolist()}"
     )
     return tensor
 
@@ -818,7 +817,9 @@ class Verifier:
                     try:
                         loop = asyncio.get_event_loop()
                         if loop.is_running():
-                            asyncio.create_task(monitor.log_counter("grail.token_validation_failures"))
+                            asyncio.create_task(
+                                monitor.log_counter("grail.token_validation_failures")
+                            )
                     except RuntimeError:
                         pass
                 self._debug("tokens_valid", status="fail")
@@ -870,7 +871,7 @@ class Verifier:
         # Enforce termination check before solution validation
         if not self._passes_termination_check(commit):
             logger.debug(
-                f"Termination check failed: sequence neither reached max context length "
+                "Termination check failed: sequence neither reached max context length "
                 "nor ended with EOS token having probability >= 0.1"
             )
             self._debug("termination_valid", status="fail", reason="not_max_len_or_eos")
@@ -918,9 +919,7 @@ class Verifier:
         try:
             difficulty = sat_data.get("difficulty", 0.5)
             seed = sat_data["seed"]
-            logger.debug(
-                f"SAT regeneration from seed '{seed}' with difficulty {difficulty}"
-            )
+            logger.debug(f"SAT regeneration from seed '{seed}' with difficulty {difficulty}")
             expected_problem = generate_sat_problem(seed, difficulty)
             if expected_problem.num_vars != sat_data.get(
                 "num_vars"
@@ -1048,7 +1047,7 @@ class Verifier:
             prompt_len = int(rollout_meta.get("prompt_length", 0) or 0)
             completion_len = int(rollout_meta.get("completion_length", 0) or 0)
             if completion_len > 0 and prompt_len >= 0:
-                completion_ids = tokens[prompt_len:prompt_len + completion_len]
+                completion_ids = tokens[prompt_len : prompt_len + completion_len]
             else:
                 completion_ids = tokens[prompt_len:]
             if not completion_ids:
@@ -1071,7 +1070,7 @@ class Verifier:
                 return None
             values_any = parsed.get("assignment", [])
             try:
-                values_any = values_any[:problem.num_vars]
+                values_any = values_any[: problem.num_vars]
             except Exception:
                 return None
             return [bool(x) for x in values_any]
@@ -1166,7 +1165,9 @@ class Verifier:
             True if proof is valid, False otherwise
         """
 
-        with miner_log_context(self._current_wallet if getattr(self, "_current_wallet", None) else prover_address):
+        with miner_log_context(
+            self._current_wallet if getattr(self, "_current_wallet", None) else prover_address
+        ):
             # Basic input validation
             try:
                 tokens = commit["tokens"]
@@ -1188,7 +1189,9 @@ class Verifier:
             # Enforce minimum coverage
             seq_len = len(tokens)
             if seq_len < int(min_k):
-                logger.debug(f"Sequence too short for minimum challenge: len={seq_len}, min_k={min_k}")
+                logger.debug(
+                    f"Sequence too short for minimum challenge: len={seq_len}, min_k={min_k}"
+                )
                 self._debug(
                     "proof_valid",
                     status="fail",

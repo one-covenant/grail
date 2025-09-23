@@ -1,12 +1,10 @@
-import contextvars
 import contextlib
+import contextvars
 import logging
-from typing import Generator, Optional
+from collections.abc import Generator
+from typing import Optional
 
-
-_uid_ctx: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
-    "miner_uid", default=None
-)
+_uid_ctx: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("miner_uid", default=None)
 _window_ctx: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "miner_window", default=None
 )
@@ -44,9 +42,10 @@ class MinerPrefixFilter(logging.Filter):
         uid = _uid_ctx.get()
         window = _window_ctx.get()
 
-        if uid and isinstance(record.msg, str) and not (
-            record.msg.startswith("[MINER ") or
-            record.msg.startswith("[GRAIL ")
+        if (
+            uid
+            and isinstance(record.msg, str)
+            and not (record.msg.startswith("[MINER ") or record.msg.startswith("[GRAIL "))
         ):
             if window:
                 prefix = f"[MINER uid={uid} window={window}] "
