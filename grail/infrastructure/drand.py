@@ -19,7 +19,7 @@ class ChainConfig(TypedDict):
 # Drand chain configurations
 DRAND_CHAINS: dict[str, ChainConfig] = {
     "quicknet": {
-        "hash": "8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce",
+        "hash": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
         "genesis_time": 1692803367,
         "period": 3,  # 3 seconds per round
         "description": "Fast 3-second randomness (recommended)",
