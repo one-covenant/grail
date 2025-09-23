@@ -11,8 +11,8 @@ from ..shared.constants import MAX_NEW_TOKENS
 from .base import Parser, RewardVector
 
 # SAT Problem Configuration
-MIN_VARS = 3
-MAX_VARS = 10
+MIN_VARS = 4
+MAX_VARS = 15
 MIN_CLAUSES = 5
 MAX_CLAUSES = 20
 CLAUSE_LENGTH = 3  # 3-SAT
