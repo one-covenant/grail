@@ -7,7 +7,6 @@ import hashlib
 import logging
 import math
 import os
-import random
 import time
 import traceback
 from dataclasses import dataclass
@@ -19,7 +18,7 @@ import torch
 import typer
 
 from ..environments import SATRolloutGenerator, generate_sat_problem
-from ..grail import Prover, sign_commit_binding
+from ..grail import Prover, sign_commit_binding, derive_canonical_sat
 from ..infrastructure.chain import GrailChainManager
 from ..infrastructure.comms import sink_window_inferences
 from ..infrastructure.credentials import load_r2_credentials
@@ -612,12 +611,15 @@ async def generate_rollouts_for_window(
                     f"{torch.cuda.memory_allocated() / 1024**2:.2f}",
                 )
 
-            # Generate a unique group identifier for this GRPO problem
-            base_nonce = random.randint(1000, 9999)
-            difficulty = compute_difficulty(inference_count)
-            sat_problem, sat_seed_base = generate_sat_problem_for_group(
-                wallet, window_block_hash, base_nonce, difficulty
+            # Deterministically derive seed and difficulty from miner+window+index
+            problem_index = max(0, problem_count - 1)
+            seed, difficulty = derive_canonical_sat(
+                wallet.hotkey.ss58_address, window_block_hash, problem_index
             )
+            sat_problem = generate_sat_problem(seed, difficulty)
+            # Use deterministic problem index as rollout_group identifier
+            base_nonce = problem_index
+            sat_seed_base = seed
             logger.debug(
                 "Generated SAT problem: %s vars, %s clauses",
                 sat_problem.num_vars,
@@ -797,6 +799,7 @@ def mine(
     # Initialize model and prover
     logger.info(f"🔑 Miner hotkey: {wallet.hotkey.ss58_address}")
     logger.info(f"Loading base model: {MODEL_NAME}")
+
     # Use wallet for secure GRAIL proof signatures
     prover = Prover(model_name=MODEL_NAME, wallet=wallet)
 

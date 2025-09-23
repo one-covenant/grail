@@ -21,7 +21,7 @@ import typer
 from grail.infrastructure.drand import get_drand_beacon, get_round_at_time
 
 from ..environments import create_sat_reward_vector
-from ..grail import Verifier
+from ..grail import Verifier, derive_canonical_sat
 from ..infrastructure.chain import GrailChainManager
 from ..infrastructure.comms import (
     file_exists,
@@ -1291,12 +1291,15 @@ async def _process_wallet_window(
 
     total_inferences = len(inferences)
     groups_map = defaultdict(list)
+    # Build group membership and assign canonical indices in file order (simple, deterministic)
+    group_index_by_id: dict[str, int] = {}
     for idx, inf in enumerate(inferences):
         group_id = inf.get("rollout_group")
-        if group_id is not None:
-            groups_map[group_id].append(idx)
-        else:
-            groups_map[f"single_{idx}"] = [idx]
+        if group_id is None:
+            group_id = f"single_{idx}"
+        groups_map[group_id].append(idx)
+        if group_id not in group_index_by_id:
+            group_index_by_id[group_id] = len(group_index_by_id)  # 0, 1, 2, ...
 
     # Determine whether to check all rollouts or sample GRPO groups.
     # Sampling is deterministic per wallet+window via a seeded RNG to keep
@@ -1475,9 +1478,13 @@ async def _process_wallet_window(
                 except Exception:
                     pass
 
-                if rollout_group:
-                    base_sat_seed = f"{wallet_addr}-{target_window_hash}-{rollout_group}"
-                    commit_data.setdefault("sat_problem", {})["seed"] = base_sat_seed
+                # Derive canonical SAT seed/difficulty based on deterministic file-order index
+                gid = rollout_group if rollout_group is not None else f"single_{inference_idx}"
+                idx = group_index_by_id.get(str(gid), 0)
+                can_seed, can_diff = derive_canonical_sat(wallet_addr, target_window_hash, idx)
+                satp = commit_data.setdefault("sat_problem", {})
+                satp["seed"] = can_seed
+                satp["difficulty"] = can_diff
 
                 challenge_rand = window_rand
                 if monitor:
