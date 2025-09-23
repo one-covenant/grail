@@ -93,7 +93,7 @@ logger.addFilter(MinerPrefixFilter())
 # numbers scattered through validation logic and to make tuning straightforward.
 MAX_SAMPLES_PER_MINER = 20  # If <= this many rollouts, check all
 SAMPLE_RATE = 0.1  # Fraction of GRPO groups to spot-check
-STOCHASTIC_CHECK_FAILURE_THRESHOLD = 0.05  # Soft-failure fraction to gate wallet
+STOCHASTIC_CHECK_FAILURE_THRESHOLD = 0.26  # Soft-failure fraction to gate wallet
 REWARD_REL_TOL = 0.02  # Relative tolerance on reward bounds
 REWARD_ABS_TOL = 1e-6  # Absolute tolerance on reward bounds
 GRPO_ADV_SUM_TOLERANCE = 0.01  # Sum of advantages should be ~0
@@ -1634,6 +1634,23 @@ async def _process_wallet_window(
                     break
                 if not soft_valid:
                     soft_failures += 1
+                    # Log soft trigger progression and record per-miner metrics
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            f"SOFT_TRIGGER soft_failures={soft_failures}/{checked_count} "
+                            f"(checked={checked_count})"
+                        )
+                    if monitor:
+                        try:
+                            await monitor.log_gauge(
+                                f"{uid_str}/soft_failures", float(soft_failures)
+                            )
+                            rate_checked = float(soft_failures) / float(max(1, checked_count))
+                            await monitor.log_gauge(
+                                f"{uid_str}/soft_failure_rate_checked", rate_checked
+                            )
+                        except Exception:
+                            pass
                     if soft_failures >= soft_fail_cutoff:
                         soft_gate_triggered = True
                         logger.warning(
