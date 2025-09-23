@@ -109,6 +109,11 @@ HARD_CHECK_KEYS = (  # Hard checks required for validity
 # Per-wallet per-window failure flag for gating across rolling windows
 FAILURE_FLAG_KEY = "had_failure"
 
+# Similarity detection configuration (rolling across recent windows)
+SIMILARITY_ROLLING_WINDOWS = 12
+SIMILARITY_THRESHOLD = 0.5  # >=50% identical rollout pairs over rolling horizon
+SIMILARITY_MIN_TOTAL = 50   # require some activity to avoid flukes
+
 # Submit weights to chain at most once per this many blocks
 WEIGHT_SUBMISSION_INTERVAL_BLOCKS = 360
 
@@ -322,6 +327,147 @@ def _compute_count_stats(values: list[int]) -> dict[str, float]:
 miner_inference_counts: defaultdict[str, list] = defaultdict(
     list
 )  # track inferences per block for weight calculation
+
+# Rolling similarity state (in-memory only)
+# - miner_digest_counts: hotkey -> digest -> rolling count over last SIMILARITY_ROLLING_WINDOWS
+# - digest_to_miners: digest -> hotkey -> rolling count
+# - miner_total_digests: hotkey -> rolling total digest-count
+miner_window_digests_by_window: defaultdict[str, dict[int, dict[str, int]]] = defaultdict(dict)
+miner_digest_counts: defaultdict[str, dict[str, int]] = defaultdict(dict)
+digest_to_miners: defaultdict[str, dict[str, int]] = defaultdict(dict)
+miner_total_digests: defaultdict[str, int] = defaultdict(int)
+
+
+def _compute_rollout_digest(commit: dict) -> Optional[str]:
+    """Compute a canonical digest for a rollout's completion tokens.
+
+    Uses compact, sorted JSON over the commit to be deterministic.
+    If tokens missing or invalid, returns None.
+    """
+    try:
+        # Only use the completion segment of tokens if lengths are present; else all tokens
+        tokens = commit.get("tokens")
+        if not isinstance(tokens, list) or not tokens:
+            return None
+        rollout_meta = commit.get("rollout", {})
+        prompt_len = int(rollout_meta.get("prompt_length", 0) or 0)
+        completion_len = int(rollout_meta.get("completion_length", 0) or 0)
+        if completion_len > 0 and prompt_len >= 0:
+            completion_ids = tokens[prompt_len : prompt_len + completion_len]
+        else:
+            completion_ids = tokens[prompt_len:]
+        # Hash the completion ids as canonical JSON array
+        content = json.dumps(completion_ids, separators=(",", ":"))
+        return hashlib.sha256(content.encode()).hexdigest()
+    except Exception:
+        return None
+
+
+def _update_similarity_rolling(
+    hotkey: str,
+    window_digest_counts: dict[str, int],
+    horizon_windows: list[int],
+    current_window: int,
+) -> None:
+    """Update rolling similarity counters with this window's digest counts.
+
+    Maintains per-miner totals and global inverted index across last
+    SIMILARITY_ROLLING_WINDOWS windows.
+    """
+    # Store current window counts per wallet to enable eviction
+    wallet_store = miner_window_digests_by_window[hotkey]
+    wallet_store[current_window] = dict(window_digest_counts)
+
+    # Evict windows older than horizon
+    min_window_kept = min(horizon_windows) if horizon_windows else current_window
+    evict_keys = [w for w in wallet_store.keys() if w < min_window_kept]
+    for old_w in evict_keys:
+        old_counts = wallet_store.pop(old_w, {})
+        for dig, cnt in old_counts.items():
+            prev = int(miner_digest_counts[hotkey].get(dig, 0))
+            new_val = max(0, prev - int(cnt))
+            if new_val == 0:
+                miner_digest_counts[hotkey].pop(dig, None)
+            else:
+                miner_digest_counts[hotkey][dig] = new_val
+            # Update inverted index
+            old_glob = int(digest_to_miners[dig].get(hotkey, 0))
+            glob_new = max(0, old_glob - int(cnt))
+            if glob_new == 0:
+                digest_to_miners[dig].pop(hotkey, None)
+                if not digest_to_miners[dig]:
+                    digest_to_miners.pop(dig, None)
+            else:
+                digest_to_miners[dig][hotkey] = glob_new
+            miner_total_digests[hotkey] = max(0, int(miner_total_digests.get(hotkey, 0)) - int(cnt))
+
+    # Add current window counts
+    add_total = 0
+    for dig, cnt in window_digest_counts.items():
+        if cnt <= 0:
+            continue
+        miner_digest_counts[hotkey][dig] = int(miner_digest_counts[hotkey].get(dig, 0)) + int(cnt)
+        digest_to_miners[dig][hotkey] = int(digest_to_miners[dig].get(hotkey, 0)) + int(cnt)
+        add_total += int(cnt)
+    if add_total:
+        miner_total_digests[hotkey] = int(miner_total_digests.get(hotkey, 0)) + add_total
+
+
+def _calculate_similarity_violations() -> list[tuple[str, str, float, int]]:
+    """Compute pairwise overlap based on shared digest counts.
+
+    Returns list of (miner_a, miner_b, similarity, shared_count) where
+    similarity = shared_count / (total_a * total_b) and similarity >= threshold.
+    """
+    overlaps: dict[tuple[str, str], int] = {}
+    # Iterate only digests shared by multiple miners
+    for dig, miner_map in digest_to_miners.items():
+        miners = list(miner_map.keys())
+        if len(miners) < 2:
+            continue
+        for i in range(len(miners)):
+            for j in range(i + 1, len(miners)):
+                a = miners[i]
+                b = miners[j]
+                ka = (a, b) if a < b else (b, a)
+                overlaps[ka] = int(overlaps.get(ka, 0)) + int(miner_map[a]) * int(miner_map[b])
+    violations: list[tuple[str, str, float, int]] = []
+    for (a, b), shared in overlaps.items():
+        total_a = int(miner_total_digests.get(a, 0))
+        total_b = int(miner_total_digests.get(b, 0))
+        if total_a < SIMILARITY_MIN_TOTAL or total_b < SIMILARITY_MIN_TOTAL:
+            continue
+        denom = total_a * total_b
+        if denom <= 0:
+            continue
+        sim = float(shared) / float(denom)
+        if sim >= SIMILARITY_THRESHOLD:
+            violations.append((a, b, sim, shared))
+    return violations
+
+
+def _evict_similarity_before(min_window_kept: int) -> None:
+    """Evict similarity contributions from windows earlier than min_window_kept."""
+    for hotkey, wallet_store in miner_window_digests_by_window.items():
+        evict_keys = [w for w in wallet_store.keys() if w < min_window_kept]
+        for old_w in evict_keys:
+            old_counts = wallet_store.pop(old_w, {})
+            for dig, cnt in old_counts.items():
+                prev = int(miner_digest_counts[hotkey].get(dig, 0))
+                new_val = max(0, prev - int(cnt))
+                if new_val == 0:
+                    miner_digest_counts[hotkey].pop(dig, None)
+                else:
+                    miner_digest_counts[hotkey][dig] = new_val
+                old_glob = int(digest_to_miners[dig].get(hotkey, 0))
+                glob_new = max(0, old_glob - int(cnt))
+                if glob_new == 0:
+                    digest_to_miners[dig].pop(hotkey, None)
+                    if not digest_to_miners[dig]:
+                        digest_to_miners.pop(dig, None)
+                else:
+                    digest_to_miners[dig][hotkey] = glob_new
+                miner_total_digests[hotkey] = max(0, int(miner_total_digests.get(hotkey, 0)) - int(cnt))
 
 
 # --------------------------------------------------------------------------- #
@@ -1133,6 +1279,9 @@ async def _process_window(
     miner_seconds_list: list[float] = []
     miner_blocks_list: list[int] = []
 
+    # Collect per-wallet digest counts for similarity detection
+    window_digests_by_wallet: dict[str, dict[str, int]] = {}
+
     for wallet_addr in hotkeys_to_check:
         try:
             # Per-miner timing (seconds and blocks) measured around the call
@@ -1147,6 +1296,7 @@ async def _process_window(
                 metrics,
                 published_rollouts,
                 processed_counts,
+                window_digests,
             ) = await _process_wallet_window(
                 wallet_addr=wallet_addr,
                 target_window=target_window,
@@ -1178,6 +1328,8 @@ async def _process_window(
                 window_inference_counts[wallet_addr] = metrics
             if published_rollouts:
                 all_valid_rollouts.extend(published_rollouts)
+            if isinstance(window_digests, dict) and window_digests:
+                window_digests_by_wallet[wallet_addr] = window_digests
             (pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err) = processed_counts
             total_rollouts_processed += pr_total
             invalid_signatures += pr_invalid_sig
@@ -1187,6 +1339,35 @@ async def _process_window(
             uid_str = str(uid_by_hotkey.get(wallet_addr, wallet_addr))
             logger.warning(f"Error processing uid {uid_str}: {e}")
             continue
+
+    # Update rolling similarity state after processing miners
+    recent_windows = list(
+        range(
+            max(0, target_window - (SIMILARITY_ROLLING_WINDOWS - 1) * WINDOW_LENGTH),
+            target_window + 1,
+            WINDOW_LENGTH,
+        )
+    )
+    for hk, wd in window_digests_by_wallet.items():
+        _update_similarity_rolling(hk, wd, recent_windows, target_window)
+
+    # Apply similarity gating based on rolling horizon
+    try:
+        violations = _calculate_similarity_violations()
+        if violations:
+            for a, b, sim, shared in violations:
+                if a in window_inference_counts:
+                    window_inference_counts[a][FAILURE_FLAG_KEY] = 1
+                if b in window_inference_counts:
+                    window_inference_counts[b][FAILURE_FLAG_KEY] = 1
+            pairs = ", ".join(
+                [f"{a}~{b}:{sim:.2%}({s})" for a, b, sim, s in sorted(violations, key=lambda x: -x[2])[:5]]
+            )
+            logger.warning(
+                f"Similarity violations (top): {pairs} — gating involved miners for window {target_window}"
+            )
+    except Exception:
+        pass
 
     for metrics in window_inference_counts.values():
         total_valid_rollouts += metrics.get("estimated_valid", 0)
@@ -1252,7 +1433,7 @@ async def _process_wallet_window(
     text_log_limit: int,
     sat_reward_low: float,
     sat_reward_high: float,
-) -> tuple[bool, Optional[dict[str, int]], list[dict], tuple[int, int, int, int]]:
+) -> tuple[bool, Optional[dict[str, int]], list[dict], tuple[int, int, int, int], dict[str, int]]:
     """Validate a single wallet window file and return metrics and rollouts."""
     filename = f"grail/windows/{wallet_addr}-window-{target_window}.json"
     miner_bucket = chain_manager.get_bucket_for_hotkey(wallet_addr)
@@ -1265,7 +1446,7 @@ async def _process_wallet_window(
     )
     if not exists:
         logger.debug(f"No file found for uid {uid_str} at {filename}")
-        return False, None, [], (0, 0, 0, 0)
+        return False, None, [], (0, 0, 0, 0), {}
 
     logger.info(f"📁 Found file for uid {uid_str}")
     window_data = await get_file(
@@ -1273,7 +1454,7 @@ async def _process_wallet_window(
     )
     if not window_data:
         logger.warning(f"Could not download {filename}")
-        return True, None, [], (0, 0, 0, 0)
+        return True, None, [], (0, 0, 0, 0), {}
 
     file_wallet_addr = window_data.get("wallet")
     window_start = window_data.get("window_start")
@@ -1282,12 +1463,12 @@ async def _process_wallet_window(
         got_uid = uid_by_hotkey.get(file_wallet_addr)
         got_id = got_uid if got_uid is not None else "unknown"
         logger.warning(f"UID mismatch in {filename}: expected {uid_str}, got {got_id}")
-        return True, None, [], (0, 0, 0, 0)
+        return True, None, [], (0, 0, 0, 0), {}
     if window_start != target_window:
         logger.warning(
             f"Window mismatch in {filename}: expected {target_window}, got {window_start}"
         )
-        return True, None, [], (0, 0, 0, 0)
+        return True, None, [], (0, 0, 0, 0), {}
 
     total_inferences = len(inferences)
     groups_map = defaultdict(list)
@@ -1370,6 +1551,8 @@ async def _process_wallet_window(
     # Prompt-prefix validity metrics
     prompt_valid_count = 0
     prompt_mismatch_count = 0
+    # Per-wallet digest counts for this window
+    window_digests: dict[str, int] = {}
 
     # Compute soft failure threshold for wallet gating
     soft_fail_cutoff = max(
@@ -1619,6 +1802,10 @@ async def _process_wallet_window(
                 solution_hash = hashlib.sha256(str(assignment).encode()).hexdigest()
                 unique_solutions.add(solution_hash)
             wallet_rollouts_buffer.append(inference)
+            # Count digest for similarity (based on completion tokens)
+            dig = _compute_rollout_digest(inference.get("commit", {}))
+            if dig:
+                window_digests[dig] = int(window_digests.get(dig, 0)) + 1
         except Exception as e:
             logger.debug(f"Error processing inference from uid {uid_str}: {e}")
             pr_processing_err += 1
@@ -1654,6 +1841,7 @@ async def _process_wallet_window(
             metrics,
             [],
             (pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err),
+            window_digests,
         )
 
     # Verify GRPO groups after processing checked inferences
@@ -1756,6 +1944,7 @@ async def _process_wallet_window(
         metrics,
         wallet_rollouts_buffer,
         (pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err),
+        window_digests,
     )
 
 
