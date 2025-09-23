@@ -109,6 +109,10 @@ HARD_CHECK_KEYS = (  # Hard checks required for validity
 # Per-wallet per-window failure flag for gating across rolling windows
 FAILURE_FLAG_KEY = "had_failure"
 
+# Rollout similarity detection configuration
+SIMILARITY_THRESHOLD = 0.5  # 50% of cross-product pairs identical
+SIMILARITY_STORAGE_DIR = "grail/similarity"  # local persistence for digest counts
+
 # Submit weights to chain at most once per this many blocks
 WEIGHT_SUBMISSION_INTERVAL_BLOCKS = 360
 
@@ -982,6 +986,174 @@ def _compute_window_randomness(target_window_hash: str, use_drand: bool) -> str:
     return hashlib.sha256(target_window_hash.encode()).hexdigest()
 
 
+# --------------------------------------------------------------------------- #
+#                    Rollout Similarity Detection Helpers                     #
+# --------------------------------------------------------------------------- #
+
+
+def _tokens_digest(tokens: list[int]) -> str:
+    """Compute a stable SHA-256 digest for a list of token ids.
+
+    Uses compact JSON encoding to avoid whitespace variability.
+    """
+    try:
+        if not isinstance(tokens, list) or not tokens:
+            return ""
+        payload = json.dumps(tokens, separators=(",", ":"))
+        return hashlib.sha256(payload.encode()).hexdigest()
+    except Exception:
+        return ""
+
+
+def _compute_window_digests_for_inferences(inferences: list[dict]) -> dict[str, int]:
+    """Return digest->count for all rollouts in a window file.
+
+    Counts all inferences present in the file to maximize detection coverage,
+    independent of sampling used for verification.
+    """
+    counts: defaultdict[str, int] = defaultdict(int)
+    for inf in inferences or []:
+        try:
+            tokens = inf.get("commit", {}).get("tokens", [])
+            dig = _tokens_digest(tokens)
+            if dig:
+                counts[dig] += 1
+        except Exception:
+            continue
+    return dict(counts)
+
+
+def _similarity_storage_path(hotkey: str, window_start: int) -> str:
+    return os.path.join(SIMILARITY_STORAGE_DIR, hotkey, f"{window_start}.json")
+
+
+def _persist_window_digests(hotkey: str, window_start: int, digest_counts: dict[str, int]) -> None:
+    """Persist per-window digest counts locally for rolling detection."""
+    try:
+        path = _similarity_storage_path(hotkey, window_start)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(digest_counts or {}, f, separators=(",", ":"))
+    except Exception:
+        logger.debug("Failed to persist window digests for %s@%s", hotkey, window_start)
+
+
+def _load_window_digests(hotkey: str, window_start: int) -> dict[str, int]:
+    try:
+        path = _similarity_storage_path(hotkey, window_start)
+        if not os.path.exists(path):
+            return {}
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return {str(k): int(v) for k, v in (data or {}).items()}
+    except Exception:
+        return {}
+
+
+def _cleanup_old_similarity_files(hotkey: str, keep_windows: set[int]) -> None:
+    try:
+        base_dir = os.path.join(SIMILARITY_STORAGE_DIR, hotkey)
+        if not os.path.isdir(base_dir):
+            return
+        for name in os.listdir(base_dir):
+            if not name.endswith(".json"):
+                continue
+            try:
+                ws = int(name.replace(".json", ""))
+            except Exception:
+                continue
+            if ws not in keep_windows:
+                try:
+                    os.remove(os.path.join(base_dir, name))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def _build_rolling_digest_counts(
+    miners: list[str],
+    target_window: int,
+    current_window_digests: dict[str, dict[str, int]],
+) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
+    """Aggregate digest counts across the last WEIGHT_ROLLING_WINDOWS windows.
+
+    Returns:
+        (rolling_counts_by_miner, total_counts_by_miner)
+    """
+    recent_windows = range(
+        max(0, target_window - (WEIGHT_ROLLING_WINDOWS - 1) * WINDOW_LENGTH),
+        target_window + 1,
+        WINDOW_LENGTH,
+    )
+    keep_set = set(recent_windows)
+    rolling_counts: dict[str, dict[str, int]] = {}
+    totals: dict[str, int] = {}
+    for miner in miners:
+        agg: defaultdict[str, int] = defaultdict(int)
+        # Include persisted windows in horizon
+        for w in recent_windows:
+            if w == target_window:
+                # Use freshly computed counts for current window
+                for d, c in (current_window_digests.get(miner) or {}).items():
+                    agg[d] += int(c)
+            else:
+                prev = _load_window_digests(miner, w)
+                if prev:
+                    for d, c in prev.items():
+                        agg[d] += int(c)
+        rolling_counts[miner] = dict(agg)
+        totals[miner] = sum(agg.values())
+        # Cleanup old files beyond horizon
+        _cleanup_old_similarity_files(miner, keep_set)
+    return rolling_counts, totals
+
+
+def _compute_pairwise_overlaps(rolling_counts: dict[str, dict[str, int]]) -> dict[tuple[str, str], int]:
+    """Compute shared pair counts via inverted index over digests."""
+    inverted: defaultdict[str, dict[str, int]] = defaultdict(dict)
+    for miner, dig_counts in rolling_counts.items():
+        for d, c in (dig_counts or {}).items():
+            if c > 0:
+                inverted[d][miner] = int(c)
+
+    overlaps: defaultdict[tuple[str, str], int] = defaultdict(int)
+    for _, miner_counts in inverted.items():
+        miners_with = list(miner_counts.keys())
+        if len(miners_with) < 2:
+            continue
+        for i in range(len(miners_with)):
+            a = miners_with[i]
+            ca = miner_counts[a]
+            for j in range(i + 1, len(miners_with)):
+                b = miners_with[j]
+                cb = miner_counts[b]
+                key = (a, b) if a < b else (b, a)
+                overlaps[key] += ca * cb
+    return dict(overlaps)
+
+
+def _detect_similarity_violations(
+    miners: list[str],
+    target_window: int,
+    current_window_digests: dict[str, dict[str, int]],
+    threshold: float = SIMILARITY_THRESHOLD,
+) -> list[tuple[str, str, float]]:
+    """Return list of (miner_a, miner_b, similarity_fraction) violating threshold."""
+    rolling_counts, totals = _build_rolling_digest_counts(miners, target_window, current_window_digests)
+    overlaps = _compute_pairwise_overlaps(rolling_counts)
+    violations: list[tuple[str, str, float]] = []
+    for (a, b), shared in overlaps.items():
+        ta = int(totals.get(a, 0))
+        tb = int(totals.get(b, 0))
+        if ta <= 0 or tb <= 0:
+            continue
+        sim = float(shared) / float(ta * tb)
+        if sim >= threshold:
+            violations.append((a, b, sim))
+    return violations
+
+
 def _determine_hotkeys_to_check(test_mode: bool, wallet: bt.wallet, meta: Any) -> list[str]:
     """Choose which hotkeys to validate based on test/prod mode."""
     uid_by_hotkey = dict(zip(meta.hotkeys, meta.uids))
@@ -1133,6 +1305,8 @@ async def _process_window(
     miner_seconds_list: list[float] = []
     miner_blocks_list: list[int] = []
 
+    all_window_digests: dict[str, dict[str, int]] = {}
+
     for wallet_addr in hotkeys_to_check:
         try:
             # Per-miner timing (seconds and blocks) measured around the call
@@ -1147,6 +1321,7 @@ async def _process_window(
                 metrics,
                 published_rollouts,
                 processed_counts,
+                window_digests,
             ) = await _process_wallet_window(
                 wallet_addr=wallet_addr,
                 target_window=target_window,
@@ -1178,6 +1353,8 @@ async def _process_window(
                 window_inference_counts[wallet_addr] = metrics
             if published_rollouts:
                 all_valid_rollouts.extend(published_rollouts)
+            if window_digests is not None:
+                all_window_digests[wallet_addr] = window_digests
             (pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err) = processed_counts
             total_rollouts_processed += pr_total
             invalid_signatures += pr_invalid_sig
@@ -1187,6 +1364,45 @@ async def _process_window(
             uid_str = str(uid_by_hotkey.get(wallet_addr, wallet_addr))
             logger.warning(f"Error processing uid {uid_str}: {e}")
             continue
+
+    # Persist per-wallet digest counts for this window and run similarity detection
+    try:
+        for hk, dig_counts in all_window_digests.items():
+            _persist_window_digests(hk, target_window, dig_counts)
+        if all_window_digests:
+            miners_for_similarity = list(all_window_digests.keys())
+            violations = _detect_similarity_violations(
+                miners_for_similarity, target_window, all_window_digests, threshold=SIMILARITY_THRESHOLD
+            )
+            if violations:
+                logger.info(
+                    "🚨 Similarity violations (>=%.0f%%) detected: %s",
+                    SIMILARITY_THRESHOLD * 100.0,
+                    ", ".join(
+                        f"({a},{b})={sim*100:.1f}%" for (a, b, sim) in sorted(violations, key=lambda x: -x[2])
+                    ),
+                )
+                # Mark both miners as failed this window
+                for a, b, sim in violations:
+                    for miner in (a, b):
+                        if miner not in window_inference_counts:
+                            window_inference_counts[miner] = {
+                                "valid": 0,
+                                "checked": 0,
+                                "total": 0,
+                                "estimated_valid": 0,
+                                "successful": 0,
+                                "unique": 0,
+                                "prompt_valid": 0,
+                                "prompt_mismatch": 0,
+                                FAILURE_FLAG_KEY: 1,
+                            }
+                        else:
+                            window_inference_counts[miner][FAILURE_FLAG_KEY] = 1
+            else:
+                logger.debug("No similarity violations detected for this window.")
+    except Exception as e:
+        logger.debug(f"Similarity detection error: {e}")
 
     for metrics in window_inference_counts.values():
         total_valid_rollouts += metrics.get("estimated_valid", 0)
@@ -1252,7 +1468,7 @@ async def _process_wallet_window(
     text_log_limit: int,
     sat_reward_low: float,
     sat_reward_high: float,
-) -> tuple[bool, Optional[dict[str, int]], list[dict], tuple[int, int, int, int]]:
+) -> tuple[bool, Optional[dict[str, int]], list[dict], tuple[int, int, int, int], dict[str, int]]:
     """Validate a single wallet window file and return metrics and rollouts."""
     filename = f"grail/windows/{wallet_addr}-window-{target_window}.json"
     miner_bucket = chain_manager.get_bucket_for_hotkey(wallet_addr)
@@ -1265,7 +1481,7 @@ async def _process_wallet_window(
     )
     if not exists:
         logger.debug(f"No file found for uid {uid_str} at {filename}")
-        return False, None, [], (0, 0, 0, 0)
+        return False, None, [], (0, 0, 0, 0), {}
 
     logger.info(f"📁 Found file for uid {uid_str}")
     window_data = await get_file(
@@ -1273,7 +1489,7 @@ async def _process_wallet_window(
     )
     if not window_data:
         logger.warning(f"Could not download {filename}")
-        return True, None, [], (0, 0, 0, 0)
+        return True, None, [], (0, 0, 0, 0), {}
 
     file_wallet_addr = window_data.get("wallet")
     window_start = window_data.get("window_start")
@@ -1282,14 +1498,16 @@ async def _process_wallet_window(
         got_uid = uid_by_hotkey.get(file_wallet_addr)
         got_id = got_uid if got_uid is not None else "unknown"
         logger.warning(f"UID mismatch in {filename}: expected {uid_str}, got {got_id}")
-        return True, None, [], (0, 0, 0, 0)
+        return True, None, [], (0, 0, 0, 0), {}
     if window_start != target_window:
         logger.warning(
             f"Window mismatch in {filename}: expected {target_window}, got {window_start}"
         )
-        return True, None, [], (0, 0, 0, 0)
+        return True, None, [], (0, 0, 0, 0), {}
 
     total_inferences = len(inferences)
+    # Compute per-window digest counts over all inferences for similarity detection
+    window_digests = _compute_window_digests_for_inferences(inferences)
     groups_map = defaultdict(list)
     # Build group membership and assign canonical indices in file order (simple, deterministic)
     group_index_by_id: dict[str, int] = {}
@@ -1654,6 +1872,7 @@ async def _process_wallet_window(
             metrics,
             [],
             (pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err),
+            window_digests,
         )
 
     # Verify GRPO groups after processing checked inferences
@@ -1756,6 +1975,7 @@ async def _process_wallet_window(
         metrics,
         wallet_rollouts_buffer,
         (pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err),
+        window_digests,
     )
 
 
