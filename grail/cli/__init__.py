@@ -128,7 +128,7 @@ def configure_logging(verbosity: int) -> None:
                     if part and "=" in part:
                         k, v = part.split("=", 1)
                         tags[k.strip()] = v.strip()
-            
+
             logger.info(f"Loki tags: {tags}")
 
             username = os.environ.get("GRAIL_OBS_LOKI_USERNAME")
