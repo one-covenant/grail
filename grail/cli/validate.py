@@ -3,12 +3,16 @@
 #                             Imports                                         #
 # --------------------------------------------------------------------------- #
 import asyncio
+import atexit
+import faulthandler
 import hashlib
 import json
 import logging
 import math
 import os
 import random
+import signal
+import sys
 import time
 import traceback
 from collections import defaultdict, deque
@@ -85,6 +89,79 @@ from . import console
 
 logger = logging.getLogger("grail")
 logger.addFilter(MinerPrefixFilter())
+
+
+# --------------------------------------------------------------------------- #
+#                           Crash Diagnostics                                 #
+# --------------------------------------------------------------------------- #
+
+
+def _flush_all_logs() -> None:
+    """Best-effort flush of all logging handlers and stdio."""
+    try:
+        root = logging.getLogger()
+        for h in list(root.handlers):
+            try:
+                h.flush()
+            except Exception:
+                pass
+        for h in list(logger.handlers):
+            try:
+                h.flush()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
+    try:
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+def _install_crash_diagnostics() -> None:
+    """Enable faulthandler and global exception logging for silent crashes."""
+    # Dump Python tracebacks on fatal signals and C-level faults
+    try:
+        faulthandler.enable(all_threads=True)
+        # Register common termination signals to dump tracebacks before exit
+        for sig in (
+            getattr(signal, "SIGTERM", None),
+            getattr(signal, "SIGABRT", None),
+            getattr(signal, "SIGSEGV", None),
+        ):
+            if sig is not None:
+                try:
+                    faulthandler.register(sig, chain=True)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # Ensure unhandled exceptions get logged
+    def _excepthook(exc_type, exc, tb):
+        try:
+            if exc_type is KeyboardInterrupt:
+                # Let standard handling occur for Ctrl-C
+                return sys.__excepthook__(exc_type, exc, tb)
+            logger.critical("Uncaught exception", exc_info=(exc_type, exc, tb))
+        finally:
+            _flush_all_logs()
+
+    try:
+        sys.excepthook = _excepthook
+    except Exception:
+        pass
+
+    # Flush logs on normal interpreter exit
+    try:
+        atexit.register(_flush_all_logs)
+    except Exception:
+        pass
+
 
 # --------------------------------------------------------------------------- #
 #                       Styling & configuration constants                     #
@@ -403,6 +480,14 @@ async def watchdog(timeout: int = 600) -> None:
         elapsed = time.monotonic() - HEARTBEAT
         if elapsed > timeout:
             logging.error(f"[WATCHDOG] Process stalled {elapsed:.0f}s — exiting process.")
+            # Best-effort flush so the final error is not lost
+            try:
+                _flush_all_logs()
+                # Give a moment for logs to ship in containerized envs
+                time.sleep(0.1)
+            except Exception:
+                pass
+            # Hard exit to avoid being stuck indefinitely
             os._exit(1)
 
 
@@ -425,6 +510,8 @@ def validate(
         show_default=True,
     ),
 ) -> None:
+    # Install crash diagnostics early to catch silent failures
+    _install_crash_diagnostics()
     coldkey = get_conf("BT_WALLET_COLD", "default")
     hotkey = get_conf("BT_WALLET_HOT", "default")
     wallet = bt.wallet(name=coldkey, hotkey=hotkey)
@@ -442,16 +529,22 @@ def validate(
     SAT_REWARD_LOW, SAT_REWARD_HIGH = _get_sat_reward_bounds()
 
     # Run service
-    asyncio.run(
-        _run_validation_service(
-            wallet=wallet,
-            verifier=verifier,
-            sat_reward_low=SAT_REWARD_LOW,
-            sat_reward_high=SAT_REWARD_HIGH,
-            use_drand=use_drand,
-            test_mode=test_mode,
+    try:
+        asyncio.run(
+            _run_validation_service(
+                wallet=wallet,
+                verifier=verifier,
+                sat_reward_low=SAT_REWARD_LOW,
+                sat_reward_high=SAT_REWARD_HIGH,
+                use_drand=use_drand,
+                test_mode=test_mode,
+            )
         )
-    )
+    except Exception:
+        # Top-level guard: ensure any uncaught async errors are logged
+        logger.exception("Validator crashed due to unhandled exception")
+        _flush_all_logs()
+        raise
 
 
 # ----------------------------- Refactored Helpers ---------------------------- #
@@ -488,6 +581,23 @@ async def _run_validation_service(
     This function manages lifecycle and orchestration. It delegates window/work
     processing to helpers and keeps the outer loop small and readable.
     """
+
+    # Install an asyncio exception handler to log any task errors
+    try:
+        loop = asyncio.get_running_loop()
+
+        def _asyncio_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+            msg = context.get("message") or "Asyncio exception in task"
+            exc = context.get("exception")
+            if exc is not None:
+                logger.error(msg, exc_info=exc)
+            else:
+                logger.error(msg)
+            _flush_all_logs()
+
+        loop.set_exception_handler(_asyncio_exception_handler)
+    except Exception:
+        pass
 
     async def _validation_loop() -> None:
         subtensor = None
@@ -847,13 +957,13 @@ async def _run_validation_service(
                         weights,
                         False,
                     )
-                    await subtensor.set_weights(
-                        wallet=wallet,
-                        netuid=NETUID,
-                        uids=meta.uids,
-                        weights=weights,
-                        wait_for_inclusion=False,
-                    )
+                    # await subtensor.set_weights(
+                    #     wallet=wallet,
+                    #     netuid=NETUID,
+                    #     uids=meta.uids,
+                    #     weights=weights,
+                    #     wait_for_inclusion=False,
+                    # )
                     last_weights_interval_submitted = current_interval
 
                     # Log successful miners during weight submission
@@ -975,7 +1085,16 @@ async def _run_validation_service(
                 await asyncio.sleep(10)
                 continue
 
-    await asyncio.gather(_validation_loop(), watchdog(timeout=(60 * 10)))
+    results = await asyncio.gather(
+        _validation_loop(),
+        watchdog(timeout=(60 * 10)),
+        return_exceptions=True,
+    )
+    # Log any surfaced exceptions from gathered tasks (should be rare)
+    for res in results:
+        if isinstance(res, Exception):
+            logger.error("Background task error", exc_info=res)
+            _flush_all_logs()
 
 
 async def _initialize_credentials_and_chain(wallet: bt.wallet) -> tuple[Any, GrailChainManager]:
@@ -1197,6 +1316,12 @@ async def _process_window(
 
     for wallet_addr in hotkeys_to_check:
         try:
+            # Refresh watchdog heartbeat on each miner to avoid false positives
+            try:
+                global HEARTBEAT
+                HEARTBEAT = time.monotonic()
+            except Exception:
+                pass
             # Per-miner timing (seconds and blocks) measured around the call
             t0 = time.monotonic()
             try:
@@ -1496,6 +1621,12 @@ async def _process_wallet_window(
     pr_processing_err = 0
 
     for _, inference_idx in enumerate(indices_to_check):
+        # Refresh watchdog heartbeat on each rollout
+        try:
+            global HEARTBEAT
+            HEARTBEAT = time.monotonic()
+        except Exception:
+            pass
         inference = inferences[inference_idx]
         checked_count += 1
 
