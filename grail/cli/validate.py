@@ -957,13 +957,13 @@ async def _run_validation_service(
                         weights,
                         False,
                     )
-                    # await subtensor.set_weights(
-                    #     wallet=wallet,
-                    #     netuid=NETUID,
-                    #     uids=meta.uids,
-                    #     weights=weights,
-                    #     wait_for_inclusion=False,
-                    # )
+                    await subtensor.set_weights(
+                        wallet=wallet,
+                        netuid=NETUID,
+                        uids=meta.uids,
+                        weights=weights,
+                        wait_for_inclusion=False,
+                    )
                     last_weights_interval_submitted = current_interval
 
                     # Log successful miners during weight submission
