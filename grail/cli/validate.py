@@ -1405,14 +1405,17 @@ async def _process_wallet_window(
     total_inferences = len(inferences)
     groups_map = defaultdict(list)
     # Build group membership and assign canonical indices in file order (simple, deterministic)
-    group_index_by_id: dict[str, int] = {}
+    max_group_id = -1
+    group_ids = set()
     for idx, inf in enumerate(inferences):
         raw_gid = inf.get("rollout_group")
         if raw_gid is not None:  # Only process inferences with rollout_group
             group_id = str(raw_gid)
             groups_map[group_id].append(idx)
-            if group_id not in group_index_by_id:
-                group_index_by_id[group_id] = len(group_index_by_id)  # 0, 1, 2, ...
+            max_group_id = max(max_group_id, int(group_id))
+            group_ids.add(group_id)
+
+    group_ids_valid = list(group_ids) == list(range(0, max_group_id + 1)) # Check if group IDs are contiguous from 0 to max_group_id
 
     # Determine whether to check all rollouts or sample GRPO groups.
     # Sampling is deterministic per wallet+window via a seeded RNG to keep
@@ -1570,8 +1573,7 @@ async def _process_wallet_window(
 
                 # Derive canonical SAT seed/difficulty based on deterministic file-order index
                 gid = rollout_group
-                idx = group_index_by_id.get(gid, 0)
-                can_seed, can_diff = derive_canonical_sat(wallet_addr, target_window_hash, idx)
+                can_seed, can_diff = derive_canonical_sat(wallet_addr, target_window_hash, gid)
                 satp = commit_data.setdefault("sat_problem", {})
                 satp["seed"] = can_seed
                 satp["difficulty"] = can_diff
@@ -1598,16 +1600,20 @@ async def _process_wallet_window(
                 pr_total += 1
                 # Hard checks are cryptographic/proof constraints; any failure rejects wallet
                 hard_valid = all(checks.get(k, False) for k in HARD_CHECK_KEYS)
+                hard_valid = all([hard_valid, group_ids_valid])
                 soft_valid = checks.get(SOFT_CHECK_KEY, True)
 
                 # Log specific check failures for debugging
                 if not hard_valid:
                     # Find the first hard check that failed (due to early return pattern)
                     failed_hard_check = None
-                    for k in HARD_CHECK_KEYS:
-                        if not checks.get(k, False):
-                            failed_hard_check = k
-                            break
+                    if not group_ids_valid:
+                        failed_hard_check = "rollout_group_ids_valid"
+                    else:
+                        for k in HARD_CHECK_KEYS:
+                            if not checks.get(k, False):
+                                failed_hard_check = k
+                                break
                     if failed_hard_check:
                         logger.debug(f"CHECK_FAILURE type=hard failed_check={failed_hard_check}")
                 if not soft_valid:
