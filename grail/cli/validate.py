@@ -95,6 +95,7 @@ logger.addFilter(MinerPrefixFilter())
 #                           Crash Diagnostics                                 #
 # --------------------------------------------------------------------------- #
 
+
 def _flush_all_logs() -> None:
     """Best-effort flush of all logging handlers and stdio."""
     try:
@@ -160,6 +161,7 @@ def _install_crash_diagnostics() -> None:
         atexit.register(_flush_all_logs)
     except Exception:
         pass
+
 
 # --------------------------------------------------------------------------- #
 #                       Styling & configuration constants                     #
@@ -583,6 +585,7 @@ async def _run_validation_service(
     # Install an asyncio exception handler to log any task errors
     try:
         loop = asyncio.get_running_loop()
+
         def _asyncio_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
             msg = context.get("message") or "Asyncio exception in task"
             exc = context.get("exception")
@@ -591,6 +594,7 @@ async def _run_validation_service(
             else:
                 logger.error(msg)
             _flush_all_logs()
+
         loop.set_exception_handler(_asyncio_exception_handler)
     except Exception:
         pass
