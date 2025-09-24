@@ -768,6 +768,35 @@ class Verifier:
         except Exception:
             logger.debug(f"event={event}")
 
+    def _spawn_monitor_task(self, coro, tag: str) -> None:
+        """Fire-and-forget a monitoring coroutine safely.
+
+        Uses the currently running loop; if none, it no-ops. Any exception
+        raised by the task is logged to avoid silent failures.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        try:
+            task = loop.create_task(coro)
+        except Exception as e:
+            logger.debug(f"Failed to schedule monitor task tag={tag}: {e}")
+            return
+
+        def _done(t: asyncio.Task) -> None:
+            try:
+                exc = t.exception()
+            except Exception:
+                exc = None
+            if exc is not None:
+                logger.debug(f"Monitor task failed tag={tag}: {exc}")
+
+        try:
+            task.add_done_callback(_done)
+        except Exception:
+            pass
+
     def verify_rollout(
         self,
         commit: dict,
@@ -813,12 +842,10 @@ class Verifier:
         if not verify_tokens(tokens, self.model.config):
             logger.debug("Token validation failed")
             if monitor:
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        asyncio.create_task(monitor.log_counter("grail.token_validation_failures"))
-                except RuntimeError:
-                    pass
+                self._spawn_monitor_task(
+                    monitor.log_counter("grail.token_validation_failures"),
+                    tag="grail.token_validation_failures",
+                )
             self._debug("tokens_valid", status="fail")
             return False, checks
         checks["tokens_valid"] = True
@@ -833,14 +860,10 @@ class Verifier:
         ):
             logger.debug("GRAIL proof failed - model identity not verified")
             if monitor:
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        asyncio.create_task(
-                            monitor.log_counter("validation/grail/verification_failures")
-                        )
-                except RuntimeError:
-                    pass
+                self._spawn_monitor_task(
+                    monitor.log_counter("validation/grail/verification_failures"),
+                    tag="validation/grail/verification_failures",
+                )
             self._debug("proof_valid", status="fail")
             return False, checks
         checks["proof_valid"] = True
@@ -898,14 +921,10 @@ class Verifier:
             return False, checks
 
         if monitor:
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.create_task(
-                        monitor.log_counter("validation/grail/verification_successes")
-                    )
-            except RuntimeError:
-                pass
+            self._spawn_monitor_task(
+                monitor.log_counter("validation/grail/verification_successes"),
+                tag="validation/grail/verification_successes",
+            )
         return True, checks
 
     def _verify_sat_problem(self, sat_data: dict) -> Optional[Any]:
@@ -1567,7 +1586,6 @@ class Verifier:
                 asyncio.create_task(monitor.log_gauge(f"{wallet_ns}/mid_frac", metrics["mid_frac"]))
                 asyncio.create_task(monitor.log_gauge(f"{wallet_ns}/bc", metrics["bc"]))
                 asyncio.create_task(monitor.log_gauge(f"{wallet_ns}/n", metrics["n"]))
-                logger.debug("-------- log_verbose_monitoring_metrics finished--------")
             except RuntimeError:
                 logger.debug("-------- log_verbose_monitoring_metrics failed--------")
                 pass

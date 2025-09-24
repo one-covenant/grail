@@ -95,7 +95,6 @@ logger.addFilter(MinerPrefixFilter())
 #                           Crash Diagnostics                                 #
 # --------------------------------------------------------------------------- #
 
-
 def _flush_all_logs() -> None:
     """Best-effort flush of all logging handlers and stdio."""
     try:
@@ -161,7 +160,6 @@ def _install_crash_diagnostics() -> None:
         atexit.register(_flush_all_logs)
     except Exception:
         pass
-
 
 # --------------------------------------------------------------------------- #
 #                       Styling & configuration constants                     #
@@ -585,7 +583,6 @@ async def _run_validation_service(
     # Install an asyncio exception handler to log any task errors
     try:
         loop = asyncio.get_running_loop()
-
         def _asyncio_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
             msg = context.get("message") or "Asyncio exception in task"
             exc = context.get("exception")
@@ -594,7 +591,6 @@ async def _run_validation_service(
             else:
                 logger.error(msg)
             _flush_all_logs()
-
         loop.set_exception_handler(_asyncio_exception_handler)
     except Exception:
         pass
@@ -1192,22 +1188,22 @@ def _aggregate_weight_inputs(
         target_window + 1,
         WINDOW_LENGTH,
     )
-    total_unique = 0
-    total_successful = 0
+    total_estimated_unique = 0
+    total_estimated_successful = 0
     total_estimated_valid = 0
     for w in recent_windows:
         metrics = inference_counts[hotkey].get(w, {})
-        total_unique += int(metrics.get("unique", 0))
-        total_successful += int(metrics.get("successful", 0))
+        total_estimated_unique += int(metrics.get("estimated_unique", 0))
+        total_estimated_successful += int(metrics.get("estimated_successful", 0))
         total_estimated_valid += int(metrics.get("estimated_valid", 0))
     # Unbounded unique score to match _compute_weights logic
-    unique_score = total_unique
+    unique_score = total_estimated_unique
     # NOTE: at this stage we only give weights to unique scores
     base_score = max(0.0, 1.0 * unique_score + 0.0 * 0.0 + 0.0 * 0.0)
     superlinear_score = base_score**SUPERLINEAR_EXPONENT
     return (
-        total_unique,
-        total_successful,
+        total_estimated_unique,
+        total_estimated_successful,
         total_estimated_valid,
         base_score,
         superlinear_score,
@@ -1448,7 +1444,9 @@ async def _handle_wallet_hard_failure(
         "total": total_inferences,
         "estimated_valid": 0,
         "successful": 0,
+        "estimated_successful": 0,
         "unique": 0,
+        "estimated_unique": 0,
         "prompt_valid": 0,
         "prompt_mismatch": prompt_mismatch_count,
         FAILURE_FLAG_KEY: 1,
@@ -1926,10 +1924,16 @@ async def _process_wallet_window(
             monitor,
         )
 
-    # Calculate estimated total valid rollouts based on sampling
     # Extrapolate from sample to estimate total for weight computation
+    # These estimates are going to be used in logging in wandb and grafana later on too
     sample_pass_rate = (valid_count / checked_count) if checked_count > 0 else 0
     estimated_valid = int(total_inferences * sample_pass_rate)
+
+    unique_sample_pass_rate = (len(unique_rollouts) / checked_count) if checked_count > 0 else 0
+    estimated_unique = int(total_inferences * unique_sample_pass_rate)
+
+    success_rate = (successful_rollouts / checked_count) if checked_count > 0 else 0
+    estimated_successful = int(total_inferences * success_rate)
 
     # Store metrics for this miner
     metrics = {
@@ -1938,7 +1942,9 @@ async def _process_wallet_window(
         "total": total_inferences,
         "estimated_valid": estimated_valid,
         "successful": successful_rollouts,
+        "estimated_successful": estimated_successful,
         "unique": len(unique_rollouts),
+        "estimated_unique": estimated_unique,
         "prompt_valid": prompt_valid_count,
         "prompt_mismatch": prompt_mismatch_count,
         FAILURE_FLAG_KEY: 0,
@@ -1948,8 +1954,10 @@ async def _process_wallet_window(
         logger.info(
             f"✅ {valid_count}/{checked_count} checked, "
             f"~{estimated_valid}/{total_inferences} estimated valid, "
-            f"{successful_rollouts} successful, "
-            f"{len(unique_rollouts)} unique"
+            f"{successful_rollouts}/{total_inferences} successful, "
+            f"{estimated_successful}/{total_inferences} estimated successful, "
+            f"{len(unique_rollouts)}/{total_inferences} unique, "
+            f"{estimated_unique}/{total_inferences} estimated unique"
         )
 
     if monitor:
@@ -2021,8 +2029,8 @@ def _compute_weights(
 
         for w in recent_windows:
             metrics = inference_counts[hotkey].get(w, EMPTY_METRICS)
-            total_unique += metrics.get("unique", 0)
-            total_successful += metrics.get("successful", 0)
+            total_unique += metrics.get("estimated_unique", 0)
+            total_successful += metrics.get("estimated_successful", 0)
             total_estimated_valid += metrics.get("estimated_valid", 0)
 
         # Scoring formula: prioritize unique solutions, then successful, then valid
@@ -2191,7 +2199,7 @@ async def _log_top_miners_by_unique_rollouts(
     miner_unique_data = []
     for hotkey, metrics in window_inference_counts.items():
         uid = uid_by_hotkey.get(hotkey, hotkey)
-        unique_count = metrics.get("unique", 0)
+        unique_count = metrics.get("estimated_unique", 0)
         miner_unique_data.append((hotkey, uid, unique_count))
 
     # Sort by unique count (descending) and get top N
