@@ -111,12 +111,10 @@ def configure_logging(verbosity: int) -> None:
     # Optionally forward logs to Grafana Loki if configured via environment
     try:
         # Support multiple Loki endpoints (comma-separated) to dual-ship
-        raw_urls = os.environ.get("GRAIL_OBS_LOKI_URL") or os.environ.get("GRAIL_LOKI_URL")
-        if not raw_urls:
-            raw_urls = os.environ.get("LOKI_URL", "")
+        raw_urls = os.environ.get("GRAIL_OBS_LOKI_URL", "")
         loki_urls = [u.strip() for u in raw_urls.split(",") if u.strip()]
         if loki_urls:
-            labels_env = os.environ.get("GRAIL_LOKI_LABELS", "")
+            labels_env = os.environ.get("GRAIL_OBS_LOKI_LABELS", "")
             # Default tags for Loki; allow overrides via env
             tags: dict[str, str] = {
                 "app": "grail",
@@ -130,13 +128,11 @@ def configure_logging(verbosity: int) -> None:
                     if part and "=" in part:
                         k, v = part.split("=", 1)
                         tags[k.strip()] = v.strip()
+            
+            logger.info(f"Loki tags: {tags}")
 
-            username = os.environ.get("GRAIL_OBS_LOKI_USERNAME") or os.environ.get(
-                "GRAIL_LOKI_USERNAME"
-            )
-            password = os.environ.get("GRAIL_OBS_LOKI_PASSWORD") or os.environ.get(
-                "GRAIL_LOKI_PASSWORD"
-            )
+            username = os.environ.get("GRAIL_OBS_LOKI_USERNAME")
+            password = os.environ.get("GRAIL_OBS_LOKI_PASSWORD")
             auth = (username, password) if username and password else None
 
             # Create LokiQueueHandler for each endpoint
