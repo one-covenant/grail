@@ -41,8 +41,8 @@
         "dedupStrategy": "none",
         "enableLogDetails": true,
         "prettifyLogMessage": false,
-        "showCommonLabels": false,
-        "showLabels": true,
+        "showCommonLabels": true,
+        "showLabels": false,
         "showTime": true,
         "sortOrder": "Descending",
         "wrapLogMessage": true
@@ -50,7 +50,7 @@
       "targets": [
         {
           "datasource": { "type": "loki", "uid": "loki" },
-          "expr": "{app=~\"$app\", level=~\"$level\", hotkey=~\"$hotkey\"} |~ \"$quick\" |~ \"$search\"",
+          "expr": "{app=~\".+\", env=~\"$env\", service=~\"$service\", severity=~\"$severity\"} |~ \"$quick\" |~ \"$miner_uid\" |~ \"$search\"",
           "refId": "A"
         }
       ],
@@ -65,17 +65,35 @@
   "templating": {
     "list": [
       {
+        "current": { "selected": true, "text": "prod", "value": "prod" },
+        "datasource": { "type": "loki", "uid": "loki" },
+        "definition": "label_values(env)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "🌎 Env",
+        "multi": false,
+        "name": "env",
+        "options": [],
+        "query": "label_values(env)",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 0,
+        "type": "query"
+      },
+      {
         "current": { "selected": false, "text": "All", "value": "$__all" },
         "datasource": { "type": "loki", "uid": "loki" },
-        "definition": "label_values({app=~\".+\"}, app)",
+        "definition": "label_values(service)",
         "hide": 0,
         "includeAll": true,
         "allValue": ".+",
-        "label": "🏷️ App",
+        "label": "🧩 Service",
         "multi": false,
-        "name": "app",
+        "name": "service",
         "options": [],
-        "query": "label_values({app=~\".+\"}, app)",
+        "query": "label_values(service)",
         "refresh": 1,
         "regex": "",
         "skipUrlSync": false,
@@ -85,15 +103,15 @@
       {
         "current": { "selected": false, "text": "All", "value": "$__all" },
         "datasource": { "type": "loki", "uid": "loki" },
-        "definition": "label_values({app=~\"$app\"}, level)",
+        "definition": "label_values(severity)",
         "hide": 0,
         "includeAll": true,
-        "allValue": ".*",
+        "allValue": ".+",
         "label": "📊 Level",
         "multi": true,
-        "name": "level",
+        "name": "severity",
         "options": [],
-        "query": "label_values({app=~\"$app\"}, level)",
+        "query": "label_values(severity)",
         "refresh": 1,
         "regex": "",
         "skipUrlSync": false,
@@ -101,44 +119,33 @@
         "type": "query"
       },
       {
-        "current": { "selected": false, "text": "All", "value": "$__all" },
-        "datasource": { "type": "loki", "uid": "loki" },
-        "definition": "label_values({app=~\"$app\"}, hotkey)",
+        "name": "miner_uid",
+        "type": "textbox",
+        "label": "🧑‍🔧 Miner UID",
         "hide": 0,
-        "includeAll": true,
-        "allValue": ".*",
-        "label": "🔑 Hotkey",
-        "multi": true,
-        "name": "hotkey",
-        "options": [],
-        "query": "label_values({app=~\"$app\"}, hotkey)",
-        "refresh": 1,
-        "regex": "",
+        "query": ".*",
+        "current": { "text": "", "value": ".*" },
+        "description": "Enter UID number (0-999). Only numbers 0-999 accepted.",
         "skipUrlSync": false,
-        "sort": 0,
-        "type": "query"
+        "regex": "^([0-9]|[1-9][0-9]|[1-9][0-9][0-9]|)$"
       },
       {
         "name": "quick",
         "type": "custom",
         "label": "🔍 Quick Search",
-        "hide": 0,
-        "query": ".*,(?i)error|\\u274c|exception|fail,(?i)warn|warning,(?i)info,(?i)debug,rollouts,mining,validation,hotkey,auth,(?i)timeout,(?i)retry,(?i)success|✅,(?i)start|begin,(?i)complete|finish",
+        "hide": 2,
+        "query": ".*,(?i)error|\\u274c|exception|fail,(?i)uid\\s*\\d+|miner.*uid=\\d+,(?i)register|registration|pow|nonce|hotkey|coldkey|wallet|subtensor|extrinsic,(?i)weight|set_weights|dendrite|metagraph,(?i)axon|serve|bind|port|socket|listen,(?i)rpc|websocket|ws|block|finality|nonce|fee|extrinsic|inclusion|reorg|era,(?i)metagraph|sync|catch.*up|stale|lag,(?i)peer|libp2p|kademlia|bootstrap|discovery|dial|connection|reset|timeout,(?i)oom|out.*of.*memory|cuda|gpu|vram|cpu|disk|rate.?limit|throttle|429|500|timeout",
         "options": [
           {"text": "🔍 All", "value": ".*", "selected": true},
           {"text": "❌ Errors", "value": "(?i)error|\\u274c|exception|fail", "selected": false},
-          {"text": "⚠️ Warnings", "value": "(?i)warn|warning", "selected": false},
-          {"text": "ℹ️ Info", "value": "(?i)info", "selected": false},
-          {"text": "🐛 Debug", "value": "(?i)debug", "selected": false},
-          {"text": "🚀 Rollouts", "value": "rollouts", "selected": false},
-          {"text": "⛏️ Mining", "value": "mining", "selected": false},
-          {"text": "✅ Validation", "value": "validation", "selected": false},
-          {"text": "🔐 Auth", "value": "auth", "selected": false},
-          {"text": "⏱️ Timeout", "value": "(?i)timeout", "selected": false},
-          {"text": "🔄 Retry", "value": "(?i)retry", "selected": false},
-          {"text": "✅ Success", "value": "(?i)success|✅", "selected": false},
-          {"text": "🏁 Start/Begin", "value": "(?i)start|begin", "selected": false},
-          {"text": "🎯 Complete", "value": "(?i)complete|finish", "selected": false}
+          {"text": "🆔 UID Patterns", "value": "(?i)uid\\s*\\d+|miner.*uid=\\d+", "selected": false},
+          {"text": "🕸 Registration", "value": "(?i)register|registration|pow|nonce|hotkey|coldkey|wallet|subtensor|extrinsic", "selected": false},
+          {"text": "⚖️ Weights", "value": "(?i)weight|set_weights|dendrite|metagraph", "selected": false},
+          {"text": "👾 Axon", "value": "(?i)axon|serve|bind|port|socket|listen", "selected": false},
+          {"text": "🔧 Chain/RPC", "value": "(?i)rpc|websocket|ws|block|finality|nonce|fee|extrinsic|inclusion|reorg|era", "selected": false},
+          {"text": "🔄 Sync/Metagraph", "value": "(?i)metagraph|sync|catch.*up|stale|lag", "selected": false},
+          {"text": "🌐 Networking", "value": "(?i)peer|libp2p|kademlia|bootstrap|discovery|dial|connection|reset|timeout", "selected": false},
+          {"text": "🏋️ Performance", "value": "(?i)oom|out.*of.*memory|cuda|gpu|vram|cpu|disk|rate.?limit|throttle|429|500|timeout", "selected": false}
         ],
         "current": {"text": "🔍 All", "value": ".*", "selected": true},
         "skipUrlSync": false
@@ -156,7 +163,7 @@
         "name": "filters",
         "type": "adhoc",
         "datasource": { "type": "loki", "uid": "loki" },
-        "hide": 0,
+        "hide": 2,
         "label": "🏷️ Advanced Filters"
       }
     ]
@@ -169,6 +176,6 @@
   "timezone": "",
   "title": "🔍 GRAIL Public Log Explorer",
   "uid": "grail-log-explorer",
-  "version": 4,
+  "version": 5,
   "weekStart": ""
 }
