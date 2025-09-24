@@ -32,6 +32,7 @@ from ..infrastructure.comms import (
 )
 from ..infrastructure.credentials import load_r2_credentials
 from ..infrastructure.network import create_subtensor
+from ..logging_utils import MinerPrefixFilter, miner_log_context
 from ..monitoring import get_monitoring_manager
 from ..monitoring.config import MonitoringConfig
 from ..shared.constants import (
@@ -83,6 +84,7 @@ from . import console
 # --------------------------------------------------------------------------- #
 
 logger = logging.getLogger("grail")
+logger.addFilter(MinerPrefixFilter())
 
 # --------------------------------------------------------------------------- #
 #                       Styling & configuration constants                     #
@@ -91,7 +93,7 @@ logger = logging.getLogger("grail")
 # numbers scattered through validation logic and to make tuning straightforward.
 MAX_SAMPLES_PER_MINER = 20  # If <= this many rollouts, check all
 SAMPLE_RATE = 0.1  # Fraction of GRPO groups to spot-check
-STOCHASTIC_CHECK_FAILURE_THRESHOLD = 0.05  # Soft-failure fraction to gate wallet
+STOCHASTIC_CHECK_FAILURE_THRESHOLD = 0.26  # Soft-failure fraction to gate wallet
 REWARD_REL_TOL = 0.02  # Relative tolerance on reward bounds
 REWARD_ABS_TOL = 1e-6  # Absolute tolerance on reward bounds
 GRPO_ADV_SUM_TOLERANCE = 0.01  # Sum of advantages should be ~0
@@ -323,6 +325,60 @@ def _compute_count_stats(values: list[int]) -> dict[str, float]:
 miner_inference_counts: defaultdict[str, list] = defaultdict(
     list
 )  # track inferences per block for weight calculation
+
+
+# --------------------------------------------------------------------------- #
+#                        Unique Rollout Helpers                               #
+# --------------------------------------------------------------------------- #
+
+
+def _update_unique_rollouts(
+    unique_rollouts: set[str],
+    commit_data: dict,
+    rollout_meta: dict,
+) -> set[str]:
+    """
+    Update the set of unique rollouts by hashing completion token IDs.
+
+    Args:
+        unique_rollouts: Set to add unique rollout hashes to
+        commit_data: Commit data containing tokens
+        rollout_meta: Rollout metadata containing length information
+
+    Returns:
+        Updated unique_rollouts set
+    """
+    try:
+        tokens = commit_data.get("tokens", [])
+        if not tokens:
+            return unique_rollouts
+
+        prompt_len = int(rollout_meta.get("prompt_length", 0) or 0)
+
+        # Extract completion token IDs
+        completion_ids = tokens[prompt_len:]
+
+        # Hash the completion token IDs
+        digest_input = json.dumps(
+            completion_ids, separators=(",", ":"), ensure_ascii=False
+        ).encode()
+        rollout_hash = hashlib.sha256(digest_input).hexdigest()
+
+        if rollout_hash not in unique_rollouts:
+            unique_rollouts.add(rollout_hash)
+
+    except Exception as e:
+        # Fallback: hash full token list if slicing fails
+        logger.debug(f"Completion token slicing failed ({e}), using fallback hash method")
+        try:
+            digest_input = json.dumps(tokens, separators=(",", ":"), ensure_ascii=False).encode()
+            rollout_hash = hashlib.sha256(digest_input).hexdigest()
+            if rollout_hash not in unique_rollouts:
+                unique_rollouts.add(rollout_hash)
+        except Exception:
+            logger.warning("Failed to hash tokens for unique rollout tracking")
+
+    return unique_rollouts
 
 
 # --------------------------------------------------------------------------- #
@@ -726,7 +782,8 @@ async def _run_validation_service(
                     for hotkey, weight in non_zero_weights[:5]:
                         uid = uid_by_hotkey.get(hotkey, None)
                         display = uid if uid is not None else hotkey
-                        logger.info(f"   uid {display}: {weight:.4f}")
+                        with miner_log_context(display, target_window):
+                            logger.info(f"weight: {weight:.4f} - top 5 miners")
                 else:
                     logger.info("⚖️  No miners received weights this window")
 
@@ -873,7 +930,10 @@ async def _run_validation_service(
                                 f"{uid_ns}/inputs/estimated_valid_rolling",
                                 tev,
                             )
-                    for hk, uid, w in top_miners:
+
+                    # Log top 5 best
+                    LOG_TOP_MINERS = 5
+                    for hk, uid, w in top_miners[:LOG_TOP_MINERS]:
                         tu, ts, tev, b, s = _aggregate_weight_inputs(
                             hk, inference_counts, target_window
                         )
@@ -889,6 +949,7 @@ async def _run_validation_service(
                             ts,
                             tev,
                         )
+
                     logger.info(
                         "Submitted weights (interval %s, block %s)",
                         current_interval,
@@ -1186,7 +1247,8 @@ async def _process_window(
             processing_errors += pr_processing_err
         except Exception as e:
             uid_str = str(uid_by_hotkey.get(wallet_addr, wallet_addr))
-            logger.warning(f"Error processing uid {uid_str}: {e}")
+            with miner_log_context(uid_str, target_window):
+                logger.warning(f"Error processing: {e}")
             continue
 
     for metrics in window_inference_counts.values():
@@ -1254,35 +1316,36 @@ async def _handle_wallet_hard_failure(
     monitor: Any,
 ) -> tuple[bool, dict[str, int], list[dict], tuple[int, int, int, int]]:
     """Handle wallet rejection due to hard or soft failures."""
-    metrics = {
-        "valid": 0,
-        "checked": checked_count,
-        "total": total_inferences,
-        "estimated_valid": 0,
-        "successful": 0,
-        "unique": 0,
-        "prompt_valid": 0,
-        "prompt_mismatch": prompt_mismatch_count,
-        FAILURE_FLAG_KEY: 1,
-    }
-    logger.info(
-        f"❌ UID {uid_str} rejected for window {target_window} "
-        f"(hard_failure={hard_failure}, "
-        f"soft_failures={soft_failures}/{total_planned_checks})"
-    )
-    if monitor:
-        await monitor.log_gauge(f"{uid_str}/had_failure", 1.0)
-        try:
-            await monitor.log_gauge(f"{uid_str}/prompt_valid", float(0))
-            await monitor.log_gauge(f"{uid_str}/prompt_mismatch", float(prompt_mismatch_count))
-        except Exception:
-            pass
-    return (
-        True,
-        metrics,
-        [],
-        (pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err),
-    )
+    with miner_log_context(uid_str, target_window):
+        metrics = {
+            "valid": 0,
+            "checked": checked_count,
+            "total": total_inferences,
+            "estimated_valid": 0,
+            "successful": 0,
+            "unique": 0,
+            "prompt_valid": 0,
+            "prompt_mismatch": prompt_mismatch_count,
+            FAILURE_FLAG_KEY: 1,
+        }
+        logger.info(
+            f"❌ Rejected "
+            f"(hard_failure={hard_failure}, "
+            f"soft_failures={soft_failures}/{total_planned_checks})"
+        )
+        if monitor:
+            await monitor.log_gauge(f"{uid_str}/had_failure", 1.0)
+            try:
+                await monitor.log_gauge(f"{uid_str}/prompt_valid", float(0))
+                await monitor.log_gauge(f"{uid_str}/prompt_mismatch", float(prompt_mismatch_count))
+            except Exception:
+                pass
+        return (
+            True,
+            metrics,
+            [],
+            (pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err),
+        )
 
 
 async def _process_wallet_window(
@@ -1306,108 +1369,111 @@ async def _process_wallet_window(
     miner_bucket = chain_manager.get_bucket_for_hotkey(wallet_addr)
     # Resolve miner UID (fallback to wallet address string)
     uid_str = str(uid_by_hotkey.get(wallet_addr, wallet_addr))
-    exists = await file_exists(
-        filename,
-        credentials=miner_bucket if miner_bucket else credentials,
-        use_write=False,
-    )
-    if not exists:
-        logger.debug(f"No file found for uid {uid_str} at {filename}")
-        return False, None, [], (0, 0, 0, 0)
 
-    logger.info(f"📁 Found file for uid {uid_str}")
-    window_data = await get_file(
-        filename, credentials=miner_bucket if miner_bucket else credentials, use_write=False
-    )
-    if not window_data:
-        logger.warning(f"Could not download {filename}")
-        return True, None, [], (0, 0, 0, 0)
-
-    file_wallet_addr = window_data.get("wallet")
-    window_start = window_data.get("window_start")
-    inferences = window_data.get("inferences", [])
-    if file_wallet_addr != wallet_addr:
-        got_uid = uid_by_hotkey.get(file_wallet_addr)
-        got_id = got_uid if got_uid is not None else "unknown"
-        logger.warning(f"UID mismatch in {filename}: expected {uid_str}, got {got_id}")
-        return True, None, [], (0, 0, 0, 0)
-    if window_start != target_window:
-        logger.warning(
-            f"Window mismatch in {filename}: expected {target_window}, got {window_start}"
+    with miner_log_context(uid_str, target_window):
+        exists = await file_exists(
+            filename,
+            credentials=miner_bucket if miner_bucket else credentials,
+            use_write=False,
         )
-        return True, None, [], (0, 0, 0, 0)
+        if not exists:
+            logger.debug(f"No file found at {filename}")
+            return False, None, [], (0, 0, 0, 0)
 
-    total_inferences = len(inferences)
-    groups_map = defaultdict(list)
-    # Build group membership and assign canonical indices in file order (simple, deterministic)
-    group_index_by_id: dict[str, int] = {}
-    for idx, inf in enumerate(inferences):
-        raw_gid = inf.get("rollout_group")
-        if raw_gid is not None:  # Only process inferences with rollout_group
-            group_id = str(raw_gid)
-            groups_map[group_id].append(idx)
-            if group_id not in group_index_by_id:
-                group_index_by_id[group_id] = len(group_index_by_id)  # 0, 1, 2, ...
-
-    # Determine whether to check all rollouts or sample GRPO groups.
-    # Sampling is deterministic per wallet+window via a seeded RNG to keep
-    # validators consistent and discourage gaming.
-    if total_inferences <= MAX_SAMPLES_PER_MINER:
-        indices_to_check = list(range(total_inferences))
-        logger.info(f"🔍 Verifying all {total_inferences} rollouts from uid {uid_str}")
-    else:
-        indices_to_check = []
-        num_groups = len(groups_map)
-
-        # Choose how many GRPO groups to spot-check (at least 1, at most all).
-        groups_to_check = max(1, min(num_groups, int(num_groups * SAMPLE_RATE)))
-
-        # Derive a deterministic RNG seed from miner wallet,
-        # window randomness, and validator hotkey.
-        # Selection is stable per validator and window, and
-        # harder to game via order-dependent behavior.
-        # We take the first 8 bytes of the SHA-256 to get
-        # a 64-bit integer seed.
-        seed_material = (f"{wallet_addr}:{window_rand}:{wallet.hotkey.ss58_address}").encode()
-        seed_int = int.from_bytes(hashlib.sha256(seed_material).digest()[:8], "big")
-        rng = random.Random(seed_int)
-
-        def _group_digest(gidxs: list[int]) -> str:
-            # Compute a stable digest per group from the canonical
-            # JSON of each rollout's commit. Indices are sorted so
-            # the digest is independent of original order.
-            # Using sort_keys and compact separators yields a
-            # canonical JSON, so identical content produces the
-            # same digest across validators.
-            dig = hashlib.sha256()
-            for i in sorted(gidxs):
-                commit_json = json.dumps(
-                    inferences[i].get("commit", {}), sort_keys=True, separators=(",", ":")
-                )
-                dig.update(hashlib.sha256(commit_json.encode()).digest())
-            return dig.hexdigest()
-
-        # Canonicalize group ordering by sorting ids by their
-        # content-derived digest. This avoids dict insertion
-        # order or arbitrary ids affecting RNG sampling.
-        group_keys = sorted(groups_map.keys(), key=lambda gid: _group_digest(groups_map[gid]))
-        # Deterministically sample groups without replacement using the seeded RNG.
-        selected_groups = rng.sample(group_keys, groups_to_check)
-        for group_id in selected_groups:
-            indices_to_check.extend(groups_map[group_id])
-        # Sort indices to make the per-rollout verification order deterministic.
-        indices_to_check.sort()
-        logger.info(
-            f"📊 Spot checking {len(indices_to_check)}/{total_inferences} "
-            f"rollouts from {groups_to_check}/{num_groups} groups "
-            f"({SAMPLE_RATE * 100:.0f}% of groups)"
+        logger.info("📁 Found file")
+        window_data = await get_file(
+            filename, credentials=miner_bucket if miner_bucket else credentials, use_write=False
         )
+        if not window_data:
+            logger.warning(f"Could not download {filename}")
+            return True, None, [], (0, 0, 0, 0)
+
+        file_wallet_addr = window_data.get("wallet")
+        window_start = window_data.get("window_start")
+        inferences = window_data.get("inferences", [])
+        if file_wallet_addr != wallet_addr:
+            got_uid = uid_by_hotkey.get(file_wallet_addr)
+            got_id = got_uid if got_uid is not None else "unknown"
+            logger.warning(f"UID mismatch in {filename}: expected {uid_str}, got {got_id}")
+            return True, None, [], (0, 0, 0, 0)
+        if window_start != target_window:
+            logger.warning(
+                f"Window mismatch in {filename}: expected {target_window}, got {window_start}"
+            )
+            return True, None, [], (0, 0, 0, 0)
+
+        # Continue with the rest of the function inside the context
+        total_inferences = len(inferences)
+        groups_map = defaultdict(list)
+        # Build group membership and assign canonical indices in file order (simple, deterministic)
+        group_index_by_id: dict[str, int] = {}
+        for idx, inf in enumerate(inferences):
+            raw_gid = inf.get("rollout_group")
+            if raw_gid is not None:  # Only process inferences with rollout_group
+                group_id = str(raw_gid)
+                groups_map[group_id].append(idx)
+                if group_id not in group_index_by_id:
+                    group_index_by_id[group_id] = len(group_index_by_id)  # 0, 1, 2, ...
+
+        # Determine whether to check all rollouts or sample GRPO groups.
+        # Sampling is deterministic per wallet+window via a seeded RNG to keep
+        # validators consistent and discourage gaming.
+        if total_inferences <= MAX_SAMPLES_PER_MINER:
+            indices_to_check = list(range(total_inferences))
+            logger.info(f"🔍 Verifying all {total_inferences} rollouts")
+        else:
+            indices_to_check = []
+            num_groups = len(groups_map)
+
+            # Choose how many GRPO groups to spot-check (at least 1, at most all).
+            groups_to_check = max(1, min(num_groups, int(num_groups * SAMPLE_RATE)))
+
+            # Derive a deterministic RNG seed from miner wallet,
+            # window randomness, and validator hotkey.
+            # Selection is stable per validator and window, and
+            # harder to game via order-dependent behavior.
+            # We take the first 8 bytes of the SHA-256 to get
+            # a 64-bit integer seed.
+            seed_material = (f"{wallet_addr}:{window_rand}:{wallet.hotkey.ss58_address}").encode()
+            seed_int = int.from_bytes(hashlib.sha256(seed_material).digest()[:8], "big")
+            rng = random.Random(seed_int)
+
+            def _group_digest(gidxs: list[int]) -> str:
+                # Compute a stable digest per group from the canonical
+                # JSON of each rollout's commit. Indices are sorted so
+                # the digest is independent of original order.
+                # Using sort_keys and compact separators yields a
+                # canonical JSON, so identical content produces the
+                # same digest across validators.
+                dig = hashlib.sha256()
+                for i in sorted(gidxs):
+                    commit_json = json.dumps(
+                        inferences[i].get("commit", {}), sort_keys=True, separators=(",", ":")
+                    )
+                    dig.update(hashlib.sha256(commit_json.encode()).digest())
+                return dig.hexdigest()
+
+            # Canonicalize group ordering by sorting ids by their
+            # content-derived digest. This avoids dict insertion
+            # order or arbitrary ids affecting RNG sampling.
+            group_keys = sorted(groups_map.keys(), key=lambda gid: _group_digest(groups_map[gid]))
+            # Deterministically sample groups without replacement using the seeded RNG.
+            selected_groups = rng.sample(group_keys, groups_to_check)
+            for group_id in selected_groups:
+                indices_to_check.extend(groups_map[group_id])
+            # Sort indices to make the per-rollout verification order deterministic.
+            indices_to_check.sort()
+            logger.info(
+                f"📊 Spot checking {len(indices_to_check)}/{total_inferences} "
+                f"rollouts from {groups_to_check}/{num_groups} groups "
+                f"({SAMPLE_RATE * 100:.0f}% of groups)"
+            )
 
     # Per-wallet counters for metrics and gating
     valid_count = 0
     checked_count = 0
     successful_rollouts = 0
-    unique_solutions = set()
+    unique_rollouts: set[str] = set()
     nonces_seen = set()
     rollout_groups = defaultdict(list)
     wallet_rollouts_buffer = []
@@ -1440,48 +1506,32 @@ async def _process_wallet_window(
             if missing_fields:
                 hard_failure = True
                 logger.warning(
-                    f"Missing required fields {missing_fields} in inference from uid {uid_str}; "
-                    f"invalidating uid for window {target_window}"
+                    f"Missing required fields {missing_fields} in inference; invalidating uid"
                 )
                 break
             if inference["window_start"] != target_window:
                 hard_failure = True
-                logger.warning(
-                    f"Window mismatch in inference from uid {uid_str}; "
-                    f"invalidating uid for window {target_window}"
-                )
+                logger.warning("Window mismatch in inference; invalidating uid")
                 break
             if inference["block_hash"] != target_window_hash:
                 hard_failure = True
-                logger.warning(
-                    f"Block hash mismatch in inference from uid {uid_str}; "
-                    f"invalidating uid for window {target_window}"
-                )
+                logger.warning("Block hash mismatch in inference; invalidating uid")
                 break
             nonce = inference["nonce"]
             if nonce in nonces_seen:
                 hard_failure = True
-                logger.warning(
-                    f"Duplicate nonce {nonce} in window from uid {uid_str}; "
-                    f"invalidating uid for window {target_window}"
-                )
+                logger.warning(f"Duplicate nonce {nonce} in window; invalidating uid")
                 break
             nonces_seen.add(nonce)
             if not verify_rollout_signature(inference):
                 pr_invalid_sig += 1
                 hard_failure = True
-                logger.warning(
-                    f"Invalid signature for uid {uid_str}; "
-                    f"invalidating uid for window {target_window}"
-                )
+                logger.warning("Invalid signature; invalidating uid")
                 break
             expected_seed = f"{wallet_addr}-{target_window_hash}-{nonce}"
             if inference.get("sat_seed") != expected_seed:
                 hard_failure = True
-                logger.warning(
-                    f"Invalid SAT seed in inference from uid {uid_str}: "
-                    f"invalidating uid for window {target_window}"
-                )
+                logger.warning("Invalid SAT seed in inference; invalidating uid")
                 break
             try:
                 commit_data = inference["commit"]
@@ -1509,7 +1559,7 @@ async def _process_wallet_window(
                         logger.warning(
                             f"Reward {tr:.6f} outside tolerant bounds "
                             f"[{lo:.6f}, {hi:.6f}] (base=[{low:.6f}, {high:.6f}]); "
-                            f"invalidating uid for window {target_window}"
+                            f"invalidating uid"
                         )
                         break
                 except Exception:
@@ -1560,15 +1610,9 @@ async def _process_wallet_window(
                             failed_hard_check = k
                             break
                     if failed_hard_check:
-                        logger.debug(
-                            f"CHECK_FAILURE uid={uid_str} window={target_window} "
-                            f"type=hard failed_check={failed_hard_check}"
-                        )
+                        logger.debug(f"CHECK_FAILURE type=hard failed_check={failed_hard_check}")
                 if not soft_valid:
-                    logger.debug(
-                        f"CHECK_FAILURE uid={uid_str} window={target_window} "
-                        f"type=soft failed_check={SOFT_CHECK_KEY}"
-                    )
+                    logger.debug(f"CHECK_FAILURE type=soft failed_check={SOFT_CHECK_KEY}")
 
                 # Track prompt validity as a metric (not gating)
                 try:
@@ -1586,23 +1630,37 @@ async def _process_wallet_window(
                 if not hard_valid:
                     pr_invalid_proof += 1
                     hard_failure = True
-                    logger.warning(
-                        f"Hard verification failed for uid {uid_str}; "
-                        f"invalidating uid for window {target_window}"
-                    )
+                    logger.warning("Hard verification failed; invalidating uid")
                     break
                 if not soft_valid:
                     soft_failures += 1
+                    # Log soft trigger progression and record per-miner metrics
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            f"SOFT_TRIGGER soft_failures={soft_failures}/{checked_count} "
+                            f"(checked={checked_count})"
+                        )
+                    if monitor:
+                        try:
+                            await monitor.log_gauge(
+                                f"{uid_str}/soft_failures", float(soft_failures)
+                            )
+                            rate_checked = float(soft_failures) / float(max(1, checked_count))
+                            await monitor.log_gauge(
+                                f"{uid_str}/soft_failure_rate_checked", rate_checked
+                            )
+                        except Exception:
+                            pass
                     if soft_failures >= soft_fail_cutoff:
                         soft_gate_triggered = True
                         logger.warning(
                             f"Soft-check failures threshold reached "
-                            f"({soft_failures}/{total_planned_checks}) for uid {uid_str}; "
-                            f"invalidating uid for window {target_window}"
+                            f"({soft_failures}/{total_planned_checks}); "
+                            f"invalidating uid"
                         )
                         break
             except Exception as e:
-                logger.warning(f"Rollout verification error for uid {uid_str}: {e}")
+                logger.warning(f"Rollout verification error: {e}")
                 continue
 
             valid_count += 1
@@ -1614,7 +1672,7 @@ async def _process_wallet_window(
                     tokens = commit_data.get("tokens", [])
                     if isinstance(tokens, list) and tokens:
                         rollout_meta = commit_data.get("rollout", {})
-                        prompt_len = int(rollout_meta.get("prompt_length", 0) or 0)
+                        prompt_len = int(rollout_meta.get("prompt_length"))
                         completion_len = int(rollout_meta.get("completion_length", 0) or 0)
                         if completion_len > 0 and prompt_len >= 0:
                             completion_ids = tokens[prompt_len : prompt_len + completion_len]
@@ -1625,15 +1683,8 @@ async def _process_wallet_window(
                         adv_val = rollout_meta.get("advantage", float("nan"))
                         success_val = rollout_meta.get("success", False)
                         logger.debug(
-                            "TEXT[validate] window=%s uid=%s nonce=%s "
-                            "reward=%.3f adv=%.3f success=%s text=%s",
-                            target_window,
-                            uid_str,
-                            nonce,
-                            float(reward_val),
-                            float(adv_val),
-                            bool(success_val),
-                            text,
+                            f"TEXT[validate] nonce={nonce} "
+                            f"reward={float(reward_val):.3f} adv={float(adv_val):.3f} success={bool(success_val)} text={text}"
                         )
                         if monitor:
                             await monitor.log_artifact(
@@ -1653,15 +1704,15 @@ async def _process_wallet_window(
                 except Exception:
                     pass
 
-            rollout_meta = inference.get("commit", {}).get("rollout", {})
             if rollout_meta.get("success", False):
                 successful_rollouts += 1
-                assignment = rollout_meta.get("assignment", [])
-                solution_hash = hashlib.sha256(str(assignment).encode()).hexdigest()
-                unique_solutions.add(solution_hash)
+
+            # Count unique rollouts by hashing completion token IDs
+            unique_rollouts = _update_unique_rollouts(unique_rollouts, commit_data, rollout_meta)
+
             wallet_rollouts_buffer.append(inference)
         except Exception as e:
-            logger.debug(f"Error processing inference from uid {uid_str}: {e}")
+            logger.debug(f"Error processing inference: {e}")
             pr_processing_err += 1
             continue
 
@@ -1683,48 +1734,49 @@ async def _process_wallet_window(
             monitor,
         )
 
-    # Verify GRPO groups - hard requirement validation
-    for group_id, group_rollouts in rollout_groups.items():
-        # Check if this looks like a complete group (should have 4 rollouts for GRPO)
-        expected_group_size = ROLLOUTS_PER_PROBLEM
-        if len(group_rollouts) != expected_group_size:
-            hard_failure = True
-            logger.warning(
-                f"GRPO group {group_id} has {len(group_rollouts)} rollouts, "
-                f"expected {expected_group_size} for uid {uid_str}; "
-                f"invalidating uid for window {target_window}"
-            )
-            break
+    with miner_log_context(uid_str, target_window):
+        # Verify GRPO groups - hard requirement validation
+        for group_id, group_rollouts in rollout_groups.items():
+            # Check if this looks like a complete group (should have 4 rollouts for GRPO)
+            expected_group_size = ROLLOUTS_PER_PROBLEM
+            if len(group_rollouts) != expected_group_size:
+                hard_failure = True
+                logger.warning(
+                    f"GRPO group {group_id} has {len(group_rollouts)} rollouts, "
+                    f"expected {expected_group_size}; "
+                    f"invalidating uid"
+                )
+                break
 
-        # Verify advantages sum to approximately zero
-        advantages = []
-        for r in group_rollouts:
-            adv = r.get("commit", {}).get("rollout", {}).get("advantage", 0.0)
-            advantages.append(adv)
-        advantage_sum = sum(advantages)
+            # Verify advantages sum to approximately zero
+            advantages = []
+            for r in group_rollouts:
+                adv = r.get("commit", {}).get("rollout", {}).get("advantage", 0.0)
+                advantages.append(adv)
+            advantage_sum = sum(advantages)
 
-        if abs(advantage_sum) > GRPO_ADV_SUM_TOLERANCE:
-            hard_failure = True
-            logger.warning(
-                f"GRPO group {group_id} advantages don't sum to 0: "
-                f"{advantage_sum} (tolerance: {GRPO_ADV_SUM_TOLERANCE}) for uid {uid_str}; "
-                f"invalidating uid for window {target_window}"
-            )
-            break
+            if abs(advantage_sum) > GRPO_ADV_SUM_TOLERANCE:
+                hard_failure = True
+                logger.warning(
+                    f"GRPO group {group_id} advantages don't sum to 0: "
+                    f"{advantage_sum} (tolerance: {GRPO_ADV_SUM_TOLERANCE}); "
+                    f"invalidating uid"
+                )
+                break
 
-        # Verify all rollouts share the same base SAT problem
-        base_seeds = []
-        for r in group_rollouts:
-            sat_problem = r.get("commit", {}).get("sat_problem", {})
-            base_seeds.append(sat_problem.get("seed"))
+            # Verify all rollouts share the same base SAT problem
+            base_seeds = []
+            for r in group_rollouts:
+                sat_problem = r.get("commit", {}).get("sat_problem", {})
+                base_seeds.append(sat_problem.get("seed"))
 
-        if len(set(base_seeds)) != 1:
-            hard_failure = True
-            logger.warning(
-                f"GRPO group {group_id} has different base problems: {set(base_seeds)} "
-                f"for uid {uid_str}; invalidating uid for window {target_window}"
-            )
-            break
+            if len(set(base_seeds)) != 1:
+                hard_failure = True
+                logger.warning(
+                    f"GRPO group {group_id} has different base problems: {set(base_seeds)}; "
+                    f"invalidating uid"
+                )
+                break
 
     # Check for hard failure after GRPO validation
     if hard_failure:
@@ -1756,18 +1808,20 @@ async def _process_wallet_window(
         "total": total_inferences,
         "estimated_valid": estimated_valid,
         "successful": successful_rollouts,
-        "unique": len(unique_solutions),
+        "unique": len(unique_rollouts),
         "prompt_valid": prompt_valid_count,
         "prompt_mismatch": prompt_mismatch_count,
         FAILURE_FLAG_KEY: 0,
     }
-    if wallet_rollouts_buffer:
-        logger.info(
-            f"✅ uid {uid_str}: {valid_count}/{checked_count} checked, "
-            f"~{estimated_valid}/{total_inferences} estimated valid, "
-            f"{successful_rollouts} successful, "
-            f"{len(unique_solutions)} unique"
-        )
+    with miner_log_context(uid_str, target_window):
+        if wallet_rollouts_buffer:
+            logger.info(
+                f"✅ {valid_count}/{checked_count} checked, "
+                f"~{estimated_valid}/{total_inferences} estimated valid, "
+                f"{successful_rollouts} successful, "
+                f"{len(unique_rollouts)} unique"
+            )
+
     if monitor:
         await monitor.log_gauge(f"{uid_str}/had_failure", 0.0)
         try:
@@ -1788,7 +1842,7 @@ def _compute_weights(
     meta_hotkeys: list[str],
     inference_counts: defaultdict[str, defaultdict[int, dict[str, int]]],
     target_window: int,
-    meta_uids: list[int] = None,
+    meta_uids: Optional[list[int]] = None,
 ) -> tuple[list[float], list[tuple[str, float]]]:
     """Compute normalized weights over the last N windows.
 
@@ -1827,9 +1881,7 @@ def _compute_weights(
                 break
         if gated_due_to_failures:
             logger.debug(
-                "Gating weight for %s due to failures in last %s windows",
-                hotkey,
-                WEIGHT_ROLLING_WINDOWS,
+                f"[MINER hotkey={hotkey}] Gating weight due to failures in last {WEIGHT_ROLLING_WINDOWS} windows"
             )
             raw_scores.append(0.0)
             continue
@@ -2057,7 +2109,7 @@ async def _log_top_miners_by_score(
             ) = _aggregate_weight_inputs(hotkey, inference_counts, target_window)
             miner_score_data.append((hotkey, uid, base_score, superlinear_score))
         except Exception as e:
-            logger.debug(f"Error calculating score for hotkey {hotkey}: {e}")
+            logger.debug(f"[MINER hotkey={hotkey}] Error calculating score: {e}")
             continue
 
     # Sort by superlinear_score (descending) and get top N

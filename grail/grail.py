@@ -18,6 +18,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
 
 from .environments import generate_sat_problem
 from .environments.sat import SATParser, create_sat_prompt
+from .logging_utils import MinerPrefixFilter, miner_log_context
 from .mining.rollout_generator import (
     REASONING_START,
     SYSTEM_PROMPT,
@@ -51,6 +52,8 @@ os.environ["TORCH_USE_CUDA_DSA"] = "1"
 
 # Use the same logger as the main module
 logger = logging.getLogger(__name__)
+logger.addFilter(MinerPrefixFilter())
+
 
 # ──────────────────────────  CONFIGURATION  ─────────────────────────────
 #  Constants are now imported from .shared.constants
@@ -130,7 +133,7 @@ def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
     # Add cache attribute to function
     if not hasattr(r_vec_from_randomness, "_cache"):
         # Initialize a simple dict cache; attribute added dynamically
-        r_vec_from_randomness._cache = {}  # type: ignore[attr-defined]
+        r_vec_from_randomness._cache = {}
     """
     Generate random projection vector from drand randomness.
 
@@ -176,7 +179,7 @@ def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
         getattr(r_vec_from_randomness, "_cache", {}),
     )
     if cache_key in cache:
-        logger.debug(f"[SketchVec] Using cached vector for d_model={d_model}")
+        logger.debug(f"Using cached sketch vector for d_model={d_model}")
         return cache[cache_key].clone()
 
     try:
@@ -215,8 +218,7 @@ def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
         r_vec_from_randomness._cache = cache
 
     logger.debug(
-        f"[SketchVec] Generated vector with shape={tensor.shape}, "
-        f"first 4 values: {tensor[:4].tolist()}"
+        f"Generated sketch vector with shape={tensor.shape}, first 4 values: {tensor[:4].tolist()}"
     )
     return tensor
 
@@ -283,9 +285,9 @@ def indices_from_root(tokens: list[int], rand_hex: str, seq_len: int, k: int) ->
         idxs = sorted(all_indices[:k])
 
     logger.debug(
-        f"[Indices] selected {len(idxs)} indices from seq_len={seq_len}: {idxs[:5]}..."
+        f"Selected {len(idxs)} indices from seq_len={seq_len}: {idxs[:5]}..."
         if len(idxs) > 5
-        else f"[Indices] selected {idxs}"
+        else f"Selected indices: {idxs}"
     )
     return idxs
 
@@ -330,7 +332,7 @@ def sign_s_vals(s_vals: list[int], wallet: bt.wallet) -> bytes:
     s_vals_bytes = b"".join(int_to_bytes(val) for val in s_vals)
     # Use Bittensor wallet's sign method (Ed25519 signature)
     signature: bytes = wallet.hotkey.sign(s_vals_bytes)
-    logger.debug(f"[Signature] signed {len(s_vals)} s_vals with Bittensor wallet signature")
+    logger.debug(f"Signed {len(s_vals)} s_vals with Bittensor wallet signature")
     return signature
 
 
@@ -363,10 +365,10 @@ def verify_s_vals_signature(s_vals: list[int], signature: bytes, wallet_address:
         # Verify signature using public key cryptography
         verified: bool = keypair.verify(data=s_vals_bytes, signature=signature)
         if not verified:
-            logger.debug(f"Signature verification failed for {wallet_address[:8]}...")
+            logger.debug("Signature verification failed")
         return verified
     except Exception as e:
-        logger.warning(f"Signature verification error for {wallet_address[:8]}...: {e}")
+        logger.warning(f"Signature verification error: {e}")
         return False
 
 
@@ -552,11 +554,8 @@ class Prover:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        self.model = (
-            AutoModelForCausalLM.from_pretrained(model_name, use_safetensors=True)
-            .to(self.device)
-            .eval()
-        )
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, use_safetensors=True)
+        self.model = self.model.to(self.device).eval()
         self.wallet = wallet
         self._state: dict = {}
         logger.debug("Prover initialized with wallet for secure signatures")
@@ -581,11 +580,8 @@ class Verifier:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        self.model = (
-            AutoModelForCausalLM.from_pretrained(model_name, use_safetensors=True)
-            .to(self.device)
-            .eval()
-        )
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, use_safetensors=True)
+        self.model = self.model.to(self.device).eval()
 
         # Install the same Qwen-style chat template used by miners
         try:
@@ -768,9 +764,9 @@ class Verifier:
             else:
                 extended_fields = fields
             kv = " ".join(f"{k}={v}" for k, v in extended_fields.items())
-            logger.debug(f"uid={self._uid()} event={event} {kv}".rstrip())
+            logger.debug(f"event={event} {kv}".rstrip())
         except Exception:
-            logger.debug(f"uid={self._uid()} event={event}")
+            logger.debug(f"event={event}")
 
     def verify_rollout(
         self,
@@ -812,42 +808,45 @@ class Verifier:
             "solution_valid": True,
         }
 
-        # First validate tokens before any further processing
-        tokens = commit.get("tokens", [])
-        if not verify_tokens(tokens, self.model.config):
-            logger.debug("Token validation failed")
-            if monitor:
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        asyncio.create_task(monitor.log_counter("grail.token_validation_failures"))
-                except RuntimeError:
-                    pass
-            self._debug("tokens_valid", status="fail")
-            return False, checks
-        checks["tokens_valid"] = True
+        with miner_log_context(self._current_wallet):
+            # First validate tokens before any further processing
+            tokens = commit.get("tokens", [])
+            if not verify_tokens(tokens, self.model.config):
+                logger.debug("Token validation failed")
+                if monitor:
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            asyncio.create_task(
+                                monitor.log_counter("grail.token_validation_failures")
+                            )
+                    except RuntimeError:
+                        pass
+                self._debug("tokens_valid", status="fail")
+                return False, checks
+            checks["tokens_valid"] = True
 
-        # Then verify the GRAIL proof - this proves the model identity
-        if not self.verify(
-            commit,
-            proof_pkg,
-            prover_address,
-            challenge_randomness=challenge_randomness,
-            min_k=min_k,
-        ):
-            logger.debug("GRAIL proof failed - model identity not verified")
-            if monitor:
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        asyncio.create_task(
-                            monitor.log_counter("validation/grail/verification_failures")
-                        )
-                except RuntimeError:
-                    pass
-            self._debug("proof_valid", status="fail")
-            return False, checks
-        checks["proof_valid"] = True
+            # Then verify the GRAIL proof - this proves the model identity
+            if not self.verify(
+                commit,
+                proof_pkg,
+                prover_address,
+                challenge_randomness=challenge_randomness,
+                min_k=min_k,
+            ):
+                logger.debug("GRAIL proof failed - model identity not verified")
+                if monitor:
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            asyncio.create_task(
+                                monitor.log_counter("validation/grail/verification_failures")
+                            )
+                    except RuntimeError:
+                        pass
+                self._debug("proof_valid", status="fail")
+                return False, checks
+            checks["proof_valid"] = True
 
         # Verify SAT problem was generated correctly from seed
         sat_data = commit.get("sat_problem", {})
@@ -920,9 +919,7 @@ class Verifier:
         try:
             difficulty = sat_data.get("difficulty", 0.5)
             seed = sat_data["seed"]
-            logger.debug(
-                f"Regenerating SAT problem from seed '{seed}' with difficulty {difficulty}"
-            )
+            logger.debug(f"SAT regeneration from seed '{seed}' with difficulty {difficulty}")
             expected_problem = generate_sat_problem(seed, difficulty)
             if expected_problem.num_vars != sat_data.get(
                 "num_vars"
@@ -951,7 +948,7 @@ class Verifier:
                 return None
             return expected_problem
         except Exception as e:
-            logger.debug(f"SAT problem verification error: {e}")
+            logger.debug(f"SAT verification error: {e}")
             return None
 
     def _verify_prompt_prefix(self, commit: dict, problem: Any) -> bool:
@@ -995,9 +992,7 @@ class Verifier:
             # Check 1: Prompt length must match canonical prompt length
             if claimed_pl != len(canonical_prompt_tokens):
                 logger.debug(
-                    "Prompt length mismatch: claimed=%s expected=%s",
-                    claimed_pl,
-                    len(canonical_prompt_tokens),
+                    f"Prompt length mismatch: claimed={claimed_pl} expected={len(canonical_prompt_tokens)}"
                 )
                 self._debug(
                     "prompt_valid",
@@ -1011,12 +1006,8 @@ class Verifier:
             # Check 2: Prompt length + completion length must equal total tokens
             if claimed_pl + claimed_cl != len(commit_tokens):
                 logger.debug(
-                    "Token count mismatch: prompt_length(%s) + completion_length(%s) = %s "
-                    "but total tokens = %s",
-                    claimed_pl,
-                    claimed_cl,
-                    claimed_pl + claimed_cl,
-                    len(commit_tokens),
+                    f"Token count mismatch: prompt_length({claimed_pl}) + completion_length({claimed_cl}) = {claimed_pl + claimed_cl} "
+                    f"but total tokens = {len(commit_tokens)}"
                 )
                 self._debug(
                     "prompt_valid",
@@ -1040,7 +1031,7 @@ class Verifier:
                 )
             return bool(prefix_ok)
         except Exception as e:
-            logger.debug(f"Prompt prefix verification error: {e}")
+            logger.debug(f"Prompt verification error: {e}")
             return False
 
     def _decode_completion_text(self, commit: dict) -> Optional[str]:
@@ -1174,42 +1165,47 @@ class Verifier:
             True if proof is valid, False otherwise
         """
 
-        # Basic input validation
-        try:
-            tokens = commit["tokens"]
-            s_vals = commit["s_vals"]
-        except Exception:
-            logger.debug("Missing tokens or s_vals in commit")
-            self._debug("proof_valid", status="fail", reason="missing_fields")
-            return False
+        with miner_log_context(
+            self._current_wallet if getattr(self, "_current_wallet", None) else prover_address
+        ):
+            # Basic input validation
+            try:
+                tokens = commit["tokens"]
+                s_vals = commit["s_vals"]
+            except Exception:
+                logger.debug("Missing tokens or s_vals in commit")
+                self._debug("proof_valid", status="fail", reason="missing_fields")
+                return False
 
-        if not isinstance(s_vals, list) or not s_vals:
-            logger.debug("Invalid or empty s_vals list")
-            self._debug("proof_valid", status="fail", reason="invalid_s_vals")
-            return False
-        if len(tokens) != len(s_vals):
-            logger.debug("tokens and s_vals length mismatch")
-            self._debug("proof_valid", status="fail", reason="length_mismatch")
-            return False
+            if not isinstance(s_vals, list) or not s_vals:
+                logger.debug("Invalid or empty s_vals list")
+                self._debug("proof_valid", status="fail", reason="invalid_s_vals")
+                return False
+            if len(tokens) != len(s_vals):
+                logger.debug("tokens and s_vals length mismatch")
+                self._debug("proof_valid", status="fail", reason="length_mismatch")
+                return False
 
-        # Enforce minimum coverage
-        seq_len = len(tokens)
-        if seq_len < int(min_k):
-            logger.debug(f"Sequence too short for minimum challenge: len={seq_len}, min_k={min_k}")
-            self._debug(
-                "proof_valid",
-                status="fail",
-                reason="too_short",
-                seq_len=int(seq_len),
-                min_k=int(min_k),
-            )
-            return False
+            # Enforce minimum coverage
+            seq_len = len(tokens)
+            if seq_len < int(min_k):
+                logger.debug(
+                    f"Sequence too short for minimum challenge: len={seq_len}, min_k={min_k}"
+                )
+                self._debug(
+                    "proof_valid",
+                    status="fail",
+                    reason="too_short",
+                    seq_len=int(seq_len),
+                    min_k=int(min_k),
+                )
+                return False
 
-        # Verify commit signature binding
-        if not verify_commit_signature(commit, prover_address):
-            logger.debug("Commit signature verification failed")
-            self._debug("proof_valid", status="fail", reason="commit_signature_invalid")
-            return False
+            # Verify commit signature binding
+            if not verify_commit_signature(commit, prover_address):
+                logger.debug("Commit signature verification failed")
+                self._debug("proof_valid", status="fail", reason="commit_signature_invalid")
+                return False
 
         # Check model/layer binding and re-derive sketch vector
         beacon = commit.get("beacon", commit.get("round_R", {}))
@@ -1273,7 +1269,7 @@ class Verifier:
             with torch.inference_mode():
                 outs = self.model(full_ids, output_hidden_states=True)
         except RuntimeError as e:
-            logger.error(f"CUDA/Runtime error during model inference in verification: {e}")
+            logger.error(f"CUDA/Runtime error during verification: {e}")
             logger.error(
                 f"Token count: {len(tokens)}, Token range: min={min(tokens)}, max={max(tokens)}"
             )
@@ -1319,7 +1315,6 @@ class Verifier:
 
             # Sketch‐value check with proper modular distance
             local = dot_mod_q(h_layer[i], r_vec)
-            logger.debug(f"[SketchCheck] idx={i}, committed={committed_s_val}, local={local}")
 
             # Calculate minimum distance considering modular arithmetic
             diff = abs(local - committed_s_val)

@@ -35,6 +35,7 @@ MAX_NEW_TOKENS = int(os.getenv("GRAIL_MAX_NEW_TOKENS", "1024"))
 
 # Must match rollout generator default
 MIN_EOS_PROBABILITY = 0.1  # Minimum probability for valid EOS termination
+
 # Max acceptable drift between miner/validator
 SANITY_CHECK_DRIFT_THRESHOLD = 0.1
 
@@ -51,12 +52,13 @@ SAMPLING_BC_THRESHOLD = 0.58
 
 # Minimal sampling shape hyperparameters (median gate for unimodal-low)
 SAMPLING_MEDIAN_LOW_MAX = 0.30
+
 # NOTE: this parameter so far has been a good indicator of bimodality
-SAMPLING_LOW_Q10_MAX = 0.15
+SAMPLING_LOW_Q10_MAX = 0.10
 
 # Extra sanity gates for sampling shape checks
 SAMPLING_MIN_TOKEN_PROB = 1e-5
-SAMPLING_INITIAL_WINDOW_STEPS = 35
+SAMPLING_INITIAL_WINDOW_STEPS = 50
 
 # ────────────────  VALIDATOR-SPECIFIC CONSTANTS  ────────────────
 
