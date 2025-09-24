@@ -110,7 +110,9 @@ Validators load local write credentials and use miners’ read credentials fetch
 
 Set `GRAIL_MONITORING_BACKEND=wandb` to enable metrics; otherwise use `null`.
 
-Public dashboard: set `WANDB_ENTITY=tplr` and `WANDB_PROJECT=grail` to publish validator logs to the public W&B project for real-time scores and issue tracking. View at https://wandb.ai/tplr/grail.
+Public dashboards:
+- **WandB Dashboard**: set `WANDB_ENTITY=tplr` and `WANDB_PROJECT=grail` to publish validator logs to the public W&B project for detailed metrics and historical data. View at https://wandb.ai/tplr/grail.
+- **Grafana Dashboard**: Real-time system logs, validator performance metrics, and network statistics are available at https://grail-grafana.tplr.ai/.
 
 ---
 

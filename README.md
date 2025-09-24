@@ -27,6 +27,9 @@
   <a href="https://wandb.ai/tplr/grail">
     <img src="https://img.shields.io/badge/W%26B-Public%20Dashboard-FFBE00?logo=weightsandbiases" alt="Weights & Biases" />
   </a>
+  <a href="https://grail-grafana.tplr.ai/">
+    <img src="https://img.shields.io/badge/Grafana-Real--time%20Logs-F46800?logo=grafana" alt="Grafana Dashboard" />
+  </a>
   <a href="https://github.com/one-covenant/grail/commits/main">
     <img src="https://img.shields.io/github/last-commit/one-covenant/grail" alt="Last Commit" />
   </a>
@@ -116,53 +119,46 @@ The GRAIL protocol ensures:
 
 ### Model Requirements
 - Hugging Face Transformers compatible, exposes token ids/logprobs
+- A100 GPU required for optimal performance and passing verification (We plan to support other GPUs in the future)
 - CUDA recommended for throughput
 
-## Installation
+## Setup
 
-This project uses `uv` for dependency management.
+For detailed setup instructions, please refer to the appropriate documentation:
 
+### Mining Setup
+See [Miner Documentation](docs/miner.md) for comprehensive setup instructions including:
+- Hardware and environment requirements
+- Wallet and network configuration
+- R2/S3 credentials setup
+- Dependency installation
+- Running the miner
+
+### Validation Setup
+See [Validator Documentation](docs/validator.md) for comprehensive setup instructions including:
+- Hardware and environment requirements
+- Wallet and network configuration
+- Dependency installation
+- Running the validator
+
+### Quick Start
 ```bash
-# Clone the repository
-git clone https://github.com/one-covenant/grail
-cd grail
-
-# Create a venv
-uv venv
-
-# Activate the virtual environment
-source .venv/bin/activate
-
 # Install dependencies
 uv sync
-```
 
-## Usage
-
-### Mining
-
-```bash
-# Copy then fill out env items (wallets, network, R2 credentials)
-cp .env.example .env
-
-# Run miner locally
+# Run miner
 grail mine
-```
 
-### Validating
-
-```bash
-# Copy then fill out env items
-cp .env.example .env
-
-# Run validator locally
+# Run validator
 grail validate
 ```
 
-Notes:
+**Important Notes:**
 - Randomness is fetched from drand; miners mix it with the window's block hash
 - Rollouts are uploaded to object storage (R2/S3); validators fetch, verify, score, and set weights
-- Monitoring: miners and validators can log metrics to the public W&B project for real-time scores and issues: https://wandb.ai/tplr/grail
+- For monitoring:
+  - Miners and validators can log detailed metrics to the public W&B project: https://wandb.ai/tplr/grail
+  - Real-time system logs and network statistics are available at the Grafana dashboard: https://grail-grafana.tplr.ai/
 
 ## Architecture Benefits
 

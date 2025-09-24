@@ -126,7 +126,9 @@ Fill `R2_*` variables in `.env.example`.
 
 Set `GRAIL_MONITORING_BACKEND=wandb` and provide `WANDB_API_KEY` (or use `null`). Metrics include rollout counts, rewards, upload durations, and success rates.
 
-Public dashboard: set `WANDB_ENTITY=tplr` and `WANDB_PROJECT=grail` to log to the public W&B project and monitor real-time scores and issues. View at https://wandb.ai/tplr/grail.
+Public dashboards:
+- **WandB Dashboard**: set `WANDB_ENTITY=tplr` and `WANDB_PROJECT=grail` to log to the public W&B project for detailed metrics and historical data. View at https://wandb.ai/tplr/grail.
+- **Grafana Dashboard**: Real-time system logs, validator performance metrics, and network statistics are available at https://grail-grafana.tplr.ai/.
 
 ---
 
