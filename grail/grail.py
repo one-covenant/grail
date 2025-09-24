@@ -18,7 +18,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
 
 from .environments import generate_sat_problem
 from .environments.sat import SATParser, create_sat_prompt
-from .logging_utils import MinerPrefixFilter, miner_log_context
+from .logging_utils import MinerPrefixFilter
 from .mining.rollout_generator import (
     REASONING_START,
     SYSTEM_PROMPT,
@@ -808,45 +808,42 @@ class Verifier:
             "solution_valid": True,
         }
 
-        with miner_log_context(self._current_wallet):
-            # First validate tokens before any further processing
-            tokens = commit.get("tokens", [])
-            if not verify_tokens(tokens, self.model.config):
-                logger.debug("Token validation failed")
-                if monitor:
-                    try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            asyncio.create_task(
-                                monitor.log_counter("grail.token_validation_failures")
-                            )
-                    except RuntimeError:
-                        pass
-                self._debug("tokens_valid", status="fail")
-                return False, checks
-            checks["tokens_valid"] = True
+        # First validate tokens before any further processing
+        tokens = commit.get("tokens", [])
+        if not verify_tokens(tokens, self.model.config):
+            logger.debug("Token validation failed")
+            if monitor:
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(monitor.log_counter("grail.token_validation_failures"))
+                except RuntimeError:
+                    pass
+            self._debug("tokens_valid", status="fail")
+            return False, checks
+        checks["tokens_valid"] = True
 
-            # Then verify the GRAIL proof - this proves the model identity
-            if not self.verify(
-                commit,
-                proof_pkg,
-                prover_address,
-                challenge_randomness=challenge_randomness,
-                min_k=min_k,
-            ):
-                logger.debug("GRAIL proof failed - model identity not verified")
-                if monitor:
-                    try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            asyncio.create_task(
-                                monitor.log_counter("validation/grail/verification_failures")
-                            )
-                    except RuntimeError:
-                        pass
-                self._debug("proof_valid", status="fail")
-                return False, checks
-            checks["proof_valid"] = True
+        # Then verify the GRAIL proof - this proves the model identity
+        if not self.verify(
+            commit,
+            proof_pkg,
+            prover_address,
+            challenge_randomness=challenge_randomness,
+            min_k=min_k,
+        ):
+            logger.debug("GRAIL proof failed - model identity not verified")
+            if monitor:
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(
+                            monitor.log_counter("validation/grail/verification_failures")
+                        )
+                except RuntimeError:
+                    pass
+            self._debug("proof_valid", status="fail")
+            return False, checks
+        checks["proof_valid"] = True
 
         # Verify SAT problem was generated correctly from seed
         sat_data = commit.get("sat_problem", {})
@@ -1165,47 +1162,42 @@ class Verifier:
             True if proof is valid, False otherwise
         """
 
-        with miner_log_context(
-            self._current_wallet if getattr(self, "_current_wallet", None) else prover_address
-        ):
-            # Basic input validation
-            try:
-                tokens = commit["tokens"]
-                s_vals = commit["s_vals"]
-            except Exception:
-                logger.debug("Missing tokens or s_vals in commit")
-                self._debug("proof_valid", status="fail", reason="missing_fields")
-                return False
+        # Basic input validation
+        try:
+            tokens = commit["tokens"]
+            s_vals = commit["s_vals"]
+        except Exception:
+            logger.debug("Missing tokens or s_vals in commit")
+            self._debug("proof_valid", status="fail", reason="missing_fields")
+            return False
 
-            if not isinstance(s_vals, list) or not s_vals:
-                logger.debug("Invalid or empty s_vals list")
-                self._debug("proof_valid", status="fail", reason="invalid_s_vals")
-                return False
-            if len(tokens) != len(s_vals):
-                logger.debug("tokens and s_vals length mismatch")
-                self._debug("proof_valid", status="fail", reason="length_mismatch")
-                return False
+        if not isinstance(s_vals, list) or not s_vals:
+            logger.debug("Invalid or empty s_vals list")
+            self._debug("proof_valid", status="fail", reason="invalid_s_vals")
+            return False
+        if len(tokens) != len(s_vals):
+            logger.debug("tokens and s_vals length mismatch")
+            self._debug("proof_valid", status="fail", reason="length_mismatch")
+            return False
 
-            # Enforce minimum coverage
-            seq_len = len(tokens)
-            if seq_len < int(min_k):
-                logger.debug(
-                    f"Sequence too short for minimum challenge: len={seq_len}, min_k={min_k}"
-                )
-                self._debug(
-                    "proof_valid",
-                    status="fail",
-                    reason="too_short",
-                    seq_len=int(seq_len),
-                    min_k=int(min_k),
-                )
-                return False
+        # Enforce minimum coverage
+        seq_len = len(tokens)
+        if seq_len < int(min_k):
+            logger.debug(f"Sequence too short for minimum challenge: len={seq_len}, min_k={min_k}")
+            self._debug(
+                "proof_valid",
+                status="fail",
+                reason="too_short",
+                seq_len=int(seq_len),
+                min_k=int(min_k),
+            )
+            return False
 
-            # Verify commit signature binding
-            if not verify_commit_signature(commit, prover_address):
-                logger.debug("Commit signature verification failed")
-                self._debug("proof_valid", status="fail", reason="commit_signature_invalid")
-                return False
+        # Verify commit signature binding
+        if not verify_commit_signature(commit, prover_address):
+            logger.debug("Commit signature verification failed")
+            self._debug("proof_valid", status="fail", reason="commit_signature_invalid")
+            return False
 
         # Check model/layer binding and re-derive sketch vector
         beacon = commit.get("beacon", commit.get("round_R", {}))

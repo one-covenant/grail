@@ -1204,27 +1204,28 @@ async def _process_window(
             except Exception:
                 b0 = None
 
-            (
-                found_file,
-                metrics,
-                published_rollouts,
-                processed_counts,
-            ) = await _process_wallet_window(
-                wallet_addr=wallet_addr,
-                target_window=target_window,
-                target_window_hash=target_window_hash,
-                window_rand=window_rand,
-                wallet=wallet,
-                verifier=verifier,
-                credentials=credentials,
-                chain_manager=chain_manager,
-                monitor=monitor,
-                uid_by_hotkey=uid_by_hotkey,
-                text_logs_emitted_by_wallet=text_logs_emitted_by_wallet,
-                text_log_limit=DEBUG_TEXT_LOG_LIMIT_PER_WALLET,
-                sat_reward_low=sat_reward_low,
-                sat_reward_high=sat_reward_high,
-            )
+            with miner_log_context(uid_by_hotkey[wallet_addr], target_window):
+                (
+                    found_file,
+                    metrics,
+                    published_rollouts,
+                    processed_counts,
+                ) = await _process_wallet_window(
+                    wallet_addr=wallet_addr,
+                    target_window=target_window,
+                    target_window_hash=target_window_hash,
+                    window_rand=window_rand,
+                    wallet=wallet,
+                    verifier=verifier,
+                    credentials=credentials,
+                    chain_manager=chain_manager,
+                    monitor=monitor,
+                    uid_by_hotkey=uid_by_hotkey,
+                    text_logs_emitted_by_wallet=text_logs_emitted_by_wallet,
+                    text_log_limit=DEBUG_TEXT_LOG_LIMIT_PER_WALLET,
+                    sat_reward_low=sat_reward_low,
+                    sat_reward_high=sat_reward_high,
+                )
             t1 = time.monotonic()
             try:
                 b1 = await subtensor.get_current_block()
@@ -1316,36 +1317,35 @@ async def _handle_wallet_hard_failure(
     monitor: Any,
 ) -> tuple[bool, dict[str, int], list[dict], tuple[int, int, int, int]]:
     """Handle wallet rejection due to hard or soft failures."""
-    with miner_log_context(uid_str, target_window):
-        metrics = {
-            "valid": 0,
-            "checked": checked_count,
-            "total": total_inferences,
-            "estimated_valid": 0,
-            "successful": 0,
-            "unique": 0,
-            "prompt_valid": 0,
-            "prompt_mismatch": prompt_mismatch_count,
-            FAILURE_FLAG_KEY: 1,
-        }
-        logger.info(
-            f"❌ Rejected "
-            f"(hard_failure={hard_failure}, "
-            f"soft_failures={soft_failures}/{total_planned_checks})"
-        )
-        if monitor:
-            await monitor.log_gauge(f"{uid_str}/had_failure", 1.0)
-            try:
-                await monitor.log_gauge(f"{uid_str}/prompt_valid", float(0))
-                await monitor.log_gauge(f"{uid_str}/prompt_mismatch", float(prompt_mismatch_count))
-            except Exception:
-                pass
-        return (
-            True,
-            metrics,
-            [],
-            (pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err),
-        )
+    metrics = {
+        "valid": 0,
+        "checked": checked_count,
+        "total": total_inferences,
+        "estimated_valid": 0,
+        "successful": 0,
+        "unique": 0,
+        "prompt_valid": 0,
+        "prompt_mismatch": prompt_mismatch_count,
+        FAILURE_FLAG_KEY: 1,
+    }
+    logger.info(
+        f"❌ Rejected "
+        f"(hard_failure={hard_failure}, "
+        f"soft_failures={soft_failures}/{total_planned_checks})"
+    )
+    if monitor:
+        await monitor.log_gauge(f"{uid_str}/had_failure", 1.0)
+        try:
+            await monitor.log_gauge(f"{uid_str}/prompt_valid", float(0))
+            await monitor.log_gauge(f"{uid_str}/prompt_mismatch", float(prompt_mismatch_count))
+        except Exception:
+            pass
+    return (
+        True,
+        metrics,
+        [],
+        (pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err),
+    )
 
 
 async def _process_wallet_window(
@@ -1370,104 +1370,103 @@ async def _process_wallet_window(
     # Resolve miner UID (fallback to wallet address string)
     uid_str = str(uid_by_hotkey.get(wallet_addr, wallet_addr))
 
-    with miner_log_context(uid_str, target_window):
-        exists = await file_exists(
-            filename,
-            credentials=miner_bucket if miner_bucket else credentials,
-            use_write=False,
+    exists = await file_exists(
+        filename,
+        credentials=miner_bucket if miner_bucket else credentials,
+        use_write=False,
+    )
+    if not exists:
+        logger.debug(f"No file found at {filename}")
+        return False, None, [], (0, 0, 0, 0)
+
+    logger.info("📁 Found file")
+    window_data = await get_file(
+        filename, credentials=miner_bucket if miner_bucket else credentials, use_write=False
+    )
+    if not window_data:
+        logger.warning(f"Could not download {filename}")
+        return True, None, [], (0, 0, 0, 0)
+
+    file_wallet_addr = window_data.get("wallet")
+    window_start = window_data.get("window_start")
+    inferences = window_data.get("inferences", [])
+    if file_wallet_addr != wallet_addr:
+        got_uid = uid_by_hotkey.get(file_wallet_addr)
+        got_id = got_uid if got_uid is not None else "unknown"
+        logger.warning(f"UID mismatch in {filename}: expected {uid_str}, got {got_id}")
+        return True, None, [], (0, 0, 0, 0)
+    if window_start != target_window:
+        logger.warning(
+            f"Window mismatch in {filename}: expected {target_window}, got {window_start}"
         )
-        if not exists:
-            logger.debug(f"No file found at {filename}")
-            return False, None, [], (0, 0, 0, 0)
+        return True, None, [], (0, 0, 0, 0)
 
-        logger.info("📁 Found file")
-        window_data = await get_file(
-            filename, credentials=miner_bucket if miner_bucket else credentials, use_write=False
+    # Continue with the rest of the function inside the context
+    total_inferences = len(inferences)
+    groups_map = defaultdict(list)
+    # Build group membership and assign canonical indices in file order (simple, deterministic)
+    group_index_by_id: dict[str, int] = {}
+    for idx, inf in enumerate(inferences):
+        raw_gid = inf.get("rollout_group")
+        if raw_gid is not None:  # Only process inferences with rollout_group
+            group_id = str(raw_gid)
+            groups_map[group_id].append(idx)
+            if group_id not in group_index_by_id:
+                group_index_by_id[group_id] = len(group_index_by_id)  # 0, 1, 2, ...
+
+    # Determine whether to check all rollouts or sample GRPO groups.
+    # Sampling is deterministic per wallet+window via a seeded RNG to keep
+    # validators consistent and discourage gaming.
+    if total_inferences <= MAX_SAMPLES_PER_MINER:
+        indices_to_check = list(range(total_inferences))
+        logger.info(f"🔍 Verifying all {total_inferences} rollouts")
+    else:
+        indices_to_check = []
+        num_groups = len(groups_map)
+
+        # Choose how many GRPO groups to spot-check (at least 1, at most all).
+        groups_to_check = max(1, min(num_groups, int(num_groups * SAMPLE_RATE)))
+
+        # Derive a deterministic RNG seed from miner wallet,
+        # window randomness, and validator hotkey.
+        # Selection is stable per validator and window, and
+        # harder to game via order-dependent behavior.
+        # We take the first 8 bytes of the SHA-256 to get
+        # a 64-bit integer seed.
+        seed_material = (f"{wallet_addr}:{window_rand}:{wallet.hotkey.ss58_address}").encode()
+        seed_int = int.from_bytes(hashlib.sha256(seed_material).digest()[:8], "big")
+        rng = random.Random(seed_int)
+
+        def _group_digest(gidxs: list[int]) -> str:
+            # Compute a stable digest per group from the canonical
+            # JSON of each rollout's commit. Indices are sorted so
+            # the digest is independent of original order.
+            # Using sort_keys and compact separators yields a
+            # canonical JSON, so identical content produces the
+            # same digest across validators.
+            dig = hashlib.sha256()
+            for i in sorted(gidxs):
+                commit_json = json.dumps(
+                    inferences[i].get("commit", {}), sort_keys=True, separators=(",", ":")
+                )
+                dig.update(hashlib.sha256(commit_json.encode()).digest())
+            return dig.hexdigest()
+
+        # Canonicalize group ordering by sorting ids by their
+        # content-derived digest. This avoids dict insertion
+        # order or arbitrary ids affecting RNG sampling.
+        group_keys = sorted(groups_map.keys(), key=lambda gid: _group_digest(groups_map[gid]))
+        # Deterministically sample groups without replacement using the seeded RNG.
+        selected_groups = rng.sample(group_keys, groups_to_check)
+        for group_id in selected_groups:
+            indices_to_check.extend(groups_map[group_id])
+        # Sort indices to make the per-rollout verification order deterministic.
+        indices_to_check.sort()
+        logger.info(
+            f"📊 Spot checking {len(indices_to_check)}/{total_inferences} "
+            f"rollouts from {groups_to_check}/{num_groups} groups "
+            f"({SAMPLE_RATE * 100:.0f}% of groups)"
         )
-        if not window_data:
-            logger.warning(f"Could not download {filename}")
-            return True, None, [], (0, 0, 0, 0)
-
-        file_wallet_addr = window_data.get("wallet")
-        window_start = window_data.get("window_start")
-        inferences = window_data.get("inferences", [])
-        if file_wallet_addr != wallet_addr:
-            got_uid = uid_by_hotkey.get(file_wallet_addr)
-            got_id = got_uid if got_uid is not None else "unknown"
-            logger.warning(f"UID mismatch in {filename}: expected {uid_str}, got {got_id}")
-            return True, None, [], (0, 0, 0, 0)
-        if window_start != target_window:
-            logger.warning(
-                f"Window mismatch in {filename}: expected {target_window}, got {window_start}"
-            )
-            return True, None, [], (0, 0, 0, 0)
-
-        # Continue with the rest of the function inside the context
-        total_inferences = len(inferences)
-        groups_map = defaultdict(list)
-        # Build group membership and assign canonical indices in file order (simple, deterministic)
-        group_index_by_id: dict[str, int] = {}
-        for idx, inf in enumerate(inferences):
-            raw_gid = inf.get("rollout_group")
-            if raw_gid is not None:  # Only process inferences with rollout_group
-                group_id = str(raw_gid)
-                groups_map[group_id].append(idx)
-                if group_id not in group_index_by_id:
-                    group_index_by_id[group_id] = len(group_index_by_id)  # 0, 1, 2, ...
-
-        # Determine whether to check all rollouts or sample GRPO groups.
-        # Sampling is deterministic per wallet+window via a seeded RNG to keep
-        # validators consistent and discourage gaming.
-        if total_inferences <= MAX_SAMPLES_PER_MINER:
-            indices_to_check = list(range(total_inferences))
-            logger.info(f"🔍 Verifying all {total_inferences} rollouts")
-        else:
-            indices_to_check = []
-            num_groups = len(groups_map)
-
-            # Choose how many GRPO groups to spot-check (at least 1, at most all).
-            groups_to_check = max(1, min(num_groups, int(num_groups * SAMPLE_RATE)))
-
-            # Derive a deterministic RNG seed from miner wallet,
-            # window randomness, and validator hotkey.
-            # Selection is stable per validator and window, and
-            # harder to game via order-dependent behavior.
-            # We take the first 8 bytes of the SHA-256 to get
-            # a 64-bit integer seed.
-            seed_material = (f"{wallet_addr}:{window_rand}:{wallet.hotkey.ss58_address}").encode()
-            seed_int = int.from_bytes(hashlib.sha256(seed_material).digest()[:8], "big")
-            rng = random.Random(seed_int)
-
-            def _group_digest(gidxs: list[int]) -> str:
-                # Compute a stable digest per group from the canonical
-                # JSON of each rollout's commit. Indices are sorted so
-                # the digest is independent of original order.
-                # Using sort_keys and compact separators yields a
-                # canonical JSON, so identical content produces the
-                # same digest across validators.
-                dig = hashlib.sha256()
-                for i in sorted(gidxs):
-                    commit_json = json.dumps(
-                        inferences[i].get("commit", {}), sort_keys=True, separators=(",", ":")
-                    )
-                    dig.update(hashlib.sha256(commit_json.encode()).digest())
-                return dig.hexdigest()
-
-            # Canonicalize group ordering by sorting ids by their
-            # content-derived digest. This avoids dict insertion
-            # order or arbitrary ids affecting RNG sampling.
-            group_keys = sorted(groups_map.keys(), key=lambda gid: _group_digest(groups_map[gid]))
-            # Deterministically sample groups without replacement using the seeded RNG.
-            selected_groups = rng.sample(group_keys, groups_to_check)
-            for group_id in selected_groups:
-                indices_to_check.extend(groups_map[group_id])
-            # Sort indices to make the per-rollout verification order deterministic.
-            indices_to_check.sort()
-            logger.info(
-                f"📊 Spot checking {len(indices_to_check)}/{total_inferences} "
-                f"rollouts from {groups_to_check}/{num_groups} groups "
-                f"({SAMPLE_RATE * 100:.0f}% of groups)"
-            )
 
     # Per-wallet counters for metrics and gating
     valid_count = 0
@@ -1637,18 +1636,19 @@ async def _process_wallet_window(
                     # Log soft trigger progression and record per-miner metrics
                     if logger.isEnabledFor(logging.DEBUG):
                         logger.debug(
-                            f"SOFT_TRIGGER soft_failures={soft_failures}/{checked_count} "
-                            f"(checked={checked_count})"
+                            f"soft_failures={soft_failures}/{total_planned_checks}! "
+                            f"If it exceeds {soft_fail_cutoff} it will fail the wallet "
+                            "for this window"
                         )
                     if monitor:
                         try:
                             await monitor.log_gauge(
                                 f"{uid_str}/soft_failures", float(soft_failures)
                             )
-                            rate_checked = float(soft_failures) / float(max(1, checked_count))
-                            await monitor.log_gauge(
-                                f"{uid_str}/soft_failure_rate_checked", rate_checked
+                            rate_checked = float(soft_failures) / float(
+                                max(1, total_planned_checks)
                             )
+                            await monitor.log_gauge(f"{uid_str}/soft_failure_rate", rate_checked)
                         except Exception:
                             pass
                     if soft_failures >= soft_fail_cutoff:
@@ -1734,49 +1734,48 @@ async def _process_wallet_window(
             monitor,
         )
 
-    with miner_log_context(uid_str, target_window):
-        # Verify GRPO groups - hard requirement validation
-        for group_id, group_rollouts in rollout_groups.items():
-            # Check if this looks like a complete group (should have 4 rollouts for GRPO)
-            expected_group_size = ROLLOUTS_PER_PROBLEM
-            if len(group_rollouts) != expected_group_size:
-                hard_failure = True
-                logger.warning(
-                    f"GRPO group {group_id} has {len(group_rollouts)} rollouts, "
-                    f"expected {expected_group_size}; "
-                    f"invalidating uid"
-                )
-                break
+    # Verify GRPO groups - hard requirement validation
+    for group_id, group_rollouts in rollout_groups.items():
+        # Check if this looks like a complete group (should have 4 rollouts for GRPO)
+        expected_group_size = ROLLOUTS_PER_PROBLEM
+        if len(group_rollouts) != expected_group_size:
+            hard_failure = True
+            logger.warning(
+                f"GRPO group {group_id} has {len(group_rollouts)} rollouts, "
+                f"expected {expected_group_size}; "
+                f"invalidating uid"
+            )
+            break
 
-            # Verify advantages sum to approximately zero
-            advantages = []
-            for r in group_rollouts:
-                adv = r.get("commit", {}).get("rollout", {}).get("advantage", 0.0)
-                advantages.append(adv)
-            advantage_sum = sum(advantages)
+        # Verify advantages sum to approximately zero
+        advantages = []
+        for r in group_rollouts:
+            adv = r.get("commit", {}).get("rollout", {}).get("advantage", 0.0)
+            advantages.append(adv)
+        advantage_sum = sum(advantages)
 
-            if abs(advantage_sum) > GRPO_ADV_SUM_TOLERANCE:
-                hard_failure = True
-                logger.warning(
-                    f"GRPO group {group_id} advantages don't sum to 0: "
-                    f"{advantage_sum} (tolerance: {GRPO_ADV_SUM_TOLERANCE}); "
-                    f"invalidating uid"
-                )
-                break
+        if abs(advantage_sum) > GRPO_ADV_SUM_TOLERANCE:
+            hard_failure = True
+            logger.warning(
+                f"GRPO group {group_id} advantages don't sum to 0: "
+                f"{advantage_sum} (tolerance: {GRPO_ADV_SUM_TOLERANCE}); "
+                f"invalidating uid"
+            )
+            break
 
-            # Verify all rollouts share the same base SAT problem
-            base_seeds = []
-            for r in group_rollouts:
-                sat_problem = r.get("commit", {}).get("sat_problem", {})
-                base_seeds.append(sat_problem.get("seed"))
+        # Verify all rollouts share the same base SAT problem
+        base_seeds = []
+        for r in group_rollouts:
+            sat_problem = r.get("commit", {}).get("sat_problem", {})
+            base_seeds.append(sat_problem.get("seed"))
 
-            if len(set(base_seeds)) != 1:
-                hard_failure = True
-                logger.warning(
-                    f"GRPO group {group_id} has different base problems: {set(base_seeds)}; "
-                    f"invalidating uid"
-                )
-                break
+        if len(set(base_seeds)) != 1:
+            hard_failure = True
+            logger.warning(
+                f"GRPO group {group_id} has different base problems: {set(base_seeds)}; "
+                f"invalidating uid"
+            )
+            break
 
     # Check for hard failure after GRPO validation
     if hard_failure:
@@ -1813,14 +1812,14 @@ async def _process_wallet_window(
         "prompt_mismatch": prompt_mismatch_count,
         FAILURE_FLAG_KEY: 0,
     }
-    with miner_log_context(uid_str, target_window):
-        if wallet_rollouts_buffer:
-            logger.info(
-                f"✅ {valid_count}/{checked_count} checked, "
-                f"~{estimated_valid}/{total_inferences} estimated valid, "
-                f"{successful_rollouts} successful, "
-                f"{len(unique_rollouts)} unique"
-            )
+
+    if wallet_rollouts_buffer:
+        logger.info(
+            f"✅ {valid_count}/{checked_count} checked, "
+            f"~{estimated_valid}/{total_inferences} estimated valid, "
+            f"{successful_rollouts} successful, "
+            f"{len(unique_rollouts)} unique"
+        )
 
     if monitor:
         await monitor.log_gauge(f"{uid_str}/had_failure", 0.0)
