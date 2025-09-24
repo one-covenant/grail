@@ -15,15 +15,15 @@ Add these variables to your `.env` file for logging and external access:
 
 ```bash
 # Loki endpoint URL (local instance)
-GRAIL_LOKI_URL=http://localhost:3100/loki/api/v1/push
+GRAIL_OBS_LOKI_URL=http://localhost:3100/loki/api/v1/push
 
 # Labels to attach to all log entries
-GRAIL_LOKI_LABELS=app=grail,env=production
+GRAIL_OBS_LOKI_LABELS=app=grail,env=production
 
 # Performance tuning (optional)
-GRAIL_LOKI_TIMEOUT_S=5.0
-GRAIL_LOKI_BATCH_SIZE=10
-GRAIL_LOKI_BATCH_INTERVAL_S=1.0
+GRAIL_OBS_LOKI_TIMEOUT_S=5.0
+GRAIL_OBS_LOKI_BATCH_SIZE=10
+GRAIL_OBS_LOKI_BATCH_INTERVAL_S=1.0
 
 # Grafana server root URL for external access
 GF_SERVER_ROOT_URL=http://your-public-ip:3000
@@ -92,7 +92,7 @@ These files exist but aren't required for basic operation:
 
 - **`setup_public_dashboard.sh`**: Convenience wrapper script
 - **`scripts/setup_grafana_node.sh`**: Manual datasource setup (superseded by provisioning)
-- **`.env.example`**: Contains other GRAIL configuration variables (Loki variables need to be added manually to `.env`)
+- **`.env.example`**: Contains other GRAIL configuration variables (observability variables are already documented there)
 
 ## Troubleshooting
 
