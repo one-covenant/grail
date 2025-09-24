@@ -86,7 +86,7 @@
         "current": { "selected": false, "text": "All", "value": "$__all" },
         "datasource": { "type": "loki", "uid": "loki" },
         "definition": "label_values(service)",
-        "hide": 0,
+        "hide": 2,
         "includeAll": true,
         "allValue": ".+",
         "label": "🧩 Service",
