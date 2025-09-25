@@ -4,6 +4,7 @@
 # --------------------------------------------------------------------------- #
 import asyncio
 import atexit
+import contextlib
 import faulthandler
 import hashlib
 import json
@@ -15,7 +16,7 @@ import signal
 import sys
 import time
 import traceback
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from types import SimpleNamespace
 from typing import Any, Optional
 
@@ -53,6 +54,13 @@ from ..shared.constants import (
     WINDOW_LENGTH,
 )
 from ..shared.subnet import get_own_uid_on_subnet
+from ..validation import (
+    COPYCAT_INTERVAL_THRESHOLD,
+    COPYCAT_TRACKER,
+    COPYCAT_WINDOW_THRESHOLD,
+    CopycatViolation,
+    compute_completion_digest,
+)
 from . import console
 
 # --------------------------------------------------------------------------- #
@@ -550,6 +558,18 @@ def validate(
 # ----------------------------- Refactored Helpers ---------------------------- #
 
 
+def _flush_all_logs() -> None:
+    """Flush all logging handlers to ensure messages are written before exit."""
+    import logging
+
+    for handler in logging.root.handlers:
+        handler.flush()
+    # Also flush any handlers on the current logger
+    logger = logging.getLogger(__name__)
+    for handler in logger.handlers:
+        handler.flush()
+
+
 def _get_sat_reward_bounds() -> tuple[float, float]:
     """Return SAT reward bounds or permissive defaults on failure."""
     try:
@@ -610,6 +630,7 @@ async def _run_validation_service(
         )
         last_processed_window = -1
         last_weights_interval_submitted = -1
+        last_copycat_interval_id = -1
         # Rolling histories (12-window horizon) for selection coverage and availability
         selection_history: deque[set[str]] = deque(maxlen=WEIGHT_ROLLING_WINDOWS)
         availability_history: deque[set[str]] = deque(maxlen=WEIGHT_ROLLING_WINDOWS)
@@ -677,6 +698,13 @@ async def _run_validation_service(
                 # Using base model directly without waiting for state
                 logger.info("🚀 Using base model for verification")
 
+                # Reset copycat tracker at the start of each submission interval,
+                # using window-derived interval ids to avoid mid-loop resets.
+                copycat_interval_id = int(target_window // WEIGHT_SUBMISSION_INTERVAL_BLOCKS)
+                if copycat_interval_id != last_copycat_interval_id:
+                    COPYCAT_TRACKER.reset_interval(copycat_interval_id)
+                    last_copycat_interval_id = copycat_interval_id
+
                 target_window_hash = await subtensor.get_block_hash(target_window)
                 # Single per-window randomness value reused across all checks
                 window_rand = _compute_window_randomness(target_window_hash, use_drand)
@@ -701,6 +729,7 @@ async def _run_validation_service(
                     )
                 else:
                     hotkeys_to_check = active_hotkeys
+
                 # Update selection coverage rolling window
                 _update_rolling(
                     selection_history,
@@ -1292,7 +1321,34 @@ async def _process_window(
     sat_reward_low: float,
     sat_reward_high: float,
 ) -> tuple[dict[str, dict[str, int]], int, int, int, int, int, int, list[dict]]:
-    """Process a window across hotkeys and aggregate metrics/results."""
+    """Process a window across hotkeys and aggregate metrics/results.
+
+    Rationale:
+    - Validates selected miners' window files, performs per-rollout checks,
+      aggregates per-miner metrics, and ingests rollout digests into the
+      copycat tracker (pairwise, window + interval scopes). Cheaters are gated
+      (set FAILURE_FLAG_KEY) and excluded from uploads.
+
+    Returns
+    -------
+    window_inference_counts: dict[str, dict[str, int]]
+        Per-miner metrics for this window (valid/checked/total/estimated_valid/unique/...)
+        plus FAILURE_FLAG_KEY when gated.
+    total_valid_rollouts: int
+        Sum of estimated_valid across miners (after any copycat gating).
+    total_rollouts_processed: int
+        Count of rollouts the verifier attempted to process (per-rollout checks).
+    invalid_signatures: int
+        Number of per-rollout signature failures observed.
+    invalid_proofs: int
+        Number of per-rollout hard-proof failures observed.
+    processing_errors: int
+        Number of exceptions during per-rollout verification.
+    files_found: int
+        Number of miner window files found this window.
+    all_valid_rollouts: list[dict]
+        Rollouts that passed for upload (pruned of any cheater miners).
+    """
     # Window timing (seconds and blocks)
     window_t0 = time.monotonic()
     try:
@@ -1301,6 +1357,7 @@ async def _process_window(
         block_beg = None
     total_valid_rollouts = 0
     window_inference_counts: dict[str, dict[str, int]] = {}
+    miner_rollout_counters: dict[str, tuple[Counter[str], int]] = {}
     files_found = 0
     all_valid_rollouts: list[dict] = []
     # Limit how many sample texts we log per wallet (debug noise control)
@@ -1335,6 +1392,8 @@ async def _process_window(
                     metrics,
                     published_rollouts,
                     processed_counts,
+                    digest_counter,
+                    total_rollouts,
                 ) = await _process_wallet_window(
                     wallet_addr=wallet_addr,
                     target_window=target_window,
@@ -1366,6 +1425,8 @@ async def _process_window(
                 window_inference_counts[wallet_addr] = metrics
             if published_rollouts:
                 all_valid_rollouts.extend(published_rollouts)
+            if digest_counter is not None:
+                miner_rollout_counters[wallet_addr] = (digest_counter, total_rollouts)
             (pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err) = processed_counts
             total_rollouts_processed += pr_total
             invalid_signatures += pr_invalid_sig
@@ -1379,6 +1440,137 @@ async def _process_window(
 
     for metrics in window_inference_counts.values():
         total_valid_rollouts += metrics.get("estimated_valid", 0)
+
+    # Copycat detection ingestion and gating
+    window_cheaters: set[str] = set()
+    window_violation_details: list[CopycatViolation] = []
+    interval_cheaters: set[str] = set()
+    interval_violation_details: list[CopycatViolation] = []
+    if miner_rollout_counters:
+        timer_ctx = (
+            monitor.timer("validation/copycat_detector") if monitor else contextlib.nullcontext()
+        )
+        with timer_ctx:
+            (
+                window_cheaters,
+                window_violation_details,
+                interval_cheaters,
+                interval_violation_details,
+                window_all_pairs,
+                interval_all_pairs,
+            ) = COPYCAT_TRACKER.ingest_window(target_window, miner_rollout_counters)
+
+    if monitor:
+        try:
+            await monitor.log_gauge(
+                "validation/copycat/window_cheaters", float(len(window_cheaters))
+            )
+            await monitor.log_gauge(
+                "validation/copycat/interval_cheaters", float(len(interval_cheaters))
+            )
+        except Exception:
+            pass
+
+    violation_map: defaultdict[str, list[CopycatViolation]] = defaultdict(list)
+    for violation in window_violation_details + interval_violation_details:
+        violation_map[violation.miner_a].append(violation)
+        violation_map[violation.miner_b].append(violation)
+
+    if violation_map:
+        for violation in window_violation_details + interval_violation_details:
+            logger.warning(
+                "Copycat overlap detected: miners %s & %s shared=%d denom=%d ratio=%.3f threshold=%.2f scope=%s window=%d",
+                violation.miner_a,
+                violation.miner_b,
+                violation.shared,
+                violation.denominator,
+                violation.ratio,
+                violation.threshold,
+                violation.scope,
+                violation.window_start,
+            )
+
+    cheaters_detected = window_cheaters.union(interval_cheaters)
+
+    # Log pairwise overlap ratios to monitoring for each miner to track trends.
+    # We log the maximum ratio over pairs for each miner at both window and interval scopes,
+    # so dashboards can visualize proximity to thresholds over time.
+    if monitor:
+        try:
+            logger.info("Window all pairs logging started")
+            logger.info("Interval all pairs: %s", interval_all_pairs)
+            logger.info("Window all pairs: %s", window_all_pairs)
+
+            # Build per-miner max ratios
+            window_max_ratio: defaultdict[str, float] = defaultdict(float)
+            for v in window_all_pairs:
+                window_max_ratio[v.miner_a] = max(window_max_ratio[v.miner_a], v.ratio)
+                window_max_ratio[v.miner_b] = max(window_max_ratio[v.miner_b], v.ratio)
+
+            interval_max_ratio: defaultdict[str, float] = defaultdict(float)
+            for v in interval_all_pairs:
+                interval_max_ratio[v.miner_a] = max(interval_max_ratio[v.miner_a], v.ratio)
+                interval_max_ratio[v.miner_b] = max(interval_max_ratio[v.miner_b], v.ratio)
+
+            # Emit gauges per miner namespace (uid/hotkey-aware)
+            for miner_hk in set(list(window_max_ratio.keys()) + list(interval_max_ratio.keys())):
+                uid_str = str(uid_by_hotkey.get(miner_hk, miner_hk))
+                wr = float(window_max_ratio.get(miner_hk, 0.0))
+                ir = float(interval_max_ratio.get(miner_hk, 0.0))
+                await monitor.log_gauge(f"{uid_str}/copycat/window_max_ratio", wr)
+                await monitor.log_gauge(f"{uid_str}/copycat/interval_max_ratio", ir)
+                # Also log proximity to thresholds (ratio / threshold)
+                await monitor.log_gauge(
+                    f"{uid_str}/copycat/window_proximity",
+                    wr / COPYCAT_WINDOW_THRESHOLD if COPYCAT_WINDOW_THRESHOLD > 0 else 0.0,
+                )
+                await monitor.log_gauge(
+                    f"{uid_str}/copycat/interval_proximity",
+                    ir / COPYCAT_INTERVAL_THRESHOLD if COPYCAT_INTERVAL_THRESHOLD > 0 else 0.0,
+                )
+        except Exception:
+            pass
+
+    for cheater in cheaters_detected:
+        metrics = window_inference_counts.get(cheater)
+        if metrics is None:
+            metrics = {
+                "valid": 0,
+                "checked": 0,
+                "total": 0,
+                "estimated_valid": 0,
+                "estimated_successful": 0,
+                "estimated_unique": 0,
+                "successful": 0,
+                "unique": 0,
+                "prompt_valid": 0,
+                "prompt_mismatch": 0,
+            }
+            window_inference_counts[cheater] = metrics
+        else:
+            metrics["valid"] = 0
+            metrics["estimated_valid"] = 0
+            metrics["estimated_successful"] = 0
+            metrics["estimated_unique"] = 0
+            metrics["successful"] = 0
+            metrics["unique"] = 0
+        metrics[FAILURE_FLAG_KEY] = 1
+        uid_str = str(uid_by_hotkey.get(cheater, cheater))
+        scopes = {violation.scope for violation in violation_map.get(cheater, [])}
+        ratios = ", ".join(f"{violation.ratio:.3f}" for violation in violation_map.get(cheater, []))
+        with miner_log_context(uid_str, target_window):
+            logger.warning(
+                "Copycat gating applied (scopes=%s ratios=%s)",
+                ",".join(sorted(scopes)) if scopes else "unknown",
+                ratios or "n/a",
+            )
+
+    if cheaters_detected and all_valid_rollouts:
+        all_valid_rollouts = [
+            rollout
+            for rollout in all_valid_rollouts
+            if rollout.get("hotkey") not in cheaters_detected
+        ]
 
     # Window timing end
     window_t1 = time.monotonic()
@@ -1490,8 +1682,33 @@ async def _process_wallet_window(
     text_log_limit: int,
     sat_reward_low: float,
     sat_reward_high: float,
-) -> tuple[bool, Optional[dict[str, int]], list[dict], tuple[int, int, int, int]]:
-    """Validate a single wallet window file and return metrics and rollouts."""
+) -> tuple[
+    bool,
+    Optional[dict[str, int]],
+    list[dict],
+    tuple[int, int, int, int],
+    Optional[Counter[str]],
+    int,
+]:
+    """Validate a single wallet window file and return metrics and rollouts.
+
+    Returns
+    -------
+    found_file: bool
+        True if the miner's window file was found and parsed.
+    metrics: Optional[dict[str, int]]
+        Per-miner window metrics or None if file invalid/mismatch.
+    wallet_rollouts_buffer: list[dict]
+        Rollouts that passed checks for this miner (used for uploads/logging).
+    processed_counts: tuple[int, int, int, int]
+        (pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err) tallies.
+    digest_counter: Optional[Counter[str]]
+        Completion digest multiset over ALL rollouts in the file (not only
+        validated ones), present only if the miner did not trigger hard/soft
+        failure gates; None otherwise.
+    total_inferences: int
+        Total rollouts present in the window file (for denominator context).
+    """
     filename = f"grail/windows/{wallet_addr}-window-{target_window}.json"
     miner_bucket = chain_manager.get_bucket_for_hotkey(wallet_addr)
     # Resolve miner UID (fallback to wallet address string)
@@ -1504,7 +1721,7 @@ async def _process_wallet_window(
     )
     if not exists:
         logger.debug(f"No file found at {filename}")
-        return False, None, [], (0, 0, 0, 0)
+        return False, None, [], (0, 0, 0, 0), None, 0
 
     logger.info("📁 Found file")
     window_data = await get_file(
@@ -1512,7 +1729,7 @@ async def _process_wallet_window(
     )
     if not window_data:
         logger.warning(f"Could not download {filename}")
-        return True, None, [], (0, 0, 0, 0)
+        return True, None, [], (0, 0, 0, 0), None, 0
 
     file_wallet_addr = window_data.get("wallet")
     window_start = window_data.get("window_start")
@@ -1521,12 +1738,12 @@ async def _process_wallet_window(
         got_uid = uid_by_hotkey.get(file_wallet_addr)
         got_id = got_uid if got_uid is not None else "unknown"
         logger.warning(f"UID mismatch in {filename}: expected {uid_str}, got {got_id}")
-        return True, None, [], (0, 0, 0, 0)
+        return True, None, [], (0, 0, 0, 0), None, 0
     if window_start != target_window:
         logger.warning(
             f"Window mismatch in {filename}: expected {target_window}, got {window_start}"
         )
-        return True, None, [], (0, 0, 0, 0)
+        return True, None, [], (0, 0, 0, 0), None, 0
 
     # Continue with the rest of the function inside the context
     total_inferences = len(inferences)
@@ -1851,7 +2068,7 @@ async def _process_wallet_window(
 
     # Handle wallet rejection due to hard or soft failures
     if hard_failure or soft_gate_triggered:
-        return await _handle_wallet_hard_failure(
+        failure_result = await _handle_wallet_hard_failure(
             uid_str,
             target_window,
             hard_failure,
@@ -1866,6 +2083,7 @@ async def _process_wallet_window(
             pr_processing_err,
             monitor,
         )
+        return failure_result + (None, total_inferences)
 
     # Verify GRPO groups - hard requirement validation
     for group_id, group_rollouts in rollout_groups.items():
@@ -1912,7 +2130,7 @@ async def _process_wallet_window(
 
     # Check for hard failure after GRPO validation
     if hard_failure:
-        return await _handle_wallet_hard_failure(
+        failure_result = await _handle_wallet_hard_failure(
             uid_str,
             target_window,
             hard_failure,
@@ -1927,6 +2145,7 @@ async def _process_wallet_window(
             pr_processing_err,
             monitor,
         )
+        return failure_result + (None, total_inferences)
 
     # Extrapolate from sample to estimate total for weight computation
     # These estimates are going to be used in logging in wandb and grafana later on too
@@ -1972,11 +2191,23 @@ async def _process_wallet_window(
         except Exception:
             pass
 
+    # Build digest counter over ALL rollouts in the file (not just validated),
+    # as long as the miner has not failed soft/hard checks for this window.
+    rollout_digest_counter: Counter[str] = Counter()
+    for inf in inferences:
+        commit_data = inf.get("commit", {})
+        rollout_meta = commit_data.get("rollout", {})
+        dig = compute_completion_digest(commit_data, rollout_meta)
+        if dig is not None:
+            rollout_digest_counter[dig] += 1
+
     return (
         True,
         metrics,
         wallet_rollouts_buffer,
         (pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err),
+        rollout_digest_counter,
+        total_inferences,
     )
 
 
