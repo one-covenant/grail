@@ -712,6 +712,11 @@ class Verifier:
                         f"Sequence neither reached max_new_tokens ({int(MAX_NEW_TOKENS)}) nor ended "
                         f"with EOS having probability >= {float(MIN_EOS_PROBABILITY)}."
                     )
+                if reason == "over_max_new_tokens":
+                    return (
+                        f"Completion length exceeds max_new_tokens ({int(MAX_NEW_TOKENS)}). "
+                        "Reduce the number of generated tokens."
+                    )
                 if reason == "no_logits":
                     return (
                         "Validator could not compute logits to verify EOS probability. Provide the full "
@@ -719,6 +724,11 @@ class Verifier:
                     )
                 if reason == "no_tokens":
                     return "No tokens provided to validate termination."
+                if reason == "completion_length_not_int":
+                    return (
+                        "Completion length is not an integer. Ensure the rollout metadata includes "
+                        "a valid completion_length field."
+                    )
                 return "Termination condition not satisfied."
 
             # token_distribution_valid detects suspicious chosen-token probability shapes
@@ -1599,11 +1609,8 @@ class Verifier:
         rollout = commit.get("rollout", {})
         completion_length = rollout.get("completion_length")
 
-        if isinstance(completion_length, int) and completion_length >= expected_max_new:
-            logger.debug(
-                f"Termination via max length: completion_length={completion_length} "
-                f">= expected_max_new={expected_max_new}"
-            )
+        # Accept termination via max-length only when it exactly hits the limit
+        if completion_length == expected_max_new:
             return True
         return False
 
@@ -1690,6 +1697,24 @@ class Verifier:
             tokens = commit.get("tokens", [])
             if not tokens:
                 self._debug("termination_valid", status="fail", reason="no_tokens")
+                return False
+
+            # Hard cap: if completion exceeds MAX_NEW_TOKENS, reject immediately
+            expected_max_new = int(MAX_NEW_TOKENS)
+            rollout = commit.get("rollout", {})
+            completion_length = rollout.get("completion_length")
+
+            if not isinstance(completion_length, int):
+                logger.debug("Completion length is not an integer")
+                self._debug("termination_valid", status="fail", reason="completion_length_not_int")
+                return False
+
+            if isinstance(completion_length, int) and completion_length > expected_max_new:
+                logger.debug("Termination rejected due to over max_new_tokens")
+                logger.debug(
+                    f"completion_length={completion_length}, max_new_tokens={expected_max_new}"
+                )
+                self._debug("termination_valid", status="fail", reason="over_max_new_tokens")
                 return False
 
             # Check max length termination first (most efficient)
