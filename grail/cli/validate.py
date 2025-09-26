@@ -31,7 +31,6 @@ from ..infrastructure.chain import GrailChainManager
 from ..infrastructure.comms import (
     file_exists,
     get_file,
-    login_huggingface,
     upload_to_huggingface,
     upload_valid_rollouts,
 )
@@ -47,7 +46,6 @@ from ..shared.constants import (
     MINER_SAMPLE_MIN,
     MINER_SAMPLE_RATE,
     MINER_SAMPLING_ENABLED,
-    MODEL_NAME,
     NETUID,
     ROLLOUTS_PER_PROBLEM,
     SUPERLINEAR_EXPONENT,
@@ -520,39 +518,9 @@ def validate(
 ) -> None:
     # Install crash diagnostics early to catch silent failures
     _install_crash_diagnostics()
-    coldkey = get_conf("BT_WALLET_COLD", "default")
-    hotkey = get_conf("BT_WALLET_HOT", "default")
-    wallet = bt.wallet(name=coldkey, hotkey=hotkey)
+    from ..neurons import ValidatorNeuron
 
-    # Initialize verifier
-    logger.info(f"🔑 Validator hotkey: {wallet.hotkey.ss58_address}")
-    logger.info(f"Loading base model for validation: {MODEL_NAME}")
-    verifier = Verifier(model_name=MODEL_NAME)
-
-    # Login to Hugging Face for dataset uploads
-    logger.info("🤗 Logging into Hugging Face for dataset uploads...")
-    login_huggingface()
-
-    # Declarative SAT reward bounds (composed from per-function bounds)
-    SAT_REWARD_LOW, SAT_REWARD_HIGH = _get_sat_reward_bounds()
-
-    # Run service
-    try:
-        asyncio.run(
-            _run_validation_service(
-                wallet=wallet,
-                verifier=verifier,
-                sat_reward_low=SAT_REWARD_LOW,
-                sat_reward_high=SAT_REWARD_HIGH,
-                use_drand=use_drand,
-                test_mode=test_mode,
-            )
-        )
-    except Exception:
-        # Top-level guard: ensure any uncaught async errors are logged
-        logger.exception("Validator crashed due to unhandled exception")
-        _flush_all_logs()
-        raise
+    asyncio.run(ValidatorNeuron(use_drand=use_drand, test_mode=test_mode).main())
 
 
 # ----------------------------- Refactored Helpers ---------------------------- #
@@ -2028,6 +1996,9 @@ async def _process_wallet_window(
                             completion_ids = tokens[prompt_len : prompt_len + completion_len]
                         else:
                             completion_ids = tokens[prompt_len:]
+                        problem_text = verifier.tokenizer.decode(
+                            tokens[:prompt_len], skip_special_tokens=False
+                        )
                         text = verifier.tokenizer.decode(completion_ids, skip_special_tokens=False)
                         reward_val = rollout_meta.get("total_reward", float("nan"))
                         adv_val = rollout_meta.get("advantage", float("nan"))
@@ -2041,12 +2012,12 @@ async def _process_wallet_window(
                                 f"{uid_str}/validation/sample_text",
                                 {
                                     "window": target_window,
-                                    "uid": uid_str,
+                                    "group": uid_str,
                                     "nonce": nonce,
                                     "reward": float(reward_val),
                                     "advantage": float(adv_val),
                                     "success": bool(success_val),
-                                    "text": text,
+                                    "text": f"Problem:\n{problem_text}\n\nCompletion:\n{text}",
                                 },
                                 "text",
                             )
