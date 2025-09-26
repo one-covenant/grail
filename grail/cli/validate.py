@@ -336,14 +336,15 @@ async def _list_active_hotkeys_for_window(
 
         # Immediately skip miners without a committed bucket (no fallback)
         if bucket is None:
-            logger.debug("Skipping %s window=%s: no committed bucket", miner_id, window_start)
             return hotkey, False
 
         async with semaphore:
             import time
+
             start_time = time.time()
             try:
                 from ..infrastructure.comms import file_exists
+
                 exists = await asyncio.wait_for(
                     file_exists(
                         filename,
@@ -353,33 +354,18 @@ async def _list_active_hotkeys_for_window(
                     timeout=6.0,
                 )
                 elapsed = time.time() - start_time
-                logger.debug(
-                    "Window file check %s for %s window=%s (%.2fs)",
-                    "SUCCESS" if exists else "NOT_FOUND",
-                    miner_id,
-                    window_start,
-                    elapsed,
-                )
                 return hotkey, bool(exists)
             except asyncio.TimeoutError:
                 elapsed = time.time() - start_time
-                logger.warning(
+                logger.debug(
                     "Window file check TIMEOUT for %s window=%s after %.2fs",
                     miner_id,
                     window_start,
                     elapsed,
                 )
                 return hotkey, False
-            except Exception as e:
+            except Exception:
                 elapsed = time.time() - start_time
-                logger.warning(
-                    "Window file check FAILED for %s window=%s after %.2fs: %s %s",
-                    miner_id,
-                    window_start,
-                    elapsed,
-                    type(e).__name__,
-                    str(e),
-                )
                 return hotkey, False
 
     results = await asyncio.gather(*(_check(hk) for hk in meta_hotkeys))

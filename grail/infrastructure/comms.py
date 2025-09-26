@@ -543,25 +543,22 @@ async def file_exists(
     """
 
     async def _head_exists(client: Any, bucket_id: str, key_to_check: str) -> bool:
-        import time
-
-        start_time = time.time()
         try:
             # Remove nested asyncio.wait_for - let the outer timeout handle it
             # to avoid timeout conflicts between botocore and asyncio
             await client.head_object(Bucket=bucket_id, Key=key_to_check)
-            elapsed = time.time() - start_time
             return True
-        except Exception as e:
-            elapsed = time.time() - start_time
-            logger.warning(
-                "R2 HEAD failed after %.2fs for key=%s bucket=%s: %s %s",
-                elapsed,
-                key_to_check,
-                bucket_id,
-                type(e).__name__,
-                str(e),
-            )
+        except Exception:
+            # NOTE: uncomment this for debugging later on
+            # elapsed = time.time() - start_time
+            # logger.warning(
+            #     "R2 HEAD failed after %.2fs for key=%s bucket=%s: %s %s",
+            #     elapsed,
+            #     key_to_check,
+            #     bucket_id,
+            #     type(e).__name__,
+            #     str(e),
+            # )
             return False
 
     try:
