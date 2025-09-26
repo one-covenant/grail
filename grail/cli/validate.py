@@ -314,12 +314,15 @@ def verify_rollout_signature(rollout_data: dict) -> bool:
 # ----------------------------- Sampling Helpers ----------------------------- #
 
 
+# NOTE: If this function experiences performance issues or timeouts,
+# consider reducing the concurrency parameter (default: 16)
 async def _list_active_hotkeys_for_window(
     meta_hotkeys: list[str],
     window_start: int,
     chain_manager: "GrailChainManager",
     default_credentials: Any,
-    concurrency: int = 64,
+    uid_by_hotkey: Optional[dict[str, int]] = None,
+    concurrency: int = 16,
 ) -> list[str]:
     """Return hotkeys with an available window file for the given window.
 
@@ -330,13 +333,41 @@ async def _list_active_hotkeys_for_window(
     async def _check(hotkey: str) -> tuple[str, bool]:
         filename = f"grail/windows/{hotkey}-window-{window_start}.json"
         bucket = chain_manager.get_bucket_for_hotkey(hotkey)
+        uid = uid_by_hotkey.get(hotkey) if uid_by_hotkey else None
+        miner_id = f"uid={uid}" if uid is not None else f"hotkey={hotkey[:12]}..."
+
+        # Immediately skip miners without a committed bucket (no fallback)
+        if bucket is None:
+            return hotkey, False
+
         async with semaphore:
+            import time
+
+            start_time = time.time()
             try:
-                exists = await file_exists(
-                    filename, credentials=bucket if bucket else default_credentials, use_write=False
+                from ..infrastructure.comms import file_exists
+
+                exists = await asyncio.wait_for(
+                    file_exists(
+                        filename,
+                        credentials=bucket,
+                        use_write=False,
+                    ),
+                    timeout=6.0,
                 )
+                elapsed = time.time() - start_time
                 return hotkey, bool(exists)
+            except asyncio.TimeoutError:
+                elapsed = time.time() - start_time
+                logger.debug(
+                    "Window file check TIMEOUT for %s window=%s after %.2fs",
+                    miner_id,
+                    window_start,
+                    elapsed,
+                )
+                return hotkey, False
             except Exception:
+                elapsed = time.time() - start_time
                 return hotkey, False
 
     results = await asyncio.gather(*(_check(hk) for hk in meta_hotkeys))
@@ -678,9 +709,20 @@ async def _run_validation_service(
                 window_rand = _compute_window_randomness(target_window_hash, use_drand)
 
                 # Discover active miners (those with a window file in storage)
-                active_hotkeys = await _list_active_hotkeys_for_window(
-                    meta.hotkeys, target_window, chain_manager, credentials
+                timer_ctx = (
+                    monitor.timer("validation/hotkeys_discovery")
+                    if monitor
+                    else contextlib.nullcontext()
                 )
+                with timer_ctx:
+                    active_hotkeys = await _list_active_hotkeys_for_window(
+                        meta.hotkeys, target_window, chain_manager, credentials, uid_by_hotkey
+                    )
+
+                logger.info(
+                    f"🔍 Found {len(active_hotkeys)}/{len(meta.hotkeys)} active miners for window {target_window}"
+                )
+
                 # Update availability (windows_with_file) rolling window
                 _update_rolling(
                     availability_history,

@@ -11,11 +11,10 @@ from __future__ import annotations
 import atexit
 import logging
 import os
-import socket
 import uuid
+from logging.handlers import RotatingFileHandler
 from typing import Callable, cast
 
-import logging_loki  # type: ignore[import-untyped]
 import typer
 from dotenv import load_dotenv
 from rich.console import Console
@@ -82,6 +81,65 @@ def configure_logging(verbosity: int) -> None:
     root.setLevel(level)
     root.addHandler(console_handler)
 
+    # Optional file logging for Promtail tailing
+    try:
+        log_file = os.environ.get("GRAIL_LOG_FILE", "").strip()
+        if log_file:
+
+            def _parse_size_to_bytes(size_text: str) -> int:
+                """Parse sizes like '100MB', '1G', '52428800' into bytes.
+
+                Accepts optional suffixes: B, KB, MB, GB (case-insensitive).
+                Falls back to integers (already in bytes) when no suffix.
+                """
+                text = (size_text or "").strip().upper()
+                if not text:
+                    return 0
+                try:
+                    if text.endswith("GB"):
+                        return int(float(text[:-2]) * 1024 * 1024 * 1024)
+                    if text.endswith("MB"):
+                        return int(float(text[:-2]) * 1024 * 1024)
+                    if text.endswith("KB"):
+                        return int(float(text[:-2]) * 1024)
+                    if text.endswith("B"):
+                        return int(float(text[:-1]))
+                    # No suffix -> assume bytes
+                    return int(float(text))
+                except Exception:
+                    # On parse error, default to 100 MB
+                    return 100 * 1024 * 1024
+
+            max_size_text = os.environ.get("GRAIL_LOG_MAX_SIZE", "100MB").strip()
+            backup_count_text = os.environ.get("GRAIL_LOG_BACKUP_COUNT", "5").strip()
+
+            max_bytes = _parse_size_to_bytes(max_size_text)
+            try:
+                backup_count = int(backup_count_text)
+            except Exception:
+                backup_count = 5
+
+            rotating_handler = RotatingFileHandler(
+                log_file,
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding="utf-8",
+            )
+            rotating_handler.setFormatter(formatter)
+            root.addHandler(rotating_handler)
+            msg_parts = [
+                "✅ File logging enabled (rotating):",
+                f"path={log_file}",
+                f"max={max_bytes}B",
+                f"backups={backup_count}",
+            ]
+            logger.info(" ".join(msg_parts))
+        else:
+            logger.info("File logging disabled (GRAIL_LOG_FILE not set)")
+    except Exception as e:
+        # Never fail app due to logging file errors
+        logger.warning(f"Failed to enable file logging: {e}")
+
     # Attach filters so all records carry consistent fields and a level tag
     root.addFilter(ContextFilter())
 
@@ -108,62 +166,17 @@ def configure_logging(verbosity: int) -> None:
 
     root.addFilter(LokiLevelTagFilter())
 
-    # Optionally forward logs to Grafana Loki if configured via environment
-    try:
-        # Support multiple Loki endpoints (comma-separated) to dual-ship
-        raw_urls = os.environ.get("GRAIL_OBS_LOKI_URL", "")
-        loki_urls = [u.strip() for u in raw_urls.split(",") if u.strip()]
-        if loki_urls:
-            labels_env = os.environ.get("GRAIL_OBS_LOKI_LABELS", "")
-            # Default tags for Loki; allow overrides via env
-            tags: dict[str, str] = {
-                "app": "grail",
-                "host": socket.gethostname(),
-                "pid": str(os.getpid()),
-                "trace_id": TRACE_ID,
-            }
-            if labels_env:
-                for part in labels_env.split(","):
-                    part = part.strip()
-                    if part and "=" in part:
-                        k, v = part.split("=", 1)
-                        tags[k.strip()] = v.strip()
-
-            logger.info(f"Loki tags: {tags}")
-
-            username = os.environ.get("GRAIL_OBS_LOKI_USERNAME")
-            password = os.environ.get("GRAIL_OBS_LOKI_PASSWORD")
-            auth = (username, password) if username and password else None
-
-            # Create LokiQueueHandler for each endpoint
-            for loki_url in loki_urls:
-                try:
-                    # Use LokiQueueHandler for automatic queue management
-                    from multiprocessing import Queue
-
-                    loki_handler = logging_loki.LokiQueueHandler(
-                        Queue(-1),
-                        url=loki_url,
-                        tags=tags,
-                        auth=auth,
-                        version="1",
-                    )
-                    # Ensure Loki line content includes level/metadata if
-                    # the handler applies formatter to records
-                    loki_handler.setFormatter(
-                        logging.Formatter(
-                            fmt=("%(asctime)s %(levelname)s [%(name)s] %(message)s"),
-                            datefmt="%Y-%m-%d %H:%M:%S",
-                        )
-                    )
-                    root.addHandler(loki_handler)
-                except Exception as e:
-                    logger.warning(f"Failed to add Loki handler for {loki_url}: {e}")
-
-            count = len(loki_urls)
-            logger.info(f"Grafana Loki logging enabled for {count} endpoints")
-    except Exception as e:
-        logger.warning(f"Failed to enable Loki logging: {e}")
+    # Log shipping mode indication
+    promtail_enabled = os.environ.get("PROMTAIL_ENABLE", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if promtail_enabled:
+        logger.info("📤 Promtail-based log shipping enabled")
+    else:
+        logger.info("📤  In-process log shipping mode")
 
     # GRAIL debug details only visible with -vv or higher
     if verbosity < 2:
