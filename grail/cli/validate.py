@@ -319,28 +319,106 @@ async def _list_active_hotkeys_for_window(
     window_start: int,
     chain_manager: "GrailChainManager",
     default_credentials: Any,
+    uid_by_hotkey: Optional[dict[str, int]] = None,
     concurrency: int = 64,
 ) -> list[str]:
     """Return hotkeys with an available window file for the given window.
 
     Active miners are those that uploaded `grail/windows/{hotkey}-window-{window_start}.json`.
     """
-    semaphore = asyncio.Semaphore(concurrency)
+    from ..infrastructure.comms import get_bucket_id, get_client_ctx
 
-    async def _check(hotkey: str) -> tuple[str, bool]:
-        filename = f"grail/windows/{hotkey}-window-{window_start}.json"
-        bucket = chain_manager.get_bucket_for_hotkey(hotkey)
-        async with semaphore:
+    # Create a single shared S3 client to avoid connection exhaustion
+    # Root cause: Creating 64+ S3 clients concurrently causes DNS/TLS bottlenecks
+    logger.debug("Creating shared S3 client for hotkey checks...")
+    shared_client = None
+    shared_bucket_id = None
+
+    try:
+        # Pre-create the client outside the concurrent checks
+        async with get_client_ctx(default_credentials, use_write=False) as client:
+            shared_client = client
+            shared_bucket_id = get_bucket_id(default_credentials, use_write=False)
+
+            semaphore = asyncio.Semaphore(concurrency)
+
+            async def _check(hotkey: str) -> tuple[str, bool]:
+                filename = f"grail/windows/{hotkey}-window-{window_start}.json"
+                bucket = chain_manager.get_bucket_for_hotkey(hotkey)
+                uid = uid_by_hotkey.get(hotkey) if uid_by_hotkey else None
+                miner_id = f"uid={uid}" if uid is not None else f"hotkey={hotkey[:12]}..."
+
+                async with semaphore:
+                    import time
+
+                    start_time = time.time()
+                    try:
+                        # Use shared client if no custom bucket, otherwise create new
+                        if bucket is None:
+                            # Use shared client for default bucket
+                            exists = await _check_file_with_client(
+                                shared_client, shared_bucket_id, filename
+                            )
+                        else:
+                            # Custom bucket needs its own client
+                            from ..infrastructure.comms import file_exists
+
+                            exists = await asyncio.wait_for(
+                                file_exists(
+                                    filename,
+                                    credentials=bucket,
+                                    use_write=False,
+                                ),
+                                timeout=6.0,
+                            )
+
+                        elapsed = time.time() - start_time
+                        return hotkey, bool(exists)
+                    except asyncio.TimeoutError:
+                        elapsed = time.time() - start_time
+                        logger.warning(
+                            "Window file check TIMEOUT for %s window=%s after %.2fs",
+                            miner_id,
+                            window_start,
+                            elapsed,
+                        )
+                        return hotkey, False
+                    except Exception as e:
+                        elapsed = time.time() - start_time
+                        logger.warning(
+                            "Window file check FAILED for %s window=%s after %.2fs: %s %s",
+                            miner_id,
+                            window_start,
+                            elapsed,
+                            type(e).__name__,
+                            str(e),
+                        )
+                        return hotkey, False
+
+            results = await asyncio.gather(*(_check(hk) for hk in meta_hotkeys))
+            return [hk for hk, ok in results if ok]
+
+    except Exception as e:
+        logger.error("Failed to create shared S3 client: %s", e)
+        return []
+
+
+async def _check_file_with_client(client: Any, bucket_id: str, filename: str) -> bool:
+    """Check if file exists using pre-created client to avoid connection overhead."""
+    try:
+        # Check compressed first
+        if not filename.endswith(".gz"):
             try:
-                exists = await file_exists(
-                    filename, credentials=bucket if bucket else default_credentials, use_write=False
-                )
-                return hotkey, bool(exists)
+                await client.head_object(Bucket=bucket_id, Key=filename + ".gz")
+                return True
             except Exception:
-                return hotkey, False
+                pass
 
-    results = await asyncio.gather(*(_check(hk) for hk in meta_hotkeys))
-    return [hk for hk, ok in results if ok]
+        # Check original
+        await client.head_object(Bucket=bucket_id, Key=filename)
+        return True
+    except Exception:
+        return False
 
 
 def _compute_sample_size(active_count: int) -> int:
@@ -678,9 +756,20 @@ async def _run_validation_service(
                 window_rand = _compute_window_randomness(target_window_hash, use_drand)
 
                 # Discover active miners (those with a window file in storage)
-                active_hotkeys = await _list_active_hotkeys_for_window(
-                    meta.hotkeys, target_window, chain_manager, credentials
+                timer_ctx = (
+                    monitor.timer("validation/hotkeys_discovery")
+                    if monitor
+                    else contextlib.nullcontext()
                 )
+                with timer_ctx:
+                    active_hotkeys = await _list_active_hotkeys_for_window(
+                        meta.hotkeys, target_window, chain_manager, credentials, uid_by_hotkey
+                    )
+
+                logger.info(
+                    f"🔍 Found {len(active_hotkeys)}/{len(meta.hotkeys)} active miners for window {target_window}"
+                )
+
                 # Update availability (windows_with_file) rolling window
                 _update_rolling(
                     availability_history,

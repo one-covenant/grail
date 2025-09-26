@@ -121,7 +121,14 @@ def get_client_ctx(
     if force_path_style:
         s3_config["addressing_style"] = "path"
 
+    # Configure transport-level timeouts and modest retries to avoid
+    # indefinite hangs. Set these higher than our asyncio timeout (6s)
+    # to let asyncio.wait_for handle the timeout cleanly.
+    # Root cause: botocore and asyncio timeouts conflict when stacked.
     config = Config(
+        connect_timeout=3,
+        read_timeout=10,  # Higher than asyncio timeout
+        retries={"max_attempts": 2, "mode": "standard"},
         max_pool_connections=256,
         region_name=region_name,
         signature_version="s3v4",
@@ -527,23 +534,49 @@ async def file_exists(
     credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
     use_write: bool = False,
 ) -> bool:
-    """Check if a file exists in the bucket (checks both compressed and uncompressed)"""
+    """Check if a file exists (compressed or uncompressed) with bounded HEAD.
+
+    Each HEAD call is wrapped in a small timeout so one stalled request
+    cannot block upstream gather calls. Root cause: rare transport stalls
+    (no response) on R2 under concurrency; without timeouts, awaits can
+    hang indefinitely. We treat timeouts as "not found" to keep progress.
+    """
+
+    async def _head_exists(client: Any, bucket_id: str, key_to_check: str) -> bool:
+        import time
+
+        start_time = time.time()
+        try:
+            # Remove nested asyncio.wait_for - let the outer timeout handle it
+            # to avoid timeout conflicts between botocore and asyncio
+            await client.head_object(Bucket=bucket_id, Key=key_to_check)
+            elapsed = time.time() - start_time
+            return True
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.warning(
+                "R2 HEAD failed after %.2fs for key=%s bucket=%s: %s %s",
+                elapsed,
+                key_to_check,
+                bucket_id,
+                type(e).__name__,
+                str(e),
+            )
+            return False
+
     try:
         async with get_client_ctx(credentials, use_write) as client:
-            # Check for compressed version first
-            if not key.endswith(".gz"):
-                try:
-                    bucket_id = get_bucket_id(credentials, use_write)
-                    await client.head_object(Bucket=bucket_id, Key=key + ".gz")
-                    return True
-                except Exception:
-                    pass
-
-            # Check for original key
             bucket_id = get_bucket_id(credentials, use_write)
-            await client.head_object(Bucket=bucket_id, Key=key)
-            return True
-    except Exception:
+
+            # Check for compressed first
+            if not key.endswith(".gz"):
+                if await _head_exists(client, bucket_id, key + ".gz"):
+                    return True
+
+            # Fallback to original key
+            return await _head_exists(client, bucket_id, key)
+    except Exception as e:
+        logger.warning("file_exists failed for key=%s: %s %s", key, type(e).__name__, str(e))
         return False
 
 
