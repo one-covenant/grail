@@ -314,6 +314,8 @@ def verify_rollout_signature(rollout_data: dict) -> bool:
 # ----------------------------- Sampling Helpers ----------------------------- #
 
 
+# NOTE: If this function experiences performance issues or timeouts,
+# consider reducing the concurrency parameter (default: 16)
 async def _list_active_hotkeys_for_window(
     meta_hotkeys: list[str],
     window_start: int,
