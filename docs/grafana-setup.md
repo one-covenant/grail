@@ -14,16 +14,16 @@ Quick setup for Grafana + Loki observability stack with public dashboard access.
 Add these variables to your `.env` file for logging and external access:
 
 ```bash
-# Loki endpoint URL (local instance)
-GRAIL_OBS_LOKI_URL=http://localhost:3100/loki/api/v1/push
+# Promtail-based log shipping
+PROMTAIL_ENABLE=true
+PROMTAIL_LOKI_URL=http://localhost:3100/loki/api/v1/push
+PROMTAIL_JOB=grail
+GRAIL_ENV=prod
+GRAIL_LOG_FILE=/var/log/grail/grail.log
 
-# Labels to attach to all log entries
-GRAIL_OBS_LOKI_LABELS=app=grail,env=production
-
-# Performance tuning (optional)
-GRAIL_OBS_LOKI_TIMEOUT_S=5.0
-GRAIL_OBS_LOKI_BATCH_SIZE=10
-GRAIL_OBS_LOKI_BATCH_INTERVAL_S=1.0
+# Log rotation settings (optional)
+GRAIL_LOG_MAX_SIZE=100MB
+GRAIL_LOG_BACKUP_COUNT=5
 
 # Grafana server root URL for external access
 GF_SERVER_ROOT_URL=http://your-public-ip:3000
@@ -33,14 +33,14 @@ GF_SERVER_ROOT_URL=http://your-public-ip:3000
 
 ```bash
 cd /home/ubuntu/grail/docker
-docker compose -f compose.grafana.yaml up -d
+docker compose --env-file ../.env -f compose.grafana.yaml up -d
 ```
 
 ### 3. Verify Services
 
 ```bash
 # Check container status
-docker compose -f compose.grafana.yaml ps
+docker compose --env-file ../.env -f compose.grafana.yaml ps
 
 # Health checks
 curl -s http://localhost:3000/api/health
@@ -57,7 +57,7 @@ curl -s http://localhost:3100/ready
 ### 5. Stop the Stack
 
 ```bash
-docker compose -f compose.grafana.yaml down
+docker compose --env-file ../.env -f compose.grafana.yaml down
 ```
 
 ## What's Included

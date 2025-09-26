@@ -1,0 +1,42 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /var/lib/promtail/positions.yml
+
+clients:
+  - url: ${PROMTAIL_LOKI_URL}
+    timeout: 5s
+    backoff_config:
+      min_period: 500ms
+      max_period: 5s
+      max_retries: 3
+    batchwait: 1s
+    batchsize: 1048576
+
+scrape_configs:
+  - job_name: ${PROMTAIL_JOB}
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: ${PROMTAIL_JOB}
+          env: ${GRAIL_ENV}
+          service: grail
+          network: ${BT_NETWORK}
+          netuid: ${NETUID}
+          wallet: ${BT_WALLET_COLD}
+          hotkey: ${BT_WALLET_HOT}
+          __path__: /var/log/grail/*.log*
+    pipeline_stages:
+      - regex:
+          expression: '^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (?P<level>\w+)\s+\[(?P<logger>[^\]]+)\] (?P<message>.*)'
+      - timestamp:
+          source: timestamp
+          format: '2006-01-02 15:04:05'
+      - labels:
+          level:
+          logger:
+      - labeldrop:
+          - filename

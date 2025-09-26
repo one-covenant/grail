@@ -110,6 +110,40 @@ Validators load local write credentials and use miners’ read credentials fetch
 
 Set `GRAIL_MONITORING_BACKEND=wandb` to enable metrics; otherwise use `null`.
 
+#### Grafana + Loki Logging (Recommended)
+
+For centralized logging, use Promtail to ship logs to Loki. This approach is more robust than in-process log shipping and prevents stalling under network pressure.
+
+**Setup:**
+1. Set environment variables in `.env`:
+   ```bash
+   PROMTAIL_ENABLE=true
+   PROMTAIL_LOKI_URL=http://your-loki-server:3100/loki/api/v1/push
+   GRAIL_ENV=prod
+   GRAIL_LOG_FILE=/var/log/grail/grail.log
+   
+   # Optional: log rotation settings
+   GRAIL_LOG_MAX_SIZE=100MB
+   GRAIL_LOG_BACKUP_COUNT=5
+   ```
+
+2. Deploy with Promtail included:
+   ```bash
+   docker compose --env-file .env -f docker/docker-compose.validator.yml up -d
+   ```
+
+3. Verify logs appear in Grafana with the configured labels.
+
+**Architecture:**
+- App writes logs to console (Rich) and file (`GRAIL_LOG_FILE`)
+- Promtail tails the log file and ships to Loki with buffering, backoff, and timeouts
+- No network I/O in the app's logging path prevents stalling
+
+**Troubleshooting:**
+- Check Promtail logs: `docker logs grail-promtail`
+- Verify log file exists: `docker exec grail-validator ls -la /var/log/grail/`
+- Test Loki connectivity: `docker exec grail-promtail wget -O- ${PROMTAIL_LOKI_URL}`
+
 Public dashboards:
 - **WandB Dashboard**: set `WANDB_ENTITY=tplr` and `WANDB_PROJECT=grail` to publish validator logs to the public W&B project for detailed metrics and historical data. View at https://wandb.ai/tplr/grail.
 - **Grafana Dashboard**: Real-time system logs, validator performance metrics, and network statistics are available at https://grail-grafana.tplr.ai/.
