@@ -8,9 +8,7 @@ import logging
 import math
 import os
 import time
-import traceback
 from dataclasses import dataclass
-from types import SimpleNamespace
 from typing import Any, Optional
 
 import bittensor as bt
@@ -19,15 +17,10 @@ import typer
 
 from ..environments import SATRolloutGenerator, generate_sat_problem
 from ..grail import Prover, derive_canonical_sat, sign_commit_binding
-from ..infrastructure.chain import GrailChainManager
 from ..infrastructure.comms import sink_window_inferences
-from ..infrastructure.credentials import load_r2_credentials
 from ..infrastructure.drand import get_drand_beacon
 from ..infrastructure.network import create_subtensor
-from ..monitoring import get_monitoring_manager
-from ..monitoring.config import MonitoringConfig
-from ..shared.constants import LAYER_INDEX, MODEL_NAME, ROLLOUTS_PER_PROBLEM, WINDOW_LENGTH
-from ..shared.subnet import get_own_uid_on_subnet
+from ..shared.constants import LAYER_INDEX, ROLLOUTS_PER_PROBLEM, WINDOW_LENGTH
 from . import console
 
 # --------------------------------------------------------------------------- #
@@ -654,7 +647,7 @@ async def generate_rollouts_for_window(
                 mean_reward,
             )
 
-            if problem_count % 10 == 0:
+            if problem_count % 2 == 0:
                 elapsed = time.time() - start_time
                 rollouts_per_sec = (len(inferences) / elapsed) if elapsed > 0 else 0
                 logger.info(
@@ -783,145 +776,12 @@ def mine(
 ) -> None:
     """Mine GRPO rollouts for SAT problems using GRAIL proofs.
 
-    This is the main mining entry point that:
-    - Loads the model and initializes the prover
-    - Connects to Bittensor and object storage
-    - Generates rollouts within time windows
-    - Uploads validated rollouts for validator consumption
-
-    Args:
-        use_drand: Whether to include drand randomness in challenges.
+    Stage 2: delegate to MinerNeuron lifecycle to keep behavior identical
+    while standardizing the long-running process management.
     """
-    coldkey = get_conf("BT_WALLET_COLD", "default")
-    hotkey = get_conf("BT_WALLET_HOT", "default")
-    wallet = bt.wallet(name=coldkey, hotkey=hotkey)
+    from ..neurons import MinerNeuron
 
-    # Initialize model and prover
-    logger.info(f"🔑 Miner hotkey: {wallet.hotkey.ss58_address}")
-    logger.info(f"Loading base model: {MODEL_NAME}")
-
-    # Use wallet for secure GRAIL proof signatures
-    prover = Prover(model_name=MODEL_NAME, wallet=wallet)
-
-    async def _run() -> None:
-        subtensor = None
-        last_window_start = -1
-        timers = MiningTimers()
-
-        # Load R2 credentials
-        try:
-            credentials = load_r2_credentials()
-            logger.info("✅ Loaded R2 credentials")
-        except Exception as e:
-            logger.error(f"Failed to load R2 credentials: {e}")
-            raise
-
-        # Initialize chain manager for credential commitments
-        config = SimpleNamespace(netuid=int(get_conf("BT_NETUID", get_conf("NETUID", 200))))
-        chain_manager = GrailChainManager(config, wallet, credentials)
-        await chain_manager.initialize()
-        logger.info("✅ Initialized chain manager and committed read credentials")
-
-        # Initialize monitoring for mining operations
-        monitor = get_monitoring_manager()
-        if monitor:
-            mining_config = MonitoringConfig.for_mining(wallet.name)
-            try:
-                subtensor_for_uid = await get_subtensor()
-            except Exception:
-                subtensor_for_uid = None
-            uid = None
-            if subtensor_for_uid is not None:
-                uid = await get_own_uid_on_subnet(subtensor_for_uid, 81, wallet.hotkey.ss58_address)
-            run_name = f"miner-{uid}" if uid is not None else f"mining_{wallet.name}"
-            run_id = await monitor.start_run(run_name, mining_config.get("hyperparameters", {}))
-            logger.info(f"Started monitoring run: {run_id} (name={run_name})")
-
-        while True:
-            try:
-                global HEARTBEAT
-                HEARTBEAT = time.monotonic()
-                if subtensor is None:
-                    subtensor = await get_subtensor()
-
-                current_block = await subtensor.get_current_block()
-                window_start = calculate_window_start(current_block)
-
-                if window_start <= last_window_start:
-                    await asyncio.sleep(2)
-                    continue
-
-                logger.info(f"🚀 Using base model for window {window_start}")
-                logger.info(
-                    f"🔥 Starting inference generation for window "
-                    f"{window_start}-{window_start + WINDOW_LENGTH - 1}"
-                )
-
-                if not await has_time_for_next_generation(subtensor, timers, window_start):
-                    last_window_start = window_start
-                    await asyncio.sleep(5)
-                    continue
-
-                window_block_hash, combined_randomness = await get_window_randomness(
-                    subtensor,
-                    window_start,
-                    use_drand,
-                )
-
-                inferences = await generate_rollouts_for_window(
-                    wallet,
-                    prover,
-                    subtensor,
-                    window_start,
-                    window_block_hash,
-                    combined_randomness,
-                    timers,
-                    monitor,
-                    use_drand,
-                )
-
-                if inferences:
-                    logger.info(
-                        f"📤 Uploading {len(inferences)} rollouts to R2 "
-                        f"for window {window_start}..."
-                    )
-                    try:
-                        upload_duration = await upload_inferences_with_metrics(
-                            wallet, window_start, inferences, credentials, monitor
-                        )
-                        timers.update_upload_time_ema(upload_duration)
-                        logger.info(
-                            f"✅ Successfully uploaded window {window_start} "
-                            f"with {len(inferences)} rollouts"
-                        )
-                        HEARTBEAT = time.monotonic()
-                        if monitor:
-                            await monitor.log_counter("mining.successful_uploads")
-                            await monitor.log_gauge("mining.uploaded_rollouts", len(inferences))
-                    except Exception as e:
-                        logger.error(f"❌ Failed to upload window {window_start}: {e}")
-                        logger.error(traceback.format_exc())
-                        if monitor:
-                            await monitor.log_counter("mining.failed_uploads")
-                else:
-                    logger.warning(f"No inferences generated for window {window_start}")
-                    if monitor:
-                        await monitor.log_counter("mining.empty_windows")
-
-                last_window_start = window_start
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                traceback.print_exc()
-                logger.error(f"Error in miner loop: {e}. Continuing ...")
-                subtensor = None
-                await asyncio.sleep(10)
-                continue
-
-    async def _main() -> None:
-        await asyncio.gather(_run(), watchdog())
-
-    asyncio.run(_main())
+    asyncio.run(MinerNeuron(use_drand=use_drand).main())
 
 
 # --------------------------------------------------------------------------- #
