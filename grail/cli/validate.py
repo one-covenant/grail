@@ -1782,7 +1782,7 @@ async def _process_wallet_window(
         # Choose how many GRPO groups to spot-check (at least 1, at most all).
         groups_to_check = max(1, min(num_groups, int(num_groups * SAMPLE_RATE)))
 
-        groups_to_check = min(groups_to_check, MAX_SAMPLES_PER_MINER//ROLLOUTS_PER_PROBLEM)
+        groups_to_check = min(groups_to_check, MAX_SAMPLES_PER_MINER // ROLLOUTS_PER_PROBLEM)
 
         # Derive a deterministic RNG seed from miner wallet,
         # window randomness, and validator hotkey.
