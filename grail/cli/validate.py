@@ -174,7 +174,8 @@ def _install_crash_diagnostics() -> None:
 # --------------------------------------------------------------------------- #
 # Sampling and validation parameters. Keep these centralized to avoid magic
 # numbers scattered through validation logic and to make tuning straightforward.
-MAX_SAMPLES_PER_MINER = 20  # If <= this many rollouts, check all
+MAX_SAMPLES_PER_MINER_THRESHOLD = 20  # If <= this many rollouts, check all
+MAX_SAMPLES_PER_MINER = 40  # If > this many rollouts, sample GRPO groups
 SAMPLE_RATE = 0.1  # Fraction of GRPO groups to spot-check
 STOCHASTIC_CHECK_FAILURE_THRESHOLD = 0.26  # Soft-failure fraction to gate wallet
 REWARD_REL_TOL = 0.02  # Relative tolerance on reward bounds
@@ -1771,7 +1772,7 @@ async def _process_wallet_window(
     # Determine whether to check all rollouts or sample GRPO groups.
     # Sampling is deterministic per wallet+window via a seeded RNG to keep
     # validators consistent and discourage gaming.
-    if total_inferences <= MAX_SAMPLES_PER_MINER:
+    if total_inferences <= MAX_SAMPLES_PER_MINER_THRESHOLD:
         indices_to_check = list(range(total_inferences))
         logger.info(f"🔍 Verifying all {total_inferences} rollouts")
     else:
@@ -1780,6 +1781,8 @@ async def _process_wallet_window(
 
         # Choose how many GRPO groups to spot-check (at least 1, at most all).
         groups_to_check = max(1, min(num_groups, int(num_groups * SAMPLE_RATE)))
+
+        groups_to_check = min(groups_to_check, MAX_SAMPLES_PER_MINER//ROLLOUTS_PER_PROBLEM)
 
         # Derive a deterministic RNG seed from miner wallet,
         # window randomness, and validator hotkey.
