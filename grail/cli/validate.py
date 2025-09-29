@@ -1821,8 +1821,7 @@ async def _process_wallet_window(
         indices_to_check.sort()
         logger.info(
             f"📊 Spot checking {len(indices_to_check)}/{total_inferences} "
-            f"rollouts from {groups_to_check}/{num_groups} groups "
-            f"({SAMPLE_RATE * 100:.0f}% of groups)"
+            f"rollouts from {groups_to_check}/{num_groups} groups!"
         )
 
     # Per-wallet counters for metrics and gating
