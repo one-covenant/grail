@@ -18,7 +18,7 @@ from .environments import (  # noqa: F401, E402, E501, F403, F405
     create_sat_reward_vector,
     generate_sat_problem,
 )
-from .grail import Prover, Verifier  # noqa: F401, E402, E501, F403, F405
+from .grail import Verifier  # noqa: F401, E402, E501, F403, F405
 from .infrastructure.comms import (  # noqa: F401, E402, E501, F403, F405
     PROTOCOL_VERSION,
     download_file_chunked,
@@ -46,7 +46,6 @@ from .mining.rollout_generator import RolloutGenerator  # noqa: F401, E402, E501
 
 __all__ = [
     # Core classes
-    "Prover",
     "Verifier",
     # New reward system
     "Parser",

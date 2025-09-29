@@ -8,13 +8,10 @@ import asyncio
 import hashlib
 import logging
 import os
-import random
-import struct
-from typing import Any, Optional, Union, cast
+from typing import Any, Optional, Union
 
-import bittensor as bt
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
+from transformers import PretrainedConfig
 
 from .environments import generate_sat_problem
 from .environments.sat import SATParser, create_sat_prompt
@@ -24,6 +21,32 @@ from .mining.rollout_generator import (
     SYSTEM_PROMPT,
 )
 from .monitoring import get_monitoring_manager
+
+# ──────────────────────────  PROTOCOL RE-EXPORTS (Stage 3a)  ────────────────
+# Import from protocol package for backward compatibility.
+# Original implementations below will be removed in future stages.
+# Current imports shadow the originals below (intentional during migration).
+from .protocol.crypto import (  # noqa: F401
+    create_proof,
+    dot_mod_q,
+    indices_from_root,
+    prf,
+    r_vec_from_randomness,
+)
+from .protocol.signatures import (  # noqa: F401
+    build_commit_binding,
+    derive_canonical_sat,
+    sign_commit_binding,
+    sign_s_vals,
+    verify_commit_signature,
+    verify_s_vals_signature,
+)
+from .protocol.tokens import (  # noqa: F401
+    hash_s_vals,
+    hash_tokens,
+    int_to_bytes,
+    verify_tokens,
+)
 from .shared.chat_templates import build_qwen_chat_template
 from .shared.constants import (
     CHALLENGE_K,
@@ -32,7 +55,6 @@ from .shared.constants import (
     MIN_EOS_PROBABILITY,
     MODEL_NAME,
     PRIME_Q,
-    RNG_LABEL,
     SAMPLING_BC_THRESHOLD,
     SAMPLING_HIGH_P,
     SAMPLING_INITIAL_WINDOW_STEPS,
@@ -45,6 +67,8 @@ from .shared.constants import (
     TOLERANCE,
 )
 from .shared.hf_compat import resolve_max_context_length, resolve_vocab_size
+
+# ──────────────────────────────────────────────────────────────────────────────
 
 # Enable CUDA debugging for better error messages
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
@@ -61,352 +85,7 @@ logger.addFilter(MinerPrefixFilter())
 COMMIT_DOMAIN = b"grail-commit-v1"
 
 
-def prf(label: bytes, *parts: bytes, out_bytes: int) -> bytes:
-    """
-    Pseudorandom function using SHA-256 in counter mode for arbitrary output length.
-    Args:
-        label: Domain separation label
-        *parts: Variable number of byte strings to include in PRF input
-        out_bytes: Number of output bytes required
-
-    Returns:
-        Deterministic pseudorandom bytes of length out_bytes
-
-    Raises:
-        ValueError: If out_bytes is negative or too large
-        TypeError: If inputs are not bytes
-    """
-    # Input validation
-    if out_bytes < 0:
-        raise ValueError(f"out_bytes must be non-negative, got {out_bytes}")
-    if out_bytes > 2**16:  # Reasonable upper limit (64KB)
-        raise ValueError(f"out_bytes too large: {out_bytes} (max 65536)")
-    if out_bytes == 0:
-        return b""
-
-    if not isinstance(label, bytes):
-        raise TypeError(f"label must be bytes, got {type(label).__name__}")
-    for i, part in enumerate(parts):
-        if not isinstance(part, bytes):
-            raise TypeError(f"parts[{i}] must be bytes, got {type(part).__name__}")
-
-    # Use SHAKE256 for variable-length output if available (more efficient)
-    try:
-        import hashlib
-
-        if hasattr(hashlib, "shake_256"):
-            # SHAKE256 is designed for variable-length output
-            shake = hashlib.shake_256()
-            shake.update(label)
-            shake.update(b"||")
-            for part in parts[:-1] if parts else []:
-                shake.update(part)
-                shake.update(b"||")
-            if parts:
-                shake.update(parts[-1])
-            return shake.digest(out_bytes)
-    except Exception:
-        pass  # Fall back to SHA256 method
-    # Original SHA256-based expansion with optimization
-    # Pre-calculate how many hash outputs we need
-    hash_size = 32  # SHA256 output size
-    num_blocks = (out_bytes + hash_size - 1) // hash_size
-    # Build input once
-    if parts:
-        input_data = label + b"||" + b"||".join(parts)
-    else:
-        input_data = label
-
-    # Use counter mode for expansion (more standard than chaining)
-    output = bytearray(num_blocks * hash_size)
-
-    for i in range(num_blocks):
-        # Include counter in each block for better security properties
-        block_input = input_data + i.to_bytes(4, "big")
-        block_hash = hashlib.sha256(block_input).digest()
-        output[i * hash_size : (i + 1) * hash_size] = block_hash
-
-    return bytes(output[:out_bytes])
-
-
-def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
-    # Add cache attribute to function
-    if not hasattr(r_vec_from_randomness, "_cache"):
-        # Initialize a simple dict cache; attribute added dynamically
-        r_vec_from_randomness._cache = {}
-    """
-    Generate random projection vector from drand randomness.
-
-    Takes drand randomness (32 bytes hex) and expands it deterministically
-    into a d_model-dimensional vector using a PRF. This ensures everyone
-    with the same drand value generates the same projection vector.
-
-    Args:
-        rand_hex: Hex string of drand randomness (typically from drand beacon)
-        d_model: Model hidden dimension size
-
-    Returns:
-        Random projection vector of shape (d_model,) with int32 values
-
-    Raises:
-        ValueError: If rand_hex is invalid or d_model is invalid
-
-    Note:
-        Uses big-endian byte order for cross-platform consistency
-    """
-    # Input validation
-    if d_model <= 0:
-        raise ValueError(f"d_model must be positive, got {d_model}")
-    if d_model > 100000:  # Reasonable upper limit
-        raise ValueError(f"d_model too large: {d_model} (max 100000)")
-    if not rand_hex:
-        raise ValueError("rand_hex cannot be empty")
-    # Normalize hex string more robustly
-    clean_hex = rand_hex.strip().replace("0x", "").replace("0X", "")
-    if not clean_hex:
-        raise ValueError(f"Empty randomness hex string after cleaning: '{rand_hex}'")
-
-    # Pad with leading zero if odd length
-    if len(clean_hex) % 2 != 0:
-        clean_hex = "0" + clean_hex
-
-    # Cache key for memoization (avoid recomputing for same inputs)
-    cache_key = (clean_hex, d_model)
-
-    # Check if we've already computed this (useful for repeated calls)
-    cache: dict[tuple[str, int], torch.Tensor] = cast(
-        dict[tuple[str, int], torch.Tensor],
-        getattr(r_vec_from_randomness, "_cache", {}),
-    )
-    if cache_key in cache:
-        logger.debug(f"Using cached sketch vector for d_model={d_model}")
-        return cache[cache_key].clone()
-
-    try:
-        # Use PRF to expand drand randomness into d_model random integers
-        # Using 4 bytes per integer for int32 range
-        raw = prf(
-            RNG_LABEL["sketch"],
-            bytes.fromhex(clean_hex),
-            out_bytes=4 * d_model,
-        )
-    except ValueError as e:
-        raise ValueError(
-            f"Invalid hex string for randomness: '{rand_hex}' -> '{clean_hex}': {e}"
-        ) from e
-
-    # Use numpy for more efficient unpacking if available
-    try:
-        import numpy as np
-
-        # More efficient for large d_model
-        ints_array = np.frombuffer(raw, dtype=">i4").astype(np.int32, copy=False)
-        tensor = torch.from_numpy(ints_array.copy())  # copy to ensure ownership
-    except ImportError as e:
-        logger.error(f"Error unpacking ints_array: {e}")
-        # Fallback to struct.unpack
-        ints = struct.unpack(">" + "i" * d_model, raw)
-        tensor = torch.tensor(ints, dtype=torch.int32)
-
-    # Optionally normalize to unit variance (commented out to maintain compatibility)
-    # tensor = tensor.float()
-    # tensor = tensor / tensor.std()
-
-    # Cache the result (limit cache size to prevent memory issues)
-    if len(cache) < 100:
-        cache[cache_key] = tensor.clone()
-        r_vec_from_randomness._cache = cache
-
-    logger.debug(
-        f"Generated sketch vector with shape={tensor.shape}, first 4 values: {tensor[:4].tolist()}"
-    )
-    return tensor
-
-
-def indices_from_root(tokens: list[int], rand_hex: str, seq_len: int, k: int) -> list[int]:
-    """
-    Generate deterministic indices for proof verification.
-    Args:
-        tokens: List of token IDs from the model output
-        rand_hex: Randomness hex string (from drand/block hash)
-        seq_len: Sequence length to sample from
-        k: Number of indices to select
-
-    Returns:
-        Sorted list of k indices sampled deterministically
-
-    Raises:
-        ValueError: If rand_hex is invalid or k > seq_len
-    """
-    # Validate inputs early
-    if k > seq_len:
-        raise ValueError(f"Cannot sample {k} indices from sequence of length {seq_len}")
-    if k <= 0:
-        raise ValueError(f"k must be positive, got {k}")
-    if not tokens:
-        raise ValueError("tokens list cannot be empty")
-
-    # Efficient token bytes conversion using bytearray
-    tokens_bytes = b"".join(int_to_bytes(token) for token in tokens)
-    tokens_hash = hashlib.sha256(tokens_bytes).digest()
-
-    # Normalize hex string more robustly
-    clean_hex = rand_hex.strip().replace("0x", "").replace("0X", "")
-    if not clean_hex:
-        raise ValueError(f"Empty randomness hex string: '{rand_hex}'")
-
-    # Validate hex string before conversion
-    if len(clean_hex) % 2 != 0:
-        clean_hex = "0" + clean_hex  # Pad with leading zero if odd length
-
-    try:
-        material = prf(
-            RNG_LABEL["open"],
-            tokens_hash,
-            bytes.fromhex(clean_hex),
-            out_bytes=32,
-        )
-    except ValueError as e:
-        raise ValueError(
-            f"Invalid hex string for randomness: '{rand_hex}' -> '{clean_hex}': {e}"
-        ) from e
-
-    # Use deterministic sampling with seed
-    rnd = random.Random(material)
-
-    # For small k relative to seq_len, use sample (more efficient)
-    # For large k, use shuffle and slice (avoids rejection sampling overhead)
-    if k < seq_len * 0.1:  # If selecting less than 10% of indices
-        idxs = sorted(rnd.sample(range(seq_len), k))
-    else:
-        # More efficient for large k
-        all_indices = list(range(seq_len))
-        rnd.shuffle(all_indices)
-        idxs = sorted(all_indices[:k])
-
-    logger.debug(
-        f"Selected {len(idxs)} indices from seq_len={seq_len}: {idxs[:5]}..."
-        if len(idxs) > 5
-        else f"Selected indices: {idxs}"
-    )
-    return idxs
-
-
 # ─────────────────────────────  UTILITIES  ─────────────────────────────
-
-
-def int_to_bytes(i: int) -> bytes:
-    return struct.pack(">I", i & 0xFFFFFFFF)
-
-
-def dot_mod_q(hidden: torch.Tensor, r_vec: torch.Tensor) -> int:
-    # Ensure both tensors are on the same device
-    device = hidden.device
-    r_vec = r_vec.to(device)
-
-    # Scale and convert to float for computation (avoid int64 issues on CUDA)
-    scaled = torch.round(hidden * 1024)
-    prod = torch.dot(scaled, r_vec.float())
-
-    # Convert to int and apply modulo
-    return int(prod.item()) % PRIME_Q
-
-
-def sign_s_vals(s_vals: list[int], wallet: bt.wallet) -> bytes:
-    """
-    Sign the s_vals list using Bittensor wallet's cryptographic signature.
-
-    Args:
-        s_vals: List of s_vals to sign
-        wallet: Bittensor wallet object (bt.wallet) with signing capability
-
-    Returns:
-        Signature bytes from Ed25519 signing
-
-    Raises:
-        TypeError: If wallet doesn't have signing capability
-    """
-    if not hasattr(wallet, "hotkey") or not hasattr(wallet.hotkey, "sign"):
-        raise TypeError(f"Wallet must be a bt.wallet with hotkey.sign() method, got {type(wallet)}")
-
-    s_vals_bytes = b"".join(int_to_bytes(val) for val in s_vals)
-    # Use Bittensor wallet's sign method (Ed25519 signature)
-    signature: bytes = wallet.hotkey.sign(s_vals_bytes)
-    logger.debug(f"Signed {len(s_vals)} s_vals with Bittensor wallet signature")
-    return signature
-
-
-def verify_s_vals_signature(s_vals: list[int], signature: bytes, wallet_address: str) -> bool:
-    """
-    Verify the signature of s_vals list using Bittensor wallet's public key.
-
-    Args:
-        s_vals: List of s_vals to verify
-        signature: Signature to verify
-        wallet_address: SS58 wallet address for public key verification
-
-    Returns:
-        True if signature is valid
-
-    Raises:
-        TypeError: If wallet_address is not a string
-    """
-    if not isinstance(wallet_address, str):
-        raise TypeError(f"wallet_address must be a string SS58 address, got {type(wallet_address)}")
-
-    s_vals_bytes = b"".join(int_to_bytes(val) for val in s_vals)
-
-    try:
-        import bittensor as bt
-
-        # Create a keypair from the SS58 address (public key only)
-        # Bittensor uses substrate under the hood but provides a cleaner interface
-        keypair = bt.Keypair(ss58_address=wallet_address)
-        # Verify signature using public key cryptography
-        verified: bool = keypair.verify(data=s_vals_bytes, signature=signature)
-        if not verified:
-            logger.debug("Signature verification failed")
-        return verified
-    except Exception as e:
-        logger.warning(f"Signature verification error: {e}")
-        return False
-
-
-def hash_s_vals(s_vals: list[int]) -> bytes:
-    """Compute hash of s_vals for integrity checking."""
-    s_vals_bytes = b"".join(int_to_bytes(val) for val in s_vals)
-    return hashlib.sha256(s_vals_bytes).digest()
-
-
-def verify_tokens(tokens: list[int], model_config: Union[PretrainedConfig, Any]) -> bool:
-    """
-    Verify token list validity for model processing.
-
-    Args:
-        tokens: List of token IDs to verify
-        model_config: Model configuration object with vocab_size and max sequence length attributes
-
-    Returns:
-        True if tokens are valid, False otherwise
-    """
-    # Check empty tokens
-    if not tokens:
-        logger.warning("Empty token list in commit")
-        return False
-
-    # Validate token IDs (best-effort if vocab size available)
-    vocab_size = resolve_vocab_size(model_config)
-    if vocab_size is not None:
-        if not _validate_token_ids(tokens, vocab_size):
-            return False
-    else:
-        logger.debug("Model config lacks vocab_size; skipping token-id bounds check")
-
-    # Validate sequence length
-    if not _validate_sequence_length(tokens, model_config):
-        return False
-
-    return True
 
 
 def _validate_token_ids(tokens: list[int], vocab_size: int) -> bool:
@@ -433,162 +112,15 @@ def _validate_sequence_length(
     return True
 
 
-def hash_tokens(tokens: list[int]) -> bytes:
-    """Compute hash of tokens for integrity checking."""
-    tokens_bytes = b"".join(int_to_bytes(t) for t in tokens)
-    return hashlib.sha256(tokens_bytes).digest()
-
-
-def derive_canonical_sat(
-    wallet_addr: str, window_hash: str, problem_index: int
-) -> tuple[str, float]:
-    """Derive canonical SAT seed and difficulty for miner/window/problem index.
-
-    The seed binds problems to the miner hotkey and the window block hash.
-    The difficulty is sampled ~uniformly in [0.3, 0.9] from a PRF of the
-    same material to eliminate miner control while keeping a broad spread.
-    """
-    try:
-        idx = int(problem_index)
-    except Exception:
-        idx = 0
-    material = f"{wallet_addr}:{window_hash}:{idx}".encode()
-    seed = hashlib.sha256(b"seed|" + material).hexdigest()
-    diff_digest = hashlib.sha256(b"diff|" + material).digest()
-    u = int.from_bytes(diff_digest[:8], "big") / float(1 << 64)
-    difficulty = 0.3 + 0.6 * u
-    return seed, float(difficulty)
-
-
-def build_commit_binding(
-    tokens: list[int],
-    randomness_hex: str,
-    model_name: str,
-    layer_index: int,
-    s_vals: list[int],
-) -> bytes:
-    """Build domain-separated commit binding to be signed.
-
-    Format: SHA256(COMMIT_DOMAIN || len(x)||x for each x in
-    [tokens_hash, rand_bytes, model_name_bytes, layer_index_be, s_vals_hash]).
-    """
-
-    def _len_bytes(b: bytes) -> bytes:
-        return len(b).to_bytes(4, "big")
-
-    rand_clean = randomness_hex.strip().replace("0x", "").replace("0X", "")
-    if len(rand_clean) % 2 != 0:
-        rand_clean = "0" + rand_clean
-    rand_bytes = bytes.fromhex(rand_clean)
-    tokens_h = hash_tokens(tokens)
-    svals_h = hash_s_vals(s_vals)
-    model_b = (model_name or "").encode("utf-8")
-    layer_b = int(layer_index).to_bytes(4, "big", signed=True)
-
-    h = hashlib.sha256()
-    h.update(COMMIT_DOMAIN)
-    for part in (tokens_h, rand_bytes, model_b, layer_b, svals_h):
-        h.update(_len_bytes(part))
-        h.update(part)
-    return h.digest()
-
-
-def sign_commit_binding(
-    tokens: list[int],
-    randomness_hex: str,
-    model_name: str,
-    layer_index: int,
-    s_vals: list[int],
-    wallet: bt.wallet,
-) -> bytes:
-    """Sign the commit-binding message with wallet hotkey."""
-    if not hasattr(wallet, "hotkey") or not hasattr(wallet.hotkey, "sign"):
-        raise TypeError("Wallet must provide hotkey.sign()")
-    msg = build_commit_binding(tokens, randomness_hex, model_name, layer_index, s_vals)
-    return wallet.hotkey.sign(msg)  # type: ignore
-
-
-def verify_commit_signature(commit: dict, wallet_address: str) -> bool:
-    """Verify commit signature binding tokens, randomness, model, layer, and s_vals."""
-    try:
-        tokens = commit["tokens"]
-        s_vals = commit["s_vals"]
-        beacon = commit.get("beacon", commit.get("round_R", {}))
-        randomness = beacon["randomness"]
-        model_info = commit.get("model", {})
-        model_name = model_info.get("name", "")
-        layer_index = int(model_info.get("layer_index"))
-        sig = bytes.fromhex(commit["signature"])
-    except Exception:
-        return False
-    msg = build_commit_binding(tokens, randomness, model_name, layer_index, s_vals)
-    try:
-        keypair = bt.Keypair(ss58_address=wallet_address)
-        return keypair.verify(data=msg, signature=sig)  # type: ignore
-    except Exception:
-        return False
-
-
-# ─────────────────────────────  PROVER  ────────────────────────────────
-
-
-class Prover:
-    def __init__(self, model_name: str = MODEL_NAME, wallet: bt.wallet = None) -> None:
-        """
-        Initialize Prover with model and Bittensor wallet for secure signatures.
-
-        Args:
-            model_name: Name of the model to load
-            wallet: Bittensor wallet object (bt.wallet) for cryptographic signatures
-
-        Raises:
-            ValueError: If wallet is not provided
-        """
-        if wallet is None:
-            raise ValueError("Prover requires a bt.wallet for secure signatures")
-
-        self.device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-        # Ensure pad_token is properly set to prevent model confusion between padding and content
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-
-        self.model = AutoModelForCausalLM.from_pretrained(model_name, use_safetensors=True)
-        self.model = self.model.to(self.device).eval()
-        self.wallet = wallet
-        self._state: dict = {}
-        logger.debug("Prover initialized with wallet for secure signatures")
-
-    def open(self, randomness_hex: str, k: int = CHALLENGE_K) -> dict:
-        # Use provided randomness instead of generating beacon
-        beacon_R1 = {"round": 2, "randomness": randomness_hex}
-        # Use tokens instead of s_vals for index derivation
-        idxs = indices_from_root(self._state["tokens"], randomness_hex, self._state["seq_len"], k)
-        return {"round_R1": beacon_R1, "indices": idxs}
-
-
-# ─────────────────────────────  VERIFIER  ──────────────────────────────
-
-
 class Verifier:
     def __init__(self, model_name: str = MODEL_NAME) -> None:
-        self.device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        from .model.provider import get_model, get_tokenizer
 
-        # Ensure pad_token is properly set to prevent model confusion between padding and content
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-
-        self.model = AutoModelForCausalLM.from_pretrained(model_name, use_safetensors=True)
-        self.model = self.model.to(self.device).eval()
-
-        # Install the same Qwen-style chat template used by miners
-        try:
-            self.tokenizer.chat_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
-        except Exception:
-            # Non-fatal: fallback to tokenizer default template
-            logger.debug("Unable to set custom chat_template; using default.")
+        # Use model provider for consistent configuration
+        chat_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
+        self.tokenizer = get_tokenizer(model_name, chat_template=chat_template)
+        self.model = get_model(model_name, device=None, use_safetensors=True, eval_mode=True)
+        self.device = self.model.device
 
         # Cache from most recent proof verification forward pass
         self._last_tokens_hash: Optional[str] = None

@@ -18,9 +18,9 @@ from grail.cli.mine import (
     has_time_for_next_generation,
     upload_inferences_with_metrics,
 )
-from grail.grail import Prover
 from grail.infrastructure.chain import GrailChainManager
 from grail.infrastructure.credentials import load_r2_credentials
+from grail.model.provider import get_model, get_tokenizer
 from grail.monitoring import get_monitoring_manager
 from grail.monitoring.config import MonitoringConfig
 from grail.shared.constants import MODEL_NAME, WINDOW_LENGTH
@@ -44,10 +44,11 @@ class MinerNeuron(BaseNeuron):
         hotkey = get_conf("BT_WALLET_HOT", "default")
         wallet = bt.wallet(name=coldkey, hotkey=hotkey)
 
-        # Initialize model and prover
+        # Initialize model and tokenizer via provider
         logger.info(f"🔑 Miner hotkey: {wallet.hotkey.ss58_address}")
         logger.info(f"Loading base model: {MODEL_NAME}")
-        prover = Prover(model_name=MODEL_NAME, wallet=wallet)
+        model = get_model(MODEL_NAME, device=None, eval_mode=True)
+        tokenizer = get_tokenizer(MODEL_NAME)
 
         async def _run() -> None:
             subtensor = None
@@ -118,7 +119,8 @@ class MinerNeuron(BaseNeuron):
 
                     inferences = await generate_rollouts_for_window(
                         wallet,
-                        prover,
+                        model,
+                        tokenizer,
                         subtensor,
                         window_start,
                         window_block_hash,
