@@ -185,14 +185,16 @@ REWARD_REL_TOL = 0.02  # Relative tolerance on reward bounds
 REWARD_ABS_TOL = 1e-6  # Absolute tolerance on reward bounds
 GRPO_ADV_SUM_TOLERANCE = 0.01  # Sum of advantages should be ~0
 DEBUG_TEXT_LOG_LIMIT_PER_WALLET = 5  # Max sample texts logged per wallet
-SOFT_CHECK_KEY = "token_distribution_valid"  # Soft heuristic key from verifier
-HARD_CHECK_KEYS = (  # Hard checks required for validity
-    "token_distribution_valid",
-    "proof_valid",
-    "sat_problem_valid",
-    "prompt_valid",
-    "termination_valid",
-    "solution_valid",
+SOFT_CHECK_KEY = "token_distribution_valid"  # Soft heuristic (reduces score, doesn't reject)
+
+HARD_CHECK_KEYS = (  # Hard checks required for validity (fail any = reject)
+    "schema_valid",  # Schema/structure validation
+    "tokens_valid",  # Token vocab/length validation
+    "proof_valid",  # GRAIL cryptographic proof
+    "sat_problem_valid",  # SAT problem regeneration
+    "prompt_valid",  # Canonical prompt matching
+    "termination_valid",  # Max length or confident EOS
+    "solution_valid",  # Assignment correctness (if success claimed)
 )
 
 # Per-wallet per-window failure flag for gating across rolling windows
@@ -207,20 +209,6 @@ WEIGHT_ROLLING_WINDOWS = int(WEIGHT_SUBMISSION_INTERVAL_BLOCKS / WINDOW_LENGTH)
 # Number of miners to log in detail on submission
 # TODO: reduce this later
 TOP_K_WEIGHTS_LOGGED = 256
-
-# Required fields for SAT rollouts validation
-REQUIRED_ROLLOUT_FIELDS = [
-    "window_start",
-    "nonce",
-    "sat_seed",
-    "block_hash",
-    "commit",
-    "proof",
-    "challenge",
-    "hotkey",
-    "signature",
-    "rollout_group",
-]
 
 # --------------------------------------------------------------------------- #
 #                             Utility helpers                                 #
@@ -1881,14 +1869,7 @@ async def _process_wallet_window(
         checked_count += 1
 
         try:
-            required_fields = REQUIRED_ROLLOUT_FIELDS
-            missing_fields = [field for field in required_fields if field not in inference]
-            if missing_fields:
-                hard_failure = True
-                logger.warning(
-                    f"Missing required fields {missing_fields} in inference; invalidating uid"
-                )
-                break
+            # Window consistency check
             if inference["window_start"] != target_window:
                 hard_failure = True
                 logger.warning("Window mismatch in inference; invalidating uid")
@@ -1964,7 +1945,6 @@ async def _process_wallet_window(
 
                 ctx = ValidationContext(
                     commit=commit_data,
-                    proof=inference["proof"],
                     prover_address=wallet_addr,
                     challenge_randomness=challenge_rand,
                     model=model,

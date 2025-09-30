@@ -25,7 +25,6 @@ class ValidationContext:
 
     # Inputs (immutable)
     commit: dict
-    proof: dict
     prover_address: str
     challenge_randomness: str
 

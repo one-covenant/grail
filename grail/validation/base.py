@@ -15,6 +15,7 @@ class Validator(ABC):
     - Updates ctx.checks with result
     - May cache results in ctx for downstream validators
     - Returns bool (pass/fail)
+    - Declares severity (hard or soft)
     """
 
     @property
@@ -22,6 +23,15 @@ class Validator(ABC):
     def check_name(self) -> str:
         """Name of this check (e.g., 'proof_valid', 'sat_problem_valid')."""
         pass
+
+    @property
+    def severity(self) -> str:
+        """Severity of this check: 'hard' or 'soft'.
+
+        Hard checks: Failure causes immediate rejection
+        Soft checks: Failure accumulates, threshold-based rejection
+        """
+        return "hard"  # Default to hard
 
     @abstractmethod
     def validate(self, ctx: ValidationContext) -> bool:

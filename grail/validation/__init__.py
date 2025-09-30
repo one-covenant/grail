@@ -28,7 +28,9 @@ from .validators import (
     SATProblemValidator,
     SATPromptValidator,
     SATSolutionValidator,
+    SchemaValidator,
     TerminationValidator,
+    TokenValidator,
 )
 
 
@@ -36,15 +38,19 @@ def create_sat_validation_pipeline() -> ValidationPipeline:
     """Create validation pipeline for SAT rollouts.
 
     Pipeline order (fail-fast):
-    1. GRAIL proof (cryptographic, caches logits)
-    2. SAT problem (regeneration from seed)
-    3. SAT prompt (canonical prefix matching)
-    4. Termination (max length or EOS)
-    5. Distribution (anti-gaming heuristic)
-    6. SAT solution (if success claimed)
+    1. Schema (structure/types, no GPU)
+    2. Tokens (vocab bounds, sequence length)
+    3. GRAIL proof (cryptographic, caches logits)
+    4. SAT problem (regeneration from seed)
+    5. SAT prompt (canonical prefix matching)
+    6. Termination (max length or EOS)
+    7. Distribution (anti-gaming heuristic)
+    8. SAT solution (if success claimed)
     """
     return ValidationPipeline(
         [
+            SchemaValidator(),  # FIRST - structure/types, no GPU
+            TokenValidator(),  # SECOND - vocab/length check
             GRAILProofValidator(),
             SATProblemValidator(),
             SATPromptValidator(),
@@ -63,6 +69,8 @@ __all__ = [
     # Pipeline factory
     "create_sat_validation_pipeline",
     # Validators
+    "SchemaValidator",
+    "TokenValidator",
     "GRAILProofValidator",
     "SATProblemValidator",
     "SATPromptValidator",

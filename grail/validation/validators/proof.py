@@ -83,7 +83,12 @@ class GRAILProofValidator(Validator):
             return False
 
         # Derive sketch vector from beacon randomness
-        beacon = ctx.commit.get("beacon", ctx.commit.get("round_R", {}))
+        beacon = ctx.commit.get("beacon", {})
+        if not beacon or "randomness" not in beacon:
+            logger.debug("Missing beacon randomness")
+            ctx.checks[self.check_name] = False
+            return False
+
         r_vec = r_vec_from_randomness(beacon["randomness"], ctx.model.config.hidden_size)
 
         # Derive challenge indices deterministically

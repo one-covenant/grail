@@ -21,7 +21,6 @@ from ..grail import derive_canonical_sat, sign_commit_binding
 from ..infrastructure.comms import sink_window_inferences
 from ..infrastructure.drand import get_drand_beacon
 from ..infrastructure.network import create_subtensor
-from ..protocol.crypto import create_proof
 from ..shared.constants import LAYER_INDEX, ROLLOUTS_PER_PROBLEM, WINDOW_LENGTH
 from . import console
 
@@ -447,13 +446,6 @@ def package_rollout_data(
     rollout_nonce = base_nonce * 10 + rollout_idx
     rollout_sat_seed = f"{wallet.hotkey.ss58_address}-{window_block_hash}-{rollout_nonce}"
 
-    # Generate proof using pure function (no state mutation)
-    proof_data = create_proof(
-        tokens=rollout.tokens,
-        randomness_hex=combined_randomness,
-        seq_len=len(rollout.tokens),
-    )
-
     # Commit-binding signature
     commit_sig = sign_commit_binding(
         rollout.tokens,
@@ -506,7 +498,6 @@ def package_rollout_data(
                 "assignment": assignment,
             },
         },
-        "proof": proof_data,
         "timestamp": time.time(),
     }
 

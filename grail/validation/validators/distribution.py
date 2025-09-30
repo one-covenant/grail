@@ -30,9 +30,13 @@ class DistributionValidator(Validator):
     - Using a different model for generation
     - Prefill tricks with low-probability prefixes
     - Bimodal distributions indicating model switching
+
+    This is a SOFT check - failures accumulate and trigger rejection
+    only if threshold exceeded (>26% of sampled rollouts).
     """
 
     check_name = "token_distribution_valid"
+    severity = "soft"  # Soft check - doesn't cause immediate rejection
 
     def validate(self, ctx: ValidationContext) -> bool:
         """Check token distribution for suspicious patterns."""
