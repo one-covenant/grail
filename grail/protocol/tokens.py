@@ -1,7 +1,7 @@
 """Token validation and hashing utilities for GRAIL protocol.
 
 Pure functions for:
-- Token/s_vals serialization and hashing
+- Token serialization and hashing
 - Token list validation against model config
 """
 
@@ -34,12 +34,6 @@ def hash_tokens(tokens: list[int]) -> bytes:
     """Compute SHA-256 hash of tokens for integrity checking."""
     tokens_bytes = b"".join(int_to_bytes(t) for t in tokens)
     return hashlib.sha256(tokens_bytes).digest()
-
-
-def hash_s_vals(s_vals: list[int]) -> bytes:
-    """Compute SHA-256 hash of s_vals for integrity checking."""
-    s_vals_bytes = b"".join(int_to_bytes(val) for val in s_vals)
-    return hashlib.sha256(s_vals_bytes).digest()
 
 
 def verify_tokens(tokens: list[int], model_config: PretrainedConfig | Any) -> bool:

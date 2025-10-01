@@ -1,4 +1,4 @@
-"""Magnitude-Rank Sketch (MRS) Verifier for GPU/Framework-Agnostic Proof.
+"""GRAIL Verifier for GPU/Framework-Agnostic Proof.
 
 This module implements a novel hidden-state verification scheme robust
 across GPUs, CUDA versions, and frameworks (HF, vLLM, SGLang).
@@ -21,20 +21,20 @@ import math
 import torch
 
 from ..shared.constants import (
-    MRS_COEFF_RANGE,
-    MRS_HISTOGRAM_TOLERANCE,
-    MRS_MIN_RANK_MATCHES,
-    MRS_NUM_BUCKETS,
-    MRS_POSITION_IMPORTANCE_DECAY,
-    MRS_SKETCH_TOLERANCE,
-    MRS_TOPK,
+    PROOF_COEFF_RANGE,
+    PROOF_HISTOGRAM_TOLERANCE,
+    PROOF_MIN_RANK_MATCHES,
+    PROOF_NUM_BUCKETS,
+    PROOF_POSITION_IMPORTANCE_DECAY,
+    PROOF_SKETCH_TOLERANCE,
+    PROOF_TOPK,
     PRIME_Q,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def log_magnitude_bucket(value: float, num_buckets: int = MRS_NUM_BUCKETS) -> int:
+def log_magnitude_bucket(value: float, num_buckets: int = PROOF_NUM_BUCKETS) -> int:
     """Map activation to logarithmic magnitude bucket with sign preservation.
 
     Logarithmic bucketing provides natural robustness:
@@ -86,7 +86,7 @@ def adaptive_tolerance(
         Adjusted tolerance dict
     """
     # Importance weight: decays from 1.0 at start
-    importance = 1.0 / (1.0 + position / MRS_POSITION_IMPORTANCE_DECAY)
+    importance = 1.0 / (1.0 + position / PROOF_POSITION_IMPORTANCE_DECAY)
 
     # More important → tighter (multiply by factor < 1)
     # Less important → looser (multiply by factor > 1)
@@ -99,17 +99,17 @@ def adaptive_tolerance(
     }
 
 
-class MRSVerifier:
+class GRAILVerifier:
     """Magnitude-Rank Sketch verifier for framework-agnostic hidden state proofs."""
 
     def __init__(
         self,
         hidden_dim: int,
-        topk: int = MRS_TOPK,
-        num_buckets: int = MRS_NUM_BUCKETS,
-        r_coeff_range: int = MRS_COEFF_RANGE,
+        topk: int = PROOF_TOPK,
+        num_buckets: int = PROOF_NUM_BUCKETS,
+        r_coeff_range: int = PROOF_COEFF_RANGE,
     ):
-        """Initialize MRS verifier.
+        """Initialize GRAIL verifier.
 
         Args:
             hidden_dim: Model hidden dimension size
@@ -124,9 +124,9 @@ class MRSVerifier:
 
         # Base tolerances (can be overridden per-position)
         self.base_tolerance = {
-            "sketch": float(MRS_SKETCH_TOLERANCE),
-            "min_rank_matches": float(MRS_MIN_RANK_MATCHES),
-            "histogram": float(MRS_HISTOGRAM_TOLERANCE),
+            "sketch": float(PROOF_SKETCH_TOLERANCE),
+            "min_rank_matches": float(PROOF_MIN_RANK_MATCHES),
+            "histogram": float(PROOF_HISTOGRAM_TOLERANCE),
         }
 
     def generate_r_vec(self, randomness_hex: str) -> torch.Tensor:
@@ -167,7 +167,7 @@ class MRSVerifier:
     def create_commitment(
         self, hidden_state: torch.Tensor, r_vec: torch.Tensor, position: int
     ) -> dict:
-        """Create MRS commitment for a single token position.
+        """Create commitment for a single token position.
 
         Args:
             hidden_state: Hidden vector at position [hidden_dim]
@@ -217,7 +217,7 @@ class MRSVerifier:
         r_vec: torch.Tensor,
         sequence_length: int,
     ) -> tuple[bool, dict]:
-        """Verify MRS commitment with multi-check validation.
+        """Verify commitment with multi-check validation.
 
         Three complementary checks (ALL must pass):
         1. Sketch: modular distance on dot product

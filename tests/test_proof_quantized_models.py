@@ -1,6 +1,6 @@
-"""Quantized model tests for MRS proof verification.
+"""Quantized model tests for GRAIL proof verification.
 
-Tests that MRS proofs fail when comparing quantized models against
+Tests that GRAIL proofs fail when comparing quantized models against
 full-precision models, as expected due to quantization-induced differences.
 
 Dependencies for quantized models:
@@ -14,11 +14,11 @@ from __future__ import annotations
 import pytest
 import torch
 
-from .mrs_test_utils import (
-    create_mrs_proof,
+from .proof_test_utils import (
+    create_proof,
     hash_hex,
     load_model_and_tokenizer,
-    verify_mrs_proof,
+    verify_proof,
 )
 
 # GPU requirement check
@@ -45,7 +45,7 @@ def prompt() -> str:
 
 
 class TestMRSQuantizedModels:
-    """MRS should reject proofs when quantization differs between systems."""
+    """GRAIL proof should reject proofs when quantization differs between systems."""
 
     @requires_gpu
     @pytest.mark.parametrize(
@@ -77,7 +77,7 @@ class TestMRSQuantizedModels:
             randomness = hash_hex(f"gptq4|{full_precision}|{quantized}")
             challenge = hash_hex(f"chal|gptq4|{full_precision}")
 
-            proof = create_mrs_proof(
+            proof = create_proof(
                 full_model,
                 full_tok,
                 prompt,
@@ -85,7 +85,7 @@ class TestMRSQuantizedModels:
                 device,
             )
 
-            is_valid, diagnostics = verify_mrs_proof(
+            is_valid, diagnostics = verify_proof(
                 quant_model,
                 proof,
                 challenge,
@@ -133,7 +133,7 @@ class TestMRSQuantizedModels:
             randomness = hash_hex(f"gptq8|{full_precision}")
             challenge = hash_hex("chal_gptq8")
 
-            proof = create_mrs_proof(
+            proof = create_proof(
                 full_model,
                 full_tok,
                 prompt,
@@ -141,7 +141,7 @@ class TestMRSQuantizedModels:
                 device,
             )
 
-            is_valid, _ = verify_mrs_proof(
+            is_valid, _ = verify_proof(
                 quant_model,
                 proof,
                 challenge,
@@ -190,7 +190,7 @@ class TestMRSQuantizedModels:
             randomness = hash_hex(f"awq|{full_precision}")
             challenge = hash_hex("chal_awq")
 
-            proof = create_mrs_proof(
+            proof = create_proof(
                 full_model,
                 full_tok,
                 prompt,
@@ -198,7 +198,7 @@ class TestMRSQuantizedModels:
                 device,
             )
 
-            is_valid, _ = verify_mrs_proof(
+            is_valid, _ = verify_proof(
                 quant_model,
                 proof,
                 challenge,
@@ -237,7 +237,7 @@ class TestMRSQuantizedModels:
             randomness = hash_hex(f"fp8|{fp8}")
             challenge = hash_hex("chal_fp8")
 
-            proof = create_mrs_proof(
+            proof = create_proof(
                 q_model,
                 q_tok,
                 prompt,
@@ -245,7 +245,7 @@ class TestMRSQuantizedModels:
                 device,
             )
 
-            is_valid, _ = verify_mrs_proof(
+            is_valid, _ = verify_proof(
                 f_model,
                 proof,
                 challenge,

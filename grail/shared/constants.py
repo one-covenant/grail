@@ -91,29 +91,29 @@ MINER_SAMPLE_MIN = 1
 # Optional cap on miners validated per window. Set to None to disable.
 MINER_SAMPLE_MAX = 35
 
-# ────────────────  MRS (MAGNITUDE-RANK SKETCH) VERIFICATION  ────────────────
+# ────────────────  GRAIL PROOF VERIFICATION  ────────────────
 
 # Top-K activation selection (focus on stable, important features)
-MRS_TOPK = 256
+PROOF_TOPK = 256
 
 # Logarithmic bucketing parameters
-MRS_NUM_BUCKETS = 16  # Buckets per sign
+PROOF_NUM_BUCKETS = 16  # Buckets per sign
 
-# Small bounded coefficients (vs ±2e9 in current system)
-MRS_COEFF_RANGE = 127  # r ∈ [-127, 127]
+# Small bounded coefficients for sketch robustness
+PROOF_COEFF_RANGE = 127  # r ∈ [-127, 127]
 
 # Multi-check tolerances (calibrate empirically via cross-framework tests)
 # Sketch: modular distance on dot product
-MRS_SKETCH_TOLERANCE = 1000
+PROOF_SKETCH_TOLERANCE = 1000
 
 # Rank: minimum matches required in top-5 ordering
-MRS_MIN_RANK_MATCHES = 4
+PROOF_MIN_RANK_MATCHES = 4
 
 # Histogram: L1 distance on bucket distribution
-MRS_HISTOGRAM_TOLERANCE = 50
+PROOF_HISTOGRAM_TOLERANCE = 50
 
 # Adaptive tolerance: position importance decay rate
-MRS_POSITION_IMPORTANCE_DECAY = 100.0
+PROOF_POSITION_IMPORTANCE_DECAY = 100.0
 
-# Proof version for MRS
-GRAIL_PROOF_VERSION_MRS = "v2_mrs"
+# GRAIL proof version
+GRAIL_PROOF_VERSION = "v1"

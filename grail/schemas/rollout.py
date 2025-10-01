@@ -54,23 +54,24 @@ class RolloutMetadata(BaseModel):
 
 
 class Commit(BaseModel):
-    """Commit data with tokens, sketches, and metadata."""
+    """Commit data with tokens, activation commitments, and metadata."""
 
     tokens: list[int] = Field(min_length=10)  # >= CHALLENGE_K
-    s_vals: list[int]
+    commitments: list[dict]
+    proof_version: str
     model: ModelInfo
     signature: str
     beacon: BeaconInfo
     sat_problem: SATProblemInfo
     rollout: RolloutMetadata
 
-    @field_validator("s_vals")
+    @field_validator("commitments")
     @classmethod
-    def validate_s_vals_length(cls, v: list[int], info) -> list[int]:
-        """S-vals must match tokens length."""
+    def validate_commitments_length(cls, v: list[dict], info) -> list[dict]:
+        """Commitments must match tokens length."""
         tokens = info.data.get("tokens", [])
         if len(v) != len(tokens):
-            raise ValueError(f"s_vals length {len(v)} must equal tokens length {len(tokens)}")
+            raise ValueError(f"commitments length {len(v)} must equal tokens length {len(tokens)}")
         return v
 
     @field_validator("rollout")

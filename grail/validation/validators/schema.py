@@ -24,7 +24,7 @@ class SchemaValidator(Validator):
     - Missing required fields
     - Wrong types (str instead of int, etc.)
     - Out-of-range values (completion_length > MAX_NEW_TOKENS)
-    - Cross-field inconsistencies (s_vals length != tokens length)
+    - Cross-field inconsistencies (commitments length != tokens length)
 
     Uses Pydantic for automatic validation with clear error messages.
     """

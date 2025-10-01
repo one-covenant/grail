@@ -19,15 +19,13 @@ from .crypto import (
 from .signatures import (
     build_commit_binding,
     derive_canonical_sat,
+    hash_commitments,
     sign_commit_binding,
-    sign_s_vals,
     verify_commit_signature,
-    verify_s_vals_signature,
 )
 
 # Re-export token utilities
 from .tokens import (
-    hash_s_vals,
     hash_tokens,
     int_to_bytes,
     verify_tokens,
@@ -41,15 +39,13 @@ __all__ = [
     "dot_mod_q",
     "create_proof",
     # Signatures
-    "sign_s_vals",
-    "verify_s_vals_signature",
     "build_commit_binding",
     "sign_commit_binding",
     "verify_commit_signature",
     "derive_canonical_sat",
+    "hash_commitments",
     # Tokens
     "int_to_bytes",
     "hash_tokens",
-    "hash_s_vals",
     "verify_tokens",
 ]

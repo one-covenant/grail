@@ -1,4 +1,4 @@
-"""Shared MRS test utilities to keep tests DRY.
+"""Shared proof test utilities to keep tests DRY.
 
 Functions here are imported by multiple test modules.
 """
@@ -13,12 +13,12 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from grail.protocol.crypto import indices_from_root
-from grail.protocol.mrs_verifier import MRSVerifier
+from grail.protocol.grail_verifier import GRAILVerifier
 from grail.shared.constants import (
     CHALLENGE_K,
-    GRAIL_PROOF_VERSION_MRS,
+    GRAIL_PROOF_VERSION,
     LAYER_INDEX,
-    MRS_TOPK,
+    PROOF_TOPK,
 )
 from grail.shared.hf_compat import resolve_hidden_size
 
@@ -40,54 +40,54 @@ def ensure_min_tokens(tokenizer: PreTrainedTokenizerBase, text: str, min_tokens:
         candidate += filler
 
 
-def create_mrs_proof(
+def create_proof(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizerBase,
     prompt: str,
     randomness_hex: str,
     device: str,
 ) -> dict:
-    """Generate MRS proof using HF, robust to small model size variations."""
+    """Generate proof using HF, robust to small model size variations."""
     prompt = ensure_min_tokens(tokenizer, prompt, max(CHALLENGE_K + 4, 24))
     inputs = tokenizer.__call__(prompt, return_tensors="pt").to(device)
     tokens = inputs["input_ids"][0].tolist()
 
     hidden_dim = resolve_hidden_size(model)
-    topk = min(int(hidden_dim), int(MRS_TOPK))
-    verifier = MRSVerifier(hidden_dim=hidden_dim, topk=topk)
+    topk = min(int(hidden_dim), int(PROOF_TOPK))
+    verifier = GRAILVerifier(hidden_dim=hidden_dim, topk=topk)
     r_vec = verifier.generate_r_vec(randomness_hex)
 
-    mrs_commitments = []
+    commitments = []
     with torch.inference_mode():
         outputs = model(inputs["input_ids"], output_hidden_states=True)
         layer_idx = min(LAYER_INDEX, len(outputs.hidden_states) - 1)
         h_layer = outputs.hidden_states[layer_idx][0]
         for pos in range(len(tokens)):
             commitment = verifier.create_commitment(h_layer[pos], r_vec, pos)
-            mrs_commitments.append(commitment)
+            commitments.append(commitment)
 
     return {
         "tokens": tokens,
-        "mrs_commitments": mrs_commitments,
-        "proof_version": GRAIL_PROOF_VERSION_MRS,
+        "commitments": commitments,
+        "proof_version": GRAIL_PROOF_VERSION,
         "randomness": randomness_hex,
     }
 
 
-def verify_mrs_proof(
+def verify_proof(
     model: PreTrainedModel,
     proof: dict,
     challenge_randomness: str,
     device: str,
 ) -> tuple[bool, list[dict]]:
-    """Verify MRS proof with robust guards for mismatch cases."""
+    """Verify proof with robust guards for mismatch cases."""
     tokens = proof["tokens"]
-    mrs_commitments = proof["mrs_commitments"]
+    commitments = proof["commitments"]
     randomness_hex = proof["randomness"]
 
     hidden_dim = resolve_hidden_size(model)
-    commit_topk = int(len(mrs_commitments[0]["indices"]))
-    verifier = MRSVerifier(hidden_dim=hidden_dim, topk=commit_topk)
+    commit_topk = int(len(commitments[0]["indices"]))
+    verifier = GRAILVerifier(hidden_dim=hidden_dim, topk=commit_topk)
     r_vec = verifier.generate_r_vec(randomness_hex)
 
     # Early guard: ensure tokens exist in validator vocab
@@ -115,7 +115,7 @@ def verify_mrs_proof(
     diagnostics_list = []
     validator_hidden_dim = int(h_layer.size(-1))
     for i in idxs:
-        miner_indices = mrs_commitments[i]["indices"]
+        miner_indices = commitments[i]["indices"]
         if max(miner_indices) >= validator_hidden_dim:
             diagnostics_list.append(
                 {
@@ -128,7 +128,7 @@ def verify_mrs_proof(
             all_valid = False
             continue
         is_valid, diagnostics = verifier.verify_commitment(
-            h_layer[i], mrs_commitments[i], r_vec, len(tokens)
+            h_layer[i], commitments[i], r_vec, len(tokens)
         )
         diagnostics_list.append({"position": i, **diagnostics})
         if not is_valid:

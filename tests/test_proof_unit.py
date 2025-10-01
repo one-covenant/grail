@@ -1,21 +1,21 @@
-"""Unit tests for MRS verifier components.
+"""Unit tests for GRAIL proof verifier components.
 
-Tests individual functions and properties of the MRS verification system.
+Tests individual functions and properties of the GRAIL proof verification system.
 """
 
 import pytest
 import torch
 
-from grail.protocol.mrs_verifier import (
-    MRSVerifier,
+from grail.protocol.grail_verifier import (
+    GRAILVerifier,
     adaptive_tolerance,
     log_magnitude_bucket,
 )
 from grail.shared.constants import (
-    MRS_HISTOGRAM_TOLERANCE,
-    MRS_MIN_RANK_MATCHES,
-    MRS_NUM_BUCKETS,
-    MRS_SKETCH_TOLERANCE,
+    PROOF_HISTOGRAM_TOLERANCE,
+    PROOF_MIN_RANK_MATCHES,
+    PROOF_NUM_BUCKETS,
+    PROOF_SKETCH_TOLERANCE,
 )
 
 
@@ -51,7 +51,7 @@ class TestLogMagnitudeBucket:
     def test_bucket_bounds(self):
         """Bucket indices are bounded by num_buckets."""
         b_huge = log_magnitude_bucket(1000.0)
-        assert abs(b_huge) <= MRS_NUM_BUCKETS
+        assert abs(b_huge) <= PROOF_NUM_BUCKETS
 
 
 class TestAdaptiveTolerance:
@@ -61,9 +61,9 @@ class TestAdaptiveTolerance:
     def base_tolerances(self):
         """Base tolerance dict fixture."""
         return {
-            "sketch": float(MRS_SKETCH_TOLERANCE),
-            "min_rank_matches": float(MRS_MIN_RANK_MATCHES),
-            "histogram": float(MRS_HISTOGRAM_TOLERANCE),
+            "sketch": float(PROOF_SKETCH_TOLERANCE),
+            "min_rank_matches": float(PROOF_MIN_RANK_MATCHES),
+            "histogram": float(PROOF_HISTOGRAM_TOLERANCE),
         }
 
     def test_early_position_tighter(self, base_tolerances):
@@ -84,13 +84,13 @@ class TestAdaptiveTolerance:
         assert tol_early["sketch"] <= tol_mid["sketch"] <= tol_late["sketch"]
 
 
-class TestMRSVerifier:
-    """Test suite for MRSVerifier class."""
+class TestGRAILVerifier:
+    """Test suite for GRAILVerifier class."""
 
     @pytest.fixture
     def verifier(self):
-        """MRSVerifier fixture."""
-        return MRSVerifier(hidden_dim=4096, topk=256)
+        """GRAILVerifier fixture."""
+        return GRAILVerifier(hidden_dim=4096, topk=256)
 
     @pytest.fixture
     def randomness(self):
@@ -140,7 +140,7 @@ class TestMRSVerifier:
 
         assert len(commitment["indices"]) == 256
         assert len(commitment["top_5_ranks"]) == 5
-        assert len(commitment["histogram"]) == 2 * MRS_NUM_BUCKETS + 1
+        assert len(commitment["histogram"]) == 2 * PROOF_NUM_BUCKETS + 1
 
     def test_self_verification(self, verifier, randomness):
         """Commitment should verify against itself perfectly."""
@@ -172,7 +172,7 @@ class TestMRSVerifier:
         )
 
         assert is_valid, f"Small drift caused failure: {diagnostics}"
-        assert diagnostics["sketch_diff"] < MRS_SKETCH_TOLERANCE
+        assert diagnostics["sketch_diff"] < PROOF_SKETCH_TOLERANCE
 
     def test_rejects_different_hidden_state(self, verifier, randomness):
         """Completely different hidden state should be rejected."""

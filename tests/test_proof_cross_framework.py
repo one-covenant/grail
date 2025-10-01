@@ -1,6 +1,6 @@
-"""Cross-framework test for MRS proof verification.
+"""Cross-framework test for GRAIL proof verification.
 
-Tests that MRS proofs are deterministic and work correctly with production-like
+Tests that GRAIL proofs are deterministic and work correctly with production-like
 SAT prompts resembling actual GRAIL mining scenarios.
 """
 
@@ -14,19 +14,19 @@ from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from grail.shared.constants import (
     CHALLENGE_K,
-    GRAIL_PROOF_VERSION_MRS,
+    GRAIL_PROOF_VERSION,
     MODEL_NAME,
 )
 
-from .mrs_test_utils import (
-    create_mrs_proof,
-    verify_mrs_proof,
+from .proof_test_utils import (
+    create_proof,
+    verify_proof,
 )
 
 # GPU requirement check
 requires_gpu = pytest.mark.skipif(
     not torch.cuda.is_available(),
-    reason="GPU required for MRS cross-framework tests (CUDA not available)",
+    reason="GPU required for GRAIL proof cross-framework tests (CUDA not available)",
 )
 
 
@@ -117,7 +117,7 @@ def production_prompts() -> list[str]:
 
 
 class TestMRSCrossFramework:
-    """Cross-framework compatibility tests for MRS."""
+    """Cross-framework compatibility tests for GRAIL proof."""
 
     @requires_gpu
     @pytest.mark.parametrize("prompt_idx", [0, 1, 2, 3])
@@ -129,15 +129,15 @@ class TestMRSCrossFramework:
         production_prompts: list[str],
         prompt_idx: int,
     ) -> None:
-        """Test MRS with production-like prompts (HF → HF, same run)."""
+        """Test GRAIL proof with production-like prompts (HF → HF, same run)."""
         prompt = production_prompts[prompt_idx]
-        from .mrs_test_utils import hash_hex
+        from .proof_test_utils import hash_hex
 
         randomness = hash_hex(f"rand|{prompt_idx}|{prompt[:64]}")
         challenge = hash_hex(f"chal|{prompt_idx}|{prompt[-64:]}")
 
         # Generate proof
-        proof = create_mrs_proof(
+        proof = create_proof(
             model,
             tokenizer,  # type: ignore[arg-type]
             prompt,
@@ -146,10 +146,10 @@ class TestMRSCrossFramework:
         )
 
         assert len(proof["tokens"]) >= CHALLENGE_K, "Not enough tokens for challenge"
-        assert len(proof["mrs_commitments"]) == len(proof["tokens"])
+        assert len(proof["commitments"]) == len(proof["tokens"])
 
         # Verify proof
-        is_valid, diagnostics = verify_mrs_proof(model, proof, challenge, device)
+        is_valid, diagnostics = verify_proof(model, proof, challenge, device)
 
         # All checks should pass perfectly (same run)
         assert is_valid, f"Prompt {prompt_idx} verification failed"
@@ -182,7 +182,7 @@ class TestMRSCrossFramework:
         model1 = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME, torch_dtype=torch.float32, device_map=device
         )
-        proof = create_mrs_proof(
+        proof = create_proof(
             model1,
             tokenizer,  # type: ignore[arg-type]
             prompt,
@@ -197,7 +197,7 @@ class TestMRSCrossFramework:
         model2 = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME, torch_dtype=torch.float32, device_map=device
         )
-        is_valid, diagnostics = verify_mrs_proof(model2, proof, challenge, device)
+        is_valid, diagnostics = verify_proof(model2, proof, challenge, device)
         del model2
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -222,7 +222,7 @@ class TestMRSCrossFramework:
         """Test that generated proofs have correct structure."""
         prompt = production_prompts[0]
         randomness = "feedbeef"
-        proof = create_mrs_proof(
+        proof = create_proof(
             model,
             tokenizer,  # type: ignore[arg-type]
             prompt,
@@ -231,10 +231,10 @@ class TestMRSCrossFramework:
         )
 
         assert "tokens" in proof
-        assert "mrs_commitments" in proof
+        assert "commitments" in proof
         assert "proof_version" in proof
         assert "randomness" in proof
-        assert proof["proof_version"] == GRAIL_PROOF_VERSION_MRS
+        assert proof["proof_version"] == GRAIL_PROOF_VERSION
 
     @requires_gpu
     def test_commitment_integrity(
@@ -247,7 +247,7 @@ class TestMRSCrossFramework:
         """Test that each commitment in proof is well-formed."""
         prompt = production_prompts[0]
         randomness = "cafebabe"
-        proof = create_mrs_proof(
+        proof = create_proof(
             model,
             tokenizer,  # type: ignore[arg-type]
             prompt,
@@ -255,7 +255,7 @@ class TestMRSCrossFramework:
             device,
         )
 
-        for idx, commitment in enumerate(proof["mrs_commitments"]):
+        for idx, commitment in enumerate(proof["commitments"]):
             assert "sketch" in commitment, f"Position {idx} missing sketch"
             assert "indices" in commitment, f"Position {idx} missing indices"
             assert "top_5_ranks" in commitment, f"Position {idx} missing ranks"
@@ -282,20 +282,20 @@ class TestMRSCrossFramework:
         all_rank_matches = []
         all_hist_diffs = []
 
-        from .mrs_test_utils import hash_hex
+        from .proof_test_utils import hash_hex
 
         for idx, prompt in enumerate(production_prompts):
             randomness = hash_hex(f"test_metrics_{idx}")
             challenge = hash_hex(f"challenge_{idx}")
 
-            proof = create_mrs_proof(
+            proof = create_proof(
                 model,
                 tokenizer,  # type: ignore[arg-type]
                 prompt,
                 randomness,
                 device,
             )
-            is_valid, diagnostics = verify_mrs_proof(model, proof, challenge, device)
+            is_valid, diagnostics = verify_proof(model, proof, challenge, device)
 
             assert is_valid, f"Verification failed for prompt {idx}"
 

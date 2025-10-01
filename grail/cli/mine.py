@@ -420,14 +420,14 @@ def package_rollout_data(
 ) -> dict:
     """Assemble the full on-chain/off-chain payload for a single rollout.
 
-    This binds model outputs (tokens, s_vals) to the randomness, model name,
+    This binds model outputs (tokens, commitments) to the randomness, model name,
     and layer via a commit-binding signature, and includes proof and SAT
     metadata required by validators.
 
     Args:
         model: Loaded model (for name_or_path)
         wallet: Miner wallet for signing
-        rollout: Generated rollout with tokens/s_vals/trajectory
+        rollout: Generated rollout with tokens/commitments/trajectory
         base_nonce: Base nonce for the group
         rollout_idx: Index within the group
         total_in_group: Total rollouts in group
@@ -446,13 +446,17 @@ def package_rollout_data(
     rollout_nonce = base_nonce * 10 + rollout_idx
     rollout_sat_seed = f"{wallet.hotkey.ss58_address}-{window_block_hash}-{rollout_nonce}"
 
-    # Sign MRS commitments for binding
-    import hashlib
-    import json
+    # Sign commit binding (tokens, randomness, model, layer, commitments)
+    from ..protocol.signatures import sign_commit_binding
 
-    commitment_data = json.dumps(rollout.mrs_commitments, sort_keys=True)
-    commitment_hash = hashlib.sha256(commitment_data.encode()).digest()
-    commit_sig = wallet.hotkey.sign(commitment_hash)
+    commit_sig = sign_commit_binding(
+        tokens=rollout.tokens,
+        randomness_hex=combined_randomness,
+        model_name=model.name_or_path,
+        layer_index=LAYER_INDEX,
+        commitments=rollout.commitments,
+        wallet=wallet,
+    )
 
     assignment = extract_assignment_from_rollout(rollout)
     satisfied_clauses = count_satisfied_clauses(sat_problem, assignment)
@@ -471,7 +475,7 @@ def package_rollout_data(
         "total_in_group": total_in_group,
         "commit": {
             "tokens": rollout.tokens,
-            "mrs_commitments": rollout.mrs_commitments,
+            "commitments": rollout.commitments,
             "proof_version": rollout.proof_version,
             "model": {
                 "name": model.name_or_path,

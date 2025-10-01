@@ -1,6 +1,6 @@
-"""Model-mismatch tests for MRS proof verification.
+"""Model-mismatch tests for GRAIL proof verification.
 These tests ensure that when miner and validator use different models,
-the MRS verification fails (as expected). We keep defaults tiny to run fast,
+the GRAIL proof verification fails (as expected). We keep defaults tiny to run fast,
 and gate larger models via environment flags.
 """
 
@@ -11,17 +11,17 @@ import os
 import pytest
 import torch
 
-from .mrs_test_utils import (
-    create_mrs_proof,
+from .proof_test_utils import (
+    create_proof,
     hash_hex,
     load_model_and_tokenizer,
-    verify_mrs_proof,
+    verify_proof,
 )
 
 # GPU requirement check
 requires_gpu = pytest.mark.skipif(
     not torch.cuda.is_available(),
-    reason="GPU required for MRS model mismatch tests (CUDA not available)",
+    reason="GPU required for GRAIL proof model mismatch tests (CUDA not available)",
 )
 
 
@@ -37,7 +37,7 @@ def prompt() -> str:
         "<start_working_out>...</end_working_out>. "
         "Final answer in <SOLUTION></SOLUTION>. "
         "<start_working_out>"
-        "We test MRS commitment robustness under model mismatch."
+        "We test GRAIL proof commitment robustness under model mismatch."
     )
 
 
@@ -139,7 +139,7 @@ class TestMRSModelMismatch:
             challenge = hash_hex(f"chal|tiny|{miner_name}|{validator_name}")
 
             # Generate proof with miner model
-            proof = create_mrs_proof(
+            proof = create_proof(
                 miner,
                 tokenizer_m,
                 prompt,
@@ -148,7 +148,7 @@ class TestMRSModelMismatch:
             )
 
             # Verify with different validator model
-            is_valid, _ = verify_mrs_proof(validator, proof, challenge, device)
+            is_valid, _ = verify_proof(validator, proof, challenge, device)
 
             assert not is_valid, (
                 "Expected verification failure with different models: "
@@ -184,14 +184,14 @@ class TestMRSModelMismatch:
             randomness = hash_hex(f"rand|large|{miner_name}|{validator_name}")
             challenge = hash_hex(f"chal|large|{miner_name}|{validator_name}")
 
-            proof = create_mrs_proof(
+            proof = create_proof(
                 miner,
                 tokenizer_m,
                 prompt,
                 randomness,
                 device,
             )
-            is_valid, _ = verify_mrs_proof(
+            is_valid, _ = verify_proof(
                 validator,
                 proof,
                 challenge,
