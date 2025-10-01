@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .distribution import DistributionValidator
+from .mrs_proof import MRSProofValidator
 from .proof import GRAILProofValidator
 from .sat import SATProblemValidator, SATPromptValidator, SATSolutionValidator
 from .schema import SchemaValidator
@@ -13,6 +14,7 @@ __all__ = [
     "SchemaValidator",
     "TokenValidator",
     "GRAILProofValidator",
+    "MRSProofValidator",
     "SATProblemValidator",
     "SATPromptValidator",
     "SATSolutionValidator",

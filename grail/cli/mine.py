@@ -17,7 +17,7 @@ import typer
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..environments import SATRolloutGenerator, generate_sat_problem
-from ..grail import derive_canonical_sat, sign_commit_binding
+from ..grail import derive_canonical_sat
 from ..infrastructure.comms import sink_window_inferences
 from ..infrastructure.drand import get_drand_beacon
 from ..infrastructure.network import create_subtensor
@@ -446,15 +446,13 @@ def package_rollout_data(
     rollout_nonce = base_nonce * 10 + rollout_idx
     rollout_sat_seed = f"{wallet.hotkey.ss58_address}-{window_block_hash}-{rollout_nonce}"
 
-    # Commit-binding signature
-    commit_sig = sign_commit_binding(
-        rollout.tokens,
-        combined_randomness,
-        model.name_or_path,
-        LAYER_INDEX,
-        rollout.s_vals,
-        wallet,
-    )
+    # Sign MRS commitments for binding
+    import hashlib
+    import json
+
+    commitment_data = json.dumps(rollout.mrs_commitments, sort_keys=True)
+    commitment_hash = hashlib.sha256(commitment_data.encode()).digest()
+    commit_sig = wallet.hotkey.sign(commitment_hash)
 
     assignment = extract_assignment_from_rollout(rollout)
     satisfied_clauses = count_satisfied_clauses(sat_problem, assignment)
@@ -473,7 +471,8 @@ def package_rollout_data(
         "total_in_group": total_in_group,
         "commit": {
             "tokens": rollout.tokens,
-            "s_vals": rollout.s_vals,
+            "mrs_commitments": rollout.mrs_commitments,
+            "proof_version": rollout.proof_version,
             "model": {
                 "name": model.name_or_path,
                 "layer_index": LAYER_INDEX,

@@ -25,6 +25,7 @@ from .pipeline import ValidationPipeline
 from .validators import (
     DistributionValidator,
     GRAILProofValidator,
+    MRSProofValidator,
     SATProblemValidator,
     SATPromptValidator,
     SATSolutionValidator,
@@ -40,7 +41,7 @@ def create_sat_validation_pipeline() -> ValidationPipeline:
     Pipeline order (fail-fast):
     1. Schema (structure/types, no GPU)
     2. Tokens (vocab bounds, sequence length)
-    3. GRAIL proof (cryptographic, caches logits)
+    3. MRS proof (GPU/framework-agnostic cryptographic proof, caches logits)
     4. SAT problem (regeneration from seed)
     5. SAT prompt (canonical prefix matching)
     6. Termination (max length or EOS)
@@ -51,7 +52,7 @@ def create_sat_validation_pipeline() -> ValidationPipeline:
         [
             SchemaValidator(),  # FIRST - structure/types, no GPU
             TokenValidator(),  # SECOND - vocab/length check
-            GRAILProofValidator(),
+            MRSProofValidator(),  # NEW: MRS-based proof validation
             SATProblemValidator(),
             SATPromptValidator(),
             TerminationValidator(),

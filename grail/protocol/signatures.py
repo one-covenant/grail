@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Domain separation for commit bindings
 COMMIT_DOMAIN = b"grail-commit-v1"
+COMMIT_DOMAIN_MRS = b"grail-commit-v2-mrs"
 
 
 def sign_s_vals(s_vals: list[int], wallet: bt.wallet) -> bytes:  # type: ignore[misc]
@@ -86,6 +87,21 @@ def verify_s_vals_signature(s_vals: list[int], signature: bytes, wallet_address:
         return False
 
 
+def hash_mrs_commitments(mrs_commitments: list[dict]) -> bytes:
+    """Return SHA-256 over a canonical JSON encoding of MRS commitments.
+
+    Uses sort_keys=True and compact separators to avoid whitespace drift.
+    """
+    try:
+        import json
+
+        payload = json.dumps(mrs_commitments, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(payload).digest()
+    except Exception as e:
+        logger.warning(f"Failed to hash MRS commitments: {e}")
+        return hashlib.sha256(b"").digest()
+
+
 def build_commit_binding(
     tokens: list[int],
     randomness_hex: str,
@@ -133,6 +149,43 @@ def build_commit_binding(
     return h.digest()
 
 
+def build_commit_binding_mrs(
+    tokens: list[int],
+    randomness_hex: str,
+    model_name: str,
+    layer_index: int,
+    mrs_commitments: list[dict],
+) -> bytes:
+    """Build domain-separated commit binding for MRS commitments.
+
+    Format: SHA256(COMMIT_DOMAIN_MRS || len(x)||x for each x in
+    [tokens_hash, rand_bytes, model_name_bytes, layer_index_be, mrs_hash]).
+    """
+
+    def _len_bytes(b: bytes) -> bytes:
+        return len(b).to_bytes(4, "big")
+
+    # Normalize randomness hex
+    rand_clean = randomness_hex.strip().replace("0x", "").replace("0X", "")
+    if len(rand_clean) % 2 != 0:
+        rand_clean = "0" + rand_clean
+    rand_bytes = bytes.fromhex(rand_clean)
+
+    # Hash components
+    tokens_h = hash_tokens(tokens)
+    mrs_h = hash_mrs_commitments(mrs_commitments)
+    model_b = (model_name or "").encode("utf-8")
+    layer_b = int(layer_index).to_bytes(4, "big", signed=True)
+
+    # Build domain-separated commitment
+    h = hashlib.sha256()
+    h.update(COMMIT_DOMAIN_MRS)
+    for part in (tokens_h, rand_bytes, model_b, layer_b, mrs_h):
+        h.update(_len_bytes(part))
+        h.update(part)
+    return h.digest()
+
+
 def sign_commit_binding(
     tokens: list[int],
     randomness_hex: str,
@@ -167,11 +220,30 @@ def sign_commit_binding(
     return wallet.hotkey.sign(msg)  # type: ignore[union-attr]
 
 
+def sign_commit_binding_mrs(
+    tokens: list[int],
+    randomness_hex: str,
+    model_name: str,
+    layer_index: int,
+    mrs_commitments: list[dict],
+    wallet: bt.wallet,  # type: ignore[misc]
+) -> bytes:
+    """Sign the MRS commit-binding message with wallet hotkey."""
+    if bt is None:
+        raise ImportError("bittensor is required for sign_commit_binding_mrs")
+    if not hasattr(wallet, "hotkey") or not hasattr(wallet.hotkey, "sign"):
+        raise TypeError("Wallet must provide hotkey.sign()")
+    msg = build_commit_binding_mrs(tokens, randomness_hex, model_name, layer_index, mrs_commitments)
+    return wallet.hotkey.sign(msg)  # type: ignore[union-attr]
+
+
 def verify_commit_signature(commit: dict, wallet_address: str) -> bool:
-    """Verify commit signature binding tokens, randomness, model, layer, and s_vals.
+    """Verify commit signature binding tokens, randomness, model, layer, and proofs.
+
+    Supports both legacy (s_vals) and MRS (mrs_commitments) proof formats.
 
     Args:
-        commit: Commit data with tokens, s_vals, beacon, model info, and signature
+        commit: Commit data with tokens, proof data, beacon, model info, and signature
         wallet_address: SS58 address for public key verification
 
     Returns:
@@ -181,22 +253,35 @@ def verify_commit_signature(commit: dict, wallet_address: str) -> bool:
         raise ImportError("bittensor is required for verify_commit_signature")
 
     try:
-        tokens = commit["tokens"]
-        s_vals = commit["s_vals"]
-        beacon = commit.get("beacon", commit.get("round_R", {}))
-        randomness = beacon["randomness"]
-        model_info = commit.get("model", {})
-        model_name = model_info.get("name", "")
-        layer_index = int(model_info.get("layer_index"))
         sig = bytes.fromhex(commit["signature"])
-    except Exception:
-        return False
+        proof_version = commit.get("proof_version", "v1")
 
-    msg = build_commit_binding(tokens, randomness, model_name, layer_index, s_vals)
-    try:
+        if proof_version == "v2_mrs":
+            tokens = commit["tokens"]
+            mrs_commitments = commit["mrs_commitments"]
+            beacon = commit.get("beacon", commit.get("round_R", {}))
+            randomness = beacon["randomness"]
+            model_info = commit.get("model", {})
+            model_name = model_info.get("name", "")
+            layer_index = int(model_info.get("layer_index"))
+            msg = build_commit_binding_mrs(
+                tokens, randomness, model_name, layer_index, mrs_commitments
+            )
+        else:
+            # Legacy proof: signature is over commit binding
+            tokens = commit["tokens"]
+            s_vals = commit["s_vals"]
+            beacon = commit.get("beacon", commit.get("round_R", {}))
+            randomness = beacon["randomness"]
+            model_info = commit.get("model", {})
+            model_name = model_info.get("name", "")
+            layer_index = int(model_info.get("layer_index"))
+            msg = build_commit_binding(tokens, randomness, model_name, layer_index, s_vals)
+
         keypair = bt.Keypair(ss58_address=wallet_address)
         return keypair.verify(data=msg, signature=sig)  # type: ignore[union-attr,return-value]
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Signature verification failed: {e}")
         return False
 
 
