@@ -17,16 +17,17 @@ import sys
 import time
 import traceback
 from collections import Counter, defaultdict, deque
-from types import SimpleNamespace
+from types import SimpleNamespace, TracebackType
 from typing import Any, Optional
 
 import bittensor as bt
 import typer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from grail.infrastructure.drand import get_drand_beacon, get_round_at_time
 
 from ..environments import create_sat_reward_vector
-from ..grail import Verifier, derive_canonical_sat
+from ..grail import derive_canonical_sat
 from ..infrastructure.chain import GrailChainManager
 from ..infrastructure.comms import (
     file_exists,
@@ -39,9 +40,8 @@ from ..infrastructure.network import create_subtensor
 from ..logging_utils import MinerPrefixFilter, miner_log_context
 from ..monitoring import get_monitoring_manager
 from ..monitoring.config import MonitoringConfig
+from ..scoring.weights import WeightComputer
 from ..shared.constants import (
-    GRAIL_BURN_PERCENTAGE,
-    GRAIL_BURN_UID,
     MINER_SAMPLE_MAX,
     MINER_SAMPLE_MIN,
     MINER_SAMPLE_RATE,
@@ -59,6 +59,7 @@ from ..validation import (
     CopycatViolation,
     compute_completion_digest,
 )
+from ..validation.pipeline import ValidationPipeline
 from . import console
 
 # --------------------------------------------------------------------------- #
@@ -148,7 +149,9 @@ def _install_crash_diagnostics() -> None:
         pass
 
     # Ensure unhandled exceptions get logged
-    def _excepthook(exc_type, exc, tb):
+    def _excepthook(
+        exc_type: type[BaseException], exc: BaseException, tb: Optional[TracebackType]
+    ) -> None:
         try:
             if exc_type is KeyboardInterrupt:
                 # Let standard handling occur for Ctrl-C
@@ -182,14 +185,16 @@ REWARD_REL_TOL = 0.02  # Relative tolerance on reward bounds
 REWARD_ABS_TOL = 1e-6  # Absolute tolerance on reward bounds
 GRPO_ADV_SUM_TOLERANCE = 0.01  # Sum of advantages should be ~0
 DEBUG_TEXT_LOG_LIMIT_PER_WALLET = 5  # Max sample texts logged per wallet
-SOFT_CHECK_KEY = "token_distribution_valid"  # Soft heuristic key from verifier
-HARD_CHECK_KEYS = (  # Hard checks required for validity
-    "tokens_valid",
-    "proof_valid",
-    "sat_problem_valid",
-    "prompt_valid",
-    "termination_valid",
-    "solution_valid",
+SOFT_CHECK_KEY = "token_distribution_valid"  # Soft heuristic (reduces score, doesn't reject)
+
+HARD_CHECK_KEYS = (  # Hard checks required for validity (fail any = reject)
+    "schema_valid",  # Schema/structure validation
+    "tokens_valid",  # Token vocab/length validation
+    "proof_valid",  # GRAIL cryptographic proof
+    "sat_problem_valid",  # SAT problem regeneration
+    "prompt_valid",  # Canonical prompt matching
+    "termination_valid",  # Max length or confident EOS
+    "solution_valid",  # Assignment correctness (if success claimed)
 )
 
 # Per-wallet per-window failure flag for gating across rolling windows
@@ -204,20 +209,6 @@ WEIGHT_ROLLING_WINDOWS = int(WEIGHT_SUBMISSION_INTERVAL_BLOCKS / WINDOW_LENGTH)
 # Number of miners to log in detail on submission
 # TODO: reduce this later
 TOP_K_WEIGHTS_LOGGED = 256
-
-# Required fields for SAT rollouts validation
-REQUIRED_ROLLOUT_FIELDS = [
-    "window_start",
-    "nonce",
-    "sat_seed",
-    "block_hash",
-    "commit",
-    "proof",
-    "challenge",
-    "hotkey",
-    "signature",
-    "rollout_group",
-]
 
 # --------------------------------------------------------------------------- #
 #                             Utility helpers                                 #
@@ -323,7 +314,7 @@ async def _list_active_hotkeys_for_window(
     chain_manager: "GrailChainManager",
     default_credentials: Any,
     uid_by_hotkey: Optional[dict[str, int]] = None,
-    concurrency: int = 16,
+    concurrency: int = 4,
 ) -> list[str]:
     """Return hotkeys with an available window file for the given window.
 
@@ -582,7 +573,10 @@ def _get_sat_reward_bounds() -> tuple[float, float]:
 
 async def _run_validation_service(
     wallet: bt.wallet,
-    verifier: "Verifier",
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    sat_pipeline: ValidationPipeline,
+    weight_computer: WeightComputer,
     sat_reward_low: float,
     sat_reward_high: float,
     use_drand: bool,
@@ -592,7 +586,10 @@ async def _run_validation_service(
 
     Args:
         wallet: Bittensor wallet used for signing and network ops.
-        verifier: GRAIL verifier instance with model/tokenizer loaded.
+        model: Loaded model instance.
+        tokenizer: Loaded tokenizer instance.
+        sat_pipeline: SAT validation pipeline.
+        weight_computer: Weight computer instance.
         sat_reward_low: Lower bound for SAT rollout reward sanity checks.
         sat_reward_high: Upper bound for SAT rollout reward sanity checks.
         use_drand: Whether to incorporate drand randomness in challenges.
@@ -657,6 +654,7 @@ async def _run_validation_service(
 
                 if monitor:
                     monitor.set_block_context(current_block, target_window)
+
                 # ------------------------------------------------------------------ #
                 # Training integration (commented for now):
                 #
@@ -696,6 +694,7 @@ async def _run_validation_service(
                 #         "No model checkpoint available for window %s", target_window
                 #     )
                 # Using base model directly without waiting for state
+
                 logger.info("🚀 Using base model for verification")
 
                 # Reset copycat tracker at the start of each submission interval,
@@ -801,7 +800,9 @@ async def _run_validation_service(
                     target_window_hash=target_window_hash,
                     window_rand=window_rand,
                     wallet=wallet,
-                    verifier=verifier,
+                    model=model,
+                    tokenizer=tokenizer,
+                    sat_pipeline=sat_pipeline,
                     credentials=credentials,
                     chain_manager=chain_manager,
                     monitor=monitor,
@@ -919,12 +920,12 @@ async def _run_validation_service(
                         "text",
                     )
 
-                # Compute and set weights
-                weights, non_zero_weights = _compute_weights(
+                # Compute and set weights using weight computer
+                weights, non_zero_weights = weight_computer.compute_weights(
                     meta_hotkeys=meta.hotkeys,
+                    meta_uids=list(meta.uids),
                     inference_counts=inference_counts,
                     target_window=target_window,
-                    meta_uids=list(meta.uids),
                 )
                 if non_zero_weights:
                     logger.info(f"⚖️  Setting weights for {len(non_zero_weights)} miners")
@@ -1323,7 +1324,9 @@ async def _process_window(
     target_window_hash: str,
     window_rand: str,
     wallet: bt.wallet,
-    verifier: "Verifier",
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    sat_pipeline: ValidationPipeline,
     credentials: Any,
     chain_manager: GrailChainManager,
     monitor: Any,
@@ -1411,7 +1414,9 @@ async def _process_window(
                     target_window_hash=target_window_hash,
                     window_rand=window_rand,
                     wallet=wallet,
-                    verifier=verifier,
+                    model=model,
+                    tokenizer=tokenizer,
+                    sat_pipeline=sat_pipeline,
                     credentials=credentials,
                     chain_manager=chain_manager,
                     monitor=monitor,
@@ -1684,7 +1689,9 @@ async def _process_wallet_window(
     target_window_hash: str,
     window_rand: str,
     wallet: bt.wallet,
-    verifier: "Verifier",
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    sat_pipeline: ValidationPipeline,
     credentials: Any,
     chain_manager: GrailChainManager,
     monitor: Any,
@@ -1862,14 +1869,7 @@ async def _process_wallet_window(
         checked_count += 1
 
         try:
-            required_fields = REQUIRED_ROLLOUT_FIELDS
-            missing_fields = [field for field in required_fields if field not in inference]
-            if missing_fields:
-                hard_failure = True
-                logger.warning(
-                    f"Missing required fields {missing_fields} in inference; invalidating uid"
-                )
-                break
+            # Window consistency check
             if inference["window_start"] != target_window:
                 hard_failure = True
                 logger.warning("Window mismatch in inference; invalidating uid")
@@ -1939,23 +1939,24 @@ async def _process_wallet_window(
                 satp["difficulty"] = can_diff
 
                 challenge_rand = window_rand
+
+                # Use validation pipeline
+                from grail.validation.context import ValidationContext
+
+                ctx = ValidationContext(
+                    commit=commit_data,
+                    prover_address=wallet_addr,
+                    challenge_randomness=challenge_rand,
+                    model=model,
+                    tokenizer=tokenizer,
+                    device=model.device,
+                )
+
                 if monitor:
                     with monitor.timer("validation/rollout_verification"):
-                        is_valid, checks = verifier.verify_rollout(
-                            commit_data,
-                            inference["proof"],
-                            wallet_addr,
-                            challenge_randomness=challenge_rand,
-                            log_identity=uid_str,
-                        )
+                        is_valid, checks = sat_pipeline.validate(ctx)
                 else:
-                    is_valid, checks = verifier.verify_rollout(
-                        commit_data,
-                        inference["proof"],
-                        wallet_addr,
-                        challenge_randomness=challenge_rand,
-                        log_identity=uid_str,
-                    )
+                    is_valid, checks = sat_pipeline.validate(ctx)
 
                 pr_total += 1
                 # Hard checks are cryptographic/proof constraints; any failure rejects wallet
@@ -1972,6 +1973,7 @@ async def _process_wallet_window(
                             break
                     if failed_hard_check:
                         logger.debug(f"CHECK_FAILURE type=hard failed_check={failed_hard_check}")
+
                 if not soft_valid:
                     logger.debug(f"CHECK_FAILURE type=soft failed_check={SOFT_CHECK_KEY}")
 
@@ -2040,10 +2042,10 @@ async def _process_wallet_window(
                             completion_ids = tokens[prompt_len : prompt_len + completion_len]
                         else:
                             completion_ids = tokens[prompt_len:]
-                        problem_text = verifier.tokenizer.decode(
+                        problem_text = tokenizer.decode(
                             tokens[:prompt_len], skip_special_tokens=False
                         )
-                        text = verifier.tokenizer.decode(completion_ids, skip_special_tokens=False)
+                        text = tokenizer.decode(completion_ids, skip_special_tokens=False)
                         reward_val = rollout_meta.get("total_reward", float("nan"))
                         adv_val = rollout_meta.get("advantage", float("nan"))
                         success_val = rollout_meta.get("success", False)
@@ -2224,155 +2226,6 @@ async def _process_wallet_window(
         rollout_digest_counter,
         total_inferences,
     )
-
-
-def _compute_weights(
-    meta_hotkeys: list[str],
-    inference_counts: defaultdict[str, defaultdict[int, dict[str, int]]],
-    target_window: int,
-    meta_uids: Optional[list[int]] = None,
-) -> tuple[list[float], list[tuple[str, float]]]:
-    """Compute normalized weights over the last N windows.
-
-    Args:
-        meta_hotkeys: Hotkeys in metagraph order.
-        inference_counts: hotkey -> window_start -> metrics dict.
-        target_window: Right edge (inclusive) of the range.
-
-    Method:
-        Sum metrics over the last WEIGHT_ROLLING_WINDOWS windows
-        (step=WINDOW_LENGTH; missing windows -> 0). Convert to capped
-        scores in [0, 1]; only 'unique' is currently weighted. Apply
-        x**SUPERLINEAR_EXPONENT, then L1-normalize across miners. If the
-        sum is zero, return an all-zero vector.
-
-    Returns:
-        (weights, non_zero_weights)
-        weights: floats aligned to meta_hotkeys; sums to 1.0 or all zeros.
-        non_zero_weights: (hotkey, weight) pairs where weight > 0.0.
-    """
-    EMPTY_METRICS: dict[str, int] = {}
-    raw_scores = []
-
-    for _, hotkey in enumerate(meta_hotkeys):
-        # Calculate score over last 12 windows
-        recent_windows = range(
-            max(0, target_window - (WEIGHT_ROLLING_WINDOWS - 1) * WINDOW_LENGTH),
-            target_window + 1,
-            WINDOW_LENGTH,
-        )
-        # Gate weight to zero if any recent window had a failure
-        gated_due_to_failures = False
-        for w in recent_windows:
-            if int(inference_counts[hotkey].get(w, EMPTY_METRICS).get(FAILURE_FLAG_KEY, 0)) == 1:
-                gated_due_to_failures = True
-                break
-        if gated_due_to_failures:
-            logger.debug(
-                f"[MINER hotkey={hotkey}] Gating weight due to failures in last {WEIGHT_ROLLING_WINDOWS} windows"
-            )
-            raw_scores.append(0.0)
-            continue
-        total_unique = 0
-        total_successful = 0
-        total_estimated_valid = 0
-
-        for w in recent_windows:
-            metrics = inference_counts[hotkey].get(w, EMPTY_METRICS)
-            total_unique += metrics.get("estimated_unique", 0)
-            total_successful += metrics.get("estimated_successful", 0)
-            total_estimated_valid += metrics.get("estimated_valid", 0)
-
-        # Scoring formula: prioritize unique solutions, then successful, then valid
-        # Base performance score (unbounded to differentiate high performers)
-        unique_score = total_unique  # NOTE: made unique score unbounded!
-        success_score = min(1.0, total_successful / 20.0) if total_successful > 0 else 0
-        valid_score = min(1.0, total_estimated_valid / 50.0) if total_estimated_valid > 0 else 0
-        # NOTE: at this stage we only give weights to unique scores
-        base_score = 1.0 * unique_score + 0.0 * success_score + 0.0 * valid_score
-        # Remove upper bound to allow differentiation between high performers
-        base_score = max(0.0, base_score)
-
-        # Apply superlinear curve: emphasizes higher performers and penalizes splitting
-        superlinear_score = base_score**SUPERLINEAR_EXPONENT
-        raw_scores.append(superlinear_score)
-
-    # Normalize and capture pre-burn non-zero indices
-    denom = math.fsum(raw_scores)
-    if denom > 0.0:
-        pre_burn_weights = [score / denom for score in raw_scores]
-    else:
-        pre_burn_weights = [0.0] * len(meta_hotkeys)
-    pre_burn_nonzero_indices = [i for i, w in enumerate(pre_burn_weights) if w > 0.0]
-
-    # Start from pre-burn weights
-    weights = list(pre_burn_weights)
-
-    # Apply burn mechanism in a mass-preserving way
-    burn_uid = GRAIL_BURN_UID
-    burn_percentage = GRAIL_BURN_PERCENTAGE
-    burn_index = None
-
-    if burn_uid is not None and burn_uid >= 0 and burn_percentage > 0 and meta_uids is not None:
-        try:
-            burn_uid = int(burn_uid)
-            burn_percentage = max(0.0, min(100.0, burn_percentage))
-            burn_fraction = burn_percentage / 100.0
-
-            if burn_uid in meta_uids:
-                burn_index = meta_uids.index(burn_uid)
-
-                if denom <= 0.0:
-                    # No signal: allocate 100% to burn UID
-                    weights = [0.0] * len(meta_hotkeys)
-                    weights[burn_index] = 1.0
-                else:
-                    # Ensure burn UID gets exactly burn_fraction, scale others proportionally
-                    remaining_fraction = 1.0 - burn_fraction
-
-                    # Get sum of all non-burn weights
-                    non_burn_sum = sum(w for i, w in enumerate(pre_burn_weights) if i != burn_index)
-
-                    if non_burn_sum > 0:
-                        # Scale non-burn weights to sum to remaining_fraction
-                        scale_factor = remaining_fraction / non_burn_sum
-                        weights = [
-                            w * scale_factor if i != burn_index else 0
-                            for i, w in enumerate(pre_burn_weights)
-                        ]
-                    else:
-                        # All weight was on burn UID, so keep others at 0
-                        weights = [0.0] * len(meta_hotkeys)
-
-                    # Set burn UID to exact burn fraction
-                    weights[burn_index] = burn_fraction
-
-                logger.info(
-                    f"🔥 Burn mechanism active: Allocating {burn_percentage:.1f}% "
-                    f"of emissions to UID {burn_uid}"
-                )
-            else:
-                logger.warning(
-                    f"Burn UID {burn_uid} not found in metagraph. "
-                    f"Burn mechanism disabled for this round."
-                )
-        except (ValueError, TypeError) as e:
-            logger.error(f"Invalid burn configuration: {e}")
-    else:
-        logger.info(
-            f"Burn uid {burn_uid} or burn percentage {burn_percentage} not set, burn mechanism disabled"
-        )
-        raise ValueError(
-            "GRAIL_BURN_UID or GRAIL_BURN_PERCENTAGE not set. Please set them in .env!"
-        )
-
-    # Compose non-zero miner list from pre-burn winners plus burn UID
-    allowed_indices = set(pre_burn_nonzero_indices)
-    if burn_index is not None:
-        allowed_indices.add(burn_index)
-    non_zero_weights = [(meta_hotkeys[i], weights[i]) for i in allowed_indices if weights[i] > 0.0]
-
-    return weights, non_zero_weights
 
 
 async def _upload_rollouts(

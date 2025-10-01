@@ -14,9 +14,10 @@ from typing import Any, Optional
 import bittensor as bt
 import torch
 import typer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..environments import SATRolloutGenerator, generate_sat_problem
-from ..grail import Prover, derive_canonical_sat, sign_commit_binding
+from ..grail import derive_canonical_sat, sign_commit_binding
 from ..infrastructure.comms import sink_window_inferences
 from ..infrastructure.drand import get_drand_beacon
 from ..infrastructure.network import create_subtensor
@@ -285,18 +286,29 @@ def generate_sat_problem_for_group(
     return sat_problem, sat_seed_base
 
 
-def create_rollout_generator(prover: Prover) -> SATRolloutGenerator:
-    """Create a GRPO rollout generator configured for the prover's model."""
+def create_rollout_generator(
+    model: AutoModelForCausalLM, tokenizer: AutoTokenizer, device: torch.device
+) -> SATRolloutGenerator:
+    """Create a GRPO rollout generator configured for the given model.
+
+    Args:
+        model: Loaded language model
+        tokenizer: Loaded tokenizer
+        device: Torch device (cuda/cpu)
+
+    Returns:
+        SATRolloutGenerator instance
+    """
     return SATRolloutGenerator(
-        prover.model,
-        prover.tokenizer,
-        prover.device,
+        model,
+        tokenizer,
+        device,
         rollouts_per_problem=ROLLOUTS_PER_PROBLEM,
     )
 
 
 async def maybe_log_debug_sample(
-    prover: Prover,
+    tokenizer: AutoTokenizer,
     sample: Any,
     window_start: int,
     base_nonce: int,
@@ -306,7 +318,17 @@ async def maybe_log_debug_sample(
 ) -> int:
     """Emit a single decoded sample for debugging, rate-limited per window.
 
-    Returns the possibly incremented text_logs_emitted counter.
+    Args:
+        tokenizer: Tokenizer for decoding tokens to text
+        sample: Rollout sample to log
+        window_start: Window start block
+        base_nonce: Base nonce for the rollout group
+        monitor: Optional monitoring client
+        text_logs_emitted: Current count of emitted logs
+        text_log_limit: Maximum logs to emit
+
+    Returns:
+        Updated text_logs_emitted counter
     """
     if not logger.isEnabledFor(logging.DEBUG):
         return text_logs_emitted
@@ -322,7 +344,7 @@ async def maybe_log_debug_sample(
             completion_ids = sample.tokens[prompt_len : prompt_len + completion_len]
         else:
             completion_ids = sample.tokens[prompt_len:]
-        sample_text = prover.tokenizer.decode(completion_ids, skip_special_tokens=False)
+        sample_text = tokenizer.decode(completion_ids, skip_special_tokens=False)
         sample_nonce = base_nonce * 10
         logger.debug(
             "TEXT[mine] window=%s group=%s nonce=%s reward=%.3f adv=%.3f success=%s text=%s",
@@ -381,7 +403,7 @@ def count_satisfied_clauses(sat_problem: Any, assignment: list[bool]) -> int:
 
 
 def package_rollout_data(
-    prover: Prover,
+    model: AutoModelForCausalLM,
     wallet: bt.wallet,
     rollout: Any,
     base_nonce: int,
@@ -402,26 +424,33 @@ def package_rollout_data(
     and layer via a commit-binding signature, and includes proof and SAT
     metadata required by validators.
 
+    Args:
+        model: Loaded model (for name_or_path)
+        wallet: Miner wallet for signing
+        rollout: Generated rollout with tokens/s_vals/trajectory
+        base_nonce: Base nonce for the group
+        rollout_idx: Index within the group
+        total_in_group: Total rollouts in group
+        sat_problem: SAT problem instance
+        sat_seed_base: SAT seed
+        window_start: Window start block
+        current_block: Current block
+        window_block_hash: Window block hash
+        combined_randomness: Challenge randomness
+        difficulty: SAT difficulty
+        use_drand: Whether drand was used
+
     Returns:
-        A signed dictionary ready to upload for validation.
+        Signed dictionary ready to upload for validation
     """
     rollout_nonce = base_nonce * 10 + rollout_idx
     rollout_sat_seed = f"{wallet.hotkey.ss58_address}-{window_block_hash}-{rollout_nonce}"
-
-    # Prepare prover state and open proof
-    prover._state = {
-        "tokens": rollout.tokens,
-        "s_vals": rollout.s_vals,
-        "seq_len": len(rollout.tokens),
-        "signature": rollout.signature,
-    }
-    proof_data = prover.open(combined_randomness)
 
     # Commit-binding signature
     commit_sig = sign_commit_binding(
         rollout.tokens,
         combined_randomness,
-        prover.model.name_or_path,
+        model.name_or_path,
         LAYER_INDEX,
         rollout.s_vals,
         wallet,
@@ -446,7 +475,7 @@ def package_rollout_data(
             "tokens": rollout.tokens,
             "s_vals": rollout.s_vals,
             "model": {
-                "name": prover.model.name_or_path,
+                "name": model.name_or_path,
                 "layer_index": LAYER_INDEX,
             },
             "signature": commit_sig.hex(),
@@ -469,7 +498,6 @@ def package_rollout_data(
                 "assignment": assignment,
             },
         },
-        "proof": proof_data,
         "timestamp": time.time(),
     }
 
@@ -516,7 +544,8 @@ async def upload_inferences_with_metrics(
 
 async def generate_rollouts_for_window(
     wallet: bt.wallet,
-    prover: Prover,
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
     subtensor: bt.subtensor,
     window_start: int,
     window_block_hash: str,
@@ -535,7 +564,8 @@ async def generate_rollouts_for_window(
 
     Args:
         wallet: Miner wallet for signing and authentication.
-        prover: GRAIL prover instance with loaded model.
+        model: Loaded model instance.
+        tokenizer: Loaded tokenizer instance.
         subtensor: Bittensor client for chain reads.
         window_start: Start block of the current window.
         window_block_hash: Block hash at window start.
@@ -558,7 +588,8 @@ async def generate_rollouts_for_window(
     text_logs_emitted = 0  # Running count of emitted debug texts
     problem_count = 0
 
-    generator = create_rollout_generator(prover)
+    device = model.device
+    generator = create_rollout_generator(model, tokenizer, device)
 
     while True:
         current_block = await subtensor.get_current_block()
@@ -627,7 +658,7 @@ async def generate_rollouts_for_window(
 
             if grpo_rollouts:
                 text_logs_emitted = await maybe_log_debug_sample(
-                    prover,
+                    tokenizer,
                     grpo_rollouts[0],
                     window_start,
                     base_nonce,
@@ -668,7 +699,7 @@ async def generate_rollouts_for_window(
             # Package each rollout with signatures and proofs for validation
             for rollout_idx, rollout in enumerate(grpo_rollouts):
                 rollout_data = package_rollout_data(
-                    prover,
+                    model,
                     wallet,
                     rollout,
                     base_nonce,

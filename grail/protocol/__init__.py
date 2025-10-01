@@ -1,26 +1,22 @@
-#!/usr/bin/env python3
-"""GRAIL protocol re-exports.
+"""GRAIL protocol: cryptographic primitives, signatures, and proof verification.
 
-Stage 3: This module now serves as a re-export hub for protocol functions.
-The monolithic Verifier class (1,161 lines) has been deleted and replaced with:
-- grail.validation.validators.* - Individual validator classes
-- grail.validation.create_sat_validation_pipeline() - Pipeline composition
-- grail.scoring.* - Scoring and weight computation
-
-Original grail.py was 1,722 lines. Now 124 lines (93% reduction).
+This package contains the core GRAIL protocol implementation extracted from
+the monolithic grail.py module for better testability and maintainability.
 """
 
 from __future__ import annotations
 
-# Re-export protocol functions for backward compatibility
-from .protocol.crypto import (  # noqa: F401
+# Re-export crypto primitives
+from .crypto import (
     create_proof,
     dot_mod_q,
     indices_from_root,
     prf,
     r_vec_from_randomness,
 )
-from .protocol.signatures import (  # noqa: F401
+
+# Re-export signature functions
+from .signatures import (
     build_commit_binding,
     derive_canonical_sat,
     sign_commit_binding,
@@ -28,7 +24,9 @@ from .protocol.signatures import (  # noqa: F401
     verify_commit_signature,
     verify_s_vals_signature,
 )
-from .protocol.tokens import (  # noqa: F401
+
+# Re-export token utilities
+from .tokens import (
     hash_s_vals,
     hash_tokens,
     int_to_bytes,

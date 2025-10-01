@@ -18,7 +18,9 @@ from .environments import (  # noqa: F401, E402, E501, F403, F405
     create_sat_reward_vector,
     generate_sat_problem,
 )
-from .grail import Prover, Verifier  # noqa: F401, E402, E501, F403, F405
+
+# Stage 3c: Verifier class deleted
+# Use grail.validation.create_sat_validation_pipeline() instead
 from .infrastructure.comms import (  # noqa: F401, E402, E501, F403, F405
     PROTOCOL_VERSION,
     download_file_chunked,
@@ -45,9 +47,6 @@ from .mining.rollout_generator import RolloutGenerator  # noqa: F401, E402, E501
 # flake8: noqa: E402,E501,F401,F403,F405
 
 __all__ = [
-    # Core classes
-    "Prover",
-    "Verifier",
     # New reward system
     "Parser",
     "RewardVector",
