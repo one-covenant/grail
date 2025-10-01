@@ -21,6 +21,7 @@ import math
 import torch
 
 from ..shared.constants import (
+    PRIME_Q,
     PROOF_COEFF_RANGE,
     PROOF_HISTOGRAM_TOLERANCE,
     PROOF_MIN_RANK_MATCHES,
@@ -28,7 +29,6 @@ from ..shared.constants import (
     PROOF_POSITION_IMPORTANCE_DECAY,
     PROOF_SKETCH_TOLERANCE,
     PROOF_TOPK,
-    PRIME_Q,
 )
 
 logger = logging.getLogger(__name__)
