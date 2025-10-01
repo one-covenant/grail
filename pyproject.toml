@@ -56,13 +56,17 @@ dev = [
     "bittensor-cli>=9.10.2",
     "zstandard>=0.21.0",  # Optional: better compression than gzip
 ]
+quantization = [
+    "auto-gptq>=0.7.1",        # GPTQ quantized models
+    "autoawq>=0.2.7",          # AWQ quantized models
+]
 experiments = [
     "jupyter>=1.0.0",
     "notebook>=6.4.0",
     "seaborn>=0.11.0",
 ]
 all = [
-    "grail[dev]",
+    "grail[dev,experiments,quantization]",
 ]
 
 [project.scripts]

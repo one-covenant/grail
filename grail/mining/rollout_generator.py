@@ -54,10 +54,11 @@ class GRPORollout:
     trajectory: list[tuple[Any, Any, float]]
     success: bool
 
-    # GRAIL proof fields (from existing grail.py)
-    s_vals: list[int]
+    # GRAIL proof fields
+    commitments: list[dict]  # Activation commitments per position
     signature: bytes
     beacon: dict
+    proof_version: str  # Proof version identifier
 
 
 class RolloutGenerator(ABC):
@@ -223,26 +224,39 @@ class RolloutGenerator(ABC):
         #     # all assignments at once
         #     break
 
-        # Generate GRAIL proof components (using existing grail.py logic)
-        from ..grail import dot_mod_q, r_vec_from_randomness, sign_s_vals
+        # Generate GRAIL proof components
+        from ..protocol.grail_verifier import GRAILVerifier
+        from ..shared.constants import GRAIL_PROOF_VERSION, LAYER_INDEX
 
-        # Compute s_vals for GRAIL proof
-        r_vec = r_vec_from_randomness(randomness_hex, resolve_hidden_size(self.model))
-        s_vals = []
+        # Initialize MRS verifier
+        hidden_dim = resolve_hidden_size(self.model)
+        verifier = GRAILVerifier(hidden_dim=hidden_dim)
+
+        # Generate coefficient vector from randomness
+        r_vec = verifier.generate_r_vec(randomness_hex)
+
+        # Compute proof commitments
+        commitments = []
 
         with torch.inference_mode():
             token_tensor = torch.tensor([all_token_ids], dtype=torch.long).to(self.device)
             model_outputs = self.model(token_tensor, output_hidden_states=True)
-            # Last layer hidden states
-            h_layer = model_outputs.hidden_states[-1][0]
+            # Get hidden states at target layer
+            h_layer = model_outputs.hidden_states[LAYER_INDEX][0]
 
             for pos in range(len(all_token_ids)):
                 if pos < h_layer.size(0):
-                    s_val = dot_mod_q(h_layer[pos], r_vec)
-                    s_vals.append(s_val)
+                    commitment = verifier.create_commitment(h_layer[pos], r_vec, pos)
+                    commitments.append(commitment)
 
-        # Sign s_vals using wallet
-        signature = sign_s_vals(s_vals, wallet)
+        # Sign commit binding (not used in payload, just stored in rollout for reference)
+        # The actual signature used for validation is created in mine.py package_rollout_data
+        import hashlib
+        import json
+
+        commitment_data = json.dumps(commitments, sort_keys=True)
+        commitment_hash = hashlib.sha256(commitment_data.encode()).digest()
+        signature = wallet.hotkey.sign(commitment_hash)  # Placeholder, real sig in mine.py
 
         return GRPORollout(
             tokens=all_token_ids,
@@ -253,9 +267,10 @@ class RolloutGenerator(ABC):
             advantage=0.0,  # Will be set after all rollouts generated
             trajectory=trajectory,
             success=success,
-            s_vals=s_vals,
+            commitments=commitments,
             signature=signature,
             beacon={"randomness": randomness_hex},
+            proof_version=GRAIL_PROOF_VERSION,
         )
 
     def _extract_logprobs(self, scores: list[torch.Tensor], token_ids: list[int]) -> list[float]:

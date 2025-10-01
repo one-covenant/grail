@@ -17,7 +17,7 @@ import typer
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..environments import SATRolloutGenerator, generate_sat_problem
-from ..grail import derive_canonical_sat, sign_commit_binding
+from ..grail import derive_canonical_sat
 from ..infrastructure.comms import sink_window_inferences
 from ..infrastructure.drand import get_drand_beacon
 from ..infrastructure.network import create_subtensor
@@ -420,14 +420,14 @@ def package_rollout_data(
 ) -> dict:
     """Assemble the full on-chain/off-chain payload for a single rollout.
 
-    This binds model outputs (tokens, s_vals) to the randomness, model name,
+    This binds model outputs (tokens, commitments) to the randomness, model name,
     and layer via a commit-binding signature, and includes proof and SAT
     metadata required by validators.
 
     Args:
         model: Loaded model (for name_or_path)
         wallet: Miner wallet for signing
-        rollout: Generated rollout with tokens/s_vals/trajectory
+        rollout: Generated rollout with tokens/commitments/trajectory
         base_nonce: Base nonce for the group
         rollout_idx: Index within the group
         total_in_group: Total rollouts in group
@@ -446,14 +446,16 @@ def package_rollout_data(
     rollout_nonce = base_nonce * 10 + rollout_idx
     rollout_sat_seed = f"{wallet.hotkey.ss58_address}-{window_block_hash}-{rollout_nonce}"
 
-    # Commit-binding signature
+    # Sign commit binding (tokens, randomness, model, layer, commitments)
+    from ..protocol.signatures import sign_commit_binding
+
     commit_sig = sign_commit_binding(
-        rollout.tokens,
-        combined_randomness,
-        model.name_or_path,
-        LAYER_INDEX,
-        rollout.s_vals,
-        wallet,
+        tokens=rollout.tokens,
+        randomness_hex=combined_randomness,
+        model_name=model.name_or_path,
+        layer_index=LAYER_INDEX,
+        commitments=rollout.commitments,
+        wallet=wallet,
     )
 
     assignment = extract_assignment_from_rollout(rollout)
@@ -473,7 +475,8 @@ def package_rollout_data(
         "total_in_group": total_in_group,
         "commit": {
             "tokens": rollout.tokens,
-            "s_vals": rollout.s_vals,
+            "commitments": rollout.commitments,
+            "proof_version": rollout.proof_version,
             "model": {
                 "name": model.name_or_path,
                 "layer_index": LAYER_INDEX,
