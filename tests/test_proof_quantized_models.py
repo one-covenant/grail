@@ -44,7 +44,7 @@ def prompt() -> str:
     )
 
 
-class TestMRSQuantizedModels:
+class TestProofQuantizedModels:
     """GRAIL proof should reject proofs when quantization differs between systems."""
 
     @requires_gpu

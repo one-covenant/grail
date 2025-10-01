@@ -116,7 +116,7 @@ def production_prompts() -> list[str]:
     ]
 
 
-class TestMRSCrossFramework:
+class TestProofCrossFramework:
     """Cross-framework compatibility tests for GRAIL proof."""
 
     @requires_gpu

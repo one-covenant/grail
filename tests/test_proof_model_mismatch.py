@@ -119,7 +119,7 @@ def _model_pairs_large_from_env() -> list[tuple[str, str]]:
     return pairs
 
 
-class TestMRSModelMismatch:
+class TestProofModelMismatch:
     """Verification must fail when miner and validator models differ."""
 
     @requires_gpu
