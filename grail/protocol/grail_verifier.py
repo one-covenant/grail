@@ -59,6 +59,7 @@ def log_magnitude_bucket(value: float, num_buckets: int = PROOF_NUM_BUCKETS) -> 
     # Typical hidden state range: [-3, 3] → log2 range ~ [0, 2]
     # Scale factor maps this to [0, num_buckets)
     log_val = math.log2(abs_val + 1.0)
+    # TODO: come up with a more robust approach for measuring max log value
     scale_factor = num_buckets / 10.0  # Assuming max log value ~ 10
     bucket = int(log_val * scale_factor)
     bucket = max(0, min(num_buckets - 1, bucket))
