@@ -29,9 +29,7 @@ def hash_hex(material: str) -> str:
     return hashlib.sha256(material.encode()).hexdigest()
 
 
-def ensure_min_tokens(
-    tokenizer: PreTrainedTokenizerBase, text: str, min_tokens: int
-) -> str:
+def ensure_min_tokens(tokenizer: PreTrainedTokenizerBase, text: str, min_tokens: int) -> str:
     filler = (
         "\n\nNote: Think step by step and keep reasoning succinct. "
         "Provide only the required tags and final solution."
@@ -109,18 +107,12 @@ def verify_proof(
             }
         ]
 
-    token_tensor = torch.tensor(
-        tokens, dtype=torch.long, device=device
-    )
+    token_tensor = torch.tensor(tokens, dtype=torch.long, device=device)
     with torch.inference_mode():
-        outputs = model(
-            token_tensor.unsqueeze(0), output_hidden_states=True
-        )
+        outputs = model(token_tensor.unsqueeze(0), output_hidden_states=True)
     layer_idx = min(LAYER_INDEX, len(outputs.hidden_states) - 1)
     h_layer = outputs.hidden_states[layer_idx][0]
-    idxs = indices_from_root(
-        tokens, challenge_randomness, len(tokens), CHALLENGE_K
-    )
+    idxs = indices_from_root(tokens, challenge_randomness, len(tokens), CHALLENGE_K)
 
     all_valid = True
     diagnostics_list = []
@@ -259,14 +251,10 @@ def generate_realistic_sat_prompt(
     # Apply Qwen chat template (same as mining)
     try:
         original_template = getattr(tokenizer, "chat_template", None)
-        tokenizer.chat_template = build_qwen_chat_template(
-            SYSTEM_PROMPT, REASONING_START
-        )
+        tokenizer.chat_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
         messages = [{"role": "user", "content": base_prompt}]
         templated = str(
-            tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
+            tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         )
         # Restore original template
         if original_template is not None:

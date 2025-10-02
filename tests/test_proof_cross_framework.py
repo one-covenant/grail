@@ -120,7 +120,9 @@ class TestProofCrossFramework:
         from .proof_test_utils import generate_realistic_sat_prompt
 
         prompt = generate_realistic_sat_prompt(
-            "test_determinism", 0.3, tokenizer  # type: ignore[arg-type]
+            "test_determinism",
+            0.3,
+            tokenizer,  # type: ignore[arg-type]
         )
         randomness = "feedbeefcafebabe1234567890abcdef"
         challenge = "deadc0de1337"
