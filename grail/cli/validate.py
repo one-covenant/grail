@@ -314,7 +314,7 @@ async def _list_active_hotkeys_for_window(
     chain_manager: "GrailChainManager",
     default_credentials: Any,
     uid_by_hotkey: Optional[dict[str, int]] = None,
-    concurrency: int = 16,
+    concurrency: int = 8,
 ) -> list[str]:
     """Return hotkeys with an available window file for the given window.
 
