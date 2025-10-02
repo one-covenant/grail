@@ -21,7 +21,7 @@ from ..grail import derive_canonical_sat
 from ..infrastructure.comms import sink_window_inferences
 from ..infrastructure.drand import get_drand_beacon
 from ..infrastructure.network import create_subtensor
-from ..shared.constants import LAYER_INDEX, ROLLOUTS_PER_PROBLEM, WINDOW_LENGTH
+from ..shared.constants import BLOCK_TIME_SECONDS, LAYER_INDEX, ROLLOUTS_PER_PROBLEM, WINDOW_LENGTH
 from . import console
 
 # --------------------------------------------------------------------------- #
@@ -34,7 +34,7 @@ logger = logging.getLogger("grail")
 # --------------------------------------------------------------------------- #
 # Mining timing and safety parameters. Centralized for easy tuning and clarity.
 EMA_ALPHA = 0.2  # Exponential moving average smoothing
-DEFAULT_BLOCK_TIME_S = 12.0  # Bittensor block time in seconds
+
 MINER_SAFETY_BLOCKS = int(  # Safety margin blocks before window end
     os.getenv("GRAIL_MINER_SAFETY_BLOCKS", "1")
 )
@@ -154,7 +154,7 @@ class MiningTimers:
     in the current window to safely generate and upload another batch.
     """
 
-    block_time_ema_s: float = DEFAULT_BLOCK_TIME_S
+    block_time_ema_s: float = float(BLOCK_TIME_SECONDS)
     gen_time_ema_s: Optional[float] = None
     upload_time_ema_s: Optional[float] = None
     last_block_num: Optional[int] = None

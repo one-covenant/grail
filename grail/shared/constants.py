@@ -13,6 +13,25 @@ NETWORK = os.getenv("BT_NETWORK", "finney")
 NETUID = int(os.getenv("NETUID", 81))
 WINDOW_LENGTH = 30
 
+# ────────────────  TIMING & VALIDATION  ────────────────
+
+# Bittensor block time (target average)
+BLOCK_TIME_SECONDS = 12
+
+# Typical variance in block production time (±seconds)
+BLOCK_TIME_VARIANCE = 3
+
+# Network latency allowance for file uploads (seconds)
+NETWORK_UPLOAD_LATENCY = 30
+
+# Grace period for upload deadline validation
+# = block variance + upload latency
+UPLOAD_GRACE_PERIOD = BLOCK_TIME_VARIANCE + NETWORK_UPLOAD_LATENCY
+
+# Buffer for future drand beacon (prevents gaming)
+# Validators use drand from this many seconds AFTER upload deadline
+DRAND_FUTURE_BUFFER = 30
+
 # ────────────────  MODEL CONFIGURATION  ────────────────
 
 MODEL_NAME = os.getenv("GRAIL_MODEL_NAME", "Qwen/Qwen3-4B-Instruct-2507")

@@ -533,48 +533,77 @@ async def file_exists(
     key: str,
     credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
     use_write: bool = False,
+    max_upload_time: Optional[float] = None,
 ) -> bool:
-    """Check if a file exists (compressed or uncompressed) with bounded HEAD.
+    """Check if a file exists (compressed or uncompressed) with optional deadline check.
 
-    Each HEAD call is wrapped in a small timeout so one stalled request
-    cannot block upstream gather calls. Root cause: rare transport stalls
-    (no response) on R2 under concurrency; without timeouts, awaits can
-    hang indefinitely. We treat timeouts as "not found" to keep progress.
+    This is a convenience wrapper around file_exists_with_deadline that returns
+    a simple boolean for backward compatibility with existing code.
+
+    Args:
+        key: S3 object key to check
+        credentials: R2/S3 credentials
+        use_write: Whether to use write credentials
+        max_upload_time: If provided, reject files uploaded after this timestamp
+
+    Returns:
+        True if file exists and meets upload time constraint (if specified)
     """
+    exists, _was_late, _upload_time = await file_exists_with_deadline(
+        key=key,
+        credentials=credentials,
+        use_write=use_write,
+        max_upload_time=max_upload_time,
+    )
+    return exists
 
-    async def _head_exists(client: Any, bucket_id: str, key_to_check: str) -> bool:
-        try:
-            # Remove nested asyncio.wait_for - let the outer timeout handle it
-            # to avoid timeout conflicts between botocore and asyncio
-            await client.head_object(Bucket=bucket_id, Key=key_to_check)
-            return True
-        except Exception:
-            # NOTE: uncomment this for debugging later on
-            # elapsed = time.time() - start_time
-            # logger.warning(
-            #     "R2 HEAD failed after %.2fs for key=%s bucket=%s: %s %s",
-            #     elapsed,
-            #     key_to_check,
-            #     bucket_id,
-            #     type(e).__name__,
-            #     str(e),
-            # )
-            return False
 
+async def file_exists_with_deadline(
+    key: str,
+    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    use_write: bool = False,
+    max_upload_time: Optional[float] = None,
+) -> tuple[bool, bool, Optional[float]]:
+    """Check existence and whether the object violates an upload deadline.
+
+    Returns
+    -------
+    (exists_and_valid, was_late, upload_time)
+        exists_and_valid: True if object exists and (upload_time <= max_upload_time when provided)
+        was_late: True if object exists but upload_time exceeded max_upload_time
+        upload_time: Float unix timestamp of LastModified if available
+    """
     try:
         async with get_client_ctx(credentials, use_write) as client:
             bucket_id = get_bucket_id(credentials, use_write)
 
-            # Check for compressed first
+            # Try compressed first
+            checked_keys = []
             if not key.endswith(".gz"):
-                if await _head_exists(client, bucket_id, key + ".gz"):
-                    return True
+                checked_keys.append(key + ".gz")
+            else:
+                checked_keys.append(key)
 
-            # Fallback to original key
-            return await _head_exists(client, bucket_id, key)
+            for candidate in checked_keys:
+                try:
+                    response = await client.head_object(Bucket=bucket_id, Key=candidate)
+                except Exception:
+                    continue
+
+                last_modified = response.get("LastModified")
+                upload_time = float(last_modified.timestamp()) if last_modified else None
+                if max_upload_time is not None and upload_time is not None:
+                    if upload_time > float(max_upload_time):
+                        return False, True, upload_time
+                return True, False, upload_time
+
+            # Not found in either compressed nor plain form
+            return False, False, None
     except Exception as e:
-        logger.warning("file_exists failed for key=%s: %s %s", key, type(e).__name__, str(e))
-        return False
+        logger.debug(
+            "file_exists_with_deadline failed for key=%s: %s %s", key, type(e).__name__, str(e)
+        )
+        return False, False, None
 
 
 async def list_bucket_files(
