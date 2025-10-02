@@ -32,13 +32,11 @@ def device() -> str:
 
 @pytest.fixture(scope="module")
 def prompt() -> str:
-    return (
-        "Problem: Provide working inside "
-        "<start_working_out>...</end_working_out>. "
-        "Final answer in <SOLUTION></SOLUTION>. "
-        "<start_working_out>"
-        "We test GRAIL proof commitment robustness under model mismatch."
-    )
+    """Generate realistic SAT prompt for model mismatch tests."""
+    from .proof_test_utils import generate_realistic_sat_prompt
+
+    # Use raw prompt (no tokenizer) since we test different models
+    return generate_realistic_sat_prompt("test_model_mismatch", 0.4)
 
 
 def _model_pairs_tiny() -> list[tuple[str, str]]:

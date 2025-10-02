@@ -54,65 +54,16 @@ def tokenizer() -> PreTrainedTokenizerBase:
 
 
 @pytest.fixture
-def production_prompts() -> list[str]:
-    """Production-like SAT prompt suite."""
+def production_prompts(tokenizer: PreTrainedTokenizerBase) -> list[str]:
+    """Production-like SAT prompt suite using realistic generator."""
+    from .proof_test_utils import generate_realistic_sat_prompt
+
+    # Generate realistic SAT prompts with varying difficulties
     return [
-        # SAT prompt 1: Full production format with instructions
-        (
-            "Problem:\n"
-            "You are given a problem.\n"
-            "Think about the problem and provide your working out.\n"
-            "Place it between <start_working_out> and <end_working_out>.\n"
-            "Then, provide your solution between <SOLUTION></SOLUTION>"
-            "Keep the reasoning succinct (≤25 steps, ≤500 tokens).<|im_end|>\n"
-            "SAT Problem:\n"
-            "SAT Problem (seed: 4ba38907):\n"
-            "Variables: 7\n"
-            "Clauses:\n"
-            "  (x7 OR NOT x2 OR x3)\n"
-            "  (x4 OR x5 OR x2)\n"
-            "  (NOT x2 OR x5 OR x7)\n"
-            "  (x2 OR NOT x4 OR NOT x6)\n"
-            "  (NOT x1 OR NOT x7 OR x4)\n"
-            "  (NOT x4 OR NOT x5 OR x3)\n"
-            "  (x3 OR x6 OR x5)\n"
-            "  (NOT x2 OR x3 OR NOT x1)\n"
-            "  (NOT x4 OR x7 OR NOT x1)\n\n"
-            "Provide your final assignment between <SOLUTION></SOLUTION> as "
-            "space-separated 0/1 values for x1..xN.\n"
-            "<start_working_out>"
-        ),
-        # SAT prompt 2: Compact format
-        (
-            "You are a helpful AI. Solve the SAT instance described below. "
-            "Think step by step within <start_working_out>..."
-            "</end_working_out> "
-            "and then give the final assignment inside <SOLUTION>..."
-            "</SOLUTION>.\n\n"
-            "SAT (seed: abcd1234): Vars=10, Clauses=12.\n"
-            "(x1 OR x2 OR NOT x3)\n(x4 OR NOT x5 OR x6)\n"
-            "(NOT x1 OR x7 OR x8)\n(x2 OR x9 OR NOT x10)\n"
-            "(NOT x6 OR x3 OR x5)\n(x10 OR NOT x2 OR x7)\n"
-            "<start_working_out>"
-        ),
-        # SAT prompt 3: System/user format
-        (
-            "System: You are given a problem. Follow the instructions "
-            "strictly.\n"
-            "User: Provide a valid assignment for the following CNF.\n"
-            "Remember to include <start_working_out> and <SOLUTION> tags.\n\n"
-            "CNF: (x1 ∨ x2) ∧ (¬x1 ∨ x3) ∧ (x2 ∨ ¬x3 ∨ x4) ∧ (¬x4 ∨ x1)\n"
-            "<start_working_out>"
-        ),
-        # Generic math (non-SAT)
-        (
-            "You are a helpful assistant. Solve the arithmetic problem below.\n"
-            "Show your work between <start_working_out> and "
-            "<end_working_out>, then give the final numeric result inside "
-            "<SOLUTION></SOLUTION>.\n\n"
-            "Compute: sum_{i=1}^{50} i^2.\n"
-            "<start_working_out>"
-        ),
+        generate_realistic_sat_prompt("test_cross_fw_1", 0.4, tokenizer),
+        generate_realistic_sat_prompt("test_cross_fw_2", 0.5, tokenizer),
+        generate_realistic_sat_prompt("test_cross_fw_3", 0.6, tokenizer),
+        generate_realistic_sat_prompt("test_cross_fw_4", 0.7, tokenizer),
     ]
 
 
@@ -166,14 +117,10 @@ class TestProofCrossFramework:
     @requires_gpu
     def test_hf_to_hf_determinism(self, tokenizer: AutoTokenizer, device: str) -> None:
         """Test determinism across separate model loads."""
-        prompt = (
-            "Problem:\nYou are given a problem.\n"
-            "Think about the problem and provide your working out.\n"
-            "Place it between <start_working_out> and <end_working_out>.\n"
-            "Then, provide your solution between <SOLUTION></SOLUTION>"
-            "Keep the reasoning succinct.<|im_end|>\n"
-            "SAT: (x1 OR x2) (¬x1 OR x3) (x2 OR ¬x3)\n"
-            "<start_working_out>"
+        from .proof_test_utils import generate_realistic_sat_prompt
+
+        prompt = generate_realistic_sat_prompt(
+            "test_determinism", 0.3, tokenizer  # type: ignore[arg-type]
         )
         randomness = "feedbeefcafebabe1234567890abcdef"
         challenge = "deadc0de1337"

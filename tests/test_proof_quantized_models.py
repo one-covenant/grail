@@ -35,13 +35,11 @@ def device() -> str:
 
 @pytest.fixture(scope="module")
 def prompt() -> str:
-    return (
-        "Problem: Solve the following SAT problem.\n"
-        "Show your work in <start_working_out>...</end_working_out>.\n"
-        "Provide solution in <SOLUTION></SOLUTION>.\n"
-        "SAT: (x1 OR x2) (NOT x1 OR x3) (x2 OR NOT x3)\n"
-        "<start_working_out>"
-    )
+    """Generate realistic SAT prompt for quantized model tests."""
+    from .proof_test_utils import generate_realistic_sat_prompt
+
+    # Use raw prompt (no tokenizer) since we test different quantizations
+    return generate_realistic_sat_prompt("test_quantized", 0.4)
 
 
 class TestProofQuantizedModels:

@@ -6,12 +6,14 @@ Functions here are imported by multiple test modules.
 from __future__ import annotations
 
 import hashlib
+import random
 
 import pytest
 import torch
 from transformers.modeling_utils import PreTrainedModel
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
+from grail.environments.sat import create_sat_prompt, generate_sat_problem
 from grail.protocol.crypto import indices_from_root
 from grail.protocol.grail_verifier import GRAILVerifier
 from grail.shared.constants import (
@@ -27,7 +29,9 @@ def hash_hex(material: str) -> str:
     return hashlib.sha256(material.encode()).hexdigest()
 
 
-def ensure_min_tokens(tokenizer: PreTrainedTokenizerBase, text: str, min_tokens: int) -> str:
+def ensure_min_tokens(
+    tokenizer: PreTrainedTokenizerBase, text: str, min_tokens: int
+) -> str:
     filler = (
         "\n\nNote: Think step by step and keep reasoning succinct. "
         "Provide only the required tags and final solution."
@@ -92,7 +96,8 @@ def verify_proof(
 
     # Early guard: ensure tokens exist in validator vocab
     try:
-        vocab_size = int(model.get_input_embeddings().weight.size(0))
+        embeddings = model.get_input_embeddings()
+        vocab_size = int(embeddings.weight.shape[0])  # noqa
     except Exception:  # pragma: no cover
         vocab_size = None
     if vocab_size is not None and max(tokens) >= vocab_size:
@@ -104,12 +109,18 @@ def verify_proof(
             }
         ]
 
-    token_tensor = torch.tensor(tokens, dtype=torch.long, device=device)
+    token_tensor = torch.tensor(
+        tokens, dtype=torch.long, device=device
+    )
     with torch.inference_mode():
-        outputs = model(token_tensor.unsqueeze(0), output_hidden_states=True)
+        outputs = model(
+            token_tensor.unsqueeze(0), output_hidden_states=True
+        )
     layer_idx = min(LAYER_INDEX, len(outputs.hidden_states) - 1)
     h_layer = outputs.hidden_states[layer_idx][0]
-    idxs = indices_from_root(tokens, challenge_randomness, len(tokens), CHALLENGE_K)
+    idxs = indices_from_root(
+        tokens, challenge_randomness, len(tokens), CHALLENGE_K
+    )
 
     all_valid = True
     diagnostics_list = []
@@ -206,3 +217,61 @@ def load_model_and_tokenizer(
             return mdl, tok
         except Exception as exc:  # pragma: no cover
             pytest.skip(f"skip: cannot load {name}: {exc}")
+
+
+def generate_realistic_sat_prompt(
+    seed: str | None = None,
+    difficulty: float = 0.5,
+    tokenizer: PreTrainedTokenizerBase | None = None,
+) -> str:
+    """Generate realistic SAT prompt using actual mining modules.
+
+    Uses the same SAT problem generator, prompt creator, chat template,
+    and system prompt as production mining for authentic test prompts.
+
+    Args:
+        seed: Deterministic seed for problem generation. Random if None.
+        difficulty: Problem difficulty in [0.0, 1.0]. Defaults to 0.5.
+        tokenizer: Optional tokenizer to apply chat template. If provided,
+            uses the same Qwen-style chat template and system prompt as
+            production mining. If None, returns raw SAT problem text.
+
+    Returns:
+        Production-quality SAT prompt string. If tokenizer provided,
+        includes chat template and system prompt wrapper.
+    """
+    if seed is None:
+        seed = hashlib.sha256(str(random.random()).encode()).hexdigest()
+    problem = generate_sat_problem(seed, difficulty)
+    base_prompt = create_sat_prompt(problem)
+
+    # If no tokenizer, return raw prompt (backward compatible)
+    if tokenizer is None:
+        return base_prompt
+
+    # Apply production chat template and system prompt
+    from grail.mining.rollout_generator import (
+        REASONING_START,
+        SYSTEM_PROMPT,
+    )
+    from grail.shared.chat_templates import build_qwen_chat_template
+
+    # Apply Qwen chat template (same as mining)
+    try:
+        original_template = getattr(tokenizer, "chat_template", None)
+        tokenizer.chat_template = build_qwen_chat_template(
+            SYSTEM_PROMPT, REASONING_START
+        )
+        messages = [{"role": "user", "content": base_prompt}]
+        templated = str(
+            tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+        )
+        # Restore original template
+        if original_template is not None:
+            tokenizer.chat_template = original_template
+        return templated
+    except Exception:
+        # Fallback: return base prompt if template fails
+        return base_prompt
