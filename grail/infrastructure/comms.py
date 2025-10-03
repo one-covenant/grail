@@ -53,9 +53,7 @@ def _get_aioboto_session() -> Any:
     global _AIOBOTO_SESSION
     if _AIOBOTO_SESSION is None:
         _AIOBOTO_SESSION = get_session()
-        logger.debug(
-            "Created singleton aiobotocore session for R2 pooling"
-        )
+        logger.debug("Created singleton aiobotocore session for R2 pooling")
     return _AIOBOTO_SESSION
 
 
