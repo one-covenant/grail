@@ -335,6 +335,16 @@ async def _list_active_hotkeys_for_window(
         async with semaphore:
             import time
 
+            # Update heartbeat to prevent watchdog timeout during long
+            # operations. Rationale: With many miners (100+), even with
+            # timeouts this can take several minutes total. Updating here
+            # prevents false-positive watchdog kills.
+            try:
+                global HEARTBEAT
+                HEARTBEAT = time.monotonic()
+            except Exception:
+                pass
+
             start_time = time.time()
             try:
                 from ..infrastructure.comms import file_exists

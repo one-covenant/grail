@@ -31,6 +31,33 @@ PROTOCOL_VERSION = "v1.0.0"
 #                   S3/R2 Configuration                                       #
 # --------------------------------------------------------------------------- #
 
+# Singleton aiobotocore session for connection pooling across all
+# clients. Rationale: Creating a new session for each client creates
+# isolated connection pools, leading to resource exhaustion when handling
+# 100+ concurrent requests. Reusing a single session allows proper
+# connection pooling (max_pool_connections applies across all clients)
+# and reduces overhead from session initialization.
+_AIOBOTO_SESSION: Optional[Any] = None
+
+
+def _get_aioboto_session() -> Any:
+    """Get or create the singleton aiobotocore session.
+
+    This session is reused across all S3 client creations to enable
+    proper connection pooling and reduce resource consumption.
+    Thread-safe for asyncio single-threaded execution model.
+
+    Returns:
+        Aiobotocore session instance
+    """
+    global _AIOBOTO_SESSION
+    if _AIOBOTO_SESSION is None:
+        _AIOBOTO_SESSION = get_session()
+        logger.debug(
+            "Created singleton aiobotocore session for R2 pooling"
+        )
+    return _AIOBOTO_SESSION
+
 
 def get_conf(key: str, default: Optional[str] = None) -> str:
     """Get configuration from environment variables."""
@@ -135,7 +162,8 @@ def get_client_ctx(
         s3=s3_config or None,
     )
 
-    return get_session().create_client(
+    # Use singleton session for proper connection pooling across all clients
+    return _get_aioboto_session().create_client(
         "s3",
         endpoint_url=endpoint_url,
         aws_access_key_id=access_key,
