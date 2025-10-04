@@ -105,10 +105,14 @@ MINER_SAMPLING_ENABLED = True
 MINER_SAMPLE_RATE = 0.25
 
 # Minimum number of active miners to validate each window (floor).
-MINER_SAMPLE_MIN = 0
+MINER_SAMPLE_MIN = 2
 
 # Optional cap on miners validated per window. Set to None to disable.
 MINER_SAMPLE_MAX = 35
+
+# Number of windows to look back for failure-based exclusion from sampling.
+# Miners with failures in the last N windows are excluded from selection.
+FAILURE_LOOKBACK_WINDOWS = 14
 
 # ────────────────  GRAIL PROOF VERIFICATION  ────────────────
 

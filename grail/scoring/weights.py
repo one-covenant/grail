@@ -35,6 +35,7 @@ class WeightComputer:
         meta_uids: list[int],
         inference_counts: defaultdict[str, defaultdict[int, dict[str, int]]],
         target_window: int,
+        availability_counts: dict[str, int],
     ) -> tuple[list[float], list[tuple[str, float]]]:
         """Compute normalized weights over rolling window.
 
@@ -43,6 +44,7 @@ class WeightComputer:
             meta_uids: UIDs in metagraph order
             inference_counts: hotkey -> window -> metrics dict
             target_window: Current window
+            availability_counts: Count of windows each miner was active (had file)
 
         Returns:
             (weights, non_zero_weights)
@@ -59,7 +61,15 @@ class WeightComputer:
         # Compute raw scores
         raw_scores = []
         for hotkey in meta_hotkeys:
-            # Gate if any recent window had failure
+            # Count windows where miner was active (submitted file)
+            windows_active = availability_counts.get(hotkey, 0)
+
+            # Gate: Must be active in at least 1 window
+            if windows_active == 0:
+                raw_scores.append(0.0)
+                continue
+
+            # Gate: Check for any failures in recent windows
             had_failure = False
             for w in recent_windows:
                 metrics = inference_counts[hotkey].get(w, {})
@@ -71,14 +81,28 @@ class WeightComputer:
                 raw_scores.append(0.0)
                 continue
 
-            # Aggregate unique rollouts over rolling window
-            total_unique = sum(
-                inference_counts[hotkey].get(w, {}).get("estimated_unique", 0)
-                for w in recent_windows
+            # Count windows where miner was actually checked (implicit: metrics exist)
+            # If metrics exist for a window, the miner was selected and validated
+            checked_windows = [w for w in recent_windows if w in inference_counts[hotkey]]
+            windows_checked = len(checked_windows)
+
+            # Gate: Must have been checked at least once to extrapolate
+            if windows_checked == 0:
+                raw_scores.append(0.0)
+                continue
+
+            # Sum estimated_unique over checked windows only
+            total_unique_checked = sum(
+                inference_counts[hotkey][w].get("estimated_unique", 0) for w in checked_windows
             )
 
-            # Superlinear scoring (unbounded unique score)
-            base_score = max(0.0, float(total_unique))
+            # Extrapolate to windows_active (fair normalization)
+            # This ensures miners checked 2x vs 3x get equal weights for equal performance
+            extrapolation_factor = windows_active / windows_checked
+            total_unique_extrapolated = total_unique_checked * extrapolation_factor
+
+            # Apply superlinear scoring
+            base_score = max(0.0, float(total_unique_extrapolated))
             superlinear_score = base_score**self.superlinear_exponent
             raw_scores.append(superlinear_score)
 

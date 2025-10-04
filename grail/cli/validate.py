@@ -42,6 +42,7 @@ from ..monitoring import get_monitoring_manager
 from ..monitoring.config import MonitoringConfig
 from ..scoring.weights import WeightComputer
 from ..shared.constants import (
+    FAILURE_LOOKBACK_WINDOWS,
     MINER_SAMPLE_MAX,
     MINER_SAMPLE_MIN,
     MINER_SAMPLE_RATE,
@@ -636,6 +637,7 @@ async def _run_validation_service(
             lambda: defaultdict(dict)
         )
         last_processed_window = -1
+        windows_processed_since_start = 0
         last_weights_interval_submitted = -1
         last_copycat_interval_id = -1
         # Rolling histories (12-window horizon) for selection coverage and availability
@@ -643,6 +645,9 @@ async def _run_validation_service(
         availability_history: deque[set[str]] = deque(maxlen=WEIGHT_ROLLING_WINDOWS)
         selection_counts: dict[str, int] = {}
         availability_counts: dict[str, int] = {}
+        # Track failures over longer horizon for exclusion from sampling
+        failure_history: deque[set[str]] = deque(maxlen=FAILURE_LOOKBACK_WINDOWS)
+        failure_counts: dict[str, int] = {}
 
         while True:
             try:
@@ -740,15 +745,19 @@ async def _run_validation_service(
                     set(active_hotkeys),
                     WEIGHT_ROLLING_WINDOWS,
                 )
+
+                # Exclude miners with recent failures (banned for 14 windows)
+                eligible_hotkeys = [hk for hk in active_hotkeys if failure_counts.get(hk, 0) == 0]
+
                 # Determine subset to validate this window
                 if test_mode:
                     hotkeys_to_check = [wallet.hotkey.ss58_address]
                 elif MINER_SAMPLING_ENABLED:
                     hotkeys_to_check = _select_miners_for_window(
-                        active_hotkeys, target_window_hash, selection_counts
+                        eligible_hotkeys, target_window_hash, selection_counts
                     )
                 else:
-                    hotkeys_to_check = active_hotkeys
+                    hotkeys_to_check = eligible_hotkeys
 
                 # Update selection coverage rolling window
                 _update_rolling(
@@ -763,6 +772,13 @@ async def _run_validation_service(
                     try:
                         await monitor.log_gauge("miner_sampling/miners_total", len(meta.hotkeys))
                         await monitor.log_gauge("miner_sampling/miners_active", len(active_hotkeys))
+                        await monitor.log_gauge(
+                            "miner_sampling/miners_eligible", len(eligible_hotkeys)
+                        )
+                        await monitor.log_gauge(
+                            "miner_sampling/miners_excluded_failures",
+                            len(active_hotkeys) - len(eligible_hotkeys),
+                        )
                         await monitor.log_gauge(
                             "miner_sampling/miners_selected", len(hotkeys_to_check)
                         )
@@ -789,9 +805,11 @@ async def _run_validation_service(
                         pass
 
                 logger.info(
-                    "Sampling: total=%s active=%s selected=%s rate=%.3f",
+                    "Sampling: total=%s active=%s eligible=%s excluded=%s selected=%s rate=%.3f",
                     len(meta.hotkeys),
                     len(active_hotkeys),
+                    len(eligible_hotkeys),
+                    len(active_hotkeys) - len(eligible_hotkeys),
                     len(hotkeys_to_check),
                     (len(hotkeys_to_check) / len(active_hotkeys)) if active_hotkeys else 0.0,
                 )
@@ -849,6 +867,16 @@ async def _run_validation_service(
                 )
                 logger.info(f"🚫 UIDs gated this window: {failed_wallets}")
 
+                # Update failure tracking for exclusion from future sampling
+                failed_this_window = {
+                    hk
+                    for hk, metrics in window_inference_counts.items()
+                    if metrics.get(FAILURE_FLAG_KEY, 0) == 1
+                }
+                _update_rolling(
+                    failure_history, failure_counts, failed_this_window, FAILURE_LOOKBACK_WINDOWS
+                )
+
                 # Monitoring metrics
                 if monitor:
                     await monitor.log_counter("validation/windows_processed")
@@ -896,17 +924,18 @@ async def _run_validation_service(
                 for hotkey, metrics in window_inference_counts.items():
                     inference_counts[hotkey][target_window] = metrics
 
+                windows_processed_since_start += 1
+
                 # Top-miner logs (use already-computed metrics; scores include current window)
                 if rollout_counts:
                     await _log_top_miners_by_rollout_count(
                         window_inference_counts, uid_by_hotkey, target_window, monitor
                     )
-                    # TODO: the unique identifier logic needs to improve before we uncomment this
-                    # await _log_top_miners_by_unique_rollouts(
-                    #     window_inference_counts, uid_by_hotkey, target_window, monitor
-                    # )
+                    await _log_top_miners_by_unique_rollouts(
+                        window_inference_counts, uid_by_hotkey, target_window, monitor
+                    )
                     await _log_top_miners_by_score(
-                        inference_counts, uid_by_hotkey, target_window, monitor
+                        inference_counts, uid_by_hotkey, target_window, availability_counts, monitor
                     )
 
                 # Compute active miner UIDs over the last rolling windows (includes failures)
@@ -930,72 +959,74 @@ async def _run_validation_service(
                         "text",
                     )
 
-                # Compute and set weights using weight computer
-                weights, non_zero_weights = weight_computer.compute_weights(
-                    meta_hotkeys=meta.hotkeys,
-                    meta_uids=list(meta.uids),
-                    inference_counts=inference_counts,
-                    target_window=target_window,
-                )
-                if non_zero_weights:
-                    logger.info(f"⚖️  Setting weights for {len(non_zero_weights)} miners")
-                    logger.info(f"Displaying weights for first 5 miners: {non_zero_weights[:5]}")
-                    for hotkey, weight in non_zero_weights[:5]:
-                        uid = uid_by_hotkey.get(hotkey, None)
-                        display = uid if uid is not None else hotkey
-                        with miner_log_context(display, target_window):
-                            logger.info(f"weight: {weight:.4f} - top 5 miners")
-                else:
-                    logger.info("⚖️  No miners received weights this window")
-
-                if monitor:
-                    await monitor.log_gauge("validation/miners_with_weights", len(non_zero_weights))
-                    await monitor.log_gauge("validation/total_registered_miners", len(meta.hotkeys))
-                    if weights:
-                        max_weight = max(weights)
-                        avg_weight = sum(weights) / len(weights)
-                        await monitor.log_gauge("validation/max_weight", max_weight)
-                        await monitor.log_gauge("validation/average_weight", avg_weight)
-                        # Additional distribution stats (top 5 minimal set)
-                        stats = _compute_weight_stats(weights)
-                        await monitor.log_gauge("weights/stats/min", stats["min"])
-                        await monitor.log_gauge("weights/stats/mean", stats["mean"])
-                        await monitor.log_gauge("weights/stats/max", stats["max"])
-                        await monitor.log_gauge("weights/stats/gini", stats["gini"])
-                # Concise distribution summary
-                if weights:
-                    stats = _compute_weight_stats(weights)
-                    logger.info(
-                        "weights: min=%.6f mean=%.6f max=%.6f gini=%.6f",
-                        stats["min"],
-                        stats["mean"],
-                        stats["max"],
-                        stats["gini"],
-                    )
-                # Global submission context (per loop)
-                if monitor:
-                    await monitor.log_gauge(
-                        "weights/config/rolling_windows",
-                        WEIGHT_ROLLING_WINDOWS,
-                    )
-                    await monitor.log_gauge(
-                        "weights/config/superlinear_exponent",
-                        SUPERLINEAR_EXPONENT,
-                    )
-                logger.debug(
-                    "Weights context prepared: interval_blocks=%s block=%s "
-                    "window=%s rolling=%s superlinear=%s",
-                    WEIGHT_SUBMISSION_INTERVAL_BLOCKS,
-                    current_block,
-                    target_window,
-                    WEIGHT_ROLLING_WINDOWS,
-                    SUPERLINEAR_EXPONENT,
-                )
-
                 # Throttle on-chain weight submissions to once per 360-block interval
                 current_interval = int(current_block // WEIGHT_SUBMISSION_INTERVAL_BLOCKS)
                 is_a_weight_submission_block = current_interval != last_weights_interval_submitted
                 if is_a_weight_submission_block:
+                    has_full_history = windows_processed_since_start >= WEIGHT_ROLLING_WINDOWS
+                    if not has_full_history:
+                        logger.debug(
+                            "Skipping weight submission: %s/%s windows processed so far",
+                            windows_processed_since_start,
+                            WEIGHT_ROLLING_WINDOWS,
+                        )
+                        if monitor:
+                            await monitor.log_gauge("weights/submission/submitted", 0.0)
+                        last_processed_window = target_window
+                        last_weights_interval_submitted = current_interval
+                        continue
+
+                    # Compute and set weights using weight computer
+                    weights, non_zero_weights = weight_computer.compute_weights(
+                        meta_hotkeys=meta.hotkeys,
+                        meta_uids=list(meta.uids),
+                        inference_counts=inference_counts,
+                        target_window=target_window,
+                        availability_counts=availability_counts,
+                    )
+                    if non_zero_weights:
+                        logger.info(f"⚖️  Setting weights for {len(non_zero_weights)} miners")
+                        logger.info(
+                            f"Displaying weights for first 5 miners: {non_zero_weights[:5]}"
+                        )
+                        for hotkey, weight in non_zero_weights[:5]:
+                            uid = uid_by_hotkey.get(hotkey, None)
+                            display = uid if uid is not None else hotkey
+                            with miner_log_context(display, target_window):
+                                logger.info(f"weight: {weight:.4f} - top 5 miners")
+                    else:
+                        logger.info("⚖️  No miners received weights this window")
+
+                    if monitor:
+                        await monitor.log_gauge(
+                            "validation/miners_with_weights", len(non_zero_weights)
+                        )
+                        await monitor.log_gauge(
+                            "validation/total_registered_miners", len(meta.hotkeys)
+                        )
+                        if weights:
+                            max_weight = max(weights)
+                            avg_weight = sum(weights) / len(weights)
+                            await monitor.log_gauge("validation/max_weight", max_weight)
+                            await monitor.log_gauge("validation/average_weight", avg_weight)
+                            # Additional distribution stats (top 5 minimal set)
+                            stats = _compute_weight_stats(weights)
+                            await monitor.log_gauge("weights/stats/min", stats["min"])
+                            await monitor.log_gauge("weights/stats/mean", stats["mean"])
+                            await monitor.log_gauge("weights/stats/max", stats["max"])
+                            await monitor.log_gauge("weights/stats/gini", stats["gini"])
+
+                    # Concise distribution summary
+                    if weights:
+                        stats = _compute_weight_stats(weights)
+                        logger.info(
+                            "weights: min=%.6f mean=%.6f max=%.6f gini=%.6f",
+                            stats["min"],
+                            stats["mean"],
+                            stats["max"],
+                            stats["gini"],
+                        )
+
                     # Precompute top miners for per-miner logging on submission
                     top_miners = _build_top_miners(
                         meta.hotkeys, meta.uids, weights, TOP_K_WEIGHTS_LOGGED
@@ -1075,41 +1106,52 @@ async def _run_validation_service(
                         WEIGHT_ROLLING_WINDOWS,
                         SUPERLINEAR_EXPONENT,
                     )
+
                     # Log detailed per-miner metrics for top-K on submission
                     if monitor:
                         for hk, uid, w in top_miners:
-                            tu, ts, tev, b, s = _aggregate_weight_inputs(
-                                hk, inference_counts, target_window
+                            metrics = _compute_miner_rolling_metrics(
+                                hk, inference_counts, target_window, availability_counts
                             )
                             uid_ns = f"{uid}/weights"
                             await monitor.log_gauge(f"{uid_ns}/weight", w)
-                            await monitor.log_gauge(f"{uid_ns}/base_score", b)
-                            await monitor.log_gauge(f"{uid_ns}/superlinear_score", s)
-                            await monitor.log_gauge(f"{uid_ns}/inputs/unique_rolling", tu)
-                            await monitor.log_gauge(f"{uid_ns}/inputs/successful_rolling", ts)
+                            await monitor.log_gauge(f"{uid_ns}/base_score", metrics["base_score"])
                             await monitor.log_gauge(
-                                f"{uid_ns}/inputs/estimated_valid_rolling",
-                                tev,
+                                f"{uid_ns}/superlinear_score", metrics["superlinear_score"]
+                            )
+                            await monitor.log_gauge(
+                                f"{uid_ns}/extrapolated_unique", metrics["extrapolated_unique"]
+                            )
+                            await monitor.log_gauge(
+                                f"{uid_ns}/checked_unique", metrics["checked_unique"]
+                            )
+                            await monitor.log_gauge(
+                                f"{uid_ns}/windows_active", metrics["windows_active"]
+                            )
+                            await monitor.log_gauge(
+                                f"{uid_ns}/windows_checked", metrics["windows_checked"]
+                            )
+                            await monitor.log_gauge(
+                                f"{uid_ns}/extrapolation_factor", metrics["extrapolation_factor"]
                             )
 
                     # Log top 5 best
                     LOG_TOP_MINERS = 5
                     for hk, uid, w in top_miners[:LOG_TOP_MINERS]:
-                        tu, ts, tev, b, s = _aggregate_weight_inputs(
-                            hk, inference_counts, target_window
+                        metrics = _compute_miner_rolling_metrics(
+                            hk, inference_counts, target_window, availability_counts
                         )
-                        logger.info(
-                            "Weight uid=%s hotkey=%s weight=%.6f base=%.6f "
-                            "unique_rolling=%d successful_rolling=%d "
-                            "estimated_valid_rolling=%d",
-                            uid,
-                            hk,
-                            w,
-                            b,
-                            tu,
-                            ts,
-                            tev,
-                        )
+                        with miner_log_context(uid, target_window):
+                            logger.info(
+                                "Top %s: weight=%.6f extrapolated_unique=%.0f "
+                                "(checked=%.0f windows=%d/%d)",
+                                LOG_TOP_MINERS,
+                                w,
+                                metrics["extrapolated_unique"],
+                                metrics["checked_unique"],
+                                int(metrics["windows_checked"]),
+                                int(metrics["windows_active"]),
+                            )
 
                     logger.info(
                         "Submitted weights (interval %s, block %s)",
@@ -1228,41 +1270,81 @@ def _determine_hotkeys_to_check(test_mode: bool, wallet: bt.wallet, meta: Any) -
     return list(meta.hotkeys)
 
 
-def _aggregate_weight_inputs(
+def _compute_miner_rolling_metrics(
     hotkey: str,
     inference_counts: defaultdict[str, defaultdict[int, dict[str, int]]],
     target_window: int,
-) -> tuple[int, int, int, float, float]:
-    """Aggregate rolling inputs and derive base/superlinear scores.
+    availability_counts: dict[str, int],
+) -> dict[str, float]:
+    """Compute rolling metrics for a miner using fair extrapolation.
 
-    Returns: (unique_sum, successful_sum, estimated_valid_sum,
-              base_score, superlinear_score)
+    This function mirrors the weight computation logic to ensure consistency
+    between reported metrics and actual weight calculation.
+
+    Returns:
+        Dictionary with keys:
+        - checked_unique: Sum of estimated_unique over checked windows
+        - checked_successful: Sum of estimated_successful over checked windows
+        - checked_valid: Sum of estimated_valid over checked windows
+        - extrapolated_unique: Fair extrapolation to windows_active
+        - extrapolated_successful: Fair extrapolation to windows_active
+        - extrapolated_valid: Fair extrapolation to windows_active
+        - windows_active: Number of windows miner was active
+        - windows_checked: Number of windows miner was validated
+        - base_score: Score used for weight computation
+        - superlinear_score: Final score after superlinear transform
     """
     recent_windows = range(
         max(0, target_window - (WEIGHT_ROLLING_WINDOWS - 1) * WINDOW_LENGTH),
         target_window + 1,
         WINDOW_LENGTH,
     )
-    total_estimated_unique = 0
-    total_estimated_successful = 0
-    total_estimated_valid = 0
-    for w in recent_windows:
-        metrics = inference_counts[hotkey].get(w, {})
-        total_estimated_unique += int(metrics.get("estimated_unique", 0))
-        total_estimated_successful += int(metrics.get("estimated_successful", 0))
-        total_estimated_valid += int(metrics.get("estimated_valid", 0))
-    # Unbounded unique score to match _compute_weights logic
-    unique_score = total_estimated_unique
-    # NOTE: at this stage we only give weights to unique scores
-    base_score = max(0.0, 1.0 * unique_score + 0.0 * 0.0 + 0.0 * 0.0)
-    superlinear_score = base_score**SUPERLINEAR_EXPONENT
-    return (
-        total_estimated_unique,
-        total_estimated_successful,
-        total_estimated_valid,
-        base_score,
-        superlinear_score,
+
+    # Count windows where miner was active and checked
+    windows_active = availability_counts.get(hotkey, 0)
+    checked_windows = [w for w in recent_windows if w in inference_counts[hotkey]]
+    windows_checked = len(checked_windows)
+
+    # Sum metrics over checked windows only
+    checked_unique = sum(
+        int(inference_counts[hotkey][w].get("estimated_unique", 0)) for w in checked_windows
     )
+    checked_successful = sum(
+        int(inference_counts[hotkey][w].get("estimated_successful", 0)) for w in checked_windows
+    )
+    checked_valid = sum(
+        int(inference_counts[hotkey][w].get("estimated_valid", 0)) for w in checked_windows
+    )
+
+    # Extrapolate to windows_active (fair normalization)
+    if windows_checked > 0 and windows_active > 0:
+        extrapolation_factor = windows_active / windows_checked
+        extrapolated_unique = checked_unique * extrapolation_factor
+        extrapolated_successful = checked_successful * extrapolation_factor
+        extrapolated_valid = checked_valid * extrapolation_factor
+    else:
+        extrapolation_factor = 0.0
+        extrapolated_unique = 0.0
+        extrapolated_successful = 0.0
+        extrapolated_valid = 0.0
+
+    # Compute scores (matches WeightComputer logic)
+    base_score = max(0.0, float(extrapolated_unique))
+    superlinear_score = base_score**SUPERLINEAR_EXPONENT
+
+    return {
+        "checked_unique": float(checked_unique),
+        "checked_successful": float(checked_successful),
+        "checked_valid": float(checked_valid),
+        "extrapolated_unique": float(extrapolated_unique),
+        "extrapolated_successful": float(extrapolated_successful),
+        "extrapolated_valid": float(extrapolated_valid),
+        "windows_active": float(windows_active),
+        "windows_checked": float(windows_checked),
+        "extrapolation_factor": float(extrapolation_factor),
+        "base_score": float(base_score),
+        "superlinear_score": float(superlinear_score),
+    }
 
 
 def _build_top_miners(
@@ -2340,45 +2422,51 @@ async def _log_top_miners_by_score(
     inference_counts: defaultdict[str, defaultdict[int, dict[str, int]]],
     uid_by_hotkey: dict[str, str],
     target_window: int,
+    availability_counts: dict[str, int],
     monitor: Optional[Any],
     top_n: int = 5,
 ) -> None:
-    """Log top miners by highest score (base_score and superlinear_score)."""
-    # Create list of (hotkey, uid, base_score, superlinear_score)
-    # for top performers
+    """Log top miners by highest score with extrapolated metrics."""
+    # Create list of (hotkey, uid, metrics_dict) for top performers
     miner_score_data = []
     for hotkey in inference_counts.keys():
         uid = uid_by_hotkey.get(hotkey, hotkey)
         try:
-            # Calculate scores using the same logic as _aggregate_weight_inputs
-            (
-                total_unique,
-                total_successful,
-                total_estimated_valid,
-                base_score,
-                superlinear_score,
-            ) = _aggregate_weight_inputs(hotkey, inference_counts, target_window)
-            miner_score_data.append((hotkey, uid, base_score, superlinear_score))
+            metrics = _compute_miner_rolling_metrics(
+                hotkey, inference_counts, target_window, availability_counts
+            )
+            miner_score_data.append((hotkey, uid, metrics))
         except Exception as e:
             logger.debug(f"[MINER hotkey={hotkey}] Error calculating score: {e}")
             continue
 
     # Sort by superlinear_score (descending) and get top N
-    top_miners = sorted(miner_score_data, key=lambda x: x[3], reverse=True)[:top_n]
+    top_miners = sorted(miner_score_data, key=lambda x: x[2]["superlinear_score"], reverse=True)[
+        :top_n
+    ]
 
     if top_miners:
         logger.info(f"🎯 Top {min(len(top_miners), top_n)} miners by score:")
-        for i, (_hotkey, uid, base_score, superlinear_score) in enumerate(top_miners, 1):
-            logger.info(
-                f"  {i}. UID {uid}: base={base_score:.2f}, superlinear={superlinear_score:.2f}"
-            )
+        for i, (_hotkey, uid, metrics) in enumerate(top_miners, 1):
+            with miner_log_context(uid, target_window):
+                logger.info(
+                    f"  {i}. UID {uid}: "
+                    f"extrapolated_unique={metrics['extrapolated_unique']:.0f} "
+                    f"(checked={metrics['checked_unique']:.0f}, "
+                    f"windows={int(metrics['windows_checked'])}/{int(metrics['windows_active'])}), "
+                    f"score={metrics['base_score']:.0f}"
+                )
 
         # Log to monitoring as text
         if monitor:
             text_lines = []
-            for rank, (_hotkey, uid, base_score, superlinear_score) in enumerate(top_miners, 1):
+            for rank, (_hotkey, uid, metrics) in enumerate(top_miners, 1):
                 text_lines.append(
-                    f"{rank}. UID {uid}: base={base_score:.2f}, superlinear={superlinear_score:.2f}"
+                    f"{rank}. UID {uid}: "
+                    f"extrapolated={metrics['extrapolated_unique']:.0f} "
+                    f"checked={metrics['checked_unique']:.0f} "
+                    f"windows={int(metrics['windows_checked'])}/{int(metrics['windows_active'])} "
+                    f"score={metrics['base_score']:.0f}"
                 )
 
             await monitor.log_artifact(
