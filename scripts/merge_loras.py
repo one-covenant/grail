@@ -13,7 +13,6 @@ from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
-
 app = typer.Typer(add_completion=False)
 
 DEFAULT_TARGET_DIR = Path("/ephemeral")
@@ -204,4 +203,3 @@ def main() -> None:
 
 if __name__ == "__main__":  # pragma: no cover
     main()
-
