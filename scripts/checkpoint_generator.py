@@ -36,11 +36,19 @@
 # We first pre fine-tune the model to make GRPO skip trying to match formatting - this speeds GRPO up.
 
 # %%
+import gc
 import os
+import re
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
 import torch
+from datasets import Dataset, load_dataset
+from transformers import TextStreamer
+from trl import GRPOConfig, GRPOTrainer, SFTConfig, SFTTrainer
 from unsloth import FastLanguageModel
+from vllm import SamplingParams
 
 max_seq_length = 2048  # Can increase for longer reasoning traces
 lora_rank = 32  # Larger rank = smarter, but slower
@@ -154,9 +162,6 @@ tokenizer.apply_chat_template(
 # We'll only filter ~59 or so examples to first "prime" / pre fine-tune the model to understand our custom GRPO formatting.
 
 # %%
-import numpy as np
-import pandas as pd
-from datasets import load_dataset
 
 dataset = load_dataset("unsloth/OpenMathReasoning-mini", split="cot")
 dataset = dataset.to_pandas()[["expected_answer", "problem", "generated_solution"]]
@@ -217,8 +222,6 @@ dataset = dataset.loc[dataset["N"] <= max_seq_length / 2].copy()
 # We then tokenize the messages and convert it to a Hugging Face compatible dataset format:
 
 # %%
-from datasets import Dataset
-
 dataset["text"] = tokenizer.apply_chat_template(dataset["Messages"].values.tolist(), tokenize=False)
 dataset = Dataset.from_pandas(dataset)
 # dataset
@@ -227,8 +230,6 @@ dataset = Dataset.from_pandas(dataset)
 # Let's now pre fine-tune the model so it follows our custom GRPO formatting!
 
 # %%
-from trl import SFTConfig, SFTTrainer
-
 trainer = SFTTrainer(
     model=model,
     tokenizer=tokenizer,
@@ -264,9 +265,6 @@ text = tokenizer.apply_chat_template(
     tokenize=False,
     add_generation_prompt=True,  # Must add for generation
 )
-
-from transformers import TextStreamer
-
 _ = model.generate(
     **tokenizer(text, return_tensors="pt").to("cuda"),
     temperature=0,
@@ -280,7 +278,6 @@ _ = model.generate(
 # %%
 del dataset
 torch.cuda.empty_cache()
-import gc
 
 gc.collect()
 
@@ -291,8 +288,6 @@ gc.collect()
 # We're using Hugging Face's [Open R1 Math dataset](https://huggingface.co/datasets/open-r1/DAPO-Math-17k-Processed). You can also utilize OpenAI's famous [GSM8K dataset](https://huggingface.co/datasets/openai/gsm8k)
 
 # %%
-from datasets import load_dataset
-
 dataset = load_dataset("open-r1/DAPO-Math-17k-Processed", "en", split="train")
 # dataset
 
@@ -337,7 +332,6 @@ dataset[0]
 # We create a regex format to match the reasoning sections and answers:
 
 # %%
-import re
 
 # Add optional EOS token matching
 solution_end_regex = r"</SOLUTION>[\s]{0,}" + "(?:" + re.escape(tokenizer.eos_token) + ")?"
@@ -451,7 +445,8 @@ def check_answer(prompts, completions, answer, **kwargs):
 
 # %%
 match_numbers = re.compile(
-    solution_start + r".*?[\s]{0,}([-]?[\d\.\,]{1,})", flags=re.MULTILINE | re.DOTALL
+    solution_start + r".*?[\s]{0,}([-]?[\d\.,]{1,})",
+    flags=re.MULTILINE | re.DOTALL,
 )
 print(match_numbers.findall("<SOLUTION>  0.34  </SOLUTION>"))
 print(match_numbers.findall("<SOLUTION>  123,456  </SOLUTION>"))
@@ -523,8 +518,6 @@ tokenized = dataset.map(
 print(tokenizer.decode(tokenized[0]["tokens"]))
 tokenized = tokenized.map(lambda x: {"L": len(x["tokens"])})
 
-import numpy as np
-
 maximum_length = int(np.quantile(tokenized["L"], 0.9))
 print("Max Length = ", maximum_length)
 
@@ -542,8 +535,6 @@ del tokenized
 max_prompt_length = maximum_length + 1  # + 1 just in case!
 max_completion_length = max_seq_length - max_prompt_length
 
-from vllm import SamplingParams
-
 vllm_sampling_params = SamplingParams(
     min_p=0.1,
     top_p=1.0,
@@ -552,8 +543,6 @@ vllm_sampling_params = SamplingParams(
     stop=[tokenizer.eos_token],
     include_stop_str_in_output=True,
 )
-
-from trl import GRPOConfig, GRPOTrainer
 
 training_args = GRPOConfig(
     vllm_sampling_params=vllm_sampling_params,
@@ -624,8 +613,6 @@ trainer.train()
 # %%
 text = "What is the sqrt of 101?"
 
-from vllm import SamplingParams
-
 sampling_params = SamplingParams(
     temperature=1.0,
     top_k=50,
@@ -656,7 +643,6 @@ tokenizer.save_pretrained(str(FULL_MODEL_OUTPUT_DIR))
 
 # %%
 # For full fine-tuning, we can verify the model was saved correctly
-import os
 
 assert (FULL_MODEL_OUTPUT_DIR / "config.json").exists(), "Model config not found"
 assert (FULL_MODEL_OUTPUT_DIR / "model.safetensors").exists() or (
@@ -678,7 +664,6 @@ text = tokenizer.apply_chat_template(
     add_generation_prompt=True,  # Must add for generation
     tokenize=False,
 )
-from vllm import SamplingParams
 
 sampling_params = SamplingParams(
     temperature=1.0,
