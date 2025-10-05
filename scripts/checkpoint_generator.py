@@ -99,7 +99,7 @@ system_prompt = f"""You are given a problem.
 Think about the problem and provide your working out.
 Place it between {reasoning_start} and {reasoning_end}.
 Then, provide your solution between {solution_start}{solution_end}"""
-system_prompt
+# system_prompt
 
 # %% [markdown]
 # We create a simple chat template below. Notice `add_generation_prompt` includes prepending `<start_working_out>` to guide the model to start its reasoning process.
@@ -166,7 +166,7 @@ is_number = pd.to_numeric(pd.Series(dataset["expected_answer"]), errors="coerce"
 # Select only numbers
 dataset = dataset.iloc[np.where(is_number)[0]]
 
-dataset
+# dataset
 
 # %% [markdown]
 # We have to format the dataset to follow our GRPO style formatting:
@@ -211,7 +211,7 @@ tokenizer.apply_chat_template(dataset["Messages"][0], tokenize=False)
 dataset["N"] = dataset["Messages"].apply(lambda x: len(tokenizer.apply_chat_template(x)))
 
 dataset = dataset.loc[dataset["N"] <= max_seq_length / 2].copy()
-dataset.shape
+# dataset.shape
 
 # %% [markdown]
 # We then tokenize the messages and convert it to a Hugging Face compatible dataset format:
@@ -221,7 +221,7 @@ from datasets import Dataset
 
 dataset["text"] = tokenizer.apply_chat_template(dataset["Messages"].values.tolist(), tokenize=False)
 dataset = Dataset.from_pandas(dataset)
-dataset
+# dataset
 
 # %% [markdown]
 # Let's now pre fine-tune the model so it follows our custom GRPO formatting!
@@ -294,7 +294,7 @@ gc.collect()
 from datasets import load_dataset
 
 dataset = load_dataset("open-r1/DAPO-Math-17k-Processed", "en", split="train")
-dataset
+# dataset
 
 # %% [markdown]
 # Let's look at the first row:
@@ -348,7 +348,7 @@ match_format = re.compile(
     rf"[\s]{{0,}}$",
     flags=re.MULTILINE | re.DOTALL,
 )
-match_format
+# match_format
 
 # %% [markdown]
 # We verify it works:
@@ -408,7 +408,7 @@ def match_format_approximately(completions, **kwargs):
 
 # %%
 def check_answer(prompts, completions, answer, **kwargs):
-    question = prompts[0][-1]["content"]
+    # question = prompts[0][-1]["content"]
     responses = [completion[0]["content"] for completion in completions]
 
     extracted_responses = [
@@ -438,7 +438,7 @@ def check_answer(prompts, completions, answer, **kwargs):
                     score += 1.5
                 else:
                     score -= 2.5  # Penalize wrong answers
-            except:
+            except Exception:
                 score -= 4.5  # Penalize
         scores.append(score)
     return scores
@@ -500,7 +500,7 @@ def check_numbers(prompts, completions, answer, **kwargs):
             # Remove commas like in 123,456
             guess = float(guess.strip().replace(",", ""))
             scores.append(3.5 if guess == true_answer else -1.5)
-        except:
+        except Exception:
             scores.append(0)
             continue
     return scores
@@ -641,7 +641,7 @@ output = (
     .text
 )
 
-output
+# output
 
 # %% [markdown]
 # For full fine-tuning, we save the entire model instead of just LoRA adapters
@@ -696,7 +696,7 @@ output = (
     .text
 )
 
-output
+# output
 
 # %% [markdown]
 # Our reasoning model is much better - it's not always correct, since we only trained it for an hour or so - it'll be better if we extend the sequence length and train for longer!

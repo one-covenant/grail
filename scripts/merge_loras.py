@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import shutil
 from pathlib import Path
-from typing import List
 
 import torch
 import typer
@@ -51,7 +50,7 @@ def _resolve_precision(precision: str) -> torch.dtype:
     return precision_map[key]
 
 
-def _discover_latest_checkpoints(root: Path, count: int) -> List[Path]:
+def _discover_latest_checkpoints(root: Path, count: int) -> list[Path]:
     """Return the latest ``count`` LoRA checkpoint directories ordered newest first."""
 
     checkpoints = []
