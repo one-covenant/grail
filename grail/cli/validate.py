@@ -51,6 +51,7 @@ from ..shared.constants import (
     NETUID,
     ROLLOUTS_PER_PROBLEM,
     SUPERLINEAR_EXPONENT,
+    TRAINER_UID,
     WINDOW_LENGTH,
 )
 from ..shared.subnet import get_own_uid_on_subnet
@@ -632,9 +633,18 @@ async def _run_validation_service(
         subtensor = None
         credentials, chain_manager = await _initialize_credentials_and_chain(wallet)
         monitor = await _initialize_monitor(wallet)
+        # Use trainer UID's committed read credentials for checkpoints
+        trainer_bucket = chain_manager.get_bucket(TRAINER_UID)
+        if trainer_bucket is not None:
+            logger.info(f"✅ Using trainer UID {TRAINER_UID} bucket for checkpoints")
+            checkpoint_credentials = trainer_bucket
+        else:
+            logger.warning(f"⚠️ Trainer UID {TRAINER_UID} bucket not found, using local credentials")
+            checkpoint_credentials = credentials
+
         checkpoint_manager = CheckpointManager(
             cache_root=default_checkpoint_cache_root(),
-            credentials=credentials,
+            credentials=checkpoint_credentials,
             keep_limit=3,  # Keep target + 2 fallback windows
         )
         # Rolling window metrics per hotkey, keyed by window_start -> metric dict

@@ -26,7 +26,7 @@ from grail.infrastructure.credentials import load_r2_credentials
 from grail.model.provider import get_model, get_tokenizer
 from grail.monitoring import get_monitoring_manager
 from grail.monitoring.config import MonitoringConfig
-from grail.shared.constants import MODEL_NAME, WINDOW_LENGTH
+from grail.shared.constants import MODEL_NAME, TRAINER_UID, WINDOW_LENGTH
 from grail.shared.subnet import get_own_uid_on_subnet
 
 from .base import BaseNeuron
@@ -70,17 +70,28 @@ class MinerNeuron(BaseNeuron):
                 logger.error(f"Failed to load R2 credentials: {e}")
                 raise
 
-            checkpoint_manager = CheckpointManager(
-                cache_root=default_checkpoint_cache_root(),
-                credentials=credentials,
-                keep_limit=2,  # Keep only current + previous window
-            )
-
             # Initialize chain manager for credential commitments
             config = SimpleNamespace(netuid=int(get_conf("BT_NETUID", get_conf("NETUID", 200))))
             chain_manager = GrailChainManager(config, wallet, credentials)
             await chain_manager.initialize()
             logger.info("✅ Initialized chain manager and committed read credentials")
+
+            # Use trainer UID's committed read credentials for checkpoints
+            trainer_bucket = chain_manager.get_bucket(TRAINER_UID)
+            if trainer_bucket is not None:
+                logger.info(f"✅ Using trainer UID {TRAINER_UID} bucket for checkpoints")
+                checkpoint_credentials = trainer_bucket
+            else:
+                logger.warning(
+                    f"⚠️ Trainer UID {TRAINER_UID} bucket not found, using local credentials"
+                )
+                checkpoint_credentials = credentials
+
+            checkpoint_manager = CheckpointManager(
+                cache_root=default_checkpoint_cache_root(),
+                credentials=checkpoint_credentials,
+                keep_limit=2,  # Keep only current + previous window
+            )
 
             # Initialize monitoring for mining operations
             monitor = get_monitoring_manager()

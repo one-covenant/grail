@@ -52,7 +52,9 @@ TRAINER_GROUP_ADV_SUM_TOL = float(os.getenv("GRAIL_TRAINER_GROUP_ADV_SUM_TOL", "
 # Checkpoint retention controls
 CHECKPOINT_RETENTION_LIMIT = int(os.getenv("GRAIL_CHECKPOINT_RETENTION_LIMIT", "10"))
 CHECKPOINT_MILESTONE_INTERVAL = int(os.getenv("GRAIL_CHECKPOINT_MILESTONE_INTERVAL", "100"))
-TRAINER_HOTKEY = os.getenv("GRAIL_TRAINER_HOTKEY")
+
+# Trainer identity used for checkpoint publication
+TRAINER_UID = 0
 
 # ────────────────  LOGGING  ────────────────
 
