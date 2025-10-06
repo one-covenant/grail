@@ -10,6 +10,7 @@ import logging
 import bittensor as bt
 
 from grail.cli.validate import (
+    WEIGHT_ROLLING_WINDOWS,
     _flush_all_logs,
     _get_sat_reward_bounds,
     _run_validation_service,
@@ -69,7 +70,7 @@ class ValidatorNeuron(BaseNeuron):
 
         # Create weight computer
         weight_computer = WeightComputer(
-            rolling_windows=12,
+            rolling_windows=WEIGHT_ROLLING_WINDOWS,
             window_length=WINDOW_LENGTH,
             superlinear_exponent=SUPERLINEAR_EXPONENT,
             burn_uid=GRAIL_BURN_UID,

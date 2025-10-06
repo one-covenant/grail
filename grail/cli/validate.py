@@ -29,6 +29,7 @@ from grail.infrastructure.drand import get_drand_beacon, get_round_at_time
 from ..environments import create_sat_reward_vector
 from ..grail import derive_canonical_sat
 from ..infrastructure.chain import GrailChainManager
+from ..infrastructure.checkpoints import CheckpointManager, default_checkpoint_cache_root
 from ..infrastructure.comms import (
     file_exists,
     get_file,
@@ -620,6 +621,11 @@ async def _run_validation_service(
         subtensor = None
         credentials, chain_manager = await _initialize_credentials_and_chain(wallet)
         monitor = await _initialize_monitor(wallet)
+        checkpoint_manager = CheckpointManager(
+            cache_root=default_checkpoint_cache_root(),
+            credentials=credentials,
+            keep_limit=3,  # Keep target + 2 fallback windows
+        )
         # Rolling window metrics per hotkey, keyed by window_start -> metric dict
         # Metrics include: valid, checked, total, estimated_valid, successful, unique
         inference_counts: defaultdict[str, defaultdict[int, dict[str, int]]] = defaultdict(
@@ -628,6 +634,7 @@ async def _run_validation_service(
         last_processed_window = -1
         last_weights_interval_submitted = -1
         last_copycat_interval_id = -1
+
         # Rolling histories (12-window horizon) for selection coverage and availability
         selection_history: deque[set[str]] = deque(maxlen=WEIGHT_ROLLING_WINDOWS)
         availability_history: deque[set[str]] = deque(maxlen=WEIGHT_ROLLING_WINDOWS)
@@ -647,6 +654,8 @@ async def _run_validation_service(
                 uid_by_hotkey = dict(zip(meta.hotkeys, meta.uids))
                 current_block = await subtensor.get_current_block()
                 target_window = _determine_target_window(current_block)
+                checkpoint_window = target_window - WINDOW_LENGTH
+
                 if target_window <= last_processed_window or target_window < 0:
                     await asyncio.sleep(5)
                     logger.debug(f"Waiting for new window {target_window}")
@@ -655,47 +664,51 @@ async def _run_validation_service(
                 if monitor:
                     monitor.set_block_context(current_block, target_window)
 
-                # ------------------------------------------------------------------ #
-                # Training integration (commented for now):
-                #
-                # If training is enabled, validators may want to load the miner's
-                # model state for the target window before verification.
-                # This keeps validation consistent with the model used to produce
-                # rollouts.
-                #
-                # Example flow:
-                # - Wait for model checkpoint to exist for this window
-                # - Load model state into verifier.model
-                # - Set model to eval mode
-                #
-                # Uncomment when training modules are wired:
-                #
-                # available = await _model_state_exists(
-                #     hotkey=wallet.hotkey.ss58_address,
-                #     window_start=target_window,
-                # )
-                # if available:
-                #     loaded = await _load_model_state(
-                #         model=verifier.model,
-                #         hotkey=wallet.hotkey.ss58_address,
-                #         window_start=target_window,
-                #     )
-                #     if loaded:
-                #         logger.info(
-                #             "✅ Loaded model state for window %s", target_window
-                #         )
-                #         verifier.model.eval()
-                #     else:
-                #         logger.warning(
-                #             "⚠️ Failed to load model state; using base model"
-                #         )
-                # else:
-                #     logger.debug(
-                #         "No model checkpoint available for window %s", target_window
-                #     )
-                # Using base model directly without waiting for state
+                # Validator should load the checkpoint miners used when producing rollouts in target_window:
+                # that is the checkpoint published after (target_window - WINDOW_LENGTH)
+                checkpoint_path = None
+                try:
+                    # Time checkpoint download/retrieval
+                    timer_ctx = (
+                        monitor.timer("validation/checkpoint_download")
+                        if monitor
+                        else contextlib.nullcontext()
+                    )
+                    with timer_ctx:
+                        checkpoint_window = target_window - WINDOW_LENGTH
+                        if checkpoint_window >= 0:
+                            checkpoint_path = await checkpoint_manager.get_checkpoint(
+                                checkpoint_window
+                            )
+                except Exception:
+                    logger.warning(
+                        "Failed to resolve checkpoint path for target_window=%s (ckpt=%s)",
+                        target_window,
+                        checkpoint_window if "checkpoint_window" in locals() else "n/a",
+                    )
 
-                logger.info("🚀 Using base model for verification")
+                if checkpoint_path:
+                    try:
+                        logger.info(
+                            "🚀 Loading checkpoint for validation window %s from %s",
+                            target_window,
+                            checkpoint_path,
+                        )
+                        model = AutoModelForCausalLM.from_pretrained(
+                            checkpoint_path, trust_remote_code=False
+                        )
+                        tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
+                        model.eval()
+                    except Exception:
+                        logger.exception("Failed to load checkpoint, continuing with base model")
+                else:
+                    logger.info("🚀 Using base model for verification")
+
+                # Trim local cache per retention policy
+                try:
+                    await checkpoint_manager.cleanup_local(target_window)
+                except Exception:
+                    logger.debug("checkpoint cache cleanup failed", exc_info=True)
 
                 # Reset copycat tracker at the start of each submission interval,
                 # using window-derived interval ids to avoid mid-loop resets.
