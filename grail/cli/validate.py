@@ -586,8 +586,8 @@ def _get_sat_reward_bounds() -> tuple[float, float]:
 
 async def _run_validation_service(
     wallet: bt.wallet,
-    model: AutoModelForCausalLM,
-    tokenizer: AutoTokenizer,
+    model: Optional[AutoModelForCausalLM],
+    tokenizer: Optional[AutoTokenizer],
     sat_pipeline: ValidationPipeline,
     weight_computer: WeightComputer,
     sat_reward_low: float,
@@ -599,8 +599,8 @@ async def _run_validation_service(
 
     Args:
         wallet: Bittensor wallet used for signing and network ops.
-        model: Loaded model instance.
-        tokenizer: Loaded tokenizer instance.
+        model: Initial model instance (can be None, will load from checkpoint).
+        tokenizer: Initial tokenizer instance (can be None, will load from checkpoint).
         sat_pipeline: SAT validation pipeline.
         weight_computer: Weight computer instance.
         sat_reward_low: Lower bound for SAT rollout reward sanity checks.
@@ -725,9 +725,19 @@ async def _run_validation_service(
                         tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
                         model.eval()
                     except Exception:
-                        logger.exception("Failed to load checkpoint, continuing with base model")
+                        logger.exception(
+                            "Failed to load checkpoint for window %s, skipping window",
+                            target_window,
+                        )
+                        await asyncio.sleep(30)
+                        continue
                 else:
-                    logger.info("🚀 Using base model for verification")
+                    logger.warning(
+                        "No checkpoint available for window %s, skipping validation",
+                        target_window,
+                    )
+                    await asyncio.sleep(30)
+                    continue
 
                 # Trim local cache per retention policy
                 try:

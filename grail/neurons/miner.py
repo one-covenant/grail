@@ -26,7 +26,7 @@ from grail.infrastructure.credentials import load_r2_credentials
 from grail.model.provider import get_model, get_tokenizer
 from grail.monitoring import get_monitoring_manager
 from grail.monitoring.config import MonitoringConfig
-from grail.shared.constants import MODEL_NAME, TRAINER_UID, WINDOW_LENGTH
+from grail.shared.constants import TRAINER_UID, WINDOW_LENGTH
 from grail.shared.subnet import get_own_uid_on_subnet
 
 from .base import BaseNeuron
@@ -47,13 +47,11 @@ class MinerNeuron(BaseNeuron):
         hotkey = get_conf("BT_WALLET_HOT", "default")
         wallet = bt.wallet(name=coldkey, hotkey=hotkey)
 
-        # Initialize model and tokenizer via provider
         logger.info(f"🔑 Miner hotkey: {wallet.hotkey.ss58_address}")
-        logger.info(f"Loading base model: {MODEL_NAME}")
-        base_model = get_model(MODEL_NAME, device=None, eval_mode=True)
-        base_tokenizer = get_tokenizer(MODEL_NAME)
-        model = base_model
-        tokenizer = base_tokenizer
+
+        # Model and tokenizer will be loaded from checkpoint
+        model = None
+        tokenizer = None
         current_checkpoint_window: int | None = None
 
         async def _run() -> None:
@@ -126,46 +124,53 @@ class MinerNeuron(BaseNeuron):
                         await asyncio.sleep(2)
                         continue
 
-                    checkpoint_path = None
+                    # Load checkpoint (required - miners always use checkpoints)
                     if checkpoint_window is not None and checkpoint_window >= 0:
-                        # Time checkpoint download/retrieval
-                        timer_ctx = (
-                            monitor.timer("mining/checkpoint_download")
-                            if monitor
-                            else contextlib.nullcontext()
-                        )
-                        with timer_ctx:
-                            checkpoint_path = await checkpoint_manager.get_checkpoint(
-                                checkpoint_window
-                            )
-
-                    if checkpoint_path is not None:
                         if current_checkpoint_window != checkpoint_window:
-                            logger.info(
-                                "🔁 Loading checkpoint for window %s from %s",
-                                checkpoint_window,
-                                checkpoint_path,
+                            # Time checkpoint download/retrieval
+                            timer_ctx = (
+                                monitor.timer("mining/checkpoint_download")
+                                if monitor
+                                else contextlib.nullcontext()
                             )
-                            try:
-                                model = get_model(str(checkpoint_path), device=None, eval_mode=True)
-                                tokenizer = get_tokenizer(str(checkpoint_path))
-                                current_checkpoint_window = checkpoint_window
-                                if torch.cuda.is_available():
-                                    torch.cuda.empty_cache()
-                            except Exception:
-                                logger.exception(
-                                    "Failed to load checkpoint for window %s; reverting to base model",
+                            with timer_ctx:
+                                checkpoint_path = await checkpoint_manager.get_checkpoint(
+                                    checkpoint_window
+                                )
+
+                            if checkpoint_path is not None:
+                                logger.info(
+                                    "🔁 Loading checkpoint for window %s from %s",
+                                    checkpoint_window,
+                                    checkpoint_path,
+                                )
+                                try:
+                                    model = get_model(
+                                        str(checkpoint_path), device=None, eval_mode=True
+                                    )
+                                    tokenizer = get_tokenizer(str(checkpoint_path))
+                                    current_checkpoint_window = checkpoint_window
+                                    if torch.cuda.is_available():
+                                        torch.cuda.empty_cache()
+                                except Exception:
+                                    logger.exception(
+                                        "Failed to load checkpoint for window %s",
+                                        checkpoint_window,
+                                    )
+                                    raise
+                            else:
+                                logger.error(
+                                    "No checkpoint available for window %s - cannot mine",
                                     checkpoint_window,
                                 )
-                                model = base_model
-                                tokenizer = base_tokenizer
-                                current_checkpoint_window = None
-                    else:
-                        if current_checkpoint_window is not None:
-                            logger.info("Reverting to base model (checkpoint unavailable)")
-                            model = base_model
-                            tokenizer = base_tokenizer
-                            current_checkpoint_window = None
+                                await asyncio.sleep(30)
+                                continue
+
+                    # Ensure model and tokenizer are loaded before mining
+                    if model is None or tokenizer is None:
+                        logger.error("Model or tokenizer not loaded, cannot mine")
+                        await asyncio.sleep(30)
+                        continue
 
                     logger.info(
                         f"🔥 Starting inference generation for window "

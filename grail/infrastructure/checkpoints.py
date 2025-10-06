@@ -39,7 +39,7 @@ from . import comms
 
 logger = logging.getLogger(__name__)
 
-CHECKPOINT_PREFIX = "model_checkpoints/"
+CHECKPOINT_PREFIX = "grail/checkpoints/"
 
 
 # --------------------------------------------------------------------------- #
