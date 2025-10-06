@@ -650,6 +650,41 @@ async def list_bucket_files(
         return []
 
 
+async def delete_prefix(
+    prefix: str,
+    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    use_write: bool = True,
+) -> None:
+    """Delete all objects under a prefix.
+
+    Designed for cleanup of checkpoint directories. Uses batched delete
+    operations to minimize round trips.
+    """
+
+    continuation_token: Optional[str] = None
+    while True:
+        try:
+            async with get_client_ctx(credentials, use_write) as client:
+                bucket_id = get_bucket_id(credentials, use_write)
+                list_kwargs: dict[str, Any] = {"Bucket": bucket_id, "Prefix": prefix}
+                if continuation_token:
+                    list_kwargs["ContinuationToken"] = continuation_token
+
+                response = await client.list_objects_v2(**list_kwargs)
+                objects = response.get("Contents", [])
+                if objects:
+                    delete_payload = {"Objects": [{"Key": obj["Key"]} for obj in objects]}
+                    await client.delete_objects(Bucket=bucket_id, Delete=delete_payload)
+
+                if not response.get("IsTruncated"):
+                    break
+
+                continuation_token = response.get("NextContinuationToken")
+        except Exception:
+            logger.error("Failed to delete prefix %s", prefix, exc_info=True)
+            break
+
+
 async def get_file(
     key: str,
     credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,

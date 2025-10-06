@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 import traceback
 from types import SimpleNamespace
 
 import bittensor as bt
+import torch
 
 import grail.cli.mine as cli_mine
 from grail.cli.mine import (
@@ -19,6 +21,7 @@ from grail.cli.mine import (
     upload_inferences_with_metrics,
 )
 from grail.infrastructure.chain import GrailChainManager
+from grail.infrastructure.checkpoints import CheckpointManager, default_checkpoint_cache_root
 from grail.infrastructure.credentials import load_r2_credentials
 from grail.model.provider import get_model, get_tokenizer
 from grail.monitoring import get_monitoring_manager
@@ -47,10 +50,14 @@ class MinerNeuron(BaseNeuron):
         # Initialize model and tokenizer via provider
         logger.info(f"🔑 Miner hotkey: {wallet.hotkey.ss58_address}")
         logger.info(f"Loading base model: {MODEL_NAME}")
-        model = get_model(MODEL_NAME, device=None, eval_mode=True)
-        tokenizer = get_tokenizer(MODEL_NAME)
+        base_model = get_model(MODEL_NAME, device=None, eval_mode=True)
+        base_tokenizer = get_tokenizer(MODEL_NAME)
+        model = base_model
+        tokenizer = base_tokenizer
+        current_checkpoint_window: int | None = None
 
         async def _run() -> None:
+            nonlocal model, tokenizer, current_checkpoint_window
             subtensor = None
             last_window_start = -1
             timers = MiningTimers()
@@ -62,6 +69,12 @@ class MinerNeuron(BaseNeuron):
             except Exception as e:
                 logger.error(f"Failed to load R2 credentials: {e}")
                 raise
+
+            checkpoint_manager = CheckpointManager(
+                cache_root=default_checkpoint_cache_root(),
+                credentials=credentials,
+                keep_limit=2,  # Keep only current + previous window
+            )
 
             # Initialize chain manager for credential commitments
             config = SimpleNamespace(netuid=int(get_conf("BT_NETUID", get_conf("NETUID", 200))))
@@ -95,12 +108,54 @@ class MinerNeuron(BaseNeuron):
 
                     current_block = await subtensor.get_current_block()
                     window_start = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
+                    # Miners use the checkpoint published after the previous window finished
+                    checkpoint_window = window_start - WINDOW_LENGTH
 
                     if window_start <= last_window_start:
                         await asyncio.sleep(2)
                         continue
 
-                    logger.info(f"🚀 Using base model for window {window_start}")
+                    checkpoint_path = None
+                    if checkpoint_window is not None and checkpoint_window >= 0:
+                        # Time checkpoint download/retrieval
+                        timer_ctx = (
+                            monitor.timer("mining/checkpoint_download")
+                            if monitor
+                            else contextlib.nullcontext()
+                        )
+                        with timer_ctx:
+                            checkpoint_path = await checkpoint_manager.get_checkpoint(
+                                checkpoint_window
+                            )
+
+                    if checkpoint_path is not None:
+                        if current_checkpoint_window != checkpoint_window:
+                            logger.info(
+                                "🔁 Loading checkpoint for window %s from %s",
+                                checkpoint_window,
+                                checkpoint_path,
+                            )
+                            try:
+                                model = get_model(str(checkpoint_path), device=None, eval_mode=True)
+                                tokenizer = get_tokenizer(str(checkpoint_path))
+                                current_checkpoint_window = checkpoint_window
+                                if torch.cuda.is_available():
+                                    torch.cuda.empty_cache()
+                            except Exception:
+                                logger.exception(
+                                    "Failed to load checkpoint for window %s; reverting to base model",
+                                    checkpoint_window,
+                                )
+                                model = base_model
+                                tokenizer = base_tokenizer
+                                current_checkpoint_window = None
+                    else:
+                        if current_checkpoint_window is not None:
+                            logger.info("Reverting to base model (checkpoint unavailable)")
+                            model = base_model
+                            tokenizer = base_tokenizer
+                            current_checkpoint_window = None
+
                     logger.info(
                         f"🔥 Starting inference generation for window "
                         f"{window_start}-{window_start + WINDOW_LENGTH - 1}"
@@ -159,6 +214,7 @@ class MinerNeuron(BaseNeuron):
                             await monitor.log_counter("mining.empty_windows")
 
                     last_window_start = window_start
+                    await checkpoint_manager.cleanup_local(window_start)
                 except asyncio.CancelledError:
                     break
                 except Exception as e:

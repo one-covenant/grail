@@ -287,7 +287,7 @@ def generate_sat_problem_for_group(
 
 
 def create_rollout_generator(
-    model: AutoModelForCausalLM, tokenizer: AutoTokenizer, device: torch.device
+    model: AutoModelForCausalLM, tokenizer: AutoTokenizer, device: Any
 ) -> SATRolloutGenerator:
     """Create a GRPO rollout generator configured for the given model.
 
