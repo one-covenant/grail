@@ -25,6 +25,7 @@ import typer
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from grail.infrastructure.drand import get_drand_beacon, get_round_at_time
+from grail.model.provider import get_model, get_tokenizer
 
 from ..environments import create_sat_reward_vector
 from ..grail import derive_canonical_sat
@@ -562,18 +563,6 @@ def validate(
 # ----------------------------- Refactored Helpers ---------------------------- #
 
 
-def _flush_all_logs() -> None:
-    """Flush all logging handlers to ensure messages are written before exit."""
-    import logging
-
-    for handler in logging.root.handlers:
-        handler.flush()
-    # Also flush any handlers on the current logger
-    logger = logging.getLogger(__name__)
-    for handler in logger.handlers:
-        handler.flush()
-
-
 def _get_sat_reward_bounds() -> tuple[float, float]:
     """Return SAT reward bounds or permissive defaults on failure."""
     try:
@@ -719,11 +708,8 @@ async def _run_validation_service(
                             target_window,
                             checkpoint_path,
                         )
-                        model = AutoModelForCausalLM.from_pretrained(
-                            checkpoint_path, trust_remote_code=False
-                        )
-                        tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
-                        model.eval()
+                        model = get_model(str(checkpoint_path), device=None, eval_mode=True)
+                        tokenizer = get_tokenizer(str(checkpoint_path))
                     except Exception:
                         logger.exception(
                             "Failed to load checkpoint for window %s, skipping window",
@@ -791,6 +777,19 @@ async def _run_validation_service(
                     )
                 else:
                     hotkeys_to_check = eligible_hotkeys
+
+                # Filter to only check UID 80
+                # NOTE: only temp; will be removed later on
+                uid_80_hotkeys = []
+                for hotkey in hotkeys_to_check:
+                    uid = uid_by_hotkey.get(hotkey)
+                    if uid == 80:
+                        uid_80_hotkeys.append(hotkey)
+
+                hotkeys_to_check = uid_80_hotkeys
+                logger.info(
+                    f"🎯 Filtering to only check UID 80: found {len(hotkeys_to_check)} hotkeys"
+                )
 
                 # Update selection coverage rolling window
                 _update_rolling(
