@@ -3,11 +3,12 @@
 Provides:
 - Signal-safe start/stop handling (SIGINT, SIGTERM)
 - A shared stop_event to coordinate shutdown
+- Shared subtensor management with automatic reconnection
+- Window calculation utilities
 - Optional window change signaling for future event-driven orchestration
 
-Stage 1 keeps this class minimal and self-contained. Subclasses should
-override `run()` and may push background tasks/threads into the provided
-registries for coordinated teardown.
+Subclasses should override `run()` and may push background tasks/threads into
+the provided registries for coordinated teardown.
 """
 
 from __future__ import annotations
@@ -17,6 +18,11 @@ import logging
 import signal
 import threading
 from typing import Optional
+
+import bittensor as bt
+
+from ..infrastructure.network import create_subtensor
+from ..shared.constants import WINDOW_LENGTH
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +41,9 @@ class BaseNeuron:
         # Background bookkeeping for structured teardown
         self._bg_tasks: set[asyncio.Task] = set()
         self._threads: list[threading.Thread] = []
+
+        # Shared subtensor instance (lazy-initialized)
+        self._subtensor: bt.subtensor | None = None
 
         # Optional window-tracking primitives (set by subclasses if needed)
         self.window_changed: Optional[asyncio.Event] = None  # noqa: UP045
@@ -63,6 +72,56 @@ class BaseNeuron:
         """Entry point for subclasses to implement their main loop."""
         raise NotImplementedError
 
+    async def get_subtensor(self) -> bt.subtensor:
+        """Get or create the shared subtensor instance.
+
+        This method lazy-initializes a single subtensor connection and caches
+        it for reuse. Subclasses should call this instead of managing their own
+        subtensor instances.
+
+        Returns:
+            Initialized async subtensor instance
+
+        Example:
+            subtensor = await self.get_subtensor()
+            current_block = await subtensor.get_current_block()
+        """
+        if self._subtensor is None:
+            logger.info("Making Bittensor connection...")
+            self._subtensor = await create_subtensor()
+            logger.info("Connected to Bittensor")
+        return self._subtensor
+
+    def reset_subtensor(self) -> None:
+        """Clear the cached subtensor instance.
+
+        Call this when a subtensor operation fails to force reconnection
+        on the next `get_subtensor()` call.
+
+        Example:
+            try:
+                block = await subtensor.get_current_block()
+            except Exception:
+                self.reset_subtensor()  # Force reconnect next time
+                raise
+        """
+        self._subtensor = None
+
+    @staticmethod
+    def calculate_window(block: int) -> int:
+        """Calculate the window start block for a given block number.
+
+        Args:
+            block: Current block number
+
+        Returns:
+            Window start block (aligned to WINDOW_LENGTH)
+
+        Example:
+            window = self.calculate_window(12345)  # Returns 12000 if WINDOW_LENGTH=1000
+        """
+        return (block // WINDOW_LENGTH) * WINDOW_LENGTH
+
     async def wait_until_window(self, target_window: int) -> None:
         """Block until `current_window` >= target_window or shutdown.
 
@@ -87,7 +146,10 @@ class BaseNeuron:
     def _install_signal_handlers(self, loop: asyncio.AbstractEventLoop) -> None:
         """Register handlers to trigger cooperative shutdown."""
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(self._shutdown(s)))
+            loop.add_signal_handler(
+                sig,
+                lambda s=sig: asyncio.create_task(self._shutdown(s)),  # type: ignore[misc]
+            )
 
     async def _shutdown(self, sig: signal.Signals) -> None:
         """Set stop flag, cancel tasks, and join threads.

@@ -1253,8 +1253,12 @@ async def _initialize_credentials_and_chain(wallet: bt.wallet) -> tuple[Any, Gra
         logger.error(f"Failed to load R2 credentials: {e}")
         raise
 
+    # Get subtensor and metagraph for chain manager
+    subtensor = await get_subtensor()
+    metagraph = await subtensor.metagraph(NETUID)
+
     config = SimpleNamespace(netuid=NETUID)
-    chain_manager = GrailChainManager(config, wallet, credentials)
+    chain_manager = GrailChainManager(config, wallet, metagraph, subtensor, credentials)
     await chain_manager.initialize()
     logger.info("✅ Initialized chain manager and committed read credentials")
 

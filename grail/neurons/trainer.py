@@ -16,7 +16,6 @@ from accelerate import Accelerator
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..infrastructure.checkpoints import CheckpointManager
-from ..infrastructure.network import create_subtensor
 from ..shared.constants import (
     MODEL_NAME,
     TRAINER_EPOCHS,
@@ -52,20 +51,17 @@ class TrainerNeuron(BaseNeuron):
         self._context = context
 
     async def run(self) -> None:  # noqa: D401
-        subtensor: bt.subtensor | None = None
         last_processed_window = -1
 
         while not self.stop_event.is_set():
             try:
                 self._context.update_heartbeat()
 
-                if subtensor is None:
-                    logger.info("Making Bittensor connection...")
-                    subtensor = await create_subtensor()
-                    logger.info("Connected to subtensor")
+                # Use shared subtensor from base class
+                subtensor = await self.get_subtensor()
 
                 current_block = await subtensor.get_current_block()
-                current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
+                current_window = self.calculate_window(current_block)
                 target_window = current_window - WINDOW_LENGTH
 
                 if target_window <= last_processed_window or target_window < 0:
@@ -90,7 +86,7 @@ class TrainerNeuron(BaseNeuron):
                 break
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Trainer loop error: %s", exc)
-                subtensor = None
+                self.reset_subtensor()  # Force reconnect on next iteration
                 await asyncio.sleep(30)
 
     async def _train_window(self, window: int) -> bool:

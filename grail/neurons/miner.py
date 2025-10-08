@@ -65,7 +65,6 @@ class MinerNeuron(BaseNeuron):
 
         async def _run() -> None:
             nonlocal model, tokenizer, current_checkpoint_window
-            subtensor = None
             last_window_start = -1
             timers = MiningTimers()
 
@@ -81,9 +80,16 @@ class MinerNeuron(BaseNeuron):
             self._update_heartbeat()
             logger.info("✅ Initialized watchdog heartbeat")
 
+            # Get subtensor and metagraph for chain manager (use shared base method)
+            subtensor = await self.get_subtensor()
+            self._update_heartbeat()
+            netuid = int(get_conf("BT_NETUID", get_conf("NETUID", 200)))
+            metagraph = await subtensor.metagraph(netuid)
+            self._update_heartbeat()
+
             # Initialize chain manager for credential commitments
-            config = SimpleNamespace(netuid=int(get_conf("BT_NETUID", get_conf("NETUID", 200))))
-            chain_manager = GrailChainManager(config, wallet, credentials)
+            config = SimpleNamespace(netuid=netuid)
+            chain_manager = GrailChainManager(config, wallet, metagraph, subtensor, credentials)
             await chain_manager.initialize()
             # Store chain manager globally for watchdog cleanup
             cli_mine.CHAIN_MANAGER = chain_manager
@@ -132,11 +138,12 @@ class MinerNeuron(BaseNeuron):
                 try:
                     # Update heartbeat at start of each iteration
                     self._update_heartbeat()
-                    if subtensor is None:
-                        subtensor = await get_subtensor()
+
+                    # Use shared subtensor from base class
+                    subtensor = await self.get_subtensor()
 
                     current_block = await subtensor.get_current_block()
-                    window_start = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
+                    window_start = self.calculate_window(current_block)
                     # Miners use the checkpoint published after the previous window finished
                     checkpoint_window = window_start - WINDOW_LENGTH
 
@@ -261,7 +268,7 @@ class MinerNeuron(BaseNeuron):
                 except Exception as e:
                     traceback.print_exc()
                     logger.error(f"Error in miner loop: {e}. Continuing ...")
-                    subtensor = None
+                    self.reset_subtensor()  # Force reconnect on next iteration
                     await asyncio.sleep(10)
                     continue
 
