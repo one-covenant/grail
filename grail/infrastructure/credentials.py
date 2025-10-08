@@ -2,14 +2,13 @@
 
 import logging
 import os
-from typing import Optional
 
 from ..shared.schemas import BucketCredentials
 
 logger = logging.getLogger(__name__)
 
 
-def get_conf(key: str, default: Optional[str] = None) -> str:
+def get_conf(key: str, default: str | None = None) -> str:
     """
     Get configuration from environment variables.
 

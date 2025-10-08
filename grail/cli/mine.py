@@ -9,7 +9,7 @@ import math
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import bittensor as bt
 import torch
@@ -36,7 +36,7 @@ logger = logging.getLogger("grail")
 EMA_ALPHA = 0.2  # Exponential moving average smoothing
 
 MINER_SAFETY_BLOCKS = int(  # Safety margin blocks before window end
-    os.getenv("GRAIL_MINER_SAFETY_BLOCKS", "1")
+    os.getenv("GRAIL_MINER_SAFETY_BLOCKS", "3")
 )
 DEBUG_TEXT_LOG_LIMIT_PER_WINDOW = 5  # Max sample texts logged per window
 
@@ -56,7 +56,7 @@ def get_conf(key: str, default: Any = None) -> Any:
 # --------------------------------------------------------------------------- #
 #                               Subtensor                                     #
 # --------------------------------------------------------------------------- #
-SUBTENSOR: Optional[bt.subtensor] = None
+SUBTENSOR: bt.subtensor | None = None
 
 
 async def get_subtensor() -> bt.subtensor:
@@ -75,7 +75,7 @@ async def get_subtensor() -> bt.subtensor:
 
 def parse_filename(
     filename: str,
-) -> tuple[Optional[str], Optional[int], Optional[int]]:
+) -> tuple[str | None, int | None, int | None]:
     """Parse filename to extract wallet, block, nonce"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -90,7 +90,7 @@ def parse_filename(
 
 def parse_window_filename(
     filename: str,
-) -> tuple[Optional[str], Optional[int]]:
+) -> tuple[str | None, int | None]:
     """Parse window filename to extract wallet and window_start"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -155,10 +155,10 @@ class MiningTimers:
     """
 
     block_time_ema_s: float = float(BLOCK_TIME_SECONDS)
-    gen_time_ema_s: Optional[float] = None
-    upload_time_ema_s: Optional[float] = None
-    last_block_num: Optional[int] = None
-    last_block_ts: Optional[float] = None
+    gen_time_ema_s: float | None = None
+    upload_time_ema_s: float | None = None
+    last_block_num: int | None = None
+    last_block_ts: float | None = None
 
     def update_block_time_ema(self, current_block: int) -> None:
         """Update the EMA for block time using observed block deltas.
@@ -257,7 +257,8 @@ async def get_window_randomness(
         return window_block_hash, window_block_hash
 
     try:
-        drand_beacon = get_drand_beacon(None)
+        # Run drand HTTP request in thread pool to avoid blocking event loop
+        drand_beacon = await asyncio.to_thread(get_drand_beacon, None)
         logger.info("🎲 Using drand randomness from round %s", drand_beacon["round"])
         combined_randomness = hashlib.sha256(
             (window_block_hash + drand_beacon["randomness"]).encode()
@@ -312,7 +313,7 @@ async def maybe_log_debug_sample(
     sample: Any,
     window_start: int,
     base_nonce: int,
-    monitor: Optional[Any],
+    monitor: Any | None,
     text_logs_emitted: int,
     text_log_limit: int,
 ) -> int:
@@ -512,7 +513,7 @@ async def upload_inferences_with_metrics(
     window_start: int,
     inferences: list[dict],
     credentials: Any,
-    monitor: Optional[Any],
+    monitor: Any | None,
 ) -> float:
     """Upload window payload to object storage and return elapsed seconds.
 
@@ -554,7 +555,7 @@ async def generate_rollouts_for_window(
     window_block_hash: str,
     combined_randomness: str,
     timers: MiningTimers,
-    monitor: Optional[Any],
+    monitor: Any | None,
     use_drand: bool,
 ) -> list[dict]:
     """Generate as many GRPO rollouts as safely possible within a window.
@@ -654,8 +655,13 @@ async def generate_rollouts_for_window(
             )
 
             HEARTBEAT = time.monotonic()
-            grpo_rollouts = generator.generate_grpo_rollouts(
-                sat_problem, combined_randomness, wallet
+            # Run blocking model inference in thread pool to avoid blocking event loop
+            # This allows heartbeat keeper and other async tasks to continue running
+            grpo_rollouts = await asyncio.to_thread(
+                generator.generate_grpo_rollouts,
+                sat_problem,
+                combined_randomness,
+                wallet,
             )
             HEARTBEAT = time.monotonic()
 

@@ -264,7 +264,7 @@ class GRAILVerifier:
         validator_ranks = validator_sorted[:5].tolist()
         miner_ranks = miner_commitment["top_5_ranks"]
 
-        rank_matches = sum(1 for m, v in zip(miner_ranks, validator_ranks) if m == v)
+        rank_matches = sum(1 for m, v in zip(miner_ranks, validator_ranks, strict=False) if m == v)
         rank_valid = rank_matches >= tolerance["min_rank_matches"]
 
         # CHECK 3: Histogram verification
@@ -275,7 +275,9 @@ class GRAILVerifier:
         miner_histogram = miner_commitment["histogram"]
 
         # L1 distance between histograms
-        hist_diff = sum(abs(m - v) for m, v in zip(miner_histogram, validator_histogram))
+        hist_diff = sum(
+            abs(m - v) for m, v in zip(miner_histogram, validator_histogram, strict=False)
+        )
         hist_valid = hist_diff <= tolerance["histogram"]
 
         # Combined verdict: ALL checks must pass

@@ -16,7 +16,7 @@ import traceback
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import bittensor as bt
 import torch
@@ -83,7 +83,7 @@ def get_conf(key: str, default: Any = None) -> Any:
 # --------------------------------------------------------------------------- #
 #                               Subtensor                                     #
 # --------------------------------------------------------------------------- #
-SUBTENSOR: Optional[bt.subtensor] = None
+SUBTENSOR: bt.subtensor | None = None
 
 
 async def get_subtensor() -> bt.subtensor:

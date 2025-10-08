@@ -40,7 +40,7 @@ def make_rollout_data(
     """Generate multiple rollout digests from seeds."""
     prompt_len = len(prompt_tokens)
     digests = []
-    for seed, is_unique in zip(seeds, unique_flags):
+    for seed, is_unique in zip(seeds, unique_flags, strict=False):
         tokens = generate_sat_completion_tokens(prompt_tokens, seed, is_unique)
         digest = compute_completion_digest({"tokens": tokens}, {"prompt_length": prompt_len})
         if digest:

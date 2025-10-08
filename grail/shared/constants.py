@@ -136,7 +136,8 @@ FAILURE_LOOKBACK_WINDOWS = 14
 # ────────────────  GRAIL PROOF VERIFICATION  ────────────────
 
 # Top-K activation selection (focus on stable, important features)
-PROOF_TOPK = 256
+# UPDATED: Reduced from 256 to 32 for higher sensitivity to training changes
+PROOF_TOPK = 32
 
 # Logarithmic bucketing parameters
 PROOF_NUM_BUCKETS = 16  # Buckets per sign
@@ -146,13 +147,16 @@ PROOF_COEFF_RANGE = 127  # r ∈ [-127, 127]
 
 # Multi-check tolerances (calibrate empirically via cross-framework tests)
 # Sketch: modular distance on dot product
-PROOF_SKETCH_TOLERANCE = 1000
+# UPDATED: Reduced from 1000 to 50 for tighter verification
+PROOF_SKETCH_TOLERANCE = 50
 
 # Rank: minimum matches required in top-5 ordering
-PROOF_MIN_RANK_MATCHES = 4
+# UPDATED: Increased from 4 to 5 for stricter rank matching
+PROOF_MIN_RANK_MATCHES = 5
 
 # Histogram: L1 distance on bucket distribution
-PROOF_HISTOGRAM_TOLERANCE = 50
+# UPDATED: Reduced from 50 to 10 for tighter distribution matching
+PROOF_HISTOGRAM_TOLERANCE = 10
 
 # Adaptive tolerance: position importance decay rate
 PROOF_POSITION_IMPORTANCE_DECAY = 100.0

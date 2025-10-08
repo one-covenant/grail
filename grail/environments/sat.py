@@ -4,7 +4,8 @@ import hashlib
 import logging
 import random
 import re
-from typing import Any, Callable, Optional, cast
+from collections.abc import Callable
+from typing import Any, cast
 
 from ..mining.rollout_generator import RolloutGenerator
 from ..shared.constants import MAX_NEW_TOKENS
@@ -389,7 +390,7 @@ def create_sat_reward_vector(
 class SATRolloutGenerator(RolloutGenerator):
     """SAT-specific rollout generator using RewardVector."""
 
-    _current_problem: Optional[SATProblem]
+    _current_problem: SATProblem | None
 
     def __init__(
         self,
@@ -397,7 +398,7 @@ class SATRolloutGenerator(RolloutGenerator):
         tokenizer: Any,
         device: str = "cuda",
         rollouts_per_problem: int = 4,
-        reward_vector: Optional[RewardVector] = None,
+        reward_vector: RewardVector | None = None,
     ) -> None:
         """Initialize SAT rollout generator.
 

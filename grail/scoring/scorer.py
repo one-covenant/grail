@@ -39,13 +39,13 @@ class MinerScorer:
         # Count successful (solved problem)
         successful = sum(
             1
-            for (ok, _), r in zip(validation_results, rollouts)
+            for (ok, _), r in zip(validation_results, rollouts, strict=False)
             if ok and r.get("commit", {}).get("rollout", {}).get("success", False)
         )
 
         # Count unique (by hashing completion tokens)
         unique_hashes = set()
-        for (ok, _), r in zip(validation_results, rollouts):
+        for (ok, _), r in zip(validation_results, rollouts, strict=False):
             if ok:
                 digest = MinerScorer._compute_rollout_hash(r)
                 if digest:

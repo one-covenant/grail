@@ -106,7 +106,7 @@ class CheckpointManager:
                 original_window = window
                 # If window values are multiples of 10, map deterministically to [0..9]
                 # by first collapsing the decade, then mod 10.
-                window = (int(window) // 100) % 10
+                window = (int(window) // 10) % 10
                 logger.debug("[TEST MOD10] remapped window %s -> %s", original_window, window)
         except Exception:
             pass
