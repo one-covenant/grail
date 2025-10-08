@@ -15,7 +15,6 @@ from grail.cli.mine import (
     MiningTimers,
     generate_rollouts_for_window,
     get_conf,
-    get_subtensor,
     get_window_randomness,
     has_time_for_next_generation,
     upload_inferences_with_metrics,
@@ -119,7 +118,7 @@ class MinerNeuron(BaseNeuron):
             if monitor:
                 mining_config = MonitoringConfig.for_mining(wallet.name)
                 try:
-                    subtensor_for_uid = await get_subtensor()
+                    subtensor_for_uid = await self.get_subtensor()
                     self._update_heartbeat()
                 except Exception:
                     subtensor_for_uid = None
