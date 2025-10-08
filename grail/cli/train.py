@@ -36,7 +36,6 @@ from ..infrastructure.comms import (
     upload_file_chunked,
 )
 from ..infrastructure.credentials import load_r2_credentials
-from ..infrastructure.network import create_subtensor
 from ..monitoring import get_monitoring_manager
 from ..monitoring.config import MonitoringConfig
 from ..shared.constants import (
@@ -78,21 +77,6 @@ def get_conf(key: str, default: Any = None) -> Any:
         console.print(f"[red]{key} not set.[/red]\nRun:\n    af set {key} <value>")
         raise typer.Exit(code=1)
     return v or default
-
-
-# --------------------------------------------------------------------------- #
-#                               Subtensor                                     #
-# --------------------------------------------------------------------------- #
-SUBTENSOR: bt.subtensor | None = None
-
-
-async def get_subtensor() -> bt.subtensor:
-    global SUBTENSOR
-    if SUBTENSOR is None:
-        logger.info("Making Bittensor connection...")
-        SUBTENSOR = await create_subtensor()
-        logger.info("Connected")
-    return SUBTENSOR
 
 
 # --------------------------------------------------------------------------- #
@@ -425,7 +409,8 @@ async def train_grpo_epoch(
 
         # Check for NaN/Inf
         if torch.isnan(grad_norm) or torch.isinf(grad_norm):
-            logger.warning("NaN/Inf grad norm detected, skipping batch")
+            logger.warning(f"NaN/Inf grad norm detected (norm={grad_norm}), skipping batch")
+            logger.warning(traceback.format_exc())
             continue
 
         scaler.step(optimizer)
@@ -542,6 +527,7 @@ async def train_window(
                 ref_model_path = str(ref_checkpoint)
     except Exception as e:
         logger.debug(f"Failed to load reference checkpoint: {e}")
+        logger.debug(traceback.format_exc())
 
     if ref_model_path:
         logger.info("Loading reference model from %s", ref_model_path)
@@ -738,13 +724,15 @@ async def publish_checkpoint(
                     return success
                 except Exception as e:
                     logger.error(f"Failed to upload {rel_path}: {e}")
+                    logger.error(traceback.format_exc())
                     return False
 
         upload_tasks = [upload_file(fp) for fp in temp_dir.rglob("*") if fp.is_file()]
         results = await asyncio.gather(*upload_tasks)
 
         if not all(results):
-            logger.error("Some files failed to upload")
+            failed_count = sum(1 for r in results if not r)
+            logger.error(f"Some files failed to upload ({failed_count}/{len(results)} failed)")
             return False
 
         # Upload READY marker
@@ -768,11 +756,13 @@ async def publish_checkpoint(
             logger.info("Cleaned up old remote checkpoints")
         except Exception as e:
             logger.warning(f"Failed to cleanup remote checkpoints: {e}")
+            logger.warning(traceback.format_exc())
 
         return True
 
     except Exception as e:
-        logger.error(f"Failed to publish checkpoint: {e}", exc_info=True)
+        logger.error(f"Failed to publish checkpoint: {e}")
+        logger.error(traceback.format_exc())
         return False
     finally:
         # Cleanup temp dir
@@ -804,30 +794,34 @@ def register(app: typer.Typer) -> None:
 
 
 def train() -> None:
-    """Run the GRPO training process."""
+    """Run the GRPO training process.
+
+    Delegates to TrainerNeuron lifecycle to keep behavior standardized
+    and use the shared BaseNeuron pattern.
+    """
+    from ..neurons import TrainerNeuron
+    from ..neurons.trainer import TrainerContext
+
     coldkey = get_conf("BT_WALLET_COLD", "default")
     hotkey = get_conf("BT_WALLET_HOT", "default")
     wallet = bt.wallet(name=coldkey, hotkey=hotkey)
 
     logger.info(f"🔑 Trainer hotkey: {wallet.hotkey.ss58_address}")
 
-    async def _run() -> None:
-        subtensor = None
-        last_processed_window = -1
-
+    async def _setup_and_run() -> None:
         # Load credentials
         try:
             credentials = load_r2_credentials()
             logger.info("✅ Loaded R2 credentials")
         except Exception as e:
             logger.error(f"Failed to load R2 credentials: {e}")
+            logger.error(traceback.format_exc())
             raise
 
-        # Initialize checkpoint manager (trainer role)
+        # Initialize checkpoint manager
         checkpoint_manager = CheckpointManager(
             cache_root=default_checkpoint_cache_root(),
             credentials=credentials,
-            role="trainer",
         )
 
         # Initialize monitoring
@@ -840,58 +834,33 @@ def train() -> None:
             )
             logger.info(f"Started monitoring run: {run_id}")
 
-        while True:
-            try:
-                global HEARTBEAT
-                HEARTBEAT = time.monotonic()
+        # Heartbeat update callback for watchdog
+        def update_heartbeat() -> None:
+            global HEARTBEAT
+            HEARTBEAT = time.monotonic()
 
-                if subtensor is None:
-                    subtensor = await get_subtensor()
+        # Create trainer context
+        context = TrainerContext(
+            wallet=wallet,
+            credentials=credentials,
+            checkpoint_manager=checkpoint_manager,
+            monitor=monitor,
+            update_heartbeat=update_heartbeat,
+        )
 
-                current_block = await subtensor.get_current_block()
-                current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
+        # Delegate to TrainerNeuron with watchdog
+        try:
+            trainer = TrainerNeuron(context)
+            await asyncio.gather(
+                trainer.main(),
+                watchdog(timeout=(60 * 15)),
+            )
+        except Exception as e:
+            logger.error(f"Training process failed: {e}")
+            traceback.print_exc()
+            raise
 
-                # Train on previous complete window
-                target_window = current_window - WINDOW_LENGTH
-
-                if target_window <= last_processed_window or target_window < 0:
-                    await asyncio.sleep(10)
-                    continue
-
-                logger.info(f"🎓 Processing training for window {target_window}")
-
-                success = await train_window(
-                    target_window,
-                    wallet,
-                    credentials,
-                    checkpoint_manager,
-                    monitor,
-                )
-
-                if success:
-                    logger.info(f"✅ Completed training cycle for window {target_window}")
-                    if monitor:
-                        await monitor.log_counter("training/successful_windows")
-                else:
-                    logger.warning(f"⚠️ Training cycle had issues for window {target_window}")
-                    if monitor:
-                        await monitor.log_counter("training/failed_windows")
-
-                last_processed_window = target_window
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                traceback.print_exc()
-                logger.error(f"Error in trainer loop: {e}. Continuing...")
-                subtensor = None
-                await asyncio.sleep(30)
-                continue
-
-    async def _main() -> None:
-        await asyncio.gather(_run(), watchdog(timeout=(60 * 15)))
-
-    asyncio.run(_main())
+    asyncio.run(_setup_and_run())
 
 
 # --------------------------------------------------------------------------- #
