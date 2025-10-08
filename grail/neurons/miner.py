@@ -41,16 +41,14 @@ class MinerNeuron(BaseNeuron):
         super().__init__()
         self.use_drand = use_drand
 
-    async def _heartbeat_keeper(self) -> None:
-        """Keep heartbeat alive during long-running operations.
+    def _update_heartbeat(self) -> None:
+        """Update heartbeat to signal progress to watchdog.
 
-        This background task ensures the watchdog doesn't kill the process
-        during legitimate long-running operations like model inference or
-        blockchain queries.
+        Called at key points in the mining loop to prove the process is
+        making progress. Now that we have explicit timeouts on blockchain
+        calls, we don't need continuous background updates.
         """
-        while not self.stop_event.is_set():
-            cli_mine.HEARTBEAT = time.monotonic()
-            await asyncio.sleep(2)  # Update every 2 seconds
+        cli_mine.HEARTBEAT = time.monotonic()
 
     async def run(self) -> None:
         """Main mining loop mirrored from the CLI implementation."""
@@ -79,16 +77,16 @@ class MinerNeuron(BaseNeuron):
                 logger.error(f"Failed to load R2 credentials: {e}")
                 raise
 
-            # Start heartbeat keeper to prevent watchdog timeouts during long operations
-            asyncio.create_task(self._heartbeat_keeper())
-            logger.info("✅ Started heartbeat keeper task")
+            # Initialize heartbeat (watchdog will monitor for stalls)
+            self._update_heartbeat()
+            logger.info("✅ Initialized watchdog heartbeat")
 
             # Initialize chain manager for credential commitments
             config = SimpleNamespace(netuid=int(get_conf("BT_NETUID", get_conf("NETUID", 200))))
             chain_manager = GrailChainManager(config, wallet, credentials)
             await chain_manager.initialize()
             logger.info("✅ Initialized chain manager and committed read credentials")
-            cli_mine.HEARTBEAT = time.monotonic()
+            self._update_heartbeat()
 
             # Use trainer UID's committed read credentials for checkpoints
             trainer_bucket = chain_manager.get_bucket(TRAINER_UID)
@@ -113,7 +111,7 @@ class MinerNeuron(BaseNeuron):
                 mining_config = MonitoringConfig.for_mining(wallet.name)
                 try:
                     subtensor_for_uid = await get_subtensor()
-                    cli_mine.HEARTBEAT = time.monotonic()
+                    self._update_heartbeat()
                 except Exception:
                     subtensor_for_uid = None
                 uid = None
@@ -121,16 +119,16 @@ class MinerNeuron(BaseNeuron):
                     uid = await get_own_uid_on_subnet(
                         subtensor_for_uid, 81, wallet.hotkey.ss58_address
                     )
-                    cli_mine.HEARTBEAT = time.monotonic()
+                    self._update_heartbeat()
                 run_name = f"miner-{uid}" if uid is not None else f"mining_{wallet.name}"
                 run_id = await monitor.start_run(run_name, mining_config.get("hyperparameters", {}))
-                cli_mine.HEARTBEAT = time.monotonic()
+                self._update_heartbeat()
                 logger.info(f"Started monitoring run: {run_id} (name={run_name})")
 
             while not self.stop_event.is_set():
                 try:
-                    # Update the heartbeat used by the CLI watchdog
-                    cli_mine.HEARTBEAT = time.monotonic()
+                    # Update heartbeat at start of each iteration
+                    self._update_heartbeat()
                     if subtensor is None:
                         subtensor = await get_subtensor()
 
@@ -156,7 +154,7 @@ class MinerNeuron(BaseNeuron):
                                 checkpoint_path = await checkpoint_manager.get_checkpoint(
                                     checkpoint_window
                                 )
-                            cli_mine.HEARTBEAT = time.monotonic()
+                            self._update_heartbeat()
 
                             # checkpoint_path = 'Qwen/Qwen3-4B-Instruct-2507'
                             if checkpoint_path is not None:
@@ -238,7 +236,7 @@ class MinerNeuron(BaseNeuron):
                                 f"✅ Successfully uploaded window {window_start} "
                                 f"with {len(inferences)} rollouts"
                             )
-                            cli_mine.HEARTBEAT = time.monotonic()
+                            self._update_heartbeat()
                             if monitor:
                                 await monitor.log_counter("mining.successful_uploads")
                                 await monitor.log_gauge("mining.uploaded_rollouts", len(inferences))
