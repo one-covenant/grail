@@ -3,12 +3,9 @@
 import asyncio
 import logging
 import multiprocessing
-import os
-from typing import Any
+from typing import Any, Optional
 
 import bittensor as bt
-from bittensor.core.chain_data import decode_account_id
-from pydantic import ValidationError
 
 from ..shared.schemas import Bucket, BucketCredentials
 from .chain_worker import chain_commitment_worker
@@ -23,6 +20,8 @@ class GrailChainManager:
         self,
         config: Any,
         wallet: bt.wallet,
+        metagraph: Any,
+        subtensor: bt.subtensor,
         credentials: BucketCredentials,
         fetch_interval: int = 600,  # 10 minutes default
     ):
@@ -32,34 +31,26 @@ class GrailChainManager:
         Args:
             config: Bittensor config object
             wallet: Wallet for signing commitments
+            metagraph: Metagraph instance from caller
+            subtensor: Async subtensor instance from caller
             credentials: Dual R2 credentials
             fetch_interval: Interval in seconds between fetching commitments
         """
         self.config = config
         self.netuid = config.netuid
         self.wallet = wallet
+        self.metagraph = metagraph
+        self.subtensor = subtensor
         self.credentials = credentials
         self.fetch_interval = fetch_interval
 
-        network = os.getenv("BT_NETWORK", "finney")
-        chain_endpoint = os.getenv("BT_CHAIN_ENDPOINT", "wss://entrypoint-finney.opentensor.ai:443")
-
-        if chain_endpoint:
-            # When using a custom chain endpoint, pass it as the network parameter
-            # This preserves the hostname (e.g., ws://alice:9944) in Docker environments
-            self.subtensor = bt.subtensor(network=chain_endpoint)
-        else:
-            self.subtensor = bt.subtensor(network=network)
-
-        self.metagraph = self.subtensor.metagraph(self.netuid)
-
         # Commitment tracking
         self.commitments: dict[int, Bucket] = {}
-        self._fetch_task: asyncio.Task | None = None
+        self._fetch_task: Optional[asyncio.Task] = None
 
         # Worker process for commitment fetching (avoids GIL contention)
-        self._worker_queue: multiprocessing.Queue | None = None
-        self._worker_process: multiprocessing.Process | None = None
+        self._worker_queue: Optional[multiprocessing.Queue] = None
+        self._worker_process: Optional[multiprocessing.Process] = None
 
         logger.info(f"Initialized GrailChainManager for netuid {self.netuid}")
 
@@ -67,8 +58,12 @@ class GrailChainManager:
         """Initialize chain manager and verify/commit credentials"""
         logger.info("Initializing GRAIL chain manager...")
 
-        # Fetch existing commitments
-        await self.fetch_commitments()
+        # Start worker process for periodic fetching
+        self.start_commitment_worker()
+
+        # Wait for first commitment fetch from worker (with timeout)
+        logger.info("Waiting for initial commitments from worker...")
+        await self._wait_for_initial_commitments(timeout=30.0)
 
         # Check if our commitment matches what's on chain
         try:
@@ -85,17 +80,15 @@ class GrailChainManager:
                     )
                 else:
                     logger.info("Commitment mismatch, updating read credentials on chain")
-                self.commit_read_credentials()
+                await self.commit_read_credentials()
             else:
                 logger.info("Existing commitment matches current read credentials")
 
         except ValueError:
             logger.warning(
-                f"Hotkey {self.wallet.hotkey.ss58_address} not found in metagraph, will commit when registered"
+                f"Hotkey {self.wallet.hotkey.ss58_address} not found in "
+                "metagraph, will commit when registered"
             )
-
-        # Start worker process for periodic fetching
-        self.start_commitment_worker()
 
     def _create_bucket_from_read_creds(self) -> Bucket:
         """Create a Bucket object from read credentials for comparison"""
@@ -114,21 +107,20 @@ class GrailChainManager:
             and bucket1.secret_access_key.strip() == bucket2.secret_access_key.strip()
         )
 
-    def commit_read_credentials(self) -> None:
-        """Commit read credentials to the chain"""
+    async def commit_read_credentials(self) -> None:
+        """Commit read credentials to the chain using async subtensor"""
         commitment = self.credentials.read_commitment
 
         if self.netuid is not None:
             try:
-                self.subtensor.commit(self.wallet, self.netuid, commitment)
+                # Use async subtensor commit
+                await self.subtensor.commit(self.wallet, self.netuid, commitment)
                 logger.info(
-                    f"Successfully committed read credentials to chain for hotkey {self.wallet.hotkey.ss58_address}"
+                    "Successfully committed read credentials to chain "
+                    f"for hotkey {self.wallet.hotkey.ss58_address}"
                 )
             except Exception as e:
                 logger.error(f"Failed to commit read credentials: {e}")
-                # Try to reinitialize substrate connection
-                self.subtensor.substrate.close()
-                self.subtensor.substrate.initialize()
                 raise
 
     def start_commitment_worker(self) -> None:
@@ -163,6 +155,33 @@ class GrailChainManager:
 
         logger.info(f"Started commitment worker process (PID: {self._worker_process.pid})")
 
+    async def _wait_for_initial_commitments(self, timeout: float = 30.0) -> None:
+        """Wait for first commitment payload from worker with timeout."""
+        start_time = asyncio.get_event_loop().time()
+
+        while True:
+            if self._worker_queue is not None:
+                try:
+                    # Non-blocking get
+                    commitments = self._worker_queue.get_nowait()
+                    self.commitments = commitments
+                    logger.info(f"Received initial {len(commitments)} commitments from worker")
+                    return
+                except Exception:
+                    # Queue empty
+                    pass
+
+            # Check timeout
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed > timeout:
+                logger.warning(
+                    f"Timeout waiting for initial commitments after "
+                    f"{timeout}s; continuing with empty set"
+                )
+                return
+
+            await asyncio.sleep(0.5)
+
     async def _poll_worker_queue(self) -> None:
         """Poll the worker queue for commitment updates."""
         while True:
@@ -183,115 +202,7 @@ class GrailChainManager:
             except Exception as e:
                 logger.error(f"Error polling worker queue: {e}")
 
-    async def fetch_commitments(self) -> None:
-        """Fetch all bucket commitments from the chain"""
-        try:
-            commitments = await self.get_commitments()
-            if commitments:
-                self.commitments = commitments
-                logger.debug(f"Fetched {len(commitments)} commitments from chain")
-            else:
-                logger.warning("No commitments fetched from chain")
-        except Exception as e:
-            logger.error(f"Failed to fetch commitments: {e}")
-
-    async def get_commitments(self, block: int | None = None) -> dict[int, Bucket]:
-        """
-        Retrieve all bucket commitments from the chain.
-
-        Args:
-            block: Optional block number to query at
-
-        Returns:
-            Dictionary mapping UIDs to Bucket configurations
-        """
-        try:
-            # Run blocking substrate operations in thread pool to avoid blocking event loop
-            def _query_commitments() -> dict[int, Bucket]:
-                substrate = self.subtensor.substrate
-
-                # Query commitments via substrate (blocking call)
-                query_result = substrate.query_map(
-                    module="Commitments",
-                    storage_function="CommitmentOf",
-                    params=[self.netuid],
-                    block_hash=(None if block is None else substrate.get_block_hash(block)),
-                )
-
-                # Create hotkey to UID mapping
-                hotkey_to_uid = dict(zip(self.metagraph.hotkeys, self.metagraph.uids, strict=False))
-                commitments = {}
-
-                for key, value in query_result:
-                    try:
-                        # Decode the commitment
-                        decoded_ss58, commitment_str = self._decode_metadata(key, value.value)
-                    except Exception as e:
-                        logger.error(f"Failed to decode metadata for key {key.value}: {e}")
-                        continue
-
-                    # Skip if hotkey not in metagraph
-                    if decoded_ss58 not in hotkey_to_uid:
-                        continue
-
-                    uid = hotkey_to_uid[decoded_ss58]
-
-                    # Validate commitment length (new format only)
-                    if len(commitment_str) != 128:
-                        logger.error(
-                            "Invalid commitment length for UID %s: %s",
-                            uid,
-                            len(commitment_str),
-                        )
-                        continue
-
-                    try:
-                        # 32 account_id + 32 access_key_id + 64 secret_access_key
-                        account_id = commitment_str[:32]
-                        access_key_id = commitment_str[32:64]
-                        secret_access_key = commitment_str[64:128]
-
-                        # Bucket name equals account id by assumption
-                        bucket = Bucket(
-                            name=account_id,
-                            account_id=account_id,
-                            access_key_id=access_key_id,
-                            secret_access_key=secret_access_key,
-                        )
-                        commitments[uid] = bucket
-                        logger.debug(f"Retrieved bucket commitment for UID {uid}")
-
-                    except ValidationError as e:
-                        logger.error(f"Failed to validate bucket for UID {uid}: {e}")
-                        continue
-
-                return commitments
-
-            # Execute blocking operation in thread pool
-            return await asyncio.to_thread(_query_commitments)
-
-        except Exception as e:
-            logger.error(f"Error querying commitments from chain: {e}")
-            # Try to reinitialize substrate connection (also blocking, run in thread)
-            try:
-                await asyncio.to_thread(lambda: self.subtensor.substrate.close())
-                await asyncio.to_thread(lambda: self.subtensor.substrate.initialize())
-            except Exception:
-                pass
-            return {}
-
-    def _decode_metadata(self, encoded_ss58: tuple, metadata: dict) -> tuple[str, str]:
-        """Decode metadata from chain query result"""
-        # Decode the key into an SS58 address
-        decoded_key = decode_account_id(encoded_ss58[0])
-
-        # Get the commitment from the metadata
-        commitment = metadata["info"]["fields"][0][0]
-        bytes_tuple = commitment[next(iter(commitment.keys()))][0]
-
-        return decoded_key, bytes(bytes_tuple).decode()
-
-    def get_bucket(self, uid: int) -> Bucket | None:
+    def get_bucket(self, uid: int) -> Optional[Bucket]:
         """
         Get the bucket configuration for a given UID.
 
@@ -303,16 +214,7 @@ class GrailChainManager:
         """
         return self.commitments.get(uid)
 
-    def get_all_buckets(self) -> dict[int, Bucket | None]:
-        """
-        Get all bucket configurations for all UIDs.
-
-        Returns:
-            Dictionary mapping UIDs to their bucket configurations
-        """
-        return {uid: self.get_bucket(uid) for uid in self.metagraph.uids}
-
-    def get_bucket_for_hotkey(self, hotkey: str) -> Bucket | None:
+    def get_bucket_for_hotkey(self, hotkey: str) -> Optional[Bucket]:
         """
         Get bucket configuration for a specific hotkey.
 

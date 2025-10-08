@@ -11,14 +11,14 @@ def _resolve_network() -> tuple[str, str | None]:
     Resolve network selection from environment variables.
 
     Priority:
-    - BT_NETWORK / BT_CHAIN_ENDPOINT (preferred names)
-    - GRAIL_NETWORK / GRAIL_CHAIN_ENDPOINT (legacy fallback)
+    - BT_CHAIN_ENDPOINT: if set, use custom endpoint (overrides BT_NETWORK)
+    - BT_NETWORK: named network ('finney', 'test', 'local'), defaults to 'finney'
 
     Returns:
-        (network, chain_endpoint)
+        (network, chain_endpoint): network name and optional custom endpoint
     """
     network = os.getenv("BT_NETWORK", "finney")
-    chain_endpoint = os.getenv("BT_CHAIN_ENDPOINT", "wss://entrypoint-finney.opentensor.ai:443")
+    chain_endpoint = os.getenv("BT_CHAIN_ENDPOINT")  # No default - None if unset
     return network, chain_endpoint
 
 
@@ -26,29 +26,37 @@ async def create_subtensor() -> bt.subtensor:
     """
     Create and initialize an async subtensor instance using env configuration.
 
-    - If BT_CHAIN_ENDPOINT/GRAIL_CHAIN_ENDPOINT is set, construct a config and pass via config.
-    - Else, use BT_NETWORK/GRAIL_NETWORK (e.g., 'finney' for mainnet, 'test' for public testnet).
+    - If BT_CHAIN_ENDPOINT is set, connect to custom endpoint directly
+    - Otherwise, use BT_NETWORK ('finney', 'test', 'local') - defaults to 'finney'
+
+    The Bittensor SDK resolves named networks to official endpoints automatically.
     """
     network, chain_endpoint = _resolve_network()
-    logger.debug(f"Creating subtensor (network={network}, endpoint={chain_endpoint})")
 
-    label = (
-        "public testnet" if network == "test" else ("mainnet" if network == "finney" else "custom")
-    )
     if chain_endpoint:
-        # Pass the chain endpoint directly as the network parameter
-        # This preserves the hostname (e.g., ws://alice:9944) in Docker environments
+        # Custom endpoint specified (e.g., local node, custom remote)
         logger.info(
-            f"Connecting to Bittensor custom endpoint: {chain_endpoint} (BT_NETWORK={network}, {label})"
+            f"Connecting to custom Bittensor endpoint: {chain_endpoint} "
+            f"(BT_NETWORK={network} ignored)"
         )
         subtensor = bt.async_subtensor(network=chain_endpoint)
     else:
-        # Supported labels in this codebase: 'finney' (mainnet), 'test' (public testnet)
-        if network not in {"finney", "test"}:
-            logger.warning(f"Unknown BT_NETWORK='{network}', defaulting to 'finney'")
+        # Use named network - SDK resolves to official endpoint
+        label = {
+            "finney": "mainnet",
+            "test": "testnet",
+            "local": "local",
+        }.get(network, "custom")
+
+        if network not in {"finney", "test", "local"}:
+            logger.warning(
+                f"Unknown BT_NETWORK='{network}', defaulting to 'finney'. "
+                "Valid options: finney, test, local"
+            )
             network = "finney"
             label = "mainnet"
-        logger.info(f"Connecting to Bittensor {label} (BT_NETWORK={network})")
+
+        logger.info(f"Connecting to Bittensor {label} (network={network})")
         subtensor = bt.async_subtensor(network=network)
 
     await subtensor.initialize()

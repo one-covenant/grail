@@ -42,11 +42,15 @@ def chain_commitment_worker(
     try:
         # Initialize bittensor connection in worker process
         network = os.getenv("BT_NETWORK", "finney")
-        chain_endpoint = os.getenv("BT_CHAIN_ENDPOINT", "wss://entrypoint-finney.opentensor.ai:443")
+        chain_endpoint = os.getenv("BT_CHAIN_ENDPOINT")  # No default
 
         if chain_endpoint:
+            # Custom endpoint
+            logger.info(f"Worker using custom endpoint: {chain_endpoint}")
             subtensor = bt.subtensor(network=chain_endpoint)
         else:
+            # Named network (finney, test, local)
+            logger.info(f"Worker using network: {network}")
             subtensor = bt.subtensor(network=network)
 
         metagraph = subtensor.metagraph(netuid)
