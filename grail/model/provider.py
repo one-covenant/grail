@@ -6,14 +6,14 @@ all components (Prover, Verifier, Trainer).
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from typing import Any
-import gc
 
 logger = logging.getLogger(__name__)
 
@@ -92,9 +92,7 @@ def get_model(
                 logger.debug(f"Failed to read checkpoint metadata: {e}")
 
     # Load model
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name, use_safetensors=use_safetensors
-    )
+    model = AutoModelForCausalLM.from_pretrained(model_name, use_safetensors=use_safetensors)
 
     # Preserve original model name for GRAIL proof validation
     if hasattr(model, "name_or_path") and original_model_name != model_name:
@@ -112,9 +110,7 @@ def get_model(
     return model
 
 
-def clear_model_and_tokenizer(
-    model: Any | None, tokenizer: Any | None
-) -> tuple[None, None]:
+def clear_model_and_tokenizer(model: Any | None, tokenizer: Any | None) -> tuple[None, None]:
     """Release references and aggressively reclaim GPU memory.
 
     Returns a pair of Nones so callers can assign:

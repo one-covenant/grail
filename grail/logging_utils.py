@@ -2,17 +2,16 @@ import contextlib
 import contextvars
 import logging
 from collections.abc import Generator
-from typing import Optional
 
-_uid_ctx: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("miner_uid", default=None)
-_window_ctx: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+_uid_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar("miner_uid", default=None)
+_window_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "miner_window", default=None
 )
 
 
 @contextlib.contextmanager
 def miner_log_context(
-    uid: Optional[object] = None, window: Optional[object] = None
+    uid: object | None = None, window: object | None = None
 ) -> Generator[None, None, None]:
     """Context manager to set miner uid/window for log prefixing.
 

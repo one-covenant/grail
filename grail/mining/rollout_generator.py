@@ -138,7 +138,7 @@ class RolloutGenerator(ABC):
         advantages = self._compute_grpo_advantages(rewards)
 
         # Update advantages in rollouts
-        for rollout, advantage in zip(rollouts, advantages):
+        for rollout, advantage in zip(rollouts, advantages, strict=False):
             rollout.advantage = advantage
 
         return rollouts

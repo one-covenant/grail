@@ -47,5 +47,5 @@ def sat_prompts() -> list[str]:
     difficulties = [0.3, 0.5, 0.7, 0.5, 0.8]
     return [
         generate_realistic_sat_prompt(seed, diff, tokenizer)
-        for seed, diff in zip(seeds, difficulties)
+        for seed, diff in zip(seeds, difficulties, strict=False)
     ]

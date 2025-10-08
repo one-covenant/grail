@@ -18,14 +18,14 @@ import time
 import traceback
 from collections import Counter, defaultdict, deque
 from types import SimpleNamespace, TracebackType
-from typing import Any, Optional
+from typing import Any
 
 import bittensor as bt
 import typer
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from grail.infrastructure.drand import get_drand_beacon, get_round_at_time
-from grail.model.provider import get_model, get_tokenizer, clear_model_and_tokenizer
+from grail.model.provider import clear_model_and_tokenizer, get_model, get_tokenizer
 
 from ..environments import create_sat_reward_vector
 from ..grail import derive_canonical_sat
@@ -40,9 +40,11 @@ from ..infrastructure.comms import (
 from ..infrastructure.credentials import load_r2_credentials
 from ..infrastructure.network import create_subtensor
 from ..logging_utils import MinerPrefixFilter, miner_log_context
+from ..mining.rollout_generator import REASONING_START, SYSTEM_PROMPT
 from ..monitoring import get_monitoring_manager
 from ..monitoring.config import MonitoringConfig
 from ..scoring.weights import WeightComputer
+from ..shared.chat_templates import build_qwen_chat_template
 from ..shared.constants import (
     FAILURE_LOOKBACK_WINDOWS,
     MINER_SAMPLE_MAX,
@@ -65,8 +67,6 @@ from ..validation import (
 )
 from ..validation.pipeline import ValidationPipeline
 from . import console
-from ..mining.rollout_generator import SYSTEM_PROMPT, REASONING_START
-from ..shared.chat_templates import build_qwen_chat_template
 
 # --------------------------------------------------------------------------- #
 #                  Future Training/Checkpoint Integration (commented)        #
@@ -156,7 +156,7 @@ def _install_crash_diagnostics() -> None:
 
     # Ensure unhandled exceptions get logged
     def _excepthook(
-        exc_type: type[BaseException], exc: BaseException, tb: Optional[TracebackType]
+        exc_type: type[BaseException], exc: BaseException, tb: TracebackType | None
     ) -> None:
         try:
             if exc_type is KeyboardInterrupt:
@@ -250,7 +250,7 @@ async def get_subtensor() -> bt.subtensor:
 # --------------------------------------------------------------------------- #
 
 
-def parse_filename(filename: str) -> tuple[Optional[str], Optional[int], Optional[int]]:
+def parse_filename(filename: str) -> tuple[str | None, int | None, int | None]:
     """Parse filename to extract wallet, block, nonce"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -263,7 +263,7 @@ def parse_filename(filename: str) -> tuple[Optional[str], Optional[int], Optiona
     return None, None, None
 
 
-def parse_window_filename(filename: str) -> tuple[Optional[str], Optional[int]]:
+def parse_window_filename(filename: str) -> tuple[str | None, int | None]:
     """Parse window filename to extract wallet and window_start"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -319,7 +319,7 @@ async def _list_active_hotkeys_for_window(
     window_start: int,
     chain_manager: "GrailChainManager",
     default_credentials: Any,
-    uid_by_hotkey: Optional[dict[str, int]] = None,
+    uid_by_hotkey: dict[str, int] | None = None,
     concurrency: int = 8,
 ) -> list[str]:
     """Return hotkeys with an available window file for the given window.
@@ -577,8 +577,8 @@ def _get_sat_reward_bounds() -> tuple[float, float]:
 
 async def _run_validation_service(
     wallet: bt.wallet,
-    model: Optional[AutoModelForCausalLM],
-    tokenizer: Optional[AutoTokenizer],
+    model: AutoModelForCausalLM | None,
+    tokenizer: AutoTokenizer | None,
     sat_pipeline: ValidationPipeline,
     weight_computer: WeightComputer,
     sat_reward_low: float,
@@ -670,7 +670,7 @@ async def _run_validation_service(
 
                 meta = await subtensor.metagraph(NETUID)
                 # Build hotkey -> uid mapping for per-miner logging namespaces
-                uid_by_hotkey = dict(zip(meta.hotkeys, meta.uids))
+                uid_by_hotkey = dict(zip(meta.hotkeys, meta.uids, strict=False))
                 current_block = await subtensor.get_current_block()
                 target_window = _determine_target_window(current_block)
                 checkpoint_window = target_window - WINDOW_LENGTH
@@ -707,7 +707,11 @@ async def _run_validation_service(
                     )
 
                 if checkpoint_path:
-                    if checkpoint_path != current_checkpoint_id or model is None or tokenizer is None:
+                    if (
+                        checkpoint_path != current_checkpoint_id
+                        or model is None
+                        or tokenizer is None
+                    ):
                         try:
                             logger.info(
                                 "🚀 Loading checkpoint for validation window %s from %s",
@@ -718,7 +722,9 @@ async def _run_validation_service(
                             model, tokenizer = clear_model_and_tokenizer(model, tokenizer)
                             chat_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
                             model = get_model(str(checkpoint_path), device=None, eval_mode=True)
-                            tokenizer = get_tokenizer(str(checkpoint_path), chat_template=chat_template)
+                            tokenizer = get_tokenizer(
+                                str(checkpoint_path), chat_template=chat_template
+                            )
                             current_checkpoint_id = str(checkpoint_path)
                         except Exception:
                             logger.exception(
@@ -1300,7 +1306,7 @@ def _compute_window_randomness(target_window_hash: str, use_drand: bool) -> str:
 
 def _determine_hotkeys_to_check(test_mode: bool, wallet: bt.wallet, meta: Any) -> list[str]:
     """Choose which hotkeys to validate based on test/prod mode."""
-    uid_by_hotkey = dict(zip(meta.hotkeys, meta.uids))
+    uid_by_hotkey = dict(zip(meta.hotkeys, meta.uids, strict=False))
     if test_mode:
         own_uid = uid_by_hotkey.get(wallet.hotkey.ss58_address)
         msg_id = own_uid if own_uid is not None else wallet.hotkey.ss58_address
@@ -1393,7 +1399,9 @@ def _build_top_miners(
     hotkeys: list[str], uids: list[int], weights: list[float], k: int
 ) -> list[tuple[str, int, float]]:
     """Return top-k (hotkey, uid, weight) sorted by weight desc."""
-    pairs = [(hk, uid, float(weights[i])) for i, (hk, uid) in enumerate(zip(hotkeys, uids))]
+    pairs = [
+        (hk, uid, float(weights[i])) for i, (hk, uid) in enumerate(zip(hotkeys, uids, strict=False))
+    ]
     pairs.sort(key=lambda x: x[2], reverse=True)
     return pairs[:k]
 
@@ -1440,7 +1448,7 @@ def _get_active_uids(
         WINDOW_LENGTH,
     )
     active_uids: list[int] = []
-    for hotkey, uid in zip(meta_hotkeys, meta_uids):
+    for hotkey, uid in zip(meta_hotkeys, meta_uids, strict=False):
         hk_windows = inference_counts[hotkey]
         for w in recent_windows:
             metrics = hk_windows.get(w)
@@ -1836,10 +1844,10 @@ async def _process_wallet_window(
     sat_reward_high: float,
 ) -> tuple[
     bool,
-    Optional[dict[str, int]],
+    dict[str, int] | None,
     list[dict],
     tuple[int, int, int, int],
-    Optional[Counter[str]],
+    Counter[str] | None,
     int,
 ]:
     """Validate a single wallet window file and return metrics and rollouts.
@@ -2392,7 +2400,7 @@ async def _log_top_miners_by_rollout_count(
     window_inference_counts: dict[str, dict[str, Any]],
     uid_by_hotkey: dict[str, str],
     target_window: int,
-    monitor: Optional[Any],
+    monitor: Any | None,
     top_n: int = 5,
 ) -> None:
     """Log top miners by total rollout count."""
@@ -2428,7 +2436,7 @@ async def _log_top_miners_by_unique_rollouts(
     window_inference_counts: dict[str, dict[str, Any]],
     uid_by_hotkey: dict[str, str],
     target_window: int,
-    monitor: Optional[Any],
+    monitor: Any | None,
     top_n: int = 5,
 ) -> None:
     """Log top miners by unique rollouts count."""
@@ -2465,7 +2473,7 @@ async def _log_top_miners_by_score(
     uid_by_hotkey: dict[str, str],
     target_window: int,
     availability_counts: dict[str, int],
-    monitor: Optional[Any],
+    monitor: Any | None,
     top_n: int = 5,
 ) -> None:
     """Log top miners by highest score with extrapolated metrics."""

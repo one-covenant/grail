@@ -23,58 +23,55 @@ def chain_commitment_worker(
     fetch_interval: int,
 ) -> None:
     """Worker process that fetches commitments and sends them via queue.
-    
+
     This runs in a completely separate process with its own Python interpreter,
     avoiding any GIL contention with the main mining loop.
-    
+
     Args:
         queue: Queue to send commitment updates
         netuid: Network UID
         wallet_name: Wallet coldkey name
-        wallet_hotkey: Wallet hotkey name  
+        wallet_hotkey: Wallet hotkey name
         fetch_interval: Seconds between fetches
     """
     # Set up logging in worker process
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s %(levelname)-8s %(message)s'
-    )
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s")
     logger = logging.getLogger(__name__)
     logger.info(f"Chain worker process started (PID: {os.getpid()})")
-    
+
     try:
         # Initialize bittensor connection in worker process
         network = os.getenv("BT_NETWORK", "finney")
         chain_endpoint = os.getenv("BT_CHAIN_ENDPOINT", "wss://entrypoint-finney.opentensor.ai:443")
-        
+
         if chain_endpoint:
             subtensor = bt.subtensor(network=chain_endpoint)
         else:
             subtensor = bt.subtensor(network=network)
-        
+
         metagraph = subtensor.metagraph(netuid)
         logger.info(f"Worker initialized subtensor for netuid {netuid}")
-        
+
         while True:
             try:
                 # Sync metagraph
                 metagraph.sync(subtensor=subtensor)
-                
+
                 # Fetch commitments (blocking is OK - we're in our own process!)
                 commitments = _fetch_commitments_sync(subtensor, metagraph, netuid)
-                
+
                 # Send to main process (non-blocking)
                 try:
                     queue.get_nowait()  # Clear old value if present
                 except Exception:
                     pass
                 queue.put(commitments, block=False)
-                
+
                 logger.info(f"Worker fetched {len(commitments)} commitments")
-                
+
                 # Sleep before next fetch
                 time.sleep(fetch_interval)
-                
+
             except Exception as e:
                 logger.error(f"Worker error during fetch: {e}")
                 # Try to reinitialize connection
@@ -84,7 +81,7 @@ def chain_commitment_worker(
                 except Exception:
                     pass
                 time.sleep(60)  # Wait before retry
-                
+
     except Exception as e:
         logger.error(f"Worker fatal error: {e}")
         raise
@@ -98,7 +95,7 @@ def _fetch_commitments_sync(
     """Synchronous commitment fetch - safe because we're in a separate process."""
     try:
         substrate = subtensor.substrate
-        
+
         # Query commitments via substrate (blocking call - but we're isolated!)
         query_result = substrate.query_map(
             module="Commitments",
@@ -106,11 +103,11 @@ def _fetch_commitments_sync(
             params=[netuid],
             block_hash=None,
         )
-        
+
         # Create hotkey to UID mapping
-        hotkey_to_uid = dict(zip(metagraph.hotkeys, metagraph.uids))
+        hotkey_to_uid = dict(zip(metagraph.hotkeys, metagraph.uids, strict=False))
         commitments = {}
-        
+
         for key, value in query_result:
             try:
                 # Decode the commitment
@@ -118,28 +115,28 @@ def _fetch_commitments_sync(
                 commitment = value.value["info"]["fields"][0][0]
                 bytes_tuple = commitment[next(iter(commitment.keys()))][0]
                 commitment_str = bytes(bytes_tuple).decode()
-                
+
             except Exception as e:
                 logger.debug(f"Failed to decode metadata for key {key}: {e}")
                 continue
-            
+
             # Skip if hotkey not in metagraph
             if decoded_ss58 not in hotkey_to_uid:
                 continue
-            
+
             uid = hotkey_to_uid[decoded_ss58]
-            
+
             # Validate commitment length (new format only)
             if len(commitment_str) != 128:
                 logger.debug(f"Invalid commitment length for UID {uid}: {len(commitment_str)}")
                 continue
-            
+
             try:
                 # 32 account_id + 32 access_key_id + 64 secret_access_key
                 account_id = commitment_str[:32]
                 access_key_id = commitment_str[32:64]
                 secret_access_key = commitment_str[64:128]
-                
+
                 # Bucket name equals account id by assumption
                 bucket = Bucket(
                     name=account_id,
@@ -149,13 +146,13 @@ def _fetch_commitments_sync(
                 )
                 commitments[uid] = bucket
                 logger.debug(f"Retrieved bucket commitment for UID {uid}")
-                
+
             except ValidationError as e:
                 logger.debug(f"Failed to validate bucket for UID {uid}: {e}")
                 continue
-        
+
         return commitments
-        
+
     except Exception as e:
         logger.error(f"Error querying commitments from chain: {e}")
         return {}

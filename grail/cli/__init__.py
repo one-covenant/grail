@@ -12,8 +12,9 @@ import atexit
 import logging
 import os
 import uuid
+from collections.abc import Callable
 from logging.handlers import RotatingFileHandler
-from typing import Callable, cast
+from typing import cast
 
 import typer
 from dotenv import load_dotenv

@@ -9,7 +9,7 @@ import os
 import tempfile
 import time
 from datetime import datetime
-from typing import Any, Optional, Union
+from typing import Any
 
 import bittensor as bt
 from aiobotocore.session import get_session
@@ -38,7 +38,7 @@ PROTOCOL_VERSION = "v1.0.0"
 # 100+ concurrent requests. Reusing a single session allows proper
 # connection pooling (max_pool_connections applies across all clients)
 # and reduces overhead from session initialization.
-_AIOBOTO_SESSION: Optional[Any] = None
+_AIOBOTO_SESSION: Any | None = None
 
 # Client cache for reusing S3 clients across operations. During training/validation,
 # we make hundreds of S3 operations per window with the same credentials. Reusing
@@ -66,7 +66,7 @@ def _get_aioboto_session() -> Any:
 
 
 def _make_cache_key(
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = True,
 ) -> tuple[str, bool]:
     """Create a cache key from credentials for client reuse.
@@ -110,7 +110,7 @@ def _make_cache_key(
 
 
 async def _get_cached_client(
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = True,
 ) -> Any:
     """Get or create a cached S3 client for reuse across operations.
@@ -164,7 +164,7 @@ async def clear_client_cache() -> None:
         logger.info("Cleared S3 client cache")
 
 
-def get_conf(key: str, default: Optional[str] = None) -> str:
+def get_conf(key: str, default: str | None = None) -> str:
     """Get configuration from environment variables."""
     v = os.getenv(key)
     if not v and default is None:
@@ -173,7 +173,7 @@ def get_conf(key: str, default: Optional[str] = None) -> str:
 
 
 def get_client_ctx(
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = True,
 ) -> Any:
     """Create an S3 client for Cloudflare R2 or a compatible endpoint.
@@ -278,7 +278,7 @@ def get_client_ctx(
 
 
 def get_bucket_id(
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = True,
 ) -> str:
     """Get the bucket ID from credentials or environment.
@@ -405,7 +405,7 @@ async def upload_file_chunked(
     chunk_size: int = 100 * 1024 * 1024,
     max_retries: int = 3,
     compress: bool = True,
-    credentials: Optional[BucketCredentials] = None,
+    credentials: BucketCredentials | None = None,
     use_write: bool = False,
 ) -> bool:
     """Upload file in chunks optimized for H100 high-bandwidth - 100MB chunks with compression"""
@@ -499,7 +499,7 @@ async def _upload_single_chunk(
     data: bytes,
     progress: TransferProgress,
     max_retries: int,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = True,
 ) -> bool:
     """Upload single chunk with retry logic"""
@@ -531,9 +531,9 @@ async def _upload_chunk_with_semaphore(
     data: bytes,
     progress: TransferProgress,
     max_retries: int,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = True,
-) -> Optional[dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Upload a single chunk with concurrency control and retry logic"""
     async with semaphore:
         for attempt in range(max_retries):
@@ -568,9 +568,9 @@ async def _upload_chunk_with_semaphore(
 async def download_file_chunked(
     key: str,
     max_retries: int = 3,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = False,
-) -> Optional[bytes]:
+) -> bytes | None:
     """Download file in chunks with automatic decompression"""
     actual_key = key
     is_compressed = False
@@ -684,9 +684,9 @@ async def _download_chunk_with_semaphore(
     end: int,
     progress: TransferProgress,
     max_retries: int,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = False,
-) -> Optional[bytes]:
+) -> bytes | None:
     """Download a single chunk with concurrency control and retry logic"""
     async with semaphore:
         for attempt in range(max_retries):
@@ -727,9 +727,9 @@ async def _download_chunk_with_semaphore(
 
 async def file_exists(
     key: str,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = False,
-    max_upload_time: Optional[float] = None,
+    max_upload_time: float | None = None,
 ) -> bool:
     """Check if a file exists (compressed or uncompressed) with optional deadline check.
 
@@ -756,10 +756,10 @@ async def file_exists(
 
 async def file_exists_with_deadline(
     key: str,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = False,
-    max_upload_time: Optional[float] = None,
-) -> tuple[bool, bool, Optional[float]]:
+    max_upload_time: float | None = None,
+) -> tuple[bool, bool, float | None]:
     """Check existence and whether the object violates an upload deadline.
 
     Returns
@@ -804,7 +804,7 @@ async def file_exists_with_deadline(
 
 async def list_bucket_files(
     prefix: str,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = False,
 ) -> list[str]:
     """List files in bucket with given prefix"""
@@ -822,7 +822,7 @@ async def list_bucket_files(
 
 async def delete_prefix(
     prefix: str,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = True,
 ) -> None:
     """Delete all objects under a prefix.
@@ -830,7 +830,7 @@ async def delete_prefix(
     Designed for cleanup of checkpoint directories. Uses batched delete
     operations to minimize round trips.
     """
-    continuation_token: Optional[str] = None
+    continuation_token: str | None = None
     while True:
         try:
             client = await _get_cached_client(credentials, use_write)
@@ -856,9 +856,9 @@ async def delete_prefix(
 
 async def get_file(
     key: str,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = False,
-) -> Optional[dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Download and parse JSON file with improved error handling"""
     try:
         data = await download_file_chunked(key, credentials=credentials, use_write=use_write)
@@ -884,7 +884,7 @@ async def sink_window_inferences(
     wallet: bt.wallet,
     window_start: int,
     inferences: list[dict],
-    credentials: Optional[BucketCredentials] = None,
+    credentials: BucketCredentials | None = None,
 ) -> None:
     """Upload window of inferences to S3 with improved logging"""
     key = f"grail/windows/{wallet.hotkey.ss58_address}-window-{window_start}.json"
@@ -916,7 +916,7 @@ async def save_model_state(
     model: AutoModelForCausalLM,
     hotkey: str,
     window: int,
-    credentials: Optional[BucketCredentials] = None,
+    credentials: BucketCredentials | None = None,
 ) -> bool:
     # Save model state as safetensors to S3 with chunked upload and progress logging
     key = f"grail/models/{hotkey}-{window}.safetensors"
@@ -959,7 +959,7 @@ async def load_model_state(
     model: AutoModelForCausalLM,
     hotkey: str,
     window: int,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = False,
 ) -> bool:
     """Load model state from S3 with chunked download and progress logging"""
@@ -1004,7 +1004,7 @@ async def load_model_state(
 async def model_state_exists(
     hotkey: str,
     window: int,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = False,
 ) -> bool:
     # Check if model state exists for given hotkey and window
@@ -1015,7 +1015,7 @@ async def model_state_exists(
 async def upload_valid_rollouts(
     window: int,
     valid_rollouts: list[dict],
-    credentials: Optional[BucketCredentials] = None,
+    credentials: BucketCredentials | None = None,
 ) -> bool:
     """Upload validated SAT rollouts for training with chunked upload and progress logging"""
     key = f"grail/valid_rollouts/{window}.json"
@@ -1042,7 +1042,7 @@ async def upload_valid_rollouts(
 
 async def get_valid_rollouts(
     window: int,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = False,
 ) -> list[dict]:
     """
@@ -1110,7 +1110,7 @@ def login_huggingface() -> bool:
 
 
 async def upload_to_huggingface(
-    rollouts: list[dict], window: int, version: Optional[str] = None
+    rollouts: list[dict], window: int, version: str | None = None
 ) -> bool:
     """
     Upload rollouts to unified Hugging Face dataset.
@@ -1283,9 +1283,9 @@ async def upload_to_huggingface(
 
 
 async def download_from_huggingface(
-    version: Optional[str] = None,
-    window: Optional[int] = None,
-    limit: Optional[int] = None,
+    version: str | None = None,
+    window: int | None = None,
+    limit: int | None = None,
 ) -> list[dict]:
     """
     Download rollouts from Hugging Face dataset with optional filtering.

@@ -4,7 +4,7 @@ import asyncio
 import logging
 import multiprocessing
 import os
-from typing import Any, Optional
+from typing import Any
 
 import bittensor as bt
 from bittensor.core.chain_data import decode_account_id
@@ -55,11 +55,11 @@ class GrailChainManager:
 
         # Commitment tracking
         self.commitments: dict[int, Bucket] = {}
-        self._fetch_task: Optional[asyncio.Task] = None
-        
+        self._fetch_task: asyncio.Task | None = None
+
         # Worker process for commitment fetching (avoids GIL contention)
-        self._worker_queue: Optional[multiprocessing.Queue] = None
-        self._worker_process: Optional[multiprocessing.Process] = None
+        self._worker_queue: multiprocessing.Queue | None = None
+        self._worker_process: multiprocessing.Process | None = None
 
         logger.info(f"Initialized GrailChainManager for netuid {self.netuid}")
 
@@ -133,17 +133,17 @@ class GrailChainManager:
 
     def start_commitment_worker(self) -> None:
         """Start worker process for commitment fetching.
-        
+
         Uses a separate process to completely isolate blockchain operations
         from the main event loop, avoiding any GIL contention issues.
         """
         if self._worker_process is not None:
             logger.warning("Worker process already started")
             return
-        
+
         # Create queue for receiving commitment updates
         self._worker_queue = multiprocessing.Queue(maxsize=1)
-        
+
         # Start worker process
         self._worker_process = multiprocessing.Process(
             target=chain_commitment_worker,
@@ -157,10 +157,10 @@ class GrailChainManager:
             daemon=True,  # Process will terminate when main process exits
         )
         self._worker_process.start()
-        
+
         # Start async task to poll queue
         self._fetch_task = asyncio.create_task(self._poll_worker_queue())
-        
+
         logger.info(f"Started commitment worker process (PID: {self._worker_process.pid})")
 
     async def _poll_worker_queue(self) -> None:
@@ -169,7 +169,7 @@ class GrailChainManager:
             try:
                 # Check queue non-blockingly
                 await asyncio.sleep(1)  # Poll every second
-                
+
                 if self._worker_queue is not None:
                     try:
                         # Non-blocking get
@@ -179,7 +179,7 @@ class GrailChainManager:
                     except Exception:
                         # Queue empty, continue
                         pass
-                    
+
             except Exception as e:
                 logger.error(f"Error polling worker queue: {e}")
 
@@ -195,7 +195,7 @@ class GrailChainManager:
         except Exception as e:
             logger.error(f"Failed to fetch commitments: {e}")
 
-    async def get_commitments(self, block: Optional[int] = None) -> dict[int, Bucket]:
+    async def get_commitments(self, block: int | None = None) -> dict[int, Bucket]:
         """
         Retrieve all bucket commitments from the chain.
 
@@ -219,7 +219,7 @@ class GrailChainManager:
                 )
 
                 # Create hotkey to UID mapping
-                hotkey_to_uid = dict(zip(self.metagraph.hotkeys, self.metagraph.uids))
+                hotkey_to_uid = dict(zip(self.metagraph.hotkeys, self.metagraph.uids, strict=False))
                 commitments = {}
 
                 for key, value in query_result:
@@ -291,7 +291,7 @@ class GrailChainManager:
 
         return decoded_key, bytes(bytes_tuple).decode()
 
-    def get_bucket(self, uid: int) -> Optional[Bucket]:
+    def get_bucket(self, uid: int) -> Bucket | None:
         """
         Get the bucket configuration for a given UID.
 
@@ -303,7 +303,7 @@ class GrailChainManager:
         """
         return self.commitments.get(uid)
 
-    def get_all_buckets(self) -> dict[int, Optional[Bucket]]:
+    def get_all_buckets(self) -> dict[int, Bucket | None]:
         """
         Get all bucket configurations for all UIDs.
 
@@ -312,7 +312,7 @@ class GrailChainManager:
         """
         return {uid: self.get_bucket(uid) for uid in self.metagraph.uids}
 
-    def get_bucket_for_hotkey(self, hotkey: str) -> Optional[Bucket]:
+    def get_bucket_for_hotkey(self, hotkey: str) -> Bucket | None:
         """
         Get bucket configuration for a specific hotkey.
 
@@ -334,7 +334,7 @@ class GrailChainManager:
         if self._fetch_task:
             self._fetch_task.cancel()
             self._fetch_task = None
-        
+
         if self._worker_process:
             self._worker_process.terminate()
             self._worker_process.join(timeout=5)
@@ -342,7 +342,7 @@ class GrailChainManager:
                 self._worker_process.kill()
             self._worker_process = None
             logger.info("Stopped commitment worker process")
-        
+
         if self._worker_queue:
             self._worker_queue.close()
             self._worker_queue = None

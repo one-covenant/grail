@@ -4,12 +4,12 @@ Utilities for subnet-related helpers shared across miner and validator.
 """
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger("grail")
 
 
-async def get_own_uid_on_subnet(subtensor: Any, netuid: int, hotkey_ss58: str) -> Optional[int]:
+async def get_own_uid_on_subnet(subtensor: Any, netuid: int, hotkey_ss58: str) -> int | None:
     """Return the UID for a given hotkey on a subnet, or None if not registered.
 
     Args:
@@ -22,7 +22,7 @@ async def get_own_uid_on_subnet(subtensor: Any, netuid: int, hotkey_ss58: str) -
     """
     try:
         meta = await subtensor.metagraph(netuid)
-        uid_by_hotkey = dict(zip(meta.hotkeys, meta.uids))
+        uid_by_hotkey = dict(zip(meta.hotkeys, meta.uids, strict=False))
         uid = uid_by_hotkey.get(hotkey_ss58)
         return int(uid) if uid is not None else None
     except Exception as e:

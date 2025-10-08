@@ -23,7 +23,7 @@ from grail.cli.mine import (
 from grail.infrastructure.chain import GrailChainManager
 from grail.infrastructure.checkpoints import CheckpointManager, default_checkpoint_cache_root
 from grail.infrastructure.credentials import load_r2_credentials
-from grail.model.provider import get_model, get_tokenizer, clear_model_and_tokenizer
+from grail.model.provider import clear_model_and_tokenizer, get_model, get_tokenizer
 from grail.monitoring import get_monitoring_manager
 from grail.monitoring.config import MonitoringConfig
 from grail.shared.constants import TRAINER_UID, WINDOW_LENGTH
@@ -242,7 +242,7 @@ class MinerNeuron(BaseNeuron):
                             if monitor:
                                 await monitor.log_counter("mining.successful_uploads")
                                 await monitor.log_gauge("mining.uploaded_rollouts", len(inferences))
-                                
+
                         except Exception as e:
                             logger.error(f"❌ Failed to upload window {window_start}: {e}")
                             logger.error(traceback.format_exc())
