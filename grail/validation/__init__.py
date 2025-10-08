@@ -51,7 +51,7 @@ def create_sat_validation_pipeline() -> ValidationPipeline:
         [
             SchemaValidator(),  # FIRST - structure/types, no GPU
             TokenValidator(),  # SECOND - vocab/length check
-            SATProblemValidator(), # This always should be called before SATPromptValidator
+            SATProblemValidator(),  # This always should be called before SATPromptValidator
             SATPromptValidator(),
             GRAILProofValidator(),  # Cryptographic proof validation
             TerminationValidator(),
