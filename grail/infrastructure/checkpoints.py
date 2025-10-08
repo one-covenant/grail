@@ -181,14 +181,12 @@ class CheckpointManager:
         # Apply MOD10 remapping if enabled (must match get_checkpoint)
         if GRAIL_CHECKPOINT_MOD10:
             # Remap each window to [0..9] to match cached names
-            remapped_keep = {(int(w) // 10) % 10
-                                for w in keep_windows}
+            remapped_keep = {(int(w) // 10) % 10 for w in keep_windows}
             keep_windows = remapped_keep
             logger.debug(
                 "[TEST MOD10] remapped keep_windows for cleanup: %s",
                 keep_windows,
             )
-
 
         for candidate in self.cache_root.glob("checkpoint-*"):
             try:
