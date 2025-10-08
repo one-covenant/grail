@@ -25,7 +25,7 @@ import typer
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from grail.infrastructure.drand import get_drand_beacon, get_round_at_time
-from grail.model.provider import get_model, get_tokenizer
+from grail.model.provider import get_model, get_tokenizer, clear_model_and_tokenizer
 
 from ..environments import create_sat_reward_vector
 from ..grail import derive_canonical_sat
@@ -65,6 +65,8 @@ from ..validation import (
 )
 from ..validation.pipeline import ValidationPipeline
 from . import console
+from ..mining.rollout_generator import SYSTEM_PROMPT, REASONING_START
+from ..shared.chat_templates import build_qwen_chat_template
 
 # --------------------------------------------------------------------------- #
 #                  Future Training/Checkpoint Integration (commented)        #
@@ -619,6 +621,7 @@ async def _run_validation_service(
         pass
 
     async def _validation_loop() -> None:
+        nonlocal model, tokenizer
         subtensor = None
         credentials, chain_manager = await _initialize_credentials_and_chain(wallet)
         monitor = await _initialize_monitor(wallet)
@@ -654,6 +657,8 @@ async def _run_validation_service(
         # Track failures over longer horizon for exclusion from sampling
         failure_history: deque[set[str]] = deque(maxlen=FAILURE_LOOKBACK_WINDOWS)
         failure_counts: dict[str, int] = {}
+
+        current_checkpoint_id = None
 
         while True:
             try:
@@ -702,21 +707,26 @@ async def _run_validation_service(
                     )
 
                 if checkpoint_path:
-                    try:
-                        logger.info(
-                            "🚀 Loading checkpoint for validation window %s from %s",
-                            target_window,
-                            checkpoint_path,
-                        )
-                        model = get_model(str(checkpoint_path), device=None, eval_mode=True)
-                        tokenizer = get_tokenizer(str(checkpoint_path))
-                    except Exception:
-                        logger.exception(
-                            "Failed to load checkpoint for window %s, skipping window",
-                            target_window,
-                        )
-                        await asyncio.sleep(30)
-                        continue
+                    if checkpoint_path != current_checkpoint_id or model is None or tokenizer is None:
+                        try:
+                            logger.info(
+                                "🚀 Loading checkpoint for validation window %s from %s",
+                                target_window,
+                                checkpoint_path,
+                            )
+                            # Pre-load cleanup to prevent VRAM growth when swapping checkpoints
+                            model, tokenizer = clear_model_and_tokenizer(model, tokenizer)
+                            chat_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
+                            model = get_model(str(checkpoint_path), device=None, eval_mode=True)
+                            tokenizer = get_tokenizer(str(checkpoint_path), chat_template=chat_template)
+                            current_checkpoint_id = str(checkpoint_path)
+                        except Exception:
+                            logger.exception(
+                                "Failed to load checkpoint for window %s, skipping window",
+                                target_window,
+                            )
+                            await asyncio.sleep(30)
+                            continue
                 else:
                     logger.warning(
                         "No checkpoint available for window %s, skipping validation",
