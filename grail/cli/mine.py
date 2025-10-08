@@ -36,7 +36,7 @@ logger = logging.getLogger("grail")
 EMA_ALPHA = 0.2  # Exponential moving average smoothing
 
 MINER_SAFETY_BLOCKS = int(  # Safety margin blocks before window end
-    os.getenv("GRAIL_MINER_SAFETY_BLOCKS", "1")
+    os.getenv("GRAIL_MINER_SAFETY_BLOCKS", "3")
 )
 DEBUG_TEXT_LOG_LIMIT_PER_WINDOW = 5  # Max sample texts logged per window
 
@@ -257,7 +257,8 @@ async def get_window_randomness(
         return window_block_hash, window_block_hash
 
     try:
-        drand_beacon = get_drand_beacon(None)
+        # Run drand HTTP request in thread pool to avoid blocking event loop
+        drand_beacon = await asyncio.to_thread(get_drand_beacon, None)
         logger.info("🎲 Using drand randomness from round %s", drand_beacon["round"])
         combined_randomness = hashlib.sha256(
             (window_block_hash + drand_beacon["randomness"]).encode()
@@ -654,8 +655,13 @@ async def generate_rollouts_for_window(
             )
 
             HEARTBEAT = time.monotonic()
-            grpo_rollouts = generator.generate_grpo_rollouts(
-                sat_problem, combined_randomness, wallet
+            # Run blocking model inference in thread pool to avoid blocking event loop
+            # This allows heartbeat keeper and other async tasks to continue running
+            grpo_rollouts = await asyncio.to_thread(
+                generator.generate_grpo_rollouts,
+                sat_problem,
+                combined_randomness,
+                wallet,
             )
             HEARTBEAT = time.monotonic()
 
