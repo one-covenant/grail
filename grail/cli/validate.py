@@ -38,7 +38,6 @@ from ..infrastructure.comms import (
     upload_valid_rollouts,
 )
 from ..infrastructure.credentials import load_r2_credentials
-from ..infrastructure.network import create_subtensor
 from ..logging_utils import MinerPrefixFilter, miner_log_context
 from ..mining.rollout_generator import REASONING_START, SYSTEM_PROMPT
 from ..monitoring import get_monitoring_manager
