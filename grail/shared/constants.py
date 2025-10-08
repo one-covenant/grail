@@ -163,3 +163,9 @@ PROOF_POSITION_IMPORTANCE_DECAY = 100.0
 
 # GRAIL proof version
 GRAIL_PROOF_VERSION = "v1"
+
+
+# ────────────────  CHECKPOINT MOD10  ────────────────
+
+# Only for testing purposes; going to be removed later on
+GRAIL_CHECKPOINT_MOD10 = True

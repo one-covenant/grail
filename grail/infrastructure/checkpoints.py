@@ -33,6 +33,7 @@ from typing import Any
 from ..shared.constants import (
     CHECKPOINT_MILESTONE_INTERVAL,
     CHECKPOINT_RETENTION_LIMIT,
+    GRAIL_CHECKPOINT_MOD10,
     WINDOW_LENGTH,
 )
 from . import comms
@@ -95,21 +96,18 @@ class CheckpointManager:
         """Ensure checkpoint for *window* is available locally and return path.
 
         Notes (testing only):
-        If env GRAIL_CHECKPOINT_MOD10 == "1", the incoming window is
+        If GRAIL_CHECKPOINT_MOD10 == True, the incoming window is
         deterministically remapped to [0..9] via modulo 10 to allow
         testing against a small fixed set of checkpoints.
         """
 
         # Testing hook: remap any input window to [0..9] when enabled
-        try:
-            if os.getenv("GRAIL_CHECKPOINT_MOD10", "1") == "1":
-                original_window = window
-                # If window values are multiples of 10, map deterministically to [0..9]
-                # by first collapsing the decade, then mod 10.
-                window = (int(window) // 10) % 10
-                logger.debug("[TEST MOD10] remapped window %s -> %s", original_window, window)
-        except Exception:
-            pass
+        if GRAIL_CHECKPOINT_MOD10:
+            original_window = window
+            # If window values are multiples of 10, map deterministically to [0..9]
+            # by first collapsing the decade, then mod 10.
+            window = (int(window) // 10) % 10
+            logger.debug("[TEST MOD10] remapped window %s -> %s", original_window, window)
 
         if window < 0:
             return None
@@ -179,6 +177,19 @@ class CheckpointManager:
         """Remove cached checkpoints outside the retention policy."""
 
         keep_windows = self._compute_keep_windows(current_window)
+
+        # Apply MOD10 remapping if enabled (must match get_checkpoint)
+        if GRAIL_CHECKPOINT_MOD10:
+            # Remap each window to [0..9] to match cached names
+            remapped_keep = {(int(w) // 10) % 10
+                                for w in keep_windows}
+            keep_windows = remapped_keep
+            logger.debug(
+                "[TEST MOD10] remapped keep_windows for cleanup: %s",
+                keep_windows,
+            )
+
+
         for candidate in self.cache_root.glob("checkpoint-*"):
             try:
                 suffix = candidate.name.split("-")[1]
