@@ -29,6 +29,9 @@ from . import console
 # --------------------------------------------------------------------------- #
 logger = logging.getLogger("grail")
 
+# Global reference to chain manager for watchdog cleanup
+CHAIN_MANAGER: Any = None
+
 # --------------------------------------------------------------------------- #
 #                       Styling & configuration constants                     #
 # --------------------------------------------------------------------------- #
@@ -800,6 +803,15 @@ async def watchdog(timeout: int = 600) -> None:
         elapsed = time.monotonic() - HEARTBEAT
         if elapsed > timeout:
             logging.error(f"[WATCHDOG] Process stalled {elapsed:.0f}s — exiting process.")
+            # Best-effort cleanup: stop commitment fetcher process
+            try:
+                global CHAIN_MANAGER
+                if CHAIN_MANAGER is not None:
+                    logger.info("[WATCHDOG] Terminating commitment fetcher process...")
+                    CHAIN_MANAGER.stop()
+            except Exception as e:
+                logger.error(f"[WATCHDOG] Failed to stop chain manager: {e}")
+            # Hard exit to avoid being stuck indefinitely
             os._exit(1)
 
 

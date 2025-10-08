@@ -103,6 +103,9 @@ from . import console
 logger = logging.getLogger("grail")
 logger.addFilter(MinerPrefixFilter())
 
+# Global reference to chain manager for watchdog cleanup
+CHAIN_MANAGER: GrailChainManager | None = None
+
 
 # --------------------------------------------------------------------------- #
 #                           Crash Diagnostics                                 #
@@ -525,6 +528,14 @@ async def watchdog(timeout: int = 600) -> None:
         elapsed = time.monotonic() - HEARTBEAT
         if elapsed > timeout:
             logging.error(f"[WATCHDOG] Process stalled {elapsed:.0f}s — exiting process.")
+            # Best-effort cleanup: stop commitment fetcher process
+            try:
+                global CHAIN_MANAGER
+                if CHAIN_MANAGER is not None:
+                    logger.info("[WATCHDOG] Terminating commitment fetcher process...")
+                    CHAIN_MANAGER.stop()
+            except Exception as e:
+                logger.error(f"[WATCHDOG] Failed to stop chain manager: {e}")
             # Best-effort flush so the final error is not lost
             try:
                 _flush_all_logs()
@@ -624,6 +635,9 @@ async def _run_validation_service(
         nonlocal model, tokenizer
         subtensor = None
         credentials, chain_manager = await _initialize_credentials_and_chain(wallet)
+        # Store chain manager globally for watchdog cleanup
+        global CHAIN_MANAGER
+        CHAIN_MANAGER = chain_manager
         monitor = await _initialize_monitor(wallet)
         # Use trainer UID's committed read credentials for checkpoints
         trainer_bucket = chain_manager.get_bucket(TRAINER_UID)

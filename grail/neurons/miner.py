@@ -85,6 +85,9 @@ class MinerNeuron(BaseNeuron):
             config = SimpleNamespace(netuid=int(get_conf("BT_NETUID", get_conf("NETUID", 200))))
             chain_manager = GrailChainManager(config, wallet, credentials)
             await chain_manager.initialize()
+            # Store chain manager globally for watchdog cleanup
+            cli_mine.CHAIN_MANAGER = chain_manager
+
             logger.info("✅ Initialized chain manager and committed read credentials")
             self._update_heartbeat()
 
