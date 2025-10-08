@@ -53,6 +53,10 @@ class ValidatorNeuron(BaseNeuron):
         logger.info("🤗 Logging into Hugging Face for dataset uploads...")
         login_huggingface()
 
+        # Get shared subtensor instance from BaseNeuron
+        subtensor = await self.get_subtensor()
+        logger.info("✅ Connected to Bittensor network")
+
         # Create validation pipeline
         sat_pipeline = create_sat_validation_pipeline()
         logger.info(
@@ -74,6 +78,7 @@ class ValidatorNeuron(BaseNeuron):
             # Model and tokenizer will be loaded from checkpoint in validation service
             await _run_validation_service(
                 wallet=wallet,
+                subtensor=subtensor,
                 model=None,
                 tokenizer=None,
                 sat_pipeline=sat_pipeline,
