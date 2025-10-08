@@ -10,20 +10,17 @@ import logging
 import bittensor as bt
 
 from grail.cli.validate import (
+    WEIGHT_ROLLING_WINDOWS,
     _flush_all_logs,
     _get_sat_reward_bounds,
     _run_validation_service,
     get_conf,
 )
 from grail.infrastructure.comms import login_huggingface
-from grail.mining.rollout_generator import REASONING_START, SYSTEM_PROMPT
-from grail.model.provider import get_model, get_tokenizer
 from grail.scoring import WeightComputer
-from grail.shared.chat_templates import build_qwen_chat_template
 from grail.shared.constants import (
     GRAIL_BURN_PERCENTAGE,
     GRAIL_BURN_UID,
-    MODEL_NAME,
     SUPERLINEAR_EXPONENT,
     WINDOW_LENGTH,
 )
@@ -51,12 +48,7 @@ class ValidatorNeuron(BaseNeuron):
         wallet = bt.wallet(name=coldkey, hotkey=hotkey)
 
         logger.info(f"🔑 Validator hotkey: {wallet.hotkey.ss58_address}")
-        logger.info(f"Loading model for validation: {MODEL_NAME}")
-
-        # Load model once via provider
-        chat_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
-        model = get_model(MODEL_NAME, eval_mode=True)
-        tokenizer = get_tokenizer(MODEL_NAME, chat_template=chat_template)
+        logger.info("Validator will load model from checkpoint")
 
         logger.info("🤗 Logging into Hugging Face for dataset uploads...")
         login_huggingface()
@@ -69,7 +61,7 @@ class ValidatorNeuron(BaseNeuron):
 
         # Create weight computer
         weight_computer = WeightComputer(
-            rolling_windows=12,
+            rolling_windows=WEIGHT_ROLLING_WINDOWS,
             window_length=WINDOW_LENGTH,
             superlinear_exponent=SUPERLINEAR_EXPONENT,
             burn_uid=GRAIL_BURN_UID,
@@ -79,10 +71,11 @@ class ValidatorNeuron(BaseNeuron):
         sat_reward_low, sat_reward_high = _get_sat_reward_bounds()
 
         try:
+            # Model and tokenizer will be loaded from checkpoint in validation service
             await _run_validation_service(
                 wallet=wallet,
-                model=model,
-                tokenizer=tokenizer,
+                model=None,
+                tokenizer=None,
                 sat_pipeline=sat_pipeline,
                 weight_computer=weight_computer,
                 sat_reward_low=sat_reward_low,

@@ -37,6 +37,25 @@ DRAND_FUTURE_BUFFER = 30
 MODEL_NAME = os.getenv("GRAIL_MODEL_NAME", "Qwen/Qwen3-4B-Instruct-2507")
 LAYER_INDEX = -1
 
+# Trainer hyperparameters (env configurable)
+TRAINER_LR = float(os.getenv("GRAIL_TRAINER_LR", "2e-6"))
+TRAINER_EPOCHS = int(os.getenv("GRAIL_TRAINER_EPOCHS", "2"))
+TRAINER_BATCH_SIZE = int(os.getenv("GRAIL_TRAINER_BATCH_SIZE", "4"))
+TRAINER_MAX_LENGTH = int(os.getenv("GRAIL_TRAINER_MAX_LENGTH", "1024"))
+TRAINER_GRAD_CLIP = float(os.getenv("GRAIL_TRAINER_GRAD_CLIP", "0.5"))
+TRAINER_WARMUP_STEPS = int(os.getenv("GRAIL_TRAINER_WARMUP_STEPS", "10"))
+TRAINER_KL_COEF = float(os.getenv("GRAIL_TRAINER_KL_COEF", "0.02"))
+TRAINER_ENTROPY_COEF = float(os.getenv("GRAIL_TRAINER_ENTROPY_COEF", "0.001"))
+TRAINER_ADV_CLIP_PERCENTILE = float(os.getenv("GRAIL_TRAINER_ADV_CLIP_PERCENTILE", "99.0"))
+TRAINER_GROUP_ADV_SUM_TOL = float(os.getenv("GRAIL_TRAINER_GROUP_ADV_SUM_TOL", "0.01"))
+
+# Checkpoint retention controls
+CHECKPOINT_RETENTION_LIMIT = int(os.getenv("GRAIL_CHECKPOINT_RETENTION_LIMIT", "3"))
+CHECKPOINT_MILESTONE_INTERVAL = int(os.getenv("GRAIL_CHECKPOINT_MILESTONE_INTERVAL", "100"))
+
+# Trainer identity used for checkpoint publication
+TRAINER_UID = 0
+
 # ────────────────  LOGGING  ────────────────
 
 TRACE = 5
@@ -117,7 +136,8 @@ FAILURE_LOOKBACK_WINDOWS = 14
 # ────────────────  GRAIL PROOF VERIFICATION  ────────────────
 
 # Top-K activation selection (focus on stable, important features)
-PROOF_TOPK = 256
+# UPDATED: Reduced from 256 to 32 for higher sensitivity to training changes
+PROOF_TOPK = 32
 
 # Logarithmic bucketing parameters
 PROOF_NUM_BUCKETS = 16  # Buckets per sign
@@ -127,16 +147,25 @@ PROOF_COEFF_RANGE = 127  # r ∈ [-127, 127]
 
 # Multi-check tolerances (calibrate empirically via cross-framework tests)
 # Sketch: modular distance on dot product
-PROOF_SKETCH_TOLERANCE = 1000
+# UPDATED: Reduced from 1000 to 50 for tighter verification
+PROOF_SKETCH_TOLERANCE = 50
 
 # Rank: minimum matches required in top-5 ordering
-PROOF_MIN_RANK_MATCHES = 4
+# UPDATED: Increased from 4 to 5 for stricter rank matching
+PROOF_MIN_RANK_MATCHES = 5
 
 # Histogram: L1 distance on bucket distribution
-PROOF_HISTOGRAM_TOLERANCE = 50
+# UPDATED: Reduced from 50 to 10 for tighter distribution matching
+PROOF_HISTOGRAM_TOLERANCE = 10
 
 # Adaptive tolerance: position importance decay rate
 PROOF_POSITION_IMPORTANCE_DECAY = 100.0
 
 # GRAIL proof version
 GRAIL_PROOF_VERSION = "v1"
+
+
+# ────────────────  CHECKPOINT MOD10  ────────────────
+
+# Only for testing purposes; going to be removed later on
+GRAIL_CHECKPOINT_MOD10 = True

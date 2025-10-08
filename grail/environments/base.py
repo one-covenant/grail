@@ -1,7 +1,8 @@
 """Base classes for reward computation and parsing."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 
 class Parser(ABC):
@@ -29,8 +30,8 @@ class RewardVector:
         self,
         reward_functions: list[Callable[[Any, Any], float]],
         weights: list[float],
-        parser: Optional[Parser] = None,
-        bounds: Optional[list[tuple[float, float]]] = None,
+        parser: Parser | None = None,
+        bounds: list[tuple[float, float]] | None = None,
     ):
         """Initialize reward vector.
 
@@ -68,7 +69,7 @@ class RewardVector:
             parsed_output = completion
 
         total_reward = 0.0
-        for reward_fn, weight in zip(self.reward_functions, self.weights):
+        for reward_fn, weight in zip(self.reward_functions, self.weights, strict=False):
             reward = reward_fn(parsed_output, context)
             total_reward += weight * reward
 
@@ -119,7 +120,7 @@ class RewardVector:
 
         min_total = 0.0
         max_total = 0.0
-        for (mn, mx), w in zip(self._bounds, self.weights):
+        for (mn, mx), w in zip(self._bounds, self.weights, strict=False):
             # Allow any real weights; composition follows linearity
             min_total += w * mn
             max_total += w * mx

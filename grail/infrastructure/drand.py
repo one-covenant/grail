@@ -2,7 +2,7 @@
 
 import logging
 import os
-from typing import Any, Optional, TypedDict
+from typing import Any, TypedDict
 
 import requests
 
@@ -84,7 +84,7 @@ def get_current_chain() -> dict[str, Any]:
     return {"name": _current_chain, **DRAND_CHAINS[_current_chain]}
 
 
-def get_drand_beacon(round_id: Optional[int] = None, use_fallback: bool = True) -> dict:
+def get_drand_beacon(round_id: int | None = None, use_fallback: bool = True) -> dict:
     """
     Fetch randomness from drand network.
 

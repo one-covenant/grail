@@ -9,7 +9,7 @@ import os
 import tempfile
 import time
 from datetime import datetime
-from typing import Any, Optional, Union
+from typing import Any
 
 import bittensor as bt
 from aiobotocore.session import get_session
@@ -17,6 +17,7 @@ from botocore.config import Config
 from datasets import Dataset
 from huggingface_hub import HfFolder
 from safetensors.torch import load_file, save_file
+from tqdm import tqdm
 from transformers import AutoModelForCausalLM
 
 from ..shared.constants import WINDOW_LENGTH
@@ -37,7 +38,14 @@ PROTOCOL_VERSION = "v1.0.0"
 # 100+ concurrent requests. Reusing a single session allows proper
 # connection pooling (max_pool_connections applies across all clients)
 # and reduces overhead from session initialization.
-_AIOBOTO_SESSION: Optional[Any] = None
+_AIOBOTO_SESSION: Any | None = None
+
+# Client cache for reusing S3 clients across operations. During training/validation,
+# we make hundreds of S3 operations per window with the same credentials. Reusing
+# clients eliminates repeated setup overhead (credential validation, config init).
+# Key: (credentials_hash, use_write) -> Value: aiobotocore client
+_CLIENT_CACHE: dict[tuple[str, bool], Any] = {}
+_CLIENT_CACHE_LOCK = asyncio.Lock()
 
 
 def _get_aioboto_session() -> Any:
@@ -57,7 +65,106 @@ def _get_aioboto_session() -> Any:
     return _AIOBOTO_SESSION
 
 
-def get_conf(key: str, default: Optional[str] = None) -> str:
+def _make_cache_key(
+    credentials: BucketCredentials | Bucket | dict | None = None,
+    use_write: bool = True,
+) -> tuple[str, bool]:
+    """Create a cache key from credentials for client reuse.
+
+    Args:
+        credentials: Bucket credentials
+        use_write: Whether write credentials are used
+
+    Returns:
+        Tuple of (credentials_hash, use_write) for cache lookup
+    """
+    # Create deterministic hash from credential components
+    if credentials is not None:
+        if isinstance(credentials, BucketCredentials):
+            account_id = credentials.account_id
+            if use_write:
+                key_id = credentials.write_access_key_id
+            else:
+                key_id = credentials.read_access_key_id
+        elif isinstance(credentials, Bucket):
+            account_id = credentials.account_id.strip()
+            key_id = credentials.access_key_id.strip()
+        elif isinstance(credentials, dict):
+            account_id = credentials.get("account_id", "").strip()
+            key_id = credentials.get("access_key_id", "").strip()
+        else:
+            # Fallback for unknown types
+            account_id = str(credentials)
+            key_id = ""
+    else:
+        # Use environment variables for hash
+        account_id = os.getenv("R2_ACCOUNT_ID", "")
+        if use_write:
+            key_id = os.getenv("R2_WRITE_ACCESS_KEY_ID", "")
+        else:
+            key_id = os.getenv("R2_READ_ACCESS_KEY_ID", "")
+
+    # Create hash from credential identifiers (not secrets)
+    cred_hash = hashlib.md5(f"{account_id}:{key_id}".encode()).hexdigest()
+    return (cred_hash, use_write)
+
+
+async def _get_cached_client(
+    credentials: BucketCredentials | Bucket | dict | None = None,
+    use_write: bool = True,
+) -> Any:
+    """Get or create a cached S3 client for reuse across operations.
+
+    This significantly reduces overhead during high-frequency operations by:
+    - Eliminating repeated client setup (credential validation, config init)
+    - Reusing connection pools via singleton session
+    - Maintaining client state across operations
+
+    Clients are cached per unique (credentials, use_write) combination.
+
+    Args:
+        credentials: Bucket credentials (BucketCredentials, Bucket, or dict)
+        use_write: Whether to use write credentials
+
+    Returns:
+        Cached or newly created aiobotocore S3 client
+    """
+    cache_key = _make_cache_key(credentials, use_write)
+
+    async with _CLIENT_CACHE_LOCK:
+        if cache_key not in _CLIENT_CACHE:
+            # Create new client and enter its context to initialize
+            client_ctx = get_client_ctx(credentials, use_write)
+            client = await client_ctx.__aenter__()
+            _CLIENT_CACHE[cache_key] = (client, client_ctx)
+            logger.debug(f"Created and cached S3 client for {cache_key[0][:8]}...")
+        else:
+            client, _client_ctx = _CLIENT_CACHE[cache_key]
+
+    return client
+
+
+async def clear_client_cache() -> None:
+    """Clear all cached S3 clients and close their connections.
+
+    Call this when:
+    - Credentials have changed
+    - Cleaning up at shutdown
+    - Recovering from connection errors
+    """
+    async with _CLIENT_CACHE_LOCK:
+        for cache_key, (_client, client_ctx) in _CLIENT_CACHE.items():
+            try:
+                await client_ctx.__aexit__(None, None, None)
+                logger.debug(f"Closed cached client {cache_key[0][:8]}...")
+            except Exception as e:
+                logger.debug(f"Error closing cached client: {e}")
+
+        _CLIENT_CACHE.clear()
+        logger.info("Cleared S3 client cache")
+
+
+def get_conf(key: str, default: str | None = None) -> str:
     """Get configuration from environment variables."""
     v = os.getenv(key)
     if not v and default is None:
@@ -66,7 +173,7 @@ def get_conf(key: str, default: Optional[str] = None) -> str:
 
 
 def get_client_ctx(
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = True,
 ) -> Any:
     """Create an S3 client for Cloudflare R2 or a compatible endpoint.
@@ -152,7 +259,7 @@ def get_client_ctx(
     # Root cause: botocore and asyncio timeouts conflict when stacked.
     config = Config(
         connect_timeout=3,
-        read_timeout=10,  # Higher than asyncio timeout
+        read_timeout=30,  # Higher than asyncio timeout
         retries={"max_attempts": 2, "mode": "standard"},
         max_pool_connections=256,
         region_name=region_name,
@@ -171,7 +278,7 @@ def get_client_ctx(
 
 
 def get_bucket_id(
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = True,
 ) -> str:
     """Get the bucket ID from credentials or environment.
@@ -202,7 +309,7 @@ def get_bucket_id(
 
 
 class TransferProgress:
-    """Track upload/download progress and speed"""
+    """Track upload/download progress and speed with tqdm-style visualization"""
 
     def __init__(self, total_size: int, operation: str):
         self.total_size = total_size
@@ -212,8 +319,21 @@ class TransferProgress:
         self.last_log_time = time.time()
         self.last_transferred = 0
 
+        # Create tqdm progress bar that outputs to logger
+        # Use file=None and disable=True to prevent TTY output
+        self.pbar = tqdm(
+            total=total_size,
+            desc=f"📊 {operation}",
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
+            disable=True,  # Don't output to stderr
+            file=None,
+        )
+
     def update(self, bytes_transferred: int) -> None:
         self.transferred += bytes_transferred
+        self.pbar.update(bytes_transferred)
         now = time.time()
 
         # Log progress every 2 seconds or on completion
@@ -222,11 +342,56 @@ class TransferProgress:
             speed_mbps = (self.transferred / (1024 * 1024)) / elapsed if elapsed > 0 else 0
             progress_pct = (self.transferred / self.total_size) * 100 if self.total_size > 0 else 0
 
+            # Calculate ETA
+            if speed_mbps > 0 and self.transferred < self.total_size:
+                remaining_mb = (self.total_size - self.transferred) / (1024 * 1024)
+                eta_seconds = remaining_mb / speed_mbps
+                eta_str = self._format_time(eta_seconds)
+            else:
+                eta_str = "00:00"
+
+            # Create a visual progress bar for logs
+            bar_length = 30
+            filled_length = int(bar_length * self.transferred // self.total_size)
+            bar = "█" * filled_length + "░" * (bar_length - filled_length)
+
+            # Format sizes
+            transferred_str = self._format_bytes(self.transferred)
+            total_str = self._format_bytes(self.total_size)
+
             logger.info(
-                f"📊 {self.operation}: {progress_pct:.1f}% ({self.transferred}/{self.total_size} bytes) @ {speed_mbps:.2f} MB/s"
+                f"📊 {self.operation}: |{bar}| "
+                f"{progress_pct:.1f}% [{transferred_str}/{total_str}] "
+                f"@ {speed_mbps:.2f} MB/s ETA: {eta_str}"
             )
             self.last_log_time = now
             self.last_transferred = self.transferred
+
+    def close(self) -> None:
+        """Close the progress bar and log final stats"""
+        self.pbar.close()
+        elapsed = time.time() - self.start_time
+        speed_mbps = (self.transferred / (1024 * 1024)) / elapsed if elapsed > 0 else 0
+        transferred_str = self._format_bytes(self.transferred)
+        logger.info(
+            f"✅ {self.operation} completed: {transferred_str} "
+            f"in {self._format_time(elapsed)} @ {speed_mbps:.2f} MB/s"
+        )
+
+    @staticmethod
+    def _format_bytes(num_bytes: int) -> str:
+        """Format bytes to human-readable string"""
+        for unit in ["B", "KB", "MB", "GB"]:
+            if num_bytes < 1024.0:
+                return f"{num_bytes:.1f}{unit}"
+            num_bytes /= 1024.0
+        return f"{num_bytes:.1f}TB"
+
+    @staticmethod
+    def _format_time(seconds: float) -> str:
+        """Format seconds to MM:SS"""
+        mins, secs = divmod(int(seconds), 60)
+        return f"{mins:02d}:{secs:02d}"
 
 
 # --------------------------------------------------------------------------- #
@@ -240,7 +405,7 @@ async def upload_file_chunked(
     chunk_size: int = 100 * 1024 * 1024,
     max_retries: int = 3,
     compress: bool = True,
-    credentials: Optional[BucketCredentials] = None,
+    credentials: BucketCredentials | None = None,
     use_write: bool = False,
 ) -> bool:
     """Upload file in chunks optimized for H100 high-bandwidth - 100MB chunks with compression"""
@@ -267,63 +432,62 @@ async def upload_file_chunked(
     )
 
     try:
-        async with get_client_ctx(credentials, use_write) as client:
-            # Initiate multipart upload
-            bucket_id = get_bucket_id(credentials, use_write)
-            response = await client.create_multipart_upload(Bucket=bucket_id, Key=key)
-            upload_id = response["UploadId"]
+        client = await _get_cached_client(credentials, use_write)
 
-            # Upload chunks concurrently with limited concurrency
-            semaphore = asyncio.Semaphore(30)  # High concurrency for H100 bandwidth
-            tasks = []
+        # Initiate multipart upload
+        bucket_id = get_bucket_id(credentials, use_write)
+        response = await client.create_multipart_upload(Bucket=bucket_id, Key=key)
+        upload_id = response["UploadId"]
 
-            for i in range(0, total_size, chunk_size):
-                chunk_data = data[i : i + chunk_size]
-                part_number = (i // chunk_size) + 1
-                task = _upload_chunk_with_semaphore(
-                    semaphore,
-                    client,
-                    key,
-                    upload_id,
-                    part_number,
-                    chunk_data,
-                    progress,
-                    max_retries,
-                    credentials,
-                    use_write,
-                )
-                tasks.append(task)
+        # Upload chunks concurrently with limited concurrency
+        semaphore = asyncio.Semaphore(30)  # High concurrency for H100 bandwidth
+        tasks = []
 
-            # Wait for all chunks to complete
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            # Check for failures
-            parts = []
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    logger.error(f"Chunk {i + 1} failed: {result}")
-                    bucket_id = get_bucket_id(credentials, use_write)
-                    await client.abort_multipart_upload(
-                        Bucket=bucket_id, Key=key, UploadId=upload_id
-                    )
-                    return False
-                parts.append(result)
-
-            # Complete multipart upload
-            bucket_id = get_bucket_id(credentials, use_write)
-            await client.complete_multipart_upload(
-                Bucket=bucket_id,
-                Key=key,
-                UploadId=upload_id,
-                MultipartUpload={"Parts": parts},
+        for i in range(0, total_size, chunk_size):
+            chunk_data = data[i : i + chunk_size]
+            part_number = (i // chunk_size) + 1
+            task = _upload_chunk_with_semaphore(
+                semaphore,
+                client,
+                key,
+                upload_id,
+                part_number,
+                chunk_data,
+                progress,
+                max_retries,
+                credentials,
+                use_write,
             )
+            tasks.append(task)
 
-            elapsed = time.time() - progress.start_time
-            speed_mbps = (total_size / (1024 * 1024)) / elapsed if elapsed > 0 else 0
-            logger.info(
-                f"✅ Upload completed: {key} ({total_size} bytes) in {elapsed:.1f}s @ {speed_mbps:.2f} MB/s"
-            )
-            return True
+        # Wait for all chunks to complete
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Check for failures
+        parts = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Chunk {i + 1} failed: {result}")
+                bucket_id = get_bucket_id(credentials, use_write)
+                await client.abort_multipart_upload(Bucket=bucket_id, Key=key, UploadId=upload_id)
+                return False
+            parts.append(result)
+
+        # Complete multipart upload
+        bucket_id = get_bucket_id(credentials, use_write)
+        await client.complete_multipart_upload(
+            Bucket=bucket_id,
+            Key=key,
+            UploadId=upload_id,
+            MultipartUpload={"Parts": parts},
+        )
+
+        elapsed = time.time() - progress.start_time
+        speed_mbps = (total_size / (1024 * 1024)) / elapsed if elapsed > 0 else 0
+        logger.info(
+            f"✅ Upload completed: {key} ({total_size} bytes) in {elapsed:.1f}s @ {speed_mbps:.2f} MB/s"
+        )
+        return True
 
     except Exception as e:
         logger.error(f"❌ Upload failed for {key}: {e}")
@@ -335,15 +499,15 @@ async def _upload_single_chunk(
     data: bytes,
     progress: TransferProgress,
     max_retries: int,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = True,
 ) -> bool:
     """Upload single chunk with retry logic"""
     for attempt in range(max_retries):
         try:
-            async with get_client_ctx(credentials, use_write) as client:
-                bucket_id = get_bucket_id(credentials, use_write)
-                await client.put_object(Bucket=bucket_id, Key=key, Body=data)
+            client = await _get_cached_client(credentials, use_write)
+            bucket_id = get_bucket_id(credentials, use_write)
+            await client.put_object(Bucket=bucket_id, Key=key, Body=data)
             progress.update(len(data))
             return True
         except Exception as e:
@@ -367,9 +531,9 @@ async def _upload_chunk_with_semaphore(
     data: bytes,
     progress: TransferProgress,
     max_retries: int,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = True,
-) -> Optional[dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Upload a single chunk with concurrency control and retry logic"""
     async with semaphore:
         for attempt in range(max_retries):
@@ -404,103 +568,99 @@ async def _upload_chunk_with_semaphore(
 async def download_file_chunked(
     key: str,
     max_retries: int = 3,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = False,
-) -> Optional[bytes]:
+) -> bytes | None:
     """Download file in chunks with automatic decompression"""
     actual_key = key
     is_compressed = False
 
     for attempt in range(max_retries):
         try:
-            async with get_client_ctx(credentials, use_write) as client:
-                # Try compressed version first if not already .gz
-                if not key.endswith(".gz"):
-                    try:
-                        compressed_key = key + ".gz"
-                        bucket_id = get_bucket_id(credentials, use_write)
-                        head_response = await client.head_object(
-                            Bucket=bucket_id, Key=compressed_key
-                        )
-                        actual_key = compressed_key
-                        is_compressed = True
-                        logger.debug(f"Found compressed version: {compressed_key}")
-                    except Exception:
-                        # Fallback to uncompressed
-                        bucket_id = get_bucket_id(credentials, use_write)
-                        head_response = await client.head_object(Bucket=bucket_id, Key=key)
-                        actual_key = key
-                else:
+            client = await _get_cached_client(credentials, use_write)
+
+            # Try compressed version first if not already .gz
+            if not key.endswith(".gz"):
+                try:
+                    compressed_key = key + ".gz"
+                    bucket_id = get_bucket_id(credentials, use_write)
+                    head_response = await client.head_object(Bucket=bucket_id, Key=compressed_key)
+                    actual_key = compressed_key
+                    is_compressed = True
+                    logger.debug(f"Found compressed version: {compressed_key}")
+                except Exception:
+                    # Fallback to uncompressed
                     bucket_id = get_bucket_id(credentials, use_write)
                     head_response = await client.head_object(Bucket=bucket_id, Key=key)
-                    is_compressed = key.endswith(".gz")
-                total_size = head_response["ContentLength"]
+                    actual_key = key
+            else:
+                bucket_id = get_bucket_id(credentials, use_write)
+                head_response = await client.head_object(Bucket=bucket_id, Key=key)
+                is_compressed = key.endswith(".gz")
+            total_size = head_response["ContentLength"]
 
-                logger.info(
-                    f"📥 Downloading {actual_key} ({total_size} bytes){' (compressed)' if is_compressed else ''}"
-                )
-                progress = TransferProgress(total_size, f"Download {actual_key}")
+            logger.info(
+                f"📥 Downloading {actual_key} ({total_size} bytes){' (compressed)' if is_compressed else ''}"
+            )
+            progress = TransferProgress(total_size, f"Download {actual_key}")
 
-                # For small files, download in one go
-                chunk_size = 100 * 1024 * 1024  # 100MB chunks for H100 bandwidth
-                if total_size <= chunk_size:
-                    bucket_id = get_bucket_id(credentials, use_write)
-                    response = await client.get_object(Bucket=bucket_id, Key=actual_key)
+            # For small files, download in one go
+            chunk_size = 100 * 1024 * 1024  # 100MB chunks
+            if total_size <= chunk_size:
+                bucket_id = get_bucket_id(credentials, use_write)
+                response = await client.get_object(Bucket=bucket_id, Key=actual_key)
+                try:
                     data = await response["Body"].read()
                     progress.update(len(data))
-                    elapsed = time.time() - progress.start_time
-                    speed_mbps = (total_size / (1024 * 1024)) / elapsed if elapsed > 0 else 0
-                    logger.info(
-                        f"✅ Download completed: {actual_key} ({total_size} bytes) in {elapsed:.1f}s @ {speed_mbps:.2f} MB/s"
-                    )
+                    progress.close()  # Log final stats
+
                     # Decompress if needed
                     if is_compressed:
                         data = gzip.decompress(data)
                         logger.debug(f"🗜️ Decompressed to {len(data)} bytes")
                     return data  # type: ignore[no-any-return]
+                finally:
+                    # Close response body
+                    response["Body"].close()
 
-                # For large files, download in chunks
-                chunks = []
-                semaphore = asyncio.Semaphore(30)  # High concurrency for H100 bandwidth
-                tasks = []
+            # For large files, download in chunks
+            chunks = []
+            semaphore = asyncio.Semaphore(30)  # High concurrency for H100 bandwidth
+            tasks = []
 
-                for start in range(0, total_size, chunk_size):
-                    end = min(start + chunk_size - 1, total_size - 1)
-                    task = _download_chunk_with_semaphore(
-                        semaphore,
-                        client,
-                        actual_key,
-                        start,
-                        end,
-                        progress,
-                        max_retries,
-                        credentials,
-                        use_write,
-                    )
-                    tasks.append(task)
-
-                # Wait for all chunks
-                chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-                # Check for failures and reassemble
-                for i, result in enumerate(chunk_results):
-                    if isinstance(result, Exception):
-                        logger.error(f"Download chunk {i} failed: {result}")
-                        raise result
-                    chunks.append(result)
-
-                data = b"".join(chunks)  # type: ignore[arg-type]
-                elapsed = time.time() - progress.start_time
-                speed_mbps = (total_size / (1024 * 1024)) / elapsed if elapsed > 0 else 0
-                logger.info(
-                    f"✅ Download completed: {actual_key} ({total_size} bytes) in {elapsed:.1f}s @ {speed_mbps:.2f} MB/s"
+            for start in range(0, total_size, chunk_size):
+                end = min(start + chunk_size - 1, total_size - 1)
+                task = _download_chunk_with_semaphore(
+                    semaphore,
+                    client,
+                    actual_key,
+                    start,
+                    end,
+                    progress,
+                    max_retries,
+                    credentials,
+                    use_write,
                 )
+                tasks.append(task)
 
-                # Decompress if needed
-                if is_compressed:
-                    data = gzip.decompress(data)
-                    logger.debug(f"🗜️ Decompressed to {len(data)} bytes")
-                return data
+            # Wait for all chunks
+            chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Check for failures and reassemble
+            for i, result in enumerate(chunk_results):
+                if isinstance(result, Exception):
+                    logger.error(f"Download chunk {i} failed: {result}")
+                    raise result
+                chunks.append(result)
+
+            data = b"".join(chunks)  # type: ignore[arg-type]
+            progress.close()  # Log final stats
+
+            # Decompress if needed
+            if is_compressed:
+                data = gzip.decompress(data)
+                logger.debug(f"🗜️ Decompressed to {len(data)} bytes")
+            return data
 
         except Exception as e:
             if attempt < max_retries - 1:
@@ -524,12 +684,13 @@ async def _download_chunk_with_semaphore(
     end: int,
     progress: TransferProgress,
     max_retries: int,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = False,
-) -> Optional[bytes]:
+) -> bytes | None:
     """Download a single chunk with concurrency control and retry logic"""
     async with semaphore:
         for attempt in range(max_retries):
+            response = None
             try:
                 bucket_id = get_bucket_id(credentials, use_write)
                 response = await client.get_object(
@@ -542,11 +703,20 @@ async def _download_chunk_with_semaphore(
                 if attempt < max_retries - 1:
                     wait_time = 2**attempt
                     logger.warning(
-                        f"Download chunk {start}-{end} attempt {attempt + 1} failed, retrying in {wait_time}s: {e}"
+                        f"Download chunk {start}-{end} attempt {attempt + 1} "
+                        f"failed, retrying in {wait_time}s: {e}"
                     )
                     await asyncio.sleep(wait_time)
                 else:
                     raise e
+            finally:
+                # Explicitly close the response body to avoid unclosed
+                # connection warnings
+                if response is not None and "Body" in response:
+                    try:
+                        response["Body"].close()
+                    except Exception:
+                        pass  # Best effort cleanup
     return None
 
 
@@ -557,9 +727,9 @@ async def _download_chunk_with_semaphore(
 
 async def file_exists(
     key: str,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = False,
-    max_upload_time: Optional[float] = None,
+    max_upload_time: float | None = None,
 ) -> bool:
     """Check if a file exists (compressed or uncompressed) with optional deadline check.
 
@@ -586,10 +756,10 @@ async def file_exists(
 
 async def file_exists_with_deadline(
     key: str,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = False,
-    max_upload_time: Optional[float] = None,
-) -> tuple[bool, bool, Optional[float]]:
+    max_upload_time: float | None = None,
+) -> tuple[bool, bool, float | None]:
     """Check existence and whether the object violates an upload deadline.
 
     Returns
@@ -600,31 +770,31 @@ async def file_exists_with_deadline(
         upload_time: Float unix timestamp of LastModified if available
     """
     try:
-        async with get_client_ctx(credentials, use_write) as client:
-            bucket_id = get_bucket_id(credentials, use_write)
+        client = await _get_cached_client(credentials, use_write)
+        bucket_id = get_bucket_id(credentials, use_write)
 
-            # Try compressed first
-            checked_keys = []
-            if not key.endswith(".gz"):
-                checked_keys.append(key + ".gz")
-            else:
-                checked_keys.append(key)
+        # Try compressed first
+        checked_keys = []
+        if not key.endswith(".gz"):
+            checked_keys.append(key + ".gz")
+        else:
+            checked_keys.append(key)
 
-            for candidate in checked_keys:
-                try:
-                    response = await client.head_object(Bucket=bucket_id, Key=candidate)
-                except Exception:
-                    continue
+        for candidate in checked_keys:
+            try:
+                response = await client.head_object(Bucket=bucket_id, Key=candidate)
+            except Exception:
+                continue
 
-                last_modified = response.get("LastModified")
-                upload_time = float(last_modified.timestamp()) if last_modified else None
-                if max_upload_time is not None and upload_time is not None:
-                    if upload_time > float(max_upload_time):
-                        return False, True, upload_time
-                return True, False, upload_time
+            last_modified = response.get("LastModified")
+            upload_time = float(last_modified.timestamp()) if last_modified else None
+            if max_upload_time is not None and upload_time is not None:
+                if upload_time > float(max_upload_time):
+                    return False, True, upload_time
+            return True, False, upload_time
 
-            # Not found in either compressed nor plain form
-            return False, False, None
+        # Not found in either compressed nor plain form
+        return False, False, None
     except Exception as e:
         logger.debug(
             "file_exists_with_deadline failed for key=%s: %s %s", key, type(e).__name__, str(e)
@@ -634,27 +804,61 @@ async def file_exists_with_deadline(
 
 async def list_bucket_files(
     prefix: str,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = False,
 ) -> list[str]:
     """List files in bucket with given prefix"""
     try:
-        async with get_client_ctx(credentials, use_write) as client:
-            bucket_id = get_bucket_id(credentials, use_write)
-            response = await client.list_objects_v2(Bucket=bucket_id, Prefix=prefix)
-            if "Contents" in response:
-                return [obj["Key"] for obj in response["Contents"]]
-            return []
+        client = await _get_cached_client(credentials, use_write)
+        bucket_id = get_bucket_id(credentials, use_write)
+        response = await client.list_objects_v2(Bucket=bucket_id, Prefix=prefix)
+        if "Contents" in response:
+            return [obj["Key"] for obj in response["Contents"]]
+        return []
     except Exception:
         logger.error("Failed to list bucket files with prefix %s", prefix, exc_info=True)
         return []
 
 
+async def delete_prefix(
+    prefix: str,
+    credentials: BucketCredentials | Bucket | dict | None = None,
+    use_write: bool = True,
+) -> None:
+    """Delete all objects under a prefix.
+
+    Designed for cleanup of checkpoint directories. Uses batched delete
+    operations to minimize round trips.
+    """
+    continuation_token: str | None = None
+    while True:
+        try:
+            client = await _get_cached_client(credentials, use_write)
+            bucket_id = get_bucket_id(credentials, use_write)
+            list_kwargs: dict[str, Any] = {"Bucket": bucket_id, "Prefix": prefix}
+            if continuation_token:
+                list_kwargs["ContinuationToken"] = continuation_token
+
+            response = await client.list_objects_v2(**list_kwargs)
+            objects = response.get("Contents", [])
+            if objects:
+                delete_payload = {"Objects": [{"Key": obj["Key"]} for obj in objects]}
+                await client.delete_objects(Bucket=bucket_id, Delete=delete_payload)
+
+            if not response.get("IsTruncated"):
+                break
+
+            continuation_token = response.get("NextContinuationToken")
+        except Exception:
+            logger.error("Failed to delete prefix %s", prefix, exc_info=True)
+            break
+
+
 async def get_file(
     key: str,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = False,
-) -> Optional[dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Download and parse JSON file with improved error handling"""
     try:
         data = await download_file_chunked(key, credentials=credentials, use_write=use_write)
@@ -680,7 +884,7 @@ async def sink_window_inferences(
     wallet: bt.wallet,
     window_start: int,
     inferences: list[dict],
-    credentials: Optional[BucketCredentials] = None,
+    credentials: BucketCredentials | None = None,
 ) -> None:
     """Upload window of inferences to S3 with improved logging"""
     key = f"grail/windows/{wallet.hotkey.ss58_address}-window-{window_start}.json"
@@ -712,7 +916,7 @@ async def save_model_state(
     model: AutoModelForCausalLM,
     hotkey: str,
     window: int,
-    credentials: Optional[BucketCredentials] = None,
+    credentials: BucketCredentials | None = None,
 ) -> bool:
     # Save model state as safetensors to S3 with chunked upload and progress logging
     key = f"grail/models/{hotkey}-{window}.safetensors"
@@ -755,7 +959,7 @@ async def load_model_state(
     model: AutoModelForCausalLM,
     hotkey: str,
     window: int,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = False,
 ) -> bool:
     """Load model state from S3 with chunked download and progress logging"""
@@ -800,7 +1004,7 @@ async def load_model_state(
 async def model_state_exists(
     hotkey: str,
     window: int,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = False,
 ) -> bool:
     # Check if model state exists for given hotkey and window
@@ -811,7 +1015,7 @@ async def model_state_exists(
 async def upload_valid_rollouts(
     window: int,
     valid_rollouts: list[dict],
-    credentials: Optional[BucketCredentials] = None,
+    credentials: BucketCredentials | None = None,
 ) -> bool:
     """Upload validated SAT rollouts for training with chunked upload and progress logging"""
     key = f"grail/valid_rollouts/{window}.json"
@@ -838,7 +1042,7 @@ async def upload_valid_rollouts(
 
 async def get_valid_rollouts(
     window: int,
-    credentials: Optional[Union[BucketCredentials, Bucket, dict]] = None,
+    credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = False,
 ) -> list[dict]:
     """
@@ -906,7 +1110,7 @@ def login_huggingface() -> bool:
 
 
 async def upload_to_huggingface(
-    rollouts: list[dict], window: int, version: Optional[str] = None
+    rollouts: list[dict], window: int, version: str | None = None
 ) -> bool:
     """
     Upload rollouts to unified Hugging Face dataset.
@@ -1079,9 +1283,9 @@ async def upload_to_huggingface(
 
 
 async def download_from_huggingface(
-    version: Optional[str] = None,
-    window: Optional[int] = None,
-    limit: Optional[int] = None,
+    version: str | None = None,
+    window: int | None = None,
+    limit: int | None = None,
 ) -> list[dict]:
     """
     Download rollouts from Hugging Face dataset with optional filtering.

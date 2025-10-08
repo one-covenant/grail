@@ -18,17 +18,19 @@ import time
 import traceback
 from collections import Counter, defaultdict, deque
 from types import SimpleNamespace, TracebackType
-from typing import Any, Optional
+from typing import Any
 
 import bittensor as bt
 import typer
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from grail.infrastructure.drand import get_drand_beacon, get_round_at_time
+from grail.model.provider import clear_model_and_tokenizer, get_model, get_tokenizer
 
 from ..environments import create_sat_reward_vector
 from ..grail import derive_canonical_sat
 from ..infrastructure.chain import GrailChainManager
+from ..infrastructure.checkpoints import CheckpointManager, default_checkpoint_cache_root
 from ..infrastructure.comms import (
     file_exists,
     get_file,
@@ -38,9 +40,11 @@ from ..infrastructure.comms import (
 from ..infrastructure.credentials import load_r2_credentials
 from ..infrastructure.network import create_subtensor
 from ..logging_utils import MinerPrefixFilter, miner_log_context
+from ..mining.rollout_generator import REASONING_START, SYSTEM_PROMPT
 from ..monitoring import get_monitoring_manager
 from ..monitoring.config import MonitoringConfig
 from ..scoring.weights import WeightComputer
+from ..shared.chat_templates import build_qwen_chat_template
 from ..shared.constants import (
     FAILURE_LOOKBACK_WINDOWS,
     MINER_SAMPLE_MAX,
@@ -50,6 +54,7 @@ from ..shared.constants import (
     NETUID,
     ROLLOUTS_PER_PROBLEM,
     SUPERLINEAR_EXPONENT,
+    TRAINER_UID,
     WINDOW_LENGTH,
 )
 from ..shared.subnet import get_own_uid_on_subnet
@@ -97,6 +102,9 @@ from . import console
 
 logger = logging.getLogger("grail")
 logger.addFilter(MinerPrefixFilter())
+
+# Global reference to chain manager for watchdog cleanup
+CHAIN_MANAGER: GrailChainManager | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -151,7 +159,7 @@ def _install_crash_diagnostics() -> None:
 
     # Ensure unhandled exceptions get logged
     def _excepthook(
-        exc_type: type[BaseException], exc: BaseException, tb: Optional[TracebackType]
+        exc_type: type[BaseException], exc: BaseException, tb: TracebackType | None
     ) -> None:
         try:
             if exc_type is KeyboardInterrupt:
@@ -245,7 +253,7 @@ async def get_subtensor() -> bt.subtensor:
 # --------------------------------------------------------------------------- #
 
 
-def parse_filename(filename: str) -> tuple[Optional[str], Optional[int], Optional[int]]:
+def parse_filename(filename: str) -> tuple[str | None, int | None, int | None]:
     """Parse filename to extract wallet, block, nonce"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -258,7 +266,7 @@ def parse_filename(filename: str) -> tuple[Optional[str], Optional[int], Optiona
     return None, None, None
 
 
-def parse_window_filename(filename: str) -> tuple[Optional[str], Optional[int]]:
+def parse_window_filename(filename: str) -> tuple[str | None, int | None]:
     """Parse window filename to extract wallet and window_start"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -314,7 +322,7 @@ async def _list_active_hotkeys_for_window(
     window_start: int,
     chain_manager: "GrailChainManager",
     default_credentials: Any,
-    uid_by_hotkey: Optional[dict[str, int]] = None,
+    uid_by_hotkey: dict[str, int] | None = None,
     concurrency: int = 8,
 ) -> list[str]:
     """Return hotkeys with an available window file for the given window.
@@ -520,6 +528,14 @@ async def watchdog(timeout: int = 600) -> None:
         elapsed = time.monotonic() - HEARTBEAT
         if elapsed > timeout:
             logging.error(f"[WATCHDOG] Process stalled {elapsed:.0f}s — exiting process.")
+            # Best-effort cleanup: stop commitment fetcher process
+            try:
+                global CHAIN_MANAGER
+                if CHAIN_MANAGER is not None:
+                    logger.info("[WATCHDOG] Terminating commitment fetcher process...")
+                    CHAIN_MANAGER.stop()
+            except Exception as e:
+                logger.error(f"[WATCHDOG] Failed to stop chain manager: {e}")
             # Best-effort flush so the final error is not lost
             try:
                 _flush_all_logs()
@@ -560,18 +576,6 @@ def validate(
 # ----------------------------- Refactored Helpers ---------------------------- #
 
 
-def _flush_all_logs() -> None:
-    """Flush all logging handlers to ensure messages are written before exit."""
-    import logging
-
-    for handler in logging.root.handlers:
-        handler.flush()
-    # Also flush any handlers on the current logger
-    logger = logging.getLogger(__name__)
-    for handler in logger.handlers:
-        handler.flush()
-
-
 def _get_sat_reward_bounds() -> tuple[float, float]:
     """Return SAT reward bounds or permissive defaults on failure."""
     try:
@@ -584,8 +588,8 @@ def _get_sat_reward_bounds() -> tuple[float, float]:
 
 async def _run_validation_service(
     wallet: bt.wallet,
-    model: AutoModelForCausalLM,
-    tokenizer: AutoTokenizer,
+    model: AutoModelForCausalLM | None,
+    tokenizer: AutoTokenizer | None,
     sat_pipeline: ValidationPipeline,
     weight_computer: WeightComputer,
     sat_reward_low: float,
@@ -597,8 +601,8 @@ async def _run_validation_service(
 
     Args:
         wallet: Bittensor wallet used for signing and network ops.
-        model: Loaded model instance.
-        tokenizer: Loaded tokenizer instance.
+        model: Initial model instance (can be None, will load from checkpoint).
+        tokenizer: Initial tokenizer instance (can be None, will load from checkpoint).
         sat_pipeline: SAT validation pipeline.
         weight_computer: Weight computer instance.
         sat_reward_low: Lower bound for SAT rollout reward sanity checks.
@@ -628,9 +632,27 @@ async def _run_validation_service(
         pass
 
     async def _validation_loop() -> None:
+        nonlocal model, tokenizer
         subtensor = None
         credentials, chain_manager = await _initialize_credentials_and_chain(wallet)
+        # Store chain manager globally for watchdog cleanup
+        global CHAIN_MANAGER
+        CHAIN_MANAGER = chain_manager
         monitor = await _initialize_monitor(wallet)
+        # Use trainer UID's committed read credentials for checkpoints
+        trainer_bucket = chain_manager.get_bucket(TRAINER_UID)
+        if trainer_bucket is not None:
+            logger.info(f"✅ Using trainer UID {TRAINER_UID} bucket for checkpoints")
+            checkpoint_credentials = trainer_bucket
+        else:
+            logger.warning(f"⚠️ Trainer UID {TRAINER_UID} bucket not found, using local credentials")
+            checkpoint_credentials = credentials
+
+        checkpoint_manager = CheckpointManager(
+            cache_root=default_checkpoint_cache_root(),
+            credentials=checkpoint_credentials,
+            keep_limit=3,  # Keep target + 2 fallback windows
+        )
         # Rolling window metrics per hotkey, keyed by window_start -> metric dict
         # Metrics include: valid, checked, total, estimated_valid, successful, unique
         inference_counts: defaultdict[str, defaultdict[int, dict[str, int]]] = defaultdict(
@@ -640,6 +662,7 @@ async def _run_validation_service(
         windows_processed_since_start = 0
         last_weights_interval_submitted = -1
         last_copycat_interval_id = -1
+
         # Rolling histories (12-window horizon) for selection coverage and availability
         selection_history: deque[set[str]] = deque(maxlen=WEIGHT_ROLLING_WINDOWS)
         availability_history: deque[set[str]] = deque(maxlen=WEIGHT_ROLLING_WINDOWS)
@@ -648,6 +671,8 @@ async def _run_validation_service(
         # Track failures over longer horizon for exclusion from sampling
         failure_history: deque[set[str]] = deque(maxlen=FAILURE_LOOKBACK_WINDOWS)
         failure_counts: dict[str, int] = {}
+
+        current_checkpoint_id = None
 
         while True:
             try:
@@ -659,9 +684,11 @@ async def _run_validation_service(
 
                 meta = await subtensor.metagraph(NETUID)
                 # Build hotkey -> uid mapping for per-miner logging namespaces
-                uid_by_hotkey = dict(zip(meta.hotkeys, meta.uids))
+                uid_by_hotkey = dict(zip(meta.hotkeys, meta.uids, strict=False))
                 current_block = await subtensor.get_current_block()
                 target_window = _determine_target_window(current_block)
+                checkpoint_window = target_window - WINDOW_LENGTH
+
                 if target_window <= last_processed_window or target_window < 0:
                     await asyncio.sleep(5)
                     logger.debug(f"Waiting for new window {target_window}")
@@ -670,47 +697,69 @@ async def _run_validation_service(
                 if monitor:
                     monitor.set_block_context(current_block, target_window)
 
-                # ------------------------------------------------------------------ #
-                # Training integration (commented for now):
-                #
-                # If training is enabled, validators may want to load the miner's
-                # model state for the target window before verification.
-                # This keeps validation consistent with the model used to produce
-                # rollouts.
-                #
-                # Example flow:
-                # - Wait for model checkpoint to exist for this window
-                # - Load model state into verifier.model
-                # - Set model to eval mode
-                #
-                # Uncomment when training modules are wired:
-                #
-                # available = await _model_state_exists(
-                #     hotkey=wallet.hotkey.ss58_address,
-                #     window_start=target_window,
-                # )
-                # if available:
-                #     loaded = await _load_model_state(
-                #         model=verifier.model,
-                #         hotkey=wallet.hotkey.ss58_address,
-                #         window_start=target_window,
-                #     )
-                #     if loaded:
-                #         logger.info(
-                #             "✅ Loaded model state for window %s", target_window
-                #         )
-                #         verifier.model.eval()
-                #     else:
-                #         logger.warning(
-                #             "⚠️ Failed to load model state; using base model"
-                #         )
-                # else:
-                #     logger.debug(
-                #         "No model checkpoint available for window %s", target_window
-                #     )
-                # Using base model directly without waiting for state
+                # Validator should load the checkpoint miners used when producing rollouts in target_window:
+                # that is the checkpoint published after (target_window - WINDOW_LENGTH)
+                checkpoint_path = None
+                try:
+                    # Time checkpoint download/retrieval
+                    timer_ctx = (
+                        monitor.timer("validation/checkpoint_download")
+                        if monitor
+                        else contextlib.nullcontext()
+                    )
+                    with timer_ctx:
+                        checkpoint_window = target_window - WINDOW_LENGTH
+                        if checkpoint_window >= 0:
+                            checkpoint_path = await checkpoint_manager.get_checkpoint(
+                                checkpoint_window
+                            )
+                except Exception:
+                    logger.warning(
+                        "Failed to resolve checkpoint path for target_window=%s (ckpt=%s)",
+                        target_window,
+                        checkpoint_window if "checkpoint_window" in locals() else "n/a",
+                    )
 
-                logger.info("🚀 Using base model for verification")
+                if checkpoint_path:
+                    if (
+                        checkpoint_path != current_checkpoint_id
+                        or model is None
+                        or tokenizer is None
+                    ):
+                        try:
+                            logger.info(
+                                "🚀 Loading checkpoint for validation window %s from %s",
+                                target_window,
+                                checkpoint_path,
+                            )
+                            # Pre-load cleanup to prevent VRAM growth when swapping checkpoints
+                            model, tokenizer = clear_model_and_tokenizer(model, tokenizer)
+                            chat_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
+                            model = get_model(str(checkpoint_path), device=None, eval_mode=True)
+                            tokenizer = get_tokenizer(
+                                str(checkpoint_path), chat_template=chat_template
+                            )
+                            current_checkpoint_id = str(checkpoint_path)
+                        except Exception:
+                            logger.exception(
+                                "Failed to load checkpoint for window %s, skipping window",
+                                target_window,
+                            )
+                            await asyncio.sleep(30)
+                            continue
+                else:
+                    logger.warning(
+                        "No checkpoint available for window %s, skipping validation",
+                        target_window,
+                    )
+                    await asyncio.sleep(30)
+                    continue
+
+                # Trim local cache per retention policy
+                try:
+                    await checkpoint_manager.cleanup_local(target_window)
+                except Exception:
+                    logger.debug("checkpoint cache cleanup failed", exc_info=True)
 
                 # Reset copycat tracker at the start of each submission interval,
                 # using window-derived interval ids to avoid mid-loop resets.
@@ -1258,7 +1307,7 @@ def _compute_window_randomness(target_window_hash: str, use_drand: bool) -> str:
 
 def _determine_hotkeys_to_check(test_mode: bool, wallet: bt.wallet, meta: Any) -> list[str]:
     """Choose which hotkeys to validate based on test/prod mode."""
-    uid_by_hotkey = dict(zip(meta.hotkeys, meta.uids))
+    uid_by_hotkey = dict(zip(meta.hotkeys, meta.uids, strict=False))
     if test_mode:
         own_uid = uid_by_hotkey.get(wallet.hotkey.ss58_address)
         msg_id = own_uid if own_uid is not None else wallet.hotkey.ss58_address
@@ -1351,7 +1400,9 @@ def _build_top_miners(
     hotkeys: list[str], uids: list[int], weights: list[float], k: int
 ) -> list[tuple[str, int, float]]:
     """Return top-k (hotkey, uid, weight) sorted by weight desc."""
-    pairs = [(hk, uid, float(weights[i])) for i, (hk, uid) in enumerate(zip(hotkeys, uids))]
+    pairs = [
+        (hk, uid, float(weights[i])) for i, (hk, uid) in enumerate(zip(hotkeys, uids, strict=False))
+    ]
     pairs.sort(key=lambda x: x[2], reverse=True)
     return pairs[:k]
 
@@ -1398,7 +1449,7 @@ def _get_active_uids(
         WINDOW_LENGTH,
     )
     active_uids: list[int] = []
-    for hotkey, uid in zip(meta_hotkeys, meta_uids):
+    for hotkey, uid in zip(meta_hotkeys, meta_uids, strict=False):
         hk_windows = inference_counts[hotkey]
         for w in recent_windows:
             metrics = hk_windows.get(w)
@@ -1794,10 +1845,10 @@ async def _process_wallet_window(
     sat_reward_high: float,
 ) -> tuple[
     bool,
-    Optional[dict[str, int]],
+    dict[str, int] | None,
     list[dict],
     tuple[int, int, int, int],
-    Optional[Counter[str]],
+    Counter[str] | None,
     int,
 ]:
     """Validate a single wallet window file and return metrics and rollouts.
@@ -2350,7 +2401,7 @@ async def _log_top_miners_by_rollout_count(
     window_inference_counts: dict[str, dict[str, Any]],
     uid_by_hotkey: dict[str, str],
     target_window: int,
-    monitor: Optional[Any],
+    monitor: Any | None,
     top_n: int = 5,
 ) -> None:
     """Log top miners by total rollout count."""
@@ -2386,7 +2437,7 @@ async def _log_top_miners_by_unique_rollouts(
     window_inference_counts: dict[str, dict[str, Any]],
     uid_by_hotkey: dict[str, str],
     target_window: int,
-    monitor: Optional[Any],
+    monitor: Any | None,
     top_n: int = 5,
 ) -> None:
     """Log top miners by unique rollouts count."""
@@ -2423,7 +2474,7 @@ async def _log_top_miners_by_score(
     uid_by_hotkey: dict[str, str],
     target_window: int,
     availability_counts: dict[str, int],
-    monitor: Optional[Any],
+    monitor: Any | None,
     top_n: int = 5,
 ) -> None:
     """Log top miners by highest score with extrapolated metrics."""

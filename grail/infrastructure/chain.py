@@ -2,14 +2,16 @@
 
 import asyncio
 import logging
+import multiprocessing
 import os
-from typing import Any, Optional
+from typing import Any
 
 import bittensor as bt
 from bittensor.core.chain_data import decode_account_id
 from pydantic import ValidationError
 
 from ..shared.schemas import Bucket, BucketCredentials
+from .chain_worker import chain_commitment_worker
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +55,11 @@ class GrailChainManager:
 
         # Commitment tracking
         self.commitments: dict[int, Bucket] = {}
-        self._fetch_task: Optional[asyncio.Task] = None
+        self._fetch_task: asyncio.Task | None = None
+
+        # Worker process for commitment fetching (avoids GIL contention)
+        self._worker_queue: multiprocessing.Queue | None = None
+        self._worker_process: multiprocessing.Process | None = None
 
         logger.info(f"Initialized GrailChainManager for netuid {self.netuid}")
 
@@ -88,8 +94,8 @@ class GrailChainManager:
                 f"Hotkey {self.wallet.hotkey.ss58_address} not found in metagraph, will commit when registered"
             )
 
-        # Start periodic fetching
-        self.start_commitment_fetcher()
+        # Start worker process for periodic fetching
+        self.start_commitment_worker()
 
     def _create_bucket_from_read_creds(self) -> Bucket:
         """Create a Bucket object from read credentials for comparison"""
@@ -125,32 +131,57 @@ class GrailChainManager:
                 self.subtensor.substrate.initialize()
                 raise
 
-    def start_commitment_fetcher(self) -> None:
-        """Start background task to periodically fetch commitments"""
-        if self._fetch_task is None:
-            self._fetch_task = asyncio.create_task(self._fetch_commitments_periodically())
-            logger.info(f"Started commitment fetcher with {self.fetch_interval}s interval")
+    def start_commitment_worker(self) -> None:
+        """Start worker process for commitment fetching.
 
-    async def _fetch_commitments_periodically(self) -> None:
-        """Background task to periodically fetch commitments"""
+        Uses a separate process to completely isolate blockchain operations
+        from the main event loop, avoiding any GIL contention issues.
+        """
+        if self._worker_process is not None:
+            logger.warning("Worker process already started")
+            return
+
+        # Create queue for receiving commitment updates
+        self._worker_queue = multiprocessing.Queue(maxsize=1)
+
+        # Start worker process
+        self._worker_process = multiprocessing.Process(
+            target=chain_commitment_worker,
+            args=(
+                self._worker_queue,
+                self.netuid,
+                self.wallet.name,
+                self.wallet.hotkey.ss58_address,
+                self.fetch_interval,
+            ),
+            daemon=True,  # Process will terminate when main process exits
+        )
+        self._worker_process.start()
+
+        # Start async task to poll queue
+        self._fetch_task = asyncio.create_task(self._poll_worker_queue())
+
+        logger.info(f"Started commitment worker process (PID: {self._worker_process.pid})")
+
+    async def _poll_worker_queue(self) -> None:
+        """Poll the worker queue for commitment updates."""
         while True:
             try:
-                await asyncio.sleep(self.fetch_interval)
+                # Check queue non-blockingly
+                await asyncio.sleep(1)  # Poll every second
 
-                # Sync metagraph
-                await asyncio.to_thread(lambda: self.metagraph.sync(subtensor=self.subtensor))
-
-                # Fetch commitments
-                await self.fetch_commitments()
+                if self._worker_queue is not None:
+                    try:
+                        # Non-blocking get
+                        commitments = self._worker_queue.get_nowait()
+                        self.commitments = commitments
+                        logger.debug(f"Received {len(commitments)} commitments from worker")
+                    except Exception:
+                        # Queue empty, continue
+                        pass
 
             except Exception as e:
-                logger.error(f"Error in periodic commitment fetch: {e}")
-                # Try to reinitialize substrate connection
-                try:
-                    self.subtensor.substrate.close()
-                    self.subtensor.substrate.initialize()
-                except Exception:
-                    pass
+                logger.error(f"Error polling worker queue: {e}")
 
     async def fetch_commitments(self) -> None:
         """Fetch all bucket commitments from the chain"""
@@ -164,7 +195,7 @@ class GrailChainManager:
         except Exception as e:
             logger.error(f"Failed to fetch commitments: {e}")
 
-    async def get_commitments(self, block: Optional[int] = None) -> dict[int, Bucket]:
+    async def get_commitments(self, block: int | None = None) -> dict[int, Bucket]:
         """
         Retrieve all bucket commitments from the chain.
 
@@ -175,70 +206,78 @@ class GrailChainManager:
             Dictionary mapping UIDs to Bucket configurations
         """
         try:
-            substrate = self.subtensor.substrate
+            # Run blocking substrate operations in thread pool to avoid blocking event loop
+            def _query_commitments() -> dict[int, Bucket]:
+                substrate = self.subtensor.substrate
 
-            # Query commitments via substrate
-            query_result = substrate.query_map(
-                module="Commitments",
-                storage_function="CommitmentOf",
-                params=[self.netuid],
-                block_hash=(None if block is None else substrate.get_block_hash(block)),
-            )
+                # Query commitments via substrate (blocking call)
+                query_result = substrate.query_map(
+                    module="Commitments",
+                    storage_function="CommitmentOf",
+                    params=[self.netuid],
+                    block_hash=(None if block is None else substrate.get_block_hash(block)),
+                )
 
-            # Create hotkey to UID mapping
-            hotkey_to_uid = dict(zip(self.metagraph.hotkeys, self.metagraph.uids))
-            commitments = {}
+                # Create hotkey to UID mapping
+                hotkey_to_uid = dict(zip(self.metagraph.hotkeys, self.metagraph.uids, strict=False))
+                commitments = {}
 
-            for key, value in query_result:
-                try:
-                    # Decode the commitment
-                    decoded_ss58, commitment_str = self._decode_metadata(key, value.value)
-                except Exception as e:
-                    logger.error(f"Failed to decode metadata for key {key.value}: {e}")
-                    continue
+                for key, value in query_result:
+                    try:
+                        # Decode the commitment
+                        decoded_ss58, commitment_str = self._decode_metadata(key, value.value)
+                    except Exception as e:
+                        logger.error(f"Failed to decode metadata for key {key.value}: {e}")
+                        continue
 
-                # Skip if hotkey not in metagraph
-                if decoded_ss58 not in hotkey_to_uid:
-                    continue
+                    # Skip if hotkey not in metagraph
+                    if decoded_ss58 not in hotkey_to_uid:
+                        continue
 
-                uid = hotkey_to_uid[decoded_ss58]
+                    uid = hotkey_to_uid[decoded_ss58]
 
-                # Validate commitment length (new format only)
-                if len(commitment_str) != 128:
-                    logger.error(
-                        "Invalid commitment length for UID %s: %s",
-                        uid,
-                        len(commitment_str),
-                    )
-                    continue
+                    # Validate commitment length (new format only)
+                    if len(commitment_str) != 128:
+                        logger.error(
+                            "Invalid commitment length for UID %s: %s",
+                            uid,
+                            len(commitment_str),
+                        )
+                        continue
 
-                try:
-                    # 32 account_id + 32 access_key_id + 64 secret_access_key
-                    account_id = commitment_str[:32]
-                    access_key_id = commitment_str[32:64]
-                    secret_access_key = commitment_str[64:128]
+                    try:
+                        # 32 account_id + 32 access_key_id + 64 secret_access_key
+                        account_id = commitment_str[:32]
+                        access_key_id = commitment_str[32:64]
+                        secret_access_key = commitment_str[64:128]
 
-                    # Bucket name equals account id by assumption
-                    bucket = Bucket(
-                        name=account_id,
-                        account_id=account_id,
-                        access_key_id=access_key_id,
-                        secret_access_key=secret_access_key,
-                    )
-                    commitments[uid] = bucket
-                    logger.debug(f"Retrieved bucket commitment for UID {uid}")
+                        # Bucket name equals account id by assumption
+                        bucket = Bucket(
+                            name=account_id,
+                            account_id=account_id,
+                            access_key_id=access_key_id,
+                            secret_access_key=secret_access_key,
+                        )
+                        commitments[uid] = bucket
+                        logger.debug(f"Retrieved bucket commitment for UID {uid}")
 
-                except ValidationError as e:
-                    logger.error(f"Failed to validate bucket for UID {uid}: {e}")
-                    continue
+                    except ValidationError as e:
+                        logger.error(f"Failed to validate bucket for UID {uid}: {e}")
+                        continue
 
-            return commitments
+                return commitments
+
+            # Execute blocking operation in thread pool
+            return await asyncio.to_thread(_query_commitments)
 
         except Exception as e:
             logger.error(f"Error querying commitments from chain: {e}")
-            # Try to reinitialize substrate connection
-            self.subtensor.substrate.close()
-            self.subtensor.substrate.initialize()
+            # Try to reinitialize substrate connection (also blocking, run in thread)
+            try:
+                await asyncio.to_thread(lambda: self.subtensor.substrate.close())
+                await asyncio.to_thread(lambda: self.subtensor.substrate.initialize())
+            except Exception:
+                pass
             return {}
 
     def _decode_metadata(self, encoded_ss58: tuple, metadata: dict) -> tuple[str, str]:
@@ -252,7 +291,7 @@ class GrailChainManager:
 
         return decoded_key, bytes(bytes_tuple).decode()
 
-    def get_bucket(self, uid: int) -> Optional[Bucket]:
+    def get_bucket(self, uid: int) -> Bucket | None:
         """
         Get the bucket configuration for a given UID.
 
@@ -264,7 +303,7 @@ class GrailChainManager:
         """
         return self.commitments.get(uid)
 
-    def get_all_buckets(self) -> dict[int, Optional[Bucket]]:
+    def get_all_buckets(self) -> dict[int, Bucket | None]:
         """
         Get all bucket configurations for all UIDs.
 
@@ -273,7 +312,7 @@ class GrailChainManager:
         """
         return {uid: self.get_bucket(uid) for uid in self.metagraph.uids}
 
-    def get_bucket_for_hotkey(self, hotkey: str) -> Optional[Bucket]:
+    def get_bucket_for_hotkey(self, hotkey: str) -> Bucket | None:
         """
         Get bucket configuration for a specific hotkey.
 
@@ -291,8 +330,19 @@ class GrailChainManager:
             return None
 
     def stop(self) -> None:
-        """Stop the background fetcher task"""
+        """Stop the background fetcher task and worker process"""
         if self._fetch_task:
             self._fetch_task.cancel()
             self._fetch_task = None
-            logger.info("Stopped commitment fetcher")
+
+        if self._worker_process:
+            self._worker_process.terminate()
+            self._worker_process.join(timeout=5)
+            if self._worker_process.is_alive():
+                self._worker_process.kill()
+            self._worker_process = None
+            logger.info("Stopped commitment worker process")
+
+        if self._worker_queue:
+            self._worker_queue.close()
+            self._worker_queue = None

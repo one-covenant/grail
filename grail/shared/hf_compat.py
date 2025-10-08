@@ -1,4 +1,4 @@
-from typing import Any, Optional, Union
+from typing import Any
 
 from transformers import PretrainedConfig, PreTrainedModel
 
@@ -50,8 +50,8 @@ def resolve_hidden_size(model: PreTrainedModel) -> int:
 
 
 def resolve_vocab_size(
-    model_config: Union[PretrainedConfig, Any],
-) -> Optional[int]:
+    model_config: PretrainedConfig | Any,
+) -> int | None:
     """Return vocab size if present in config (direct or nested)."""
     try:
         for attr in ("vocab_size", "n_vocab", "vocabulary_size"):
@@ -72,7 +72,7 @@ def resolve_vocab_size(
 
 
 def resolve_max_context_length(
-    model_config: Union[PretrainedConfig, Any],
+    model_config: PretrainedConfig | Any,
 ) -> int:
     """Return best-effort max context length (max sequence length) with common fallbacks."""
     candidates = (
