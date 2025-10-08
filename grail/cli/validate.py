@@ -808,19 +808,6 @@ async def _run_validation_service(
                 else:
                     hotkeys_to_check = eligible_hotkeys
 
-                # Filter to only check UID 80
-                # NOTE: only temp; will be removed later on
-                uid_80_hotkeys = []
-                for hotkey in hotkeys_to_check:
-                    uid = uid_by_hotkey.get(hotkey)
-                    if uid == 80:
-                        uid_80_hotkeys.append(hotkey)
-
-                hotkeys_to_check = uid_80_hotkeys
-                logger.info(
-                    f"🎯 Filtering to only check UID 80: found {len(hotkeys_to_check)} hotkeys"
-                )
-
                 # Update selection coverage rolling window
                 _update_rolling(
                     selection_history,
