@@ -38,7 +38,6 @@ from ..infrastructure.comms import (
     upload_valid_rollouts,
 )
 from ..infrastructure.credentials import load_r2_credentials
-from ..infrastructure.network import create_subtensor
 from ..logging_utils import MinerPrefixFilter, miner_log_context
 from ..mining.rollout_generator import REASONING_START, SYSTEM_PROMPT
 from ..monitoring import get_monitoring_manager
@@ -230,22 +229,6 @@ def get_conf(key: str, default: Any = None) -> Any:
         console.print(f"[red]{key} not set.[/red]\nRun:\n    af set {key} <value>")
         raise typer.Exit(code=1)
     return v or default
-
-
-# --------------------------------------------------------------------------- #
-#                               Subtensor                                     #
-# --------------------------------------------------------------------------- #
-
-SUBTENSOR = None
-
-
-async def get_subtensor() -> bt.subtensor:
-    global SUBTENSOR
-    if SUBTENSOR is None:
-        logger.info("Making Bittensor connection...")
-        SUBTENSOR = await create_subtensor()
-        logger.info("Connected")
-    return SUBTENSOR
 
 
 # --------------------------------------------------------------------------- #
@@ -588,6 +571,7 @@ def _get_sat_reward_bounds() -> tuple[float, float]:
 
 async def _run_validation_service(
     wallet: bt.wallet,
+    subtensor: bt.subtensor,
     model: AutoModelForCausalLM | None,
     tokenizer: AutoTokenizer | None,
     sat_pipeline: ValidationPipeline,
@@ -601,6 +585,7 @@ async def _run_validation_service(
 
     Args:
         wallet: Bittensor wallet used for signing and network ops.
+        subtensor: Shared async subtensor instance from caller.
         model: Initial model instance (can be None, will load from checkpoint).
         tokenizer: Initial tokenizer instance (can be None, will load from checkpoint).
         sat_pipeline: SAT validation pipeline.
@@ -633,12 +618,11 @@ async def _run_validation_service(
 
     async def _validation_loop() -> None:
         nonlocal model, tokenizer
-        subtensor = None
-        credentials, chain_manager = await _initialize_credentials_and_chain(wallet)
+        credentials, chain_manager = await _initialize_credentials_and_chain(wallet, subtensor)
         # Store chain manager globally for watchdog cleanup
         global CHAIN_MANAGER
         CHAIN_MANAGER = chain_manager
-        monitor = await _initialize_monitor(wallet)
+        monitor = await _initialize_monitor(wallet, subtensor)
         # Use trainer UID's committed read credentials for checkpoints
         trainer_bucket = chain_manager.get_bucket(TRAINER_UID)
         if trainer_bucket is not None:
@@ -678,9 +662,6 @@ async def _run_validation_service(
             try:
                 global HEARTBEAT
                 HEARTBEAT = time.monotonic()
-
-                if subtensor is None:
-                    subtensor = await get_subtensor()
 
                 meta = await subtensor.metagraph(NETUID)
                 # Build hotkey -> uid mapping for per-miner logging namespaces
@@ -1223,7 +1204,8 @@ async def _run_validation_service(
             except Exception as e:
                 traceback.print_exc()
                 logger.info(f"Error in validator loop: {e}. Continuing ...")
-                subtensor = None
+                # Note: subtensor is now managed externally by BaseNeuron
+                # No need to reset it here; reconnection will be handled on next iteration
                 await asyncio.sleep(10)
                 continue
 
@@ -1239,8 +1221,14 @@ async def _run_validation_service(
             _flush_all_logs()
 
 
-async def _initialize_credentials_and_chain(wallet: bt.wallet) -> tuple[Any, GrailChainManager]:
+async def _initialize_credentials_and_chain(
+    wallet: bt.wallet, subtensor: bt.subtensor
+) -> tuple[Any, GrailChainManager]:
     """Load storage credentials and initialize chain manager.
+
+    Args:
+        wallet: Bittensor wallet for signing and network ops.
+        subtensor: Shared async subtensor instance from caller.
 
     Returns:
         Tuple (credentials, chain_manager): object storage credentials for R2/S3
@@ -1253,16 +1241,23 @@ async def _initialize_credentials_and_chain(wallet: bt.wallet) -> tuple[Any, Gra
         logger.error(f"Failed to load R2 credentials: {e}")
         raise
 
+    # Get metagraph for chain manager
+    metagraph = await subtensor.metagraph(NETUID)
+
     config = SimpleNamespace(netuid=NETUID)
-    chain_manager = GrailChainManager(config, wallet, credentials)
+    chain_manager = GrailChainManager(config, wallet, metagraph, subtensor, credentials)
     await chain_manager.initialize()
     logger.info("✅ Initialized chain manager and committed read credentials")
 
     return credentials, chain_manager
 
 
-async def _initialize_monitor(wallet: bt.wallet) -> Any:
+async def _initialize_monitor(wallet: bt.wallet, subtensor: bt.subtensor) -> Any:
     """Initialize monitoring run for validation, if configured.
+
+    Args:
+        wallet: Bittensor wallet for signing and network ops.
+        subtensor: Shared async subtensor instance from caller.
 
     Returns:
         Monitoring client or None if monitoring is disabled.
@@ -1271,12 +1266,9 @@ async def _initialize_monitor(wallet: bt.wallet) -> Any:
     if monitor:
         validation_config = MonitoringConfig.for_validation(wallet.name)
         try:
-            subtensor = await get_subtensor()
-        except Exception:
-            subtensor = None
-        uid = None
-        if subtensor is not None:
             uid = await get_own_uid_on_subnet(subtensor, 81, wallet.hotkey.ss58_address)
+        except Exception:
+            uid = None
         run_name = f"validator-{uid}" if uid is not None else f"validation_{wallet.name}"
         run_id = await monitor.start_run(run_name, validation_config.get("hyperparameters", {}))
         logger.info(f"Started monitoring run: {run_id} (name={run_name})")
