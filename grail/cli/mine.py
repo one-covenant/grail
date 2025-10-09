@@ -20,7 +20,6 @@ from ..environments import SATRolloutGenerator, generate_sat_problem
 from ..grail import derive_canonical_sat
 from ..infrastructure.comms import sink_window_inferences
 from ..infrastructure.drand import get_drand_beacon
-from ..infrastructure.network import create_subtensor
 from ..shared.constants import BLOCK_TIME_SECONDS, LAYER_INDEX, ROLLOUTS_PER_PROBLEM, WINDOW_LENGTH
 from . import console
 
@@ -54,21 +53,6 @@ def get_conf(key: str, default: Any = None) -> Any:
         console.print(f"[red]{key} not set.[/red]\nRun:\n    af set {key} <value>")
         raise typer.Exit(code=1)
     return v or default
-
-
-# --------------------------------------------------------------------------- #
-#                               Subtensor                                     #
-# --------------------------------------------------------------------------- #
-SUBTENSOR: bt.subtensor | None = None
-
-
-async def get_subtensor() -> bt.subtensor:
-    global SUBTENSOR
-    if SUBTENSOR is None:
-        logger.info("Making Bittensor connection...")
-        SUBTENSOR = await create_subtensor()
-        logger.info("Connected")
-    return SUBTENSOR
 
 
 # --------------------------------------------------------------------------- #
