@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from typing import Any, ClassVar
 
 import bittensor as bt
@@ -12,11 +13,13 @@ logger = logging.getLogger(__name__)
 
 class ResilientSubtensor:
     """
-    Wrapper around bittensor subtensor that automatically adds timeout and retry
-    logic to blockchain calls.
+    Wrapper around bittensor subtensor with circuit breaker, caching, and auto-restart.
 
     This prevents the application from hanging indefinitely when blockchain RPC
     calls fail or timeout. Protected methods will retry with exponential backoff.
+    - Circuit breaker: Stops calls temporarily after repeated failures
+    - Metagraph cache: Returns last good metagraph when calls timeout
+    - Auto-restart: Recreates subtensor connection after extended failures
     """
 
     # Methods that should be protected with timeout and retry logic
@@ -31,9 +34,9 @@ class ResilientSubtensor:
     def __init__(
         self,
         subtensor: bt.subtensor,
-        timeout: float = 15.0,
+        timeout: float = 10.0,
         retries: int = 3,
-        backoff_base: float = 5.0,
+        backoff_base: float = 10.0,
     ):
         """
         Initialize resilient subtensor wrapper.
@@ -48,6 +51,153 @@ class ResilientSubtensor:
         object.__setattr__(self, "_timeout", timeout)
         object.__setattr__(self, "_retries", retries)
         object.__setattr__(self, "_backoff_base", backoff_base)
+        # Circuit breaker state
+        object.__setattr__(self, "_failure_count", 0)
+        object.__setattr__(self, "_circuit_open_until", 0.0)
+        object.__setattr__(self, "_circuit_threshold", 2)  # Open after 2 consecutive call failures
+        object.__setattr__(self, "_circuit_timeout", 30.0)  # Stay open for 30s
+        # Metagraph cache
+        object.__setattr__(self, "_metagraph_cache", {})
+
+    def _is_circuit_open(self) -> bool:
+        """Check if circuit breaker is currently open."""
+        circuit_open_until = object.__getattribute__(self, "_circuit_open_until")
+        return time.time() < circuit_open_until
+
+    def _get_cached_metagraph(self, netuid: int) -> Any | None:
+        """Get cached metagraph for a given netuid."""
+        metagraph_cache = object.__getattribute__(self, "_metagraph_cache")
+        return metagraph_cache.get(netuid)
+
+    def _cache_metagraph(self, netuid: int, metagraph: Any) -> None:
+        """Cache metagraph for a given netuid."""
+        metagraph_cache = object.__getattribute__(self, "_metagraph_cache")
+        metagraph_cache[netuid] = metagraph
+
+    def _reset_circuit_breaker(self) -> None:
+        """Reset circuit breaker failure count on success."""
+        object.__setattr__(self, "_failure_count", 0)
+
+    def _increment_failure_count(self) -> int:
+        """Increment and return failure count."""
+        failure_count = object.__getattribute__(self, "_failure_count") + 1
+        object.__setattr__(self, "_failure_count", failure_count)
+        return failure_count
+
+    def _open_circuit_breaker(self) -> None:
+        """Open circuit breaker for cooldown period."""
+        circuit_timeout = object.__getattribute__(self, "_circuit_timeout")
+        failure_count = object.__getattribute__(self, "_failure_count")
+        object.__setattr__(self, "_circuit_open_until", time.time() + circuit_timeout)
+        logger.error(
+            "🔴 Circuit breaker opened after %d failures, cooling down for %ds",
+            failure_count,
+            circuit_timeout,
+        )
+
+    def _should_open_circuit(self) -> bool:
+        """Check if circuit breaker threshold is reached."""
+        failure_count = object.__getattribute__(self, "_failure_count")
+        circuit_threshold = object.__getattribute__(self, "_circuit_threshold")
+        return failure_count >= circuit_threshold
+
+    async def _restart_subtensor(self) -> None:
+        """Restart subtensor connection."""
+        logger.warning("🔄 Restarting subtensor connection...")
+        subtensor = object.__getattribute__(self, "_subtensor")
+        network = (
+            subtensor.network
+            if hasattr(subtensor, "network")
+            else os.getenv("BT_NETWORK", "finney")
+        )
+        new_subtensor = bt.async_subtensor(network=network)
+        await new_subtensor.initialize()
+        object.__setattr__(self, "_subtensor", new_subtensor)
+        self._reset_circuit_breaker()
+        logger.info("✅ Subtensor connection restarted")
+
+    async def _handle_circuit_open(self, method_name: str, args: tuple) -> Any:
+        """Handle method call when circuit breaker is open."""
+        if method_name == "metagraph" and args:
+            cached = self._get_cached_metagraph(args[0])
+            if cached:
+                logger.warning("⚡ Circuit open, returning cached metagraph for netuid %s", args[0])
+                return cached
+        logger.warning("⚡ Circuit breaker open, skipping %s call", method_name)
+        raise TimeoutError(f"Circuit breaker open for {method_name}")
+
+    async def _attempt_call(self, method: Any, args: tuple, kwargs: dict, timeout: float) -> Any:
+        """Attempt a single method call with timeout."""
+        return await asyncio.wait_for(method(*args, **kwargs), timeout=timeout)
+
+    def _handle_success(self, method_name: str, args: tuple, result: Any, retry: int) -> None:
+        """Handle successful method call."""
+        self._reset_circuit_breaker()
+        if method_name == "metagraph" and args:
+            self._cache_metagraph(args[0], result)
+        if retry > 0:
+            logger.info("✅ %s() succeeded on attempt %d", method_name, retry + 1)
+
+    async def _handle_timeout(
+        self, method_name: str, retry: int, retries: int, backoff_base: float
+    ) -> None:
+        """Handle timeout during retry attempt."""
+        if retry < retries - 1:
+            wait_time = backoff_base * (2**retry)
+            logger.error(
+                "⏱️ Timeout in %s (attempt %d/%d), retrying in %ds",
+                method_name,
+                retry + 1,
+                retries,
+                wait_time,
+            )
+            await asyncio.sleep(wait_time)
+
+    def _handle_all_retries_failed(self, method_name: str, args: tuple, retries: int) -> Any:
+        """Handle case when all retries are exhausted.
+
+        Note: This counts complete call failures (after all retries), not individual
+        retry attempts. Circuit opens after threshold consecutive call failures.
+        """
+        self._increment_failure_count()
+
+        if self._should_open_circuit():
+            self._open_circuit_breaker()
+            asyncio.create_task(self._restart_subtensor())
+
+        # Try to return cached metagraph as last resort
+        if method_name == "metagraph" and args:
+            cached = self._get_cached_metagraph(args[0])
+            if cached:
+                logger.warning("⚠️ Returning stale cached metagraph for netuid %s", args[0])
+                return cached
+
+        logger.error("❌ %s failed after %d attempts", method_name, retries)
+        raise TimeoutError(f"{method_name} failed after {retries} attempts")
+
+    async def _call_with_retry(
+        self, method_name: str, method: Any, args: tuple, kwargs: dict
+    ) -> Any:
+        """Execute method with retry logic and circuit breaker protection."""
+        # Check circuit breaker
+        if self._is_circuit_open():
+            return await self._handle_circuit_open(method_name, args)
+
+        timeout = object.__getattribute__(self, "_timeout")
+        retries = object.__getattribute__(self, "_retries")
+        backoff_base = object.__getattribute__(self, "_backoff_base")
+
+        # Retry loop
+        for retry in range(retries):
+            try:
+                result = await self._attempt_call(method, args, kwargs, timeout)
+                self._handle_success(method_name, args, result, retry)
+                return result
+            except asyncio.TimeoutError:
+                await self._handle_timeout(method_name, retry, retries, backoff_base)
+
+        # All retries exhausted
+        return self._handle_all_retries_failed(method_name, args, retries)
 
     def __getattr__(self, name: str) -> Any:
         """Intercept attribute access to wrap protected methods."""
@@ -63,47 +213,7 @@ class ResilientSubtensor:
 
         # Return a wrapped version with retry logic
         async def wrapped_method(*args: Any, **kwargs: Any) -> Any:
-            timeout = object.__getattribute__(self, "_timeout")
-            retries = object.__getattribute__(self, "_retries")
-            backoff_base = object.__getattribute__(self, "_backoff_base")
-
-            for retry in range(retries):
-                try:
-                    result = await asyncio.wait_for(
-                        attr(*args, **kwargs),
-                        timeout=timeout,
-                    )
-                    if retry > 0:
-                        logger.info("✅ %s() succeeded on attempt %d", name, retry + 1)
-                    return result
-                except asyncio.TimeoutError:
-                    wait_time = backoff_base * (2**retry)
-                    args_str = ", ".join(str(a) for a in args[:2])  # Show first 2 args
-                    logger.error(
-                        "⏱️ Timeout in %s(%s) (attempt %d/%d)",
-                        name,
-                        args_str,
-                        retry + 1,
-                        retries,
-                    )
-                    if retry < retries - 1:
-                        logger.info("Retrying in %ds...", wait_time)
-                        await asyncio.sleep(wait_time)
-
-            # All retries exhausted
-            args_str = ", ".join(str(a) for a in args[:2])
-            total_time = timeout * retries + sum(backoff_base * (2**i) for i in range(retries - 1))
-            logger.error(
-                "❌ BLOCKCHAIN CALL FAILED: %s(%s) timed out after "
-                "%d attempts (total ~%.0fs). This indicates network issues "
-                "or blockchain node problems.",
-                name,
-                args_str,
-                retries,
-                total_time,
-            )
-            error_msg = f"{name} failed after {retries} attempts - blockchain connection issue"
-            raise TimeoutError(error_msg)
+            return await self._call_with_retry(name, attr, args, kwargs)
 
         return wrapped_method
 
@@ -192,7 +302,7 @@ async def create_subtensor(*, resilient: bool = True) -> bt.subtensor | Resilien
 
     if resilient:
         # Wrap with resilience layer for production use
-        timeout = float(os.getenv("BT_CALL_TIMEOUT", "5.0"))
+        timeout = float(os.getenv("BT_CALL_TIMEOUT", "10.0"))
         retries = int(os.getenv("BT_CALL_RETRIES", "3"))
         backoff = float(os.getenv("BT_CALL_BACKOFF", "5.0"))
 
