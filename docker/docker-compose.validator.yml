@@ -108,6 +108,8 @@ services:
     container_name: grail-promtail
     restart: unless-stopped
     command: ["-config.file=/etc/promtail/promtail.yml", "-config.expand-env=true"]
+    profiles:
+      - promtail
     environment:
       - PROMTAIL_LOKI_URL=${PROMTAIL_LOKI_URL:-http://loki:3100/loki/api/v1/push}
       - PROMTAIL_JOB=${PROMTAIL_JOB:-grail}
@@ -119,7 +121,7 @@ services:
     volumes:
       - promtail-positions:/var/lib/promtail
       - validator-logs:/var/log/grail:ro
-      - ./docker/promtail.yml:/etc/promtail/promtail.yml:ro
+      - ./promtail.yml:/etc/promtail/promtail.yml:ro
     depends_on:
       - validator
     networks:

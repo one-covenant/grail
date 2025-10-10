@@ -110,9 +110,11 @@ Validators load local write credentials and use miners’ read credentials fetch
 
 Set `GRAIL_MONITORING_BACKEND=wandb` to enable metrics; otherwise use `null`.
 
-#### Grafana + Loki Logging (Recommended)
+#### Grafana + Loki Logging (Optional)
 
 For centralized logging, use Promtail to ship logs to Loki. This approach is more robust than in-process log shipping and prevents stalling under network pressure.
+
+**Promtail is disabled by default.** To enable it, use Docker Compose profiles.
 
 **Setup:**
 1. Set environment variables in `.env`:
@@ -127,12 +129,23 @@ For centralized logging, use Promtail to ship logs to Loki. This approach is mor
    GRAIL_LOG_BACKUP_COUNT=5
    ```
 
-2. Deploy with Promtail included:
+2. Deploy **with Promtail enabled** using the `--profile promtail` flag:
+   ```bash
+   docker compose --env-file .env --profile promtail -f docker/docker-compose.validator.yml up -d
+   ```
+   
+   Or set the profile in your environment:
+   ```bash
+   export COMPOSE_PROFILES=promtail
+   docker compose --env-file .env -f docker/docker-compose.validator.yml up -d
+   ```
+
+3. To run **without Promtail** (default behavior):
    ```bash
    docker compose --env-file .env -f docker/docker-compose.validator.yml up -d
    ```
 
-3. Verify logs appear in Grafana with the configured labels.
+4. Verify logs appear in Grafana with the configured labels.
 
 **Architecture:**
 - App writes logs to console (Rich) and file (`GRAIL_LOG_FILE`)
