@@ -62,6 +62,7 @@ from ..validation import (
     COPYCAT_TRACKER,
     COPYCAT_WINDOW_THRESHOLD,
     CopycatViolation,
+    MinerSampler,
     compute_completion_digest,
 )
 from ..validation.pipeline import ValidationPipeline
@@ -222,6 +223,14 @@ TOP_K_WEIGHTS_LOGGED = 256
 #                             Utility helpers                                 #
 # --------------------------------------------------------------------------- #
 
+# Initialize miner sampler for validation (Phase 2 refactoring)
+_MINER_SAMPLER = MinerSampler(
+    sample_rate=MINER_SAMPLE_RATE,
+    sample_min=MINER_SAMPLE_MIN,
+    sample_max=MINER_SAMPLE_MAX,
+    concurrency=8,
+)
+
 
 def get_conf(key: str, default: Any = None) -> Any:
     v = os.getenv(key)
@@ -311,74 +320,37 @@ async def _list_active_hotkeys_for_window(
     """Return hotkeys with an available window file for the given window.
 
     Active miners are those that uploaded `grail/windows/{hotkey}-window-{window_start}.json`.
+
+    Note: Phase 2 refactoring - now delegates to MinerSampler.discover_active_miners()
     """
-    semaphore = asyncio.Semaphore(concurrency)
 
-    async def _check(hotkey: str) -> tuple[str, bool]:
-        filename = f"grail/windows/{hotkey}-window-{window_start}.json"
-        bucket = chain_manager.get_bucket_for_hotkey(hotkey)
-        uid = uid_by_hotkey.get(hotkey) if uid_by_hotkey else None
-        miner_id = f"uid={uid}" if uid is not None else f"hotkey={hotkey[:12]}..."
-
-        # Immediately skip miners without a committed bucket (no fallback)
-        if bucket is None:
-            return hotkey, False
-
-        async with semaphore:
+    # Heartbeat callback for watchdog
+    def _update_heartbeat() -> None:
+        try:
             import time
 
-            # Update heartbeat to prevent watchdog timeout during long
-            # operations. Rationale: With many miners (100+), even with
-            # timeouts this can take several minutes total. Updating here
-            # prevents false-positive watchdog kills.
-            try:
-                global HEARTBEAT
-                HEARTBEAT = time.monotonic()
-            except Exception:
-                pass
+            global HEARTBEAT
+            HEARTBEAT = time.monotonic()
+        except Exception:
+            pass
 
-            start_time = time.time()
-            try:
-                from ..infrastructure.comms import file_exists
-
-                exists = await asyncio.wait_for(
-                    file_exists(
-                        filename,
-                        credentials=bucket,
-                        use_write=False,
-                    ),
-                    timeout=6.0,
-                )
-                elapsed = time.time() - start_time
-                return hotkey, bool(exists)
-            except asyncio.TimeoutError:
-                elapsed = time.time() - start_time
-                logger.debug(
-                    "Window file check TIMEOUT for %s window=%s after %.2fs",
-                    miner_id,
-                    window_start,
-                    elapsed,
-                )
-                return hotkey, False
-            except Exception:
-                elapsed = time.time() - start_time
-                return hotkey, False
-
-    results = await asyncio.gather(*(_check(hk) for hk in meta_hotkeys))
-    return [hk for hk, ok in results if ok]
+    # Delegate to MinerSampler (Phase 2 refactoring)
+    return await _MINER_SAMPLER.discover_active_miners(
+        meta_hotkeys=meta_hotkeys,
+        window=window_start,
+        chain_manager=chain_manager,
+        uid_by_hotkey=uid_by_hotkey,
+        heartbeat_callback=_update_heartbeat,
+    )
 
 
 def _compute_sample_size(active_count: int) -> int:
-    if active_count <= 0:
-        return 0
-    rate_k = int(math.ceil(active_count * float(MINER_SAMPLE_RATE)))
-    k = max(int(MINER_SAMPLE_MIN), rate_k)
-    if MINER_SAMPLE_MAX is not None:
-        try:
-            k = min(k, int(MINER_SAMPLE_MAX))
-        except Exception:
-            pass
-    return min(k, active_count)
+    """Compute sample size for active miners.
+
+    Note: Phase 2 refactoring - now delegates to MinerSampler._compute_sample_size()
+    Kept for backwards compatibility with existing code.
+    """
+    return _MINER_SAMPLER._compute_sample_size(active_count)
 
 
 def _select_miners_for_window(
@@ -386,18 +358,16 @@ def _select_miners_for_window(
     target_window_hash: str,
     selection_counts: dict[str, int],
 ) -> list[str]:
-    k = _compute_sample_size(len(active_hotkeys))
-    if k == 0:
-        return []
+    """Select miners for validation using deterministic sampling.
 
-    def _tie_break(hk: str) -> int:
-        dig = hashlib.sha256(f"{target_window_hash}:{hk}".encode()).digest()
-        return int.from_bytes(dig[:8], "big")
-
-    ranked = sorted(
-        active_hotkeys, key=lambda hk: (int(selection_counts.get(hk, 0)), _tie_break(hk))
+    Note: Phase 2 refactoring - now delegates to MinerSampler.select_miners_for_validation()
+    Kept for backwards compatibility with existing code.
+    """
+    return _MINER_SAMPLER.select_miners_for_validation(
+        active_hotkeys=active_hotkeys,
+        window_hash=target_window_hash,
+        selection_counts=selection_counts,
     )
-    return ranked[:k]
 
 
 def _update_rolling(
@@ -406,13 +376,17 @@ def _update_rolling(
     new_set: set[str],
     horizon: int,
 ) -> None:
-    if len(history) >= horizon:
-        old_set = history.popleft()
-        for hk in old_set:
-            counts[hk] = max(0, int(counts.get(hk, 0)) - 1)
-    history.append(new_set)
-    for hk in new_set:
-        counts[hk] = int(counts.get(hk, 0)) + 1
+    """Update rolling window history and counts.
+
+    Note: Phase 2 refactoring - now delegates to MinerSampler.update_rolling_history()
+    Kept for backwards compatibility with existing code.
+    """
+    _MINER_SAMPLER.update_rolling_history(
+        history=history,
+        counts=counts,
+        new_set=new_set,
+        horizon=horizon,
+    )
 
 
 def _compute_count_stats(values: list[int]) -> dict[str, float]:
@@ -666,6 +640,12 @@ async def _run_validation_service(
                 meta = await subtensor.metagraph(NETUID)
                 # Build hotkey -> uid mapping for per-miner logging namespaces
                 uid_by_hotkey = dict(zip(meta.hotkeys, meta.uids, strict=False))
+
+                # Update chain manager's metagraph to keep hotkey->UID lookups fresh
+                # This is critical because miners register/deregister and UIDs shift
+                if chain_manager:
+                    chain_manager.metagraph = meta
+
                 current_block = await subtensor.get_current_block()
                 target_window = _determine_target_window(current_block)
                 checkpoint_window = target_window - WINDOW_LENGTH

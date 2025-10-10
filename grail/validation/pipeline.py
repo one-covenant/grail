@@ -6,6 +6,16 @@ import logging
 
 from .base import Validator
 from .context import ValidationContext
+from .validators import (
+    DistributionValidator,
+    GRAILProofValidator,
+    SATProblemValidator,
+    SATPromptValidator,
+    SATSolutionValidator,
+    SchemaValidator,
+    TerminationValidator,
+    TokenValidator,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,3 +66,34 @@ class ValidationPipeline:
                 return False, ctx.checks
 
         return True, ctx.checks
+
+
+def create_sat_validation_pipeline() -> ValidationPipeline:
+    """Create the standard SAT validation pipeline.
+
+    Returns a pipeline with validators in dependency order:
+    1. Schema validation (basic structure)
+    2. Token validation (token IDs are valid)
+    3. GRAIL proof validation (cryptographic proof)
+    4. SAT problem validation (problem regenerates correctly)
+    5. SAT prompt validation (prompt matches canonical form)
+    6. Termination validation (completion ends properly)
+    7. SAT solution validation (solution is correct)
+    8. Distribution validation (logprobs match model)
+
+    Returns:
+        ValidationPipeline configured for SAT environment
+    """
+    validators = [
+        SchemaValidator(),
+        TokenValidator(),
+        GRAILProofValidator(),
+        SATProblemValidator(),
+        SATPromptValidator(),
+        TerminationValidator(),
+        SATSolutionValidator(),
+        DistributionValidator(),
+    ]
+
+    logger.info(f"Created SAT validation pipeline with {len(validators)} validators")
+    return ValidationPipeline(validators)
