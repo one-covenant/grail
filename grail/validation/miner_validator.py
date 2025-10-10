@@ -38,7 +38,7 @@ REWARD_ABS_TOL = 1e-6  # Absolute tolerance on reward bounds
 FAILURE_FLAG_KEY = "had_failure"
 
 # Validation check keys (MUST match validate.py exactly)
-HARD_CHECK_KEYS = (
+HARD_CHECK_KEYS = (  # Hard checks required for validity (fail any = reject)
     "schema_valid",  # Schema/structure validation
     "tokens_valid",  # Token vocab/length validation
     "proof_valid",  # GRAIL cryptographic proof
@@ -439,13 +439,16 @@ class MinerValidator:
                 if not self._check_reward_bounds(rollout_meta, state):
                     break
 
-                # Track rollout group
-                rollout_group = str(inference.get("rollout_group"))
+                # Track rollout group (skip if missing to avoid "None" grouping)
+                rollout_group_raw = inference.get("rollout_group")
+                if rollout_group_raw is None:
+                    state["hard_failure"] = True
+                    logger.warning("Missing rollout_group; invalidating uid")
+                    break
+                rollout_group = str(rollout_group_raw)
                 state["rollout_groups"][rollout_group].append(inference)
 
                 # Derive canonical SAT problem using file-order group index
-                from ..protocol.signatures import derive_canonical_sat
-
                 group_index = int(group_index_by_id.get(rollout_group, 0))
                 can_seed, can_diff = derive_canonical_sat(miner_hotkey, window_hash, group_index)
 
@@ -464,7 +467,7 @@ class MinerValidator:
                 )
 
                 if monitor:
-                    with monitor.timer("validation/rollout_verification"):
+                    with monitor.timer("profiling/rollout_verification"):
                         is_valid, checks = self._sat_pipeline.validate(ctx)
                 else:
                     is_valid, checks = self._sat_pipeline.validate(ctx)
