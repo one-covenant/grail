@@ -13,6 +13,7 @@ from typing import Any
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..infrastructure.chain import GrailChainManager
+from ..logging_utils import miner_log_context
 from .copycat_service import CopycatService
 from .miner_validator import MinerValidator
 from .types import MinerResults, WindowResults
@@ -128,22 +129,24 @@ class WindowProcessor:
                 b0 = None
 
             try:
-                # Validate miner
-                result: MinerResults = await self._miner_validator.validate_miner(
-                    miner_hotkey=miner_hotkey,
-                    window=window,
-                    window_hash=window_hash,
-                    window_rand=window_rand,
-                    validator_wallet=validator_wallet,
-                    model=model,
-                    tokenizer=tokenizer,
-                    credentials=credentials,
-                    chain_manager=chain_manager,
-                    monitor=monitor,
-                    uid_by_hotkey=uid_by_hotkey,
-                    text_logs_emitted=text_logs_emitted,
-                    heartbeat_callback=heartbeat_callback,
-                )
+                # Validate miner (use .get() to avoid KeyError if hotkey not in map)
+                uid = uid_by_hotkey.get(miner_hotkey, miner_hotkey)
+                with miner_log_context(uid, window):
+                    result: MinerResults = await self._miner_validator.validate_miner(
+                        miner_hotkey=miner_hotkey,
+                        window=window,
+                        window_hash=window_hash,
+                        window_rand=window_rand,
+                        validator_wallet=validator_wallet,
+                        model=model,
+                        tokenizer=tokenizer,
+                        credentials=credentials,
+                        chain_manager=chain_manager,
+                        monitor=monitor,
+                        uid_by_hotkey=uid_by_hotkey,
+                        text_logs_emitted=text_logs_emitted,
+                        heartbeat_callback=heartbeat_callback,
+                    )
 
                 # Record timing
                 t1 = time.monotonic()
