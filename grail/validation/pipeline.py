@@ -85,14 +85,14 @@ def create_sat_validation_pipeline() -> ValidationPipeline:
         ValidationPipeline configured for SAT environment
     """
     validators = [
-        SchemaValidator(),
-        TokenValidator(),
-        GRAILProofValidator(),
-        SATProblemValidator(),
+        SchemaValidator(),  # FIRST - structure/types, no GPU
+        TokenValidator(),  # SECOND - vocab/length check
+        SATProblemValidator(),  # This always should be called before SATPromptValidator
         SATPromptValidator(),
+        GRAILProofValidator(),  # Cryptographic proof validation
         TerminationValidator(),
-        SATSolutionValidator(),
         DistributionValidator(),
+        SATSolutionValidator(),
     ]
 
     logger.info(f"Created SAT validation pipeline with {len(validators)} validators")
