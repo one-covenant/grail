@@ -27,7 +27,6 @@ class ResilientSubtensor:
         "get_current_block",
         "get_block_hash",
         "metagraph",
-        "commit",
         "get_commitment",
     }
 
