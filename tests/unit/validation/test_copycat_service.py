@@ -14,7 +14,6 @@ Uses pytest best practices:
 - Clear test names
 """
 
-
 from grail.validation.copycat_service import COPYCAT_SERVICE, COPYCAT_TRACKER, CopycatService
 
 

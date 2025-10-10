@@ -167,4 +167,3 @@ class TestEdgeCases:
             active_hotkeys, "hash_abc", selection_counts
         )
         assert selected == selected_again
-
