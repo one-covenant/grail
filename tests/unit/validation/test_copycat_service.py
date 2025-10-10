@@ -15,8 +15,7 @@ Uses pytest best practices:
 """
 
 
-from grail.validation.copycat import COPYCAT_TRACKER
-from grail.validation.copycat_service import COPYCAT_SERVICE, CopycatService
+from grail.validation.copycat_service import COPYCAT_SERVICE, COPYCAT_TRACKER, CopycatService
 
 
 class TestServiceInitialization:

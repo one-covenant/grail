@@ -215,6 +215,6 @@ def sat_prompt_tokens(sat_prompts: list[str]) -> list[int]:
 @pytest.fixture(scope="session")
 def tracker():
     """CopycatTracker instance for testing."""
-    from grail.validation.copycat import CopycatTracker
+    from grail.validation.copycat_service import CopycatTracker
 
     return CopycatTracker()

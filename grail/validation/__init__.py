@@ -15,14 +15,15 @@ Types:
 - MinerResults: Single miner validation results
 """
 
-from .copycat import (
+from ..shared.digest import compute_completion_digest
+from .copycat_service import (
     COPYCAT_INTERVAL_THRESHOLD,
+    COPYCAT_SERVICE,
     COPYCAT_TRACKER,
     COPYCAT_WINDOW_THRESHOLD,
+    CopycatService,
     CopycatViolation,
-    compute_completion_digest,
 )
-from .copycat_service import COPYCAT_SERVICE, CopycatService
 from .miner_validator import MinerValidator
 from .pipeline import ValidationPipeline, create_sat_validation_pipeline
 from .sampling import MinerSampler

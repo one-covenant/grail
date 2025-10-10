@@ -20,8 +20,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from ..infrastructure.chain import GrailChainManager
 from ..infrastructure.comms import file_exists, get_file
 from ..shared.constants import ROLLOUTS_PER_PROBLEM
+from ..shared.digest import compute_completion_digest
 from .context import ValidationContext
-from .copycat import compute_completion_digest
 from .pipeline import ValidationPipeline
 from .types import MinerResults
 
