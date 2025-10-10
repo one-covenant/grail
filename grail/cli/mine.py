@@ -28,8 +28,6 @@ from . import console
 # --------------------------------------------------------------------------- #
 logger = logging.getLogger("grail")
 
-# Global reference to chain manager for watchdog cleanup
-CHAIN_MANAGER: Any = None
 
 # --------------------------------------------------------------------------- #
 #                       Styling & configuration constants                     #
@@ -565,8 +563,6 @@ async def generate_rollouts_for_window(
     while True:
         current_block = await subtensor.get_current_block()
         timers.update_block_time_ema(current_block)
-        global HEARTBEAT
-        HEARTBEAT = time.monotonic()
         current_window = calculate_window_start(current_block)
         if current_window > window_start:
             logger.info("Window %s has ended, moving to next window", window_start)
@@ -621,7 +617,6 @@ async def generate_rollouts_for_window(
                 len(sat_problem.clauses),
             )
 
-            HEARTBEAT = time.monotonic()
             # Run blocking model inference in thread pool to avoid blocking event loop
             # This allows heartbeat keeper and other async tasks to continue running
             grpo_rollouts = await asyncio.to_thread(
@@ -630,7 +625,6 @@ async def generate_rollouts_for_window(
                 combined_randomness,
                 wallet,
             )
-            HEARTBEAT = time.monotonic()
 
             if grpo_rollouts:
                 text_logs_emitted = await maybe_log_debug_sample(
@@ -705,7 +699,6 @@ async def generate_rollouts_for_window(
 
             timers.update_gen_time_ema(time.time() - gen_start)
             await asyncio.sleep(0.01)
-            HEARTBEAT = time.monotonic()
 
         except RuntimeError as e:
             if "CUDA" in str(e):
@@ -755,28 +748,7 @@ def register(app: typer.Typer) -> None:
     app.command("mine")(mine)
 
 
-# --------------------------------------------------------------------------- #
-#                               Watchdog                                      #
-# --------------------------------------------------------------------------- #
-HEARTBEAT = time.monotonic()
-
-
-async def watchdog(timeout: int = 600) -> None:
-    while True:
-        await asyncio.sleep(timeout // 3)
-        elapsed = time.monotonic() - HEARTBEAT
-        if elapsed > timeout:
-            logging.error(f"[WATCHDOG] Process stalled {elapsed:.0f}s — exiting process.")
-            # Best-effort cleanup: stop commitment fetcher process
-            try:
-                global CHAIN_MANAGER
-                if CHAIN_MANAGER is not None:
-                    logger.info("[WATCHDOG] Terminating commitment fetcher process...")
-                    CHAIN_MANAGER.stop()
-            except Exception as e:
-                logger.error(f"[WATCHDOG] Failed to stop chain manager: {e}")
-            # Hard exit to avoid being stuck indefinitely
-            os._exit(1)
+# (Watchdog removed; handled by BaseNeuron in MinerNeuron)
 
 
 # --------------------------------------------------------------------------- #

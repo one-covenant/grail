@@ -42,7 +42,11 @@ logger = logging.getLogger(__name__)
 class ValidatorNeuron(BaseNeuron):
     """Runs validation using new service-based architecture."""
 
-    def __init__(self, use_drand: bool = True, test_mode: bool = False) -> None:
+    def __init__(
+        self,
+        use_drand: bool = True,
+        test_mode: bool = False,
+    ) -> None:
         super().__init__()
         self.use_drand = use_drand
         self.test_mode = test_mode
@@ -78,7 +82,8 @@ class ValidatorNeuron(BaseNeuron):
         # Create validation pipeline
         sat_pipeline = create_sat_validation_pipeline()
         logger.info(
-            f"✅ Created SAT validation pipeline with {len(sat_pipeline.validators)} validators"
+            "✅ Created SAT validation pipeline with %s validators",
+            len(sat_pipeline.validators),
         )
 
         # Create weight computer
@@ -112,12 +117,19 @@ class ValidatorNeuron(BaseNeuron):
             monitor=monitor,
         )
 
+        # Start process-level watchdog (10 minutes stall timeout)
+        self.start_watchdog(timeout_seconds=(60 * 10))
+
         try:
-            # Run validation loop
+            # Ensure chain manager is stopped during cooperative shutdown
+            self.register_shutdown_callback(validation_service.cleanup)
+
+            # Run validation loop and feed heartbeats to watchdog
             await validation_service.run_validation_loop(
                 subtensor=subtensor,
                 use_drand=self.use_drand,
                 test_mode=self.test_mode,
+                heartbeat_callback=self.heartbeat,
             )
         except Exception:
             logger.exception("Validator crashed due to unhandled exception")
