@@ -300,7 +300,7 @@ class CopycatService:
 
         # Time the copycat detection if monitor available
         timer_ctx = (
-            monitor.timer("validation/copycat_detector") if monitor else contextlib.nullcontext()
+            monitor.timer("profiling/copycat_detector") if monitor else contextlib.nullcontext()
         )
 
         with timer_ctx:
