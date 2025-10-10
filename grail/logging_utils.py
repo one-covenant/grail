@@ -1,6 +1,7 @@
 import contextlib
 import contextvars
 import logging
+import sys
 from collections.abc import Generator
 
 _uid_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar("miner_uid", default=None)
@@ -52,3 +53,33 @@ class MinerPrefixFilter(logging.Filter):
                 prefix = f"[MINER uid={uid}] "
             record.msg = prefix + record.msg
         return True
+
+
+def flush_all_logs() -> None:
+    """Best-effort flush of all logging handlers and stdio.
+
+    Used by CLI entry points and watchdog to ensure logs are written before exit.
+    """
+    try:
+        root = logging.getLogger()
+        for h in list(root.handlers):
+            try:
+                h.flush()
+            except Exception:
+                pass
+        grail_logger = logging.getLogger("grail")
+        for h in list(grail_logger.handlers):
+            try:
+                h.flush()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
+    try:
+        sys.stderr.flush()
+    except Exception:
+        pass

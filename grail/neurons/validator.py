@@ -10,13 +10,14 @@ import os
 
 import bittensor as bt
 
-from grail.cli.validate import _flush_all_logs, _get_sat_reward_bounds
+from grail.environments import get_sat_reward_bounds
 from grail.infrastructure.checkpoints import (
     CheckpointManager,
     default_checkpoint_cache_root,
 )
 from grail.infrastructure.comms import login_huggingface
 from grail.infrastructure.credentials import load_r2_credentials
+from grail.logging_utils import flush_all_logs
 from grail.monitoring import get_monitoring_manager
 from grail.monitoring.config import MonitoringConfig
 from grail.scoring import WeightComputer
@@ -97,7 +98,7 @@ class ValidatorNeuron(BaseNeuron):
         )
 
         # Get SAT reward bounds
-        sat_reward_low, sat_reward_high = _get_sat_reward_bounds()
+        sat_reward_low, sat_reward_high = get_sat_reward_bounds()
 
         # Create validation service
         validation_service = ValidationService(
@@ -120,7 +121,7 @@ class ValidatorNeuron(BaseNeuron):
             )
         except Exception:
             logger.exception("Validator crashed due to unhandled exception")
-            _flush_all_logs()
+            flush_all_logs()
             raise
         finally:
             validation_service.cleanup()
