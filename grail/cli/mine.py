@@ -103,26 +103,6 @@ def sign_rollout(rollout_data: dict, wallet: bt.wallet) -> dict:
     return rollout_data
 
 
-def verify_rollout_signature(rollout_data: dict) -> bool:
-    """Verify the signature of a rollout"""
-    try:
-        challenge = rollout_data.get("challenge")
-        hotkey = rollout_data.get("hotkey")
-        signature = rollout_data.get("signature")
-
-        if not all([challenge, hotkey, signature]):
-            return False
-
-        if not isinstance(signature, str):
-            return False
-
-        keypair = bt.Keypair(ss58_address=hotkey)
-        result = keypair.verify(data=challenge, signature=bytes.fromhex(signature))
-        return bool(result)
-    except Exception:
-        return False
-
-
 # --------------------------------------------------------------------------- #
 #                         Time & window utilities                             #
 # --------------------------------------------------------------------------- #

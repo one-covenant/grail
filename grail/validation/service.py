@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 from collections import defaultdict, deque
 from types import SimpleNamespace
@@ -319,7 +320,7 @@ class ValidationService:
         checkpoint_path = None
         try:
             timer_ctx = (
-                self._monitor.timer("validation/checkpoint_download")
+                self._monitor.timer("profiling/checkpoint_download")
                 if self._monitor
                 else contextlib.nullcontext()
             )
@@ -349,14 +350,23 @@ class ValidationService:
                     f"🚀 Loading checkpoint for validation window {target_window} "
                     f"from {checkpoint_path}"
                 )
-                # Pre-load cleanup to prevent VRAM growth
-                self._model, self._tokenizer = clear_model_and_tokenizer(
-                    self._model, self._tokenizer
+                # Time model loading (can be slow: GPU transfer, safetensors load)
+                timer_ctx = (
+                    self._monitor.timer("profiling/checkpoint_load")
+                    if self._monitor
+                    else contextlib.nullcontext()
                 )
-                chat_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
-                self._model = get_model(str(checkpoint_path), device=None, eval_mode=True)
-                self._tokenizer = get_tokenizer(str(checkpoint_path), chat_template=chat_template)
-                self._current_checkpoint_id = str(checkpoint_path)
+                with timer_ctx:
+                    # Pre-load cleanup to prevent VRAM growth
+                    self._model, self._tokenizer = clear_model_and_tokenizer(
+                        self._model, self._tokenizer
+                    )
+                    chat_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
+                    self._model = get_model(str(checkpoint_path), device=None, eval_mode=True)
+                    self._tokenizer = get_tokenizer(
+                        str(checkpoint_path), chat_template=chat_template
+                    )
+                    self._current_checkpoint_id = str(checkpoint_path)
                 return True
             except Exception:
                 logger.exception(f"Failed to load checkpoint for window {target_window}")
@@ -387,11 +397,11 @@ class ValidationService:
         if self._subtensor is None:
             raise RuntimeError("Subtensor not initialized")
         target_window_hash = await self._subtensor.get_block_hash(target_window)
-        window_rand = target_window_hash  # TODO: Integrate drand if use_drand
+        window_rand = await self._compute_window_randomness(target_window_hash, use_drand)
 
         # Discover active miners
         timer_ctx = (
-            self._monitor.timer("validation/hotkeys_discovery")
+            self._monitor.timer("profiling/hotkeys_discovery")
             if self._monitor
             else contextlib.nullcontext()
         )
@@ -451,28 +461,35 @@ class ValidationService:
                 selected=len(hotkeys_to_check),
             )
 
-        # Process window (validate all miners)
+        # Process window (validate all miners) - time the entire operation
         if self._window_processor is None:
             raise RuntimeError("WindowProcessor not initialized")
         if self._model is None or self._tokenizer is None:
             raise RuntimeError("Model and tokenizer must be loaded")
         if self._chain_manager is None:
             raise RuntimeError("Chain manager not initialized")
-        window_results = await self._window_processor.process_window(
-            window=target_window,
-            window_hash=target_window_hash,
-            window_rand=window_rand,
-            miners_to_check=hotkeys_to_check,
-            validator_wallet=self._wallet,
-            model=self._model,
-            tokenizer=self._tokenizer,
-            credentials=self._credentials,
-            chain_manager=self._chain_manager,
-            monitor=self._monitor,
-            uid_by_hotkey=uid_by_hotkey,
-            subtensor=self._subtensor,
-            heartbeat_callback=heartbeat_callback,
+
+        timer_ctx = (
+            self._monitor.timer("profiling/window_processing")
+            if self._monitor
+            else contextlib.nullcontext()
         )
+        with timer_ctx:
+            window_results = await self._window_processor.process_window(
+                window=target_window,
+                window_hash=target_window_hash,
+                window_rand=window_rand,
+                miners_to_check=hotkeys_to_check,
+                validator_wallet=self._wallet,
+                model=self._model,
+                tokenizer=self._tokenizer,
+                credentials=self._credentials,
+                chain_manager=self._chain_manager,
+                monitor=self._monitor,
+                uid_by_hotkey=uid_by_hotkey,
+                subtensor=self._subtensor,
+                heartbeat_callback=heartbeat_callback,
+            )
 
         # Update inference counts for weight computation
         for hotkey, metrics in window_results.window_metrics.items():
@@ -495,6 +512,40 @@ class ValidationService:
             f"{window_results.total_valid_rollouts} valid rollouts, "
             f"{window_results.files_found}/{len(hotkeys_to_check)} files found"
         )
+
+        # Log aggregated window metrics to monitoring (W&B)
+        if self._monitor:
+            try:
+                await self._monitor.log_gauge(
+                    "validation/window_valid_rollouts",
+                    window_results.total_valid_rollouts,
+                )
+                await self._monitor.log_gauge(
+                    "validation/window_files_found",
+                    window_results.files_found,
+                )
+                await self._monitor.log_gauge(
+                    "validation/window_invalid_signatures",
+                    window_results.invalid_signatures,
+                )
+                await self._monitor.log_gauge(
+                    "validation/window_invalid_proofs",
+                    window_results.invalid_proofs,
+                )
+                await self._monitor.log_gauge(
+                    "validation/window_processing_errors",
+                    window_results.processing_errors,
+                )
+                await self._monitor.log_gauge(
+                    "profiling/window_seconds",
+                    float(window_results.window_timing_seconds),
+                )
+                await self._monitor.log_gauge(
+                    "profiling/window_blocks",
+                    int(window_results.window_timing_blocks),
+                )
+            except Exception:
+                logger.debug("Failed to log aggregated window metrics", exc_info=True)
 
     async def _submit_weights_if_ready(self, current_block: int, meta: Any) -> None:
         """Submit weights if interval has been reached.
@@ -529,30 +580,70 @@ class ValidationService:
                 for key, value in metrics.items():
                     aggregated[hotkey][key] = aggregated[hotkey].get(key, 0) + value
 
-        # Compute weights
-        weights, non_zero_weights = self._weight_computer.compute_weights(
-            meta_hotkeys=list(meta.hotkeys),
-            meta_uids=list(meta.uids),
-            inference_counts=self._inference_counts,
-            target_window=current_block,
-            availability_counts=self._availability_counts,
+        # Compute weights (with timing)
+        timer_ctx = (
+            self._monitor.timer("profiling/weights_computation")
+            if self._monitor
+            else contextlib.nullcontext()
         )
-
-        # Submit to chain
-        try:
-            if self._subtensor is None:
-                raise RuntimeError("Subtensor not initialized")
-            await self._subtensor.set_weights(
-                wallet=self._wallet,
-                netuid=self._netuid,
-                uids=list(meta.uids),
-                weights=weights,
-                wait_for_inclusion=False,
+        with timer_ctx:
+            weights, non_zero_weights = self._weight_computer.compute_weights(
+                meta_hotkeys=list(meta.hotkeys),
+                meta_uids=list(meta.uids),
+                inference_counts=self._inference_counts,
+                target_window=current_block,
+                availability_counts=self._availability_counts,
             )
-            logger.info(f"✅ Submitted weights for interval {current_interval}")
-            self._last_weights_interval_submitted = current_interval
-        except Exception as e:
-            logger.error(f"Failed to submit weights: {e}")
+
+        # Submit to chain (with timing)
+        timer_ctx = (
+            self._monitor.timer("profiling/weights_submission")
+            if self._monitor
+            else contextlib.nullcontext()
+        )
+        with timer_ctx:
+            try:
+                if self._subtensor is None:
+                    raise RuntimeError("Subtensor not initialized")
+                await self._subtensor.set_weights(
+                    wallet=self._wallet,
+                    netuid=self._netuid,
+                    uids=list(meta.uids),
+                    weights=weights,
+                    wait_for_inclusion=False,
+                )
+                logger.info(f"✅ Submitted weights for interval {current_interval}")
+                self._last_weights_interval_submitted = current_interval
+            except Exception as e:
+                logger.error(f"Failed to submit weights: {e}")
+
+        # Log top miners by weight to monitoring (W&B)
+        if self._monitor and non_zero_weights:
+            # Build UID mapping and select top-K by weight
+            uid_by_hotkey = dict(zip(meta.hotkeys, meta.uids, strict=True))
+            top_k = 5
+            top_miners = sorted(non_zero_weights, key=lambda x: float(x[1]), reverse=True)[:top_k]
+
+            # Prepare human-readable lines
+            lines: list[str] = []
+            for rank, (hk, w) in enumerate(top_miners, start=1):
+                uid = uid_by_hotkey.get(hk)
+                ident = str(uid) if uid is not None else hk[:12]
+                lines.append(f"{rank}. UID {ident}: weight={float(w):.6f}")
+
+            await self._monitor.log_gauge(
+                "weights/submission/successful_miners_count",
+                len(non_zero_weights),
+            )
+            await self._monitor.log_artifact(
+                "weights/submission/top_miners",
+                {
+                    "interval": current_interval,
+                    "block": current_block,
+                    "text": "\n".join(lines),
+                },
+                "text",
+            )
 
     def _compute_target_validation_window(self, current_block: int) -> int:
         """Compute the target window for validation based on current block.
@@ -579,6 +670,39 @@ class ValidationService:
             List of hotkeys without recent failures (failure_count == 0)
         """
         return [hk for hk in active_hotkeys if self._failure_counts.get(hk, 0) == 0]
+
+    async def _compute_window_randomness(self, target_window_hash: str, use_drand: bool) -> str:
+        """Derive deterministic per-window randomness with optional drand.
+
+        This must match the logic miners use to ensure prompt validation
+        succeeds.
+
+        Args:
+            target_window_hash: Block hash at window start
+            use_drand: Whether to incorporate drand beacon randomness
+
+        Returns:
+            SHA-256 hex digest of combined randomness
+        """
+        if use_drand:
+            try:
+                from ..infrastructure.drand import get_drand_beacon
+
+                # Run drand HTTP request in thread pool to avoid blocking
+                drand_beacon = await asyncio.to_thread(get_drand_beacon, None)
+                logger.info(
+                    "🎲 Using drand randomness from round %s",
+                    drand_beacon["round"],
+                )
+                combined_randomness = hashlib.sha256(
+                    (target_window_hash + drand_beacon["randomness"]).encode()
+                ).hexdigest()
+                return combined_randomness
+            except Exception as e:
+                logger.warning("Failed to get drand, using block hash: %s", e)
+                return hashlib.sha256(target_window_hash.encode()).hexdigest()
+
+        return hashlib.sha256(target_window_hash.encode()).hexdigest()
 
     def _update_rolling(
         self,

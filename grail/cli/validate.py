@@ -4,6 +4,7 @@
 This module provides the CLI command for running validation.
 All validation logic is in grail.validation.ValidationService.
 """
+
 import asyncio
 import atexit
 import faulthandler
@@ -70,6 +71,7 @@ def _install_crash_diagnostics() -> None:
         atexit.register(flush_all_logs)
     except Exception:
         pass
+
 
 # --------------------------------------------------------------------------- #
 #                               CLI                                           #

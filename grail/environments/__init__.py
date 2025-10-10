@@ -30,6 +30,7 @@ def get_sat_reward_bounds() -> tuple[float, float]:
     except Exception:
         return float("-inf"), float("inf")
 
+
 __all__ = [
     # Base classes
     "Parser",

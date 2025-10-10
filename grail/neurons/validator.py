@@ -28,15 +28,15 @@ from grail.shared.constants import (
     SUPERLINEAR_EXPONENT,
     WINDOW_LENGTH,
 )
-from grail.validation import ValidationService, create_sat_validation_pipeline
+from grail.validation import create_sat_validation_pipeline
+from grail.validation.service import (
+    WEIGHT_ROLLING_WINDOWS,
+    ValidationService,
+)
 
 from .base import BaseNeuron
 
 logger = logging.getLogger(__name__)
-
-# Weight submission interval (same as validate.py)
-WEIGHT_SUBMISSION_INTERVAL_BLOCKS = 360
-WEIGHT_ROLLING_WINDOWS = int(WEIGHT_SUBMISSION_INTERVAL_BLOCKS / WINDOW_LENGTH)
 
 
 class ValidatorNeuron(BaseNeuron):
