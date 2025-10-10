@@ -346,7 +346,8 @@ class ValidationService:
         ):
             try:
                 logger.info(
-                    f"🚀 Loading checkpoint for validation window {target_window} from {checkpoint_path}"
+                    f"🚀 Loading checkpoint for validation window {target_window} "
+                    f"from {checkpoint_path}"
                 )
                 # Pre-load cleanup to prevent VRAM growth
                 self._model, self._tokenizer = clear_model_and_tokenizer(
@@ -490,7 +491,8 @@ class ValidationService:
         )
 
         logger.info(
-            f"Window {target_window} complete: {window_results.total_valid_rollouts} valid rollouts, "
+            f"Window {target_window} complete: "
+            f"{window_results.total_valid_rollouts} valid rollouts, "
             f"{window_results.files_found}/{len(hotkeys_to_check)} files found"
         )
 

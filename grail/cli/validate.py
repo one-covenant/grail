@@ -658,7 +658,8 @@ async def _run_validation_service(
                 if monitor:
                     monitor.set_block_context(current_block, target_window)
 
-                # Validator should load the checkpoint miners used when producing rollouts in target_window:
+                # Validator should load the checkpoint miners used when producing
+                # rollouts in target_window:
                 # that is the checkpoint published after (target_window - WINDOW_LENGTH)
                 checkpoint_path = None
                 try:
@@ -745,7 +746,8 @@ async def _run_validation_service(
                     )
 
                 logger.info(
-                    f"🔍 Found {len(active_hotkeys)}/{len(meta.hotkeys)} active miners for window {target_window}"
+                    f"🔍 Found {len(active_hotkeys)}/{len(meta.hotkeys)} active miners "
+                    f"for window {target_window}"
                 )
 
                 # Update availability (windows_with_file) rolling window
@@ -1042,7 +1044,8 @@ async def _run_validation_service(
                         meta.hotkeys, meta.uids, weights, TOP_K_WEIGHTS_LOGGED
                     )
                     logger.debug(
-                        "set_weights args: wallet=%s netuid=%s uids=%s weights=%s wait_for_inclusion=%s",
+                        "set_weights args: wallet=%s netuid=%s uids=%s weights=%s "
+                        "wait_for_inclusion=%s",
                         wallet.hotkey.ss58_address if wallet and wallet.hotkey else "None",
                         NETUID,
                         meta.uids,
@@ -1081,29 +1084,30 @@ async def _run_validation_service(
                                     uid_weight_map[uid] = w
 
                             # Log summary with window prominently displayed
-                            logger.info(
-                                f"🏆 Window {target_window} - Successful miners: {len(submission_successful_uids)} UIDs"
-                            )
+                    logger.info(
+                        f"🏆 Window {target_window} - Successful miners: "
+                        f"{len(submission_successful_uids)} UIDs"
+                    )
 
-                            # Log detailed UID information
-                            uid_details = []
-                            for uid in sorted(submission_successful_uids):
-                                weight = uid_weight_map.get(uid, 0.0)
-                                uid_details.append(f"UID:{uid} (weight:{weight:.4f})")
+                    # Log detailed UID information
+                    uid_details = []
+                    for uid in sorted(submission_successful_uids):
+                        weight = uid_weight_map.get(uid, 0.0)
+                        uid_details.append(f"UID:{uid} (weight:{weight:.4f})")
 
-                            logger.info(f"Window {target_window} UIDs: {', '.join(uid_details)}")
+                    logger.info(f"Window {target_window} UIDs: {', '.join(uid_details)}")
 
-                            # Log all UIDs in a single row
-                            await monitor.log_artifact(
-                                "weights/submission/successful_miners",
-                                {
-                                    "window": target_window,
-                                    "text": ",".join(
-                                        str(uid) for uid in sorted(submission_successful_uids)
-                                    ),
-                                },
-                                "text",
-                            )
+                    # Log all UIDs in a single row
+                    await monitor.log_artifact(
+                        "weights/submission/successful_miners",
+                        {
+                            "window": target_window,
+                            "text": ",".join(
+                                str(uid) for uid in sorted(submission_successful_uids)
+                            ),
+                        },
+                        "text",
+                    )
 
                     logger.info(
                         "Submitted weights: interval=%s block=%s window=%s "
@@ -1610,7 +1614,8 @@ async def _process_window(
     if violation_map:
         for violation in window_violation_details + interval_violation_details:
             logger.warning(
-                "Copycat overlap detected: miners %s & %s shared=%d denom=%d ratio=%.3f threshold=%.2f scope=%s window=%d",
+                "Copycat overlap detected: miners %s & %s shared=%d denom=%d "
+                "ratio=%.3f threshold=%.2f scope=%s window=%d",
                 violation.miner_a,
                 violation.miner_b,
                 violation.shared,
@@ -2166,7 +2171,8 @@ async def _process_wallet_window(
                         success_val = rollout_meta.get("success", False)
                         logger.debug(
                             f"TEXT[validate] nonce={nonce} "
-                            f"reward={float(reward_val):.3f} adv={float(adv_val):.3f} success={bool(success_val)} text={text}"
+                            f"reward={float(reward_val):.3f} adv={float(adv_val):.3f} "
+                            f"success={bool(success_val)} text={text}"
                         )
                         if monitor:
                             await monitor.log_artifact(

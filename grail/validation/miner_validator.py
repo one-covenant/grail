@@ -268,7 +268,8 @@ class MinerValidator:
         # Validate wallet matches
         if file_wallet != miner_hotkey:
             logger.warning(
-                f"Wallet mismatch in file: expected {miner_hotkey[:12]}..., got {file_wallet[:12] if file_wallet else 'None'}..."
+                f"Wallet mismatch in file: expected {miner_hotkey[:12]}..., "
+                f"got {file_wallet[:12] if file_wallet else 'None'}..."
             )
             return {"valid": False, "reason": "wallet_mismatch"}
 
@@ -646,7 +647,8 @@ class MinerValidator:
             if state["soft_failures"] >= soft_fail_cutoff:
                 state["soft_gate_triggered"] = True
                 logger.warning(
-                    f"Soft-check threshold reached ({state['soft_failures']}/{total_planned_checks}); "
+                    f"Soft-check threshold reached "
+                    f"({state['soft_failures']}/{total_planned_checks}); "
                     "invalidating uid"
                 )
                 return False

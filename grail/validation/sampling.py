@@ -117,8 +117,6 @@ class MinerSampler:
                         ),
                         timeout=6.0,
                     )
-                    if not exists:
-                        logger.debug(f"No window file found for hotkey {hotkey}")
                     return hotkey, bool(exists)
                 except asyncio.TimeoutError:
                     elapsed = time.time() - start_time
