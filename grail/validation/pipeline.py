@@ -68,6 +68,30 @@ class ValidationPipeline:
         return True, ctx.checks
 
 
+def get_hard_check_keys(pipeline: ValidationPipeline) -> tuple[str, ...]:
+    """Extract hard check names from pipeline validators.
+
+    Args:
+        pipeline: Validation pipeline instance
+
+    Returns:
+        Tuple of check names for validators with severity="hard"
+    """
+    return tuple(v.check_name for v in pipeline.validators if v.severity == "hard")
+
+
+def get_soft_check_keys(pipeline: ValidationPipeline) -> tuple[str, ...]:
+    """Extract soft check names from pipeline validators.
+
+    Args:
+        pipeline: Validation pipeline instance
+
+    Returns:
+        Tuple of check names for validators with severity="soft"
+    """
+    return tuple(v.check_name for v in pipeline.validators if v.severity == "soft")
+
+
 def create_sat_validation_pipeline() -> ValidationPipeline:
     """Create the standard SAT validation pipeline.
 

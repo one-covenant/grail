@@ -22,7 +22,7 @@ from ..infrastructure.comms import file_exists, get_file
 from ..shared.constants import ROLLOUTS_PER_PROBLEM
 from ..shared.digest import compute_completion_digest
 from .context import ValidationContext
-from .pipeline import ValidationPipeline
+from .pipeline import ValidationPipeline, get_hard_check_keys, get_soft_check_keys
 from .types import MinerResults
 
 logger = logging.getLogger(__name__)
@@ -36,18 +36,6 @@ GRPO_ADV_SUM_TOLERANCE = 0.01  # Sum of advantages should be ~0
 REWARD_REL_TOL = 0.02  # Relative tolerance on reward bounds
 REWARD_ABS_TOL = 1e-6  # Absolute tolerance on reward bounds
 FAILURE_FLAG_KEY = "had_failure"
-
-# Validation check keys (MUST match validate.py exactly)
-HARD_CHECK_KEYS = (  # Hard checks required for validity (fail any = reject)
-    "schema_valid",  # Schema/structure validation
-    "tokens_valid",  # Token vocab/length validation
-    "proof_valid",  # GRAIL cryptographic proof
-    "sat_problem_valid",  # SAT problem regeneration
-    "prompt_valid",  # Canonical prompt matching
-    "termination_valid",  # Max length or confident EOS
-    "solution_valid",  # Assignment correctness (if success claimed)
-)
-SOFT_CHECK_KEY = "token_distribution_valid"  # Soft heuristic
 
 
 @dataclass
@@ -116,6 +104,16 @@ class MinerValidator:
         self._sat_pipeline = sat_pipeline
         self._sat_reward_low, self._sat_reward_high = sat_reward_bounds
         self._text_log_limit = text_log_limit
+
+        # Derive check keys from pipeline validators (single source of truth)
+        self._hard_check_keys = get_hard_check_keys(sat_pipeline)
+        soft_check_keys = get_soft_check_keys(sat_pipeline)
+        self._soft_check_key = soft_check_keys[0] if soft_check_keys else None
+
+        logger.debug(
+            f"MinerValidator initialized with {len(self._hard_check_keys)} hard checks "
+            f"and {len(soft_check_keys)} soft checks"
+        )
 
     async def validate_miner(
         self,
@@ -616,17 +614,19 @@ class MinerValidator:
         Returns:
             False if hard failure or soft gate triggered
         """
-        hard_valid = all(checks.get(k, False) for k in HARD_CHECK_KEYS)
-        soft_valid = checks.get(SOFT_CHECK_KEY, True)
+        hard_valid = all(checks.get(k, False) for k in self._hard_check_keys)
+        soft_valid = checks.get(self._soft_check_key, True) if self._soft_check_key else True
 
         # Log failures
         if not hard_valid:
-            failed_check = next((k for k in HARD_CHECK_KEYS if not checks.get(k, False)), None)
+            failed_check = next(
+                (k for k in self._hard_check_keys if not checks.get(k, False)), None
+            )
             if failed_check:
                 logger.debug(f"CHECK_FAILURE type=hard failed_check={failed_check}")
 
-        if not soft_valid:
-            logger.debug(f"CHECK_FAILURE type=soft failed_check={SOFT_CHECK_KEY}")
+        if not soft_valid and self._soft_check_key:
+            logger.debug(f"CHECK_FAILURE type=soft failed_check={self._soft_check_key}")
 
         # Handle hard failure
         if not hard_valid:

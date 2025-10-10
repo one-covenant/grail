@@ -25,7 +25,12 @@ from .copycat_service import (
     CopycatViolation,
 )
 from .miner_validator import MinerValidator
-from .pipeline import ValidationPipeline, create_sat_validation_pipeline
+from .pipeline import (
+    ValidationPipeline,
+    create_sat_validation_pipeline,
+    get_hard_check_keys,
+    get_soft_check_keys,
+)
 from .sampling import MinerSampler
 from .service import ValidationService
 from .types import MinerResults, ValidationContext, WindowResults
@@ -42,6 +47,8 @@ __all__ = [
     # Pipeline
     "ValidationPipeline",
     "create_sat_validation_pipeline",
+    "get_hard_check_keys",
+    "get_soft_check_keys",
     # Copycat detection
     "COPYCAT_INTERVAL_THRESHOLD",
     "COPYCAT_TRACKER",
