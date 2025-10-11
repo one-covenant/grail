@@ -19,10 +19,12 @@ import os
 import signal
 import threading
 import time
+from typing import Callable
 
 import bittensor as bt
 
 from ..infrastructure.network import create_subtensor
+from ..logging_utils import dump_asyncio_stacks
 from ..shared.constants import WINDOW_LENGTH
 
 logger = logging.getLogger(__name__)
@@ -50,7 +52,7 @@ class BaseNeuron:
         self._last_heartbeat: float = time.monotonic()
 
         # Registered cleanup callbacks to run during shutdown
-        self._shutdown_callbacks: list[object] = []
+        self._shutdown_callbacks: list[Callable[[], None]] = []
 
         # Optional window-tracking primitives (set by subclasses if needed)
         self.window_changed: asyncio.Event | None = None  # noqa: UP045
@@ -118,7 +120,7 @@ class BaseNeuron:
         """Record liveness progress for the watchdog."""
         self._last_heartbeat = time.monotonic()
 
-    def register_shutdown_callback(self, fn) -> None:
+    def register_shutdown_callback(self, fn: Callable[[], None]) -> None:
         """Register a callable to run during cooperative shutdown."""
         self._shutdown_callbacks.append(fn)
 
@@ -147,6 +149,12 @@ class BaseNeuron:
                         f"{elapsed:.0f}",
                         timeout_seconds,
                     )
+                except Exception:
+                    pass
+
+                # Emit compact asyncio task snapshot once before shutdown
+                try:
+                    await dump_asyncio_stacks()
                 except Exception:
                     pass
 
@@ -205,7 +213,7 @@ class BaseNeuron:
             handler = self._make_shutdown_handler(sig)
             loop.add_signal_handler(sig, handler)
 
-    def _make_shutdown_handler(self, sig: signal.Signals) -> object:
+    def _make_shutdown_handler(self, sig: signal.Signals) -> Callable[[], None]:
         def _handler() -> None:
             asyncio.create_task(self._shutdown(sig))
 

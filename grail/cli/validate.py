@@ -15,14 +15,13 @@ from types import TracebackType
 
 import typer
 
-from ..logging_utils import MinerPrefixFilter, flush_all_logs
+from ..logging_utils import flush_all_logs
 
 # --------------------------------------------------------------------------- #
 #                              Logging Setup                                  #
 # --------------------------------------------------------------------------- #
 
 logger = logging.getLogger("grail")
-logger.addFilter(MinerPrefixFilter())
 
 
 # --------------------------------------------------------------------------- #

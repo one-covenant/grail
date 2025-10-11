@@ -8,6 +8,8 @@ from typing import Any, ClassVar
 
 import bittensor as bt
 
+from ..logging_utils import await_with_stall_log
+
 logger = logging.getLogger(__name__)
 
 
@@ -298,7 +300,12 @@ async def create_subtensor(*, resilient: bool = True) -> bt.subtensor | Resilien
         logger.info("Connecting to Bittensor %s (network=%s)", label, network)
         subtensor = bt.async_subtensor(network=network)
 
-    await subtensor.initialize()
+    await await_with_stall_log(
+        subtensor.initialize(),
+        label="subtensor.initialize",
+        threshold_seconds=120.0,
+        log=logger,
+    )
 
     if resilient:
         # Wrap with resilience layer for production use

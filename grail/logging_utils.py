@@ -1,18 +1,21 @@
+import asyncio
 import contextlib
 import contextvars
 import logging
 import sys
 from collections.abc import Generator
+from typing import Any, Optional
 
-_uid_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar("miner_uid", default=None)
-_window_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+_uid_ctx: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("miner_uid", default=None)
+_window_ctx: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "miner_window", default=None
 )
 
 
 @contextlib.contextmanager
 def miner_log_context(
-    uid: object | None = None, window: object | None = None
+    uid: object = None,
+    window: object = None,
 ) -> Generator[None, None, None]:
     """Context manager to set miner uid/window for log prefixing.
 
@@ -35,18 +38,18 @@ class MinerPrefixFilter(logging.Filter):
     The prefix is added only if:
       - uid is present in the context, and
       - the message is a string, and
-      - it does not already start with a standard prefix (avoids double-prefixing)
+      - it does not already start with a standard prefix
+        (avoids double-prefixing)
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
         uid = _uid_ctx.get()
         window = _window_ctx.get()
 
-        if (
-            uid
-            and isinstance(record.msg, str)
-            and not (record.msg.startswith("[MINER ") or record.msg.startswith("[GRAIL "))
-        ):
+        if uid and isinstance(record.msg, str):
+            is_prefixed = record.msg.startswith("[MINER ") or record.msg.startswith("[GRAIL ")
+            if is_prefixed:
+                return True
             if window:
                 prefix = f"[MINER uid={uid} window={window}] "
             else:
@@ -58,7 +61,8 @@ class MinerPrefixFilter(logging.Filter):
 def flush_all_logs() -> None:
     """Best-effort flush of all logging handlers and stdio.
 
-    Used by CLI entry points and watchdog to ensure logs are written before exit.
+    Used by CLI entry points and watchdog to ensure logs are written before
+    exit.
     """
     try:
         root = logging.getLogger()
@@ -81,5 +85,90 @@ def flush_all_logs() -> None:
         pass
     try:
         sys.stderr.flush()
+    except Exception:
+        pass
+
+
+async def await_with_stall_log(
+    awaitable: Any,
+    label: str,
+    *,
+    threshold_seconds: float = 120.0,
+    log: Optional[logging.Logger] = None,
+) -> Any:
+    """Await a coroutine and emit one stall warning if it exceeds threshold.
+
+    Emits a single "[STALL] <label> running > Ns" and then awaits completion.
+    """
+    logger = log or logging.getLogger(__name__)
+    task = awaitable if isinstance(awaitable, asyncio.Task) else asyncio.create_task(awaitable)
+    timer = asyncio.create_task(asyncio.sleep(threshold_seconds))
+    try:
+        done, _ = await asyncio.wait({task, timer}, return_when=asyncio.FIRST_COMPLETED)
+        if timer in done and not task.done():
+            try:
+                logger.warning("[STALL] %s running > %.0fs", label, threshold_seconds)
+            except Exception:
+                pass
+            return await task
+        return await task
+    finally:
+        if not timer.done():
+            timer.cancel()
+            # Swallow cancellation of the timer during shutdown to avoid
+            # bubbling CancelledError from cleanup paths.
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await timer
+
+
+async def dump_asyncio_stacks(
+    *,
+    log: Optional[logging.Logger] = None,
+    max_tasks: int = 20,
+    max_frames: int = 3,
+) -> None:
+    """Emit a compact snapshot of running asyncio task stack tops.
+
+    Logged once on watchdog expiry to pinpoint blocking await locations.
+    """
+    logger = log or logging.getLogger(__name__)
+    try:
+        tasks = [t for t in asyncio.all_tasks() if not t.done()]
+    except Exception:
+        tasks = []
+
+    if not tasks:
+        try:
+            logger.error("[WATCHDOG] No active tasks to dump")
+        except Exception:
+            pass
+        return
+
+    try:
+        logger.error("[WATCHDOG] Task stack snapshot (%d tasks)", len(tasks))
+        count = 0
+        for t in list(tasks)[:max_tasks]:
+            count += 1
+            try:
+                stack = t.get_stack(limit=max_frames)
+            except Exception:
+                stack = []
+            if stack:
+                top = stack[-1]
+                fname = getattr(top.f_code, "co_filename", "<unknown>")
+                lineno = getattr(top, "f_lineno", 0)
+                func = getattr(top.f_code, "co_name", "<unknown>")
+                logger.error(
+                    "[WATCHDOG] task=%s at %s:%s in %s()",
+                    t.get_name(),
+                    fname,
+                    lineno,
+                    func,
+                )
+            else:
+                logger.error("[WATCHDOG] task=%s at <no-python-frame>", t.get_name())
+        remaining = len(tasks) - count
+        if remaining > 0:
+            logger.error("[WATCHDOG] … %d more tasks omitted", remaining)
     except Exception:
         pass
