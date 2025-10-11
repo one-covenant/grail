@@ -20,6 +20,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from ..infrastructure.chain import GrailChainManager
 from ..infrastructure.checkpoints import CheckpointManager
 from ..infrastructure.credentials import BucketCredentials
+from ..logging_utils import dump_asyncio_stacks
 from ..mining.rollout_generator import REASONING_START, SYSTEM_PROMPT
 from ..model.provider import (
     clear_model_and_tokenizer,
@@ -241,7 +242,18 @@ class ValidationService:
                 self._last_processed_window = target_window
 
             except asyncio.CancelledError:
-                logger.info("Validation loop cancelled")
+                # Log full traceback and attempt an asyncio task snapshot for diagnostics
+                logger.warning(
+                    "Validation loop cancelled",
+                    exc_info=True,
+                )
+                try:
+                    await dump_asyncio_stacks(label="CANCEL")
+                except Exception:
+                    logger.debug(
+                        "Failed to dump asyncio stacks during cancellation",
+                        exc_info=True,
+                    )
                 break
             except Exception as e:
                 logger.error(f"Error in validation loop: {e}", exc_info=True)
@@ -1055,6 +1067,11 @@ class ValidationService:
         Stops background tasks like the chain manager worker process.
         Call this before shutdown.
         """
+        # Make idempotent: ensure we only run once even if called from multiple paths
+        if getattr(self, "_cleaned_up", False):
+            return
+        self._cleaned_up = True
+
         if self._chain_manager:
             try:
                 self._chain_manager.stop()
