@@ -315,7 +315,7 @@ class MinerValidator:
         groups_to_check = min(groups_to_check, MAX_SAMPLES_PER_MINER // ROLLOUTS_PER_PROBLEM)
 
         # Deterministic RNG seed
-        seed_material = f"{miner_hotkey}:{window_rand}:{validator_wallet.hotkey.ss58_address}"
+        seed_material = f"{miner_hotkey}:{window_rand}"
         seed_int = int.from_bytes(hashlib.sha256(seed_material.encode()).digest()[:8], "big")
         rng = random.Random(seed_int)
 
@@ -869,6 +869,16 @@ class MinerValidator:
                 await monitor.log_gauge(
                     f"{uid_str}/prompt_mismatch", float(state["prompt_mismatch_count"])
                 )
+                # Log soft failure metrics
+                await monitor.log_gauge(
+                    f"{uid_str}/soft_failures_count", float(state["soft_failures"])
+                )
+                soft_failure_ratio = (
+                    state["soft_failures"] / state["checked_count"]
+                    if state["checked_count"] > 0
+                    else 0.0
+                )
+                await monitor.log_gauge(f"{uid_str}/soft_failures_ratio", soft_failure_ratio)
             except Exception:
                 pass
 
@@ -956,6 +966,16 @@ class MinerValidator:
                 await monitor.log_gauge(
                     f"{uid_str}/prompt_mismatch", float(validation_state["prompt_mismatch_count"])
                 )
+                # Log soft failure metrics (even for successful miners)
+                await monitor.log_gauge(
+                    f"{uid_str}/soft_failures_count", float(validation_state["soft_failures"])
+                )
+                soft_failure_ratio = (
+                    validation_state["soft_failures"] / validation_state["checked_count"]
+                    if validation_state["checked_count"] > 0
+                    else 0.0
+                )
+                await monitor.log_gauge(f"{uid_str}/soft_failures_ratio", soft_failure_ratio)
             except Exception:
                 pass
 
