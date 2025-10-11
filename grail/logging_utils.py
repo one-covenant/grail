@@ -6,9 +6,13 @@ import sys
 from collections.abc import Generator
 from typing import Any, Optional
 
-_uid_ctx: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("miner_uid", default=None)
+_uid_ctx: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "miner_uid",
+    default=None,
+)
 _window_ctx: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
-    "miner_window", default=None
+    "miner_window",
+    default=None,
 )
 
 
@@ -126,6 +130,7 @@ async def dump_asyncio_stacks(
     log: Optional[logging.Logger] = None,
     max_tasks: int = 20,
     max_frames: int = 3,
+    label: str = "WATCHDOG",
 ) -> None:
     """Emit a compact snapshot of running asyncio task stack tops.
 
@@ -139,13 +144,13 @@ async def dump_asyncio_stacks(
 
     if not tasks:
         try:
-            logger.error("[WATCHDOG] No active tasks to dump")
+            logger.error("[%s] No active tasks to dump", label)
         except Exception:
             pass
         return
 
     try:
-        logger.error("[WATCHDOG] Task stack snapshot (%d tasks)", len(tasks))
+        logger.error("[%s] Task stack snapshot (%d tasks)", label, len(tasks))
         count = 0
         for t in list(tasks)[:max_tasks]:
             count += 1
@@ -159,16 +164,17 @@ async def dump_asyncio_stacks(
                 lineno = getattr(top, "f_lineno", 0)
                 func = getattr(top.f_code, "co_name", "<unknown>")
                 logger.error(
-                    "[WATCHDOG] task=%s at %s:%s in %s()",
+                    "[%s] task=%s at %s:%s in %s()",
+                    label,
                     t.get_name(),
                     fname,
                     lineno,
                     func,
                 )
             else:
-                logger.error("[WATCHDOG] task=%s at <no-python-frame>", t.get_name())
+                logger.error("[%s] task=%s at <no-python-frame>", label, t.get_name())
         remaining = len(tasks) - count
         if remaining > 0:
-            logger.error("[WATCHDOG] … %d more tasks omitted", remaining)
+            logger.error("[%s] … %d more tasks omitted", label, remaining)
     except Exception:
         pass

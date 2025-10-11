@@ -60,6 +60,9 @@ class BaseNeuron:
         self.current_block: int = 0
         self.current_window: int = 0
 
+        # Track shutdown source for clearer logging
+        self._shutdown_source: str | None = None
+
     async def main(self) -> None:
         """Install signal handlers, initialize optional events, and run."""
         loop = asyncio.get_running_loop()
@@ -75,6 +78,7 @@ class BaseNeuron:
         finally:
             # Ensure graceful shutdown even if run() completes normally
             if not self.stop_event.is_set():
+                self._shutdown_source = "normal_return"
                 await self._shutdown(signal.SIGTERM)
 
     async def run(self) -> None:
@@ -154,12 +158,13 @@ class BaseNeuron:
 
                 # Emit compact asyncio task snapshot once before shutdown
                 try:
-                    await dump_asyncio_stacks()
+                    await dump_asyncio_stacks(label="WATCHDOG")
                 except Exception:
                     pass
 
                 # Attempt cooperative shutdown first
                 try:
+                    self._shutdown_source = "watchdog"
                     await self._shutdown(signal.SIGTERM)
                 except Exception:
                     pass
@@ -215,6 +220,12 @@ class BaseNeuron:
 
     def _make_shutdown_handler(self, sig: signal.Signals) -> Callable[[], None]:
         def _handler() -> None:
+            # Log receipt of an OS signal then schedule asynchronous teardown
+            try:
+                logger.warning("Received OS signal: %s", sig.name)
+            except Exception:
+                pass
+            self._shutdown_source = "os_signal"
             asyncio.create_task(self._shutdown(sig))
 
         return _handler
@@ -225,7 +236,15 @@ class BaseNeuron:
         This function is idempotent and safe to call multiple times.
         """
         try:
-            logger.warning("Shutting down due to signal: %s", sig.name)
+            reason = self._shutdown_source or "unknown"
+            if reason == "os_signal":
+                logger.warning("Shutting down due to OS signal: %s", sig.name)
+            elif reason == "watchdog":
+                logger.warning("Shutting down due to watchdog timeout")
+            elif reason == "normal_return":
+                logger.info("Cooperative shutdown (reason=normal_return)")
+            else:
+                logger.warning("Shutting down (reason=%s, signal=%s)", reason, sig.name)
         except Exception:
             pass
 
@@ -256,3 +275,5 @@ class BaseNeuron:
 
         # Allow log buffers to flush
         await asyncio.sleep(0.1)
+        # Reset for next lifecycle start if reused
+        self._shutdown_source = None

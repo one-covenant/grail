@@ -105,7 +105,6 @@ class ValidatorNeuron(BaseNeuron):
         # Get SAT reward bounds
         sat_reward_low, sat_reward_high = get_sat_reward_bounds()
 
-        # Create validation service
         validation_service = ValidationService(
             wallet=wallet,
             netuid=NETUID,
@@ -136,4 +135,5 @@ class ValidatorNeuron(BaseNeuron):
             flush_all_logs()
             raise
         finally:
-            validation_service.cleanup()
+            # Cleanup handled via registered shutdown callback and BaseNeuron
+            pass
