@@ -47,25 +47,40 @@ class TerminationValidator(Validator):
                 return True
 
             # Check EOS termination
-            if tokens[-1] != ctx.tokenizer.eos_token_id:
+            eos_id = getattr(ctx.tokenizer, "eos_token_id", None)
+            if eos_id is None:
+                logger.debug("Tokenizer missing eos_token_id")
+                ctx.checks[self.check_name] = False
+                return False
+            if tokens[-1] != eos_id:
                 logger.debug("Not EOS token and not max length")
                 ctx.checks[self.check_name] = False
                 return False
 
-            # Use cached logits from proof validator
-            logits = ctx.cached_logits
-            if logits is None:
-                # Fallback: compute logits
+            # Use cached logits from proof validator (full sequence)
+            if ctx.cached_logits is None:
+                # Fallback: compute logits (uses base class method)
                 logger.debug("Recomputing logits for EOS probability")
-                logits = self._compute_logits(ctx)
+                logits = self.compute_logits(ctx, full_sequence=False)
                 if logits is None:
                     logger.debug("Cannot verify EOS probability: no logits")
+                    ctx.checks[self.check_name] = False
+                    return False
+            else:
+                # Extract second-to-last token's logits from cached full tensor
+                if ctx.cached_logits.dim() == 1:
+                    # Already extracted (shouldn't happen with new caching)
+                    logits = ctx.cached_logits
+                elif len(tokens) >= 2:
+                    logits = ctx.cached_logits[-2]
+                else:
+                    logger.debug("Insufficient tokens for EOS check")
                     ctx.checks[self.check_name] = False
                     return False
 
             # Check EOS probability
             probs = torch.softmax(logits, dim=-1)
-            p_eos = float(probs[ctx.tokenizer.eos_token_id].item())
+            p_eos = float(probs[eos_id].item())
 
             if p_eos >= MIN_EOS_PROBABILITY:
                 ctx.checks[self.check_name] = True
@@ -79,22 +94,3 @@ class TerminationValidator(Validator):
             logger.debug(f"Termination check error: {e}")
             ctx.checks[self.check_name] = False
             return False
-
-    def _compute_logits(self, ctx: ValidationContext) -> torch.Tensor | None:
-        """Compute logits if not cached."""
-        try:
-            tokens = ctx.commit.get("tokens", [])
-            if len(tokens) < 2:
-                return None
-
-            full_ids = torch.tensor(tokens, dtype=torch.long, device=ctx.device).unsqueeze(0)
-            with torch.inference_mode():
-                outs = ctx.model(full_ids)
-
-            if outs.logits.size(1) < 2:
-                return None
-
-            return outs.logits[0, -2, :].detach().to("cpu")
-        except Exception as e:
-            logger.debug(f"Logits computation failed: {e}")
-            return None

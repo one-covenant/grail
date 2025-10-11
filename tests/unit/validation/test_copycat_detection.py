@@ -10,11 +10,11 @@ from collections import Counter
 
 import pytest
 
-from grail.validation.copycat import (
+from grail.shared.digest import compute_completion_digest
+from grail.validation.copycat_service import (
     COPYCAT_INTERVAL_THRESHOLD,
     COPYCAT_WINDOW_THRESHOLD,
     CopycatTracker,
-    compute_completion_digest,
 )
 
 

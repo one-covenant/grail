@@ -51,15 +51,23 @@ class DistributionValidator(Validator):
         # Compute distribution metrics
         metrics = self._compute_metrics(probs)
 
-        # Detect suspicious patterns
-        suspicious = self._is_suspicious(metrics, probs)
+        # Detect suspicious patterns and collect reasons/initial-window metrics
+        suspicious, reasons, initial_metrics = self._is_suspicious(metrics, probs)
 
+        # Record results
         ctx.checks[self.check_name] = not suspicious
         ctx.metadata["distribution_metrics"] = metrics
+        if initial_metrics is not None:
+            ctx.metadata["distribution_initial_metrics"] = initial_metrics
+        ctx.metadata["distribution_reasons"] = reasons
+
+        # Note: W&B logging is done at miner level (aggregated across rollouts)
+        # See MinerValidator._log_aggregated_distribution_metrics()
+
         return not suspicious
 
     def _collect_probs(self, ctx: ValidationContext) -> list[float] | None:
-        """Collect chosen token probabilities via forward pass."""
+        """Collect chosen token probabilities from cached logits."""
         try:
             tokens = ctx.commit.get("tokens", [])
             rollout = ctx.commit.get("rollout", {})
@@ -70,16 +78,17 @@ class DistributionValidator(Validator):
             if completion_len <= 0:
                 return None
 
-            # Model inference
-            full_ids = torch.tensor(tokens, dtype=torch.long, device=ctx.device).unsqueeze(0)
-            with torch.inference_mode():
-                outs = ctx.model(full_ids)
-            logits = outs.logits[0]
+            # Use cached logits from proof validator (avoids redundant forward pass)
+            if ctx.cached_logits is None:
+                logger.debug("No cached logits available")
+                return None
+
+            logits = ctx.cached_logits
 
             # Collect probabilities for completion tokens
             probs = []
             for t in range(prompt_len, min(prompt_len + completion_len, len(tokens))):
-                if t > 0:
+                if t > 0 and t - 1 < logits.size(0):
                     step_probs = torch.softmax(logits[t - 1], dim=-1)
                     probs.append(float(step_probs[tokens[t]].item()))
 
@@ -144,33 +153,46 @@ class DistributionValidator(Validator):
                 "bc": 0.0,
             }
 
-    def _is_suspicious(self, metrics: dict, probs: list[float]) -> bool:
-        """Apply heuristics to detect exploits."""
+    def _is_suspicious(self, metrics: dict, probs: list[float]) -> tuple[bool, dict, dict | None]:
+        """Apply heuristics to detect exploits and return reasons.
+
+        Returns:
+            (suspicious, reasons_dict, initial_window_metrics_or_None)
+        """
+        reasons: dict[str, bool] = {
+            "median_low": False,
+            "min_low": False,
+            "bimodal_full": False,
+            "bimodal_initial": False,
+        }
+
         # Unimodal low (all probs clustered low)
         if metrics["median"] <= SAMPLING_MEDIAN_LOW_MAX:
             logger.debug(f"Suspicious: median {metrics['median']} too low")
-            return True
+            reasons["median_low"] = True
 
         # Extremely low probability token (exploit)
         if metrics["min"] <= SAMPLING_MIN_TOKEN_PROB:
             logger.debug(f"Suspicious: min prob {metrics['min']} too low")
-            return True
+            reasons["min_low"] = True
 
-        # Bimodal distribution
-        low_q10 = metrics["q10"] <= SAMPLING_LOW_Q10_MAX
-        high_bc = metrics["bc"] >= SAMPLING_BC_THRESHOLD
+        # Bimodal distribution (full sequence)
+        low_q10 = metrics.get("q10", 0.0) <= SAMPLING_LOW_Q10_MAX
+        high_bc = metrics.get("bc", 0.0) >= SAMPLING_BC_THRESHOLD
         if low_q10 and high_bc:
-            logger.debug(f"Suspicious: bimodal (q10={metrics['q10']}, bc={metrics['bc']})")
-            return True
+            logger.debug(f"Suspicious: bimodal (q10={metrics.get('q10')}, bc={metrics.get('bc')})")
+            reasons["bimodal_full"] = True
 
         # Check initial window for prefix exploits
+        initial_metrics: dict | None = None
         k = min(SAMPLING_INITIAL_WINDOW_STEPS, len(probs))
         if k > 0:
             initial_metrics = self._compute_metrics(probs[:k])
-            init_low_q10 = initial_metrics["q10"] <= SAMPLING_LOW_Q10_MAX
-            init_high_bc = initial_metrics["bc"] >= SAMPLING_BC_THRESHOLD
+            init_low_q10 = initial_metrics.get("q10", 0.0) <= SAMPLING_LOW_Q10_MAX
+            init_high_bc = initial_metrics.get("bc", 0.0) >= SAMPLING_BC_THRESHOLD
             if init_low_q10 and init_high_bc:
                 logger.debug("Suspicious: bimodal in initial window")
-                return True
+                reasons["bimodal_initial"] = True
 
-        return False
+        suspicious = any(reasons.values())
+        return suspicious, reasons, initial_metrics

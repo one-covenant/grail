@@ -15,13 +15,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import threading
-from typing import Optional
+import time
+from typing import Callable
 
 import bittensor as bt
 
 from ..infrastructure.network import create_subtensor
+from ..logging_utils import dump_asyncio_stacks
 from ..shared.constants import WINDOW_LENGTH
 
 logger = logging.getLogger(__name__)
@@ -45,11 +48,20 @@ class BaseNeuron:
         # Shared subtensor instance (lazy-initialized)
         self._subtensor: bt.subtensor | None = None
 
+        # Watchdog state
+        self._last_heartbeat: float = time.monotonic()
+
+        # Registered cleanup callbacks to run during shutdown
+        self._shutdown_callbacks: list[Callable[[], None]] = []
+
         # Optional window-tracking primitives (set by subclasses if needed)
-        self.window_changed: Optional[asyncio.Event] = None  # noqa: UP045
-        self._notify_loop: Optional[asyncio.AbstractEventLoop] = None  # noqa: UP045
+        self.window_changed: asyncio.Event | None = None  # noqa: UP045
+        self._notify_loop: asyncio.AbstractEventLoop | None = None  # noqa: UP045
         self.current_block: int = 0
         self.current_window: int = 0
+
+        # Track shutdown source for clearer logging
+        self._shutdown_source: str | None = None
 
     async def main(self) -> None:
         """Install signal handlers, initialize optional events, and run."""
@@ -66,6 +78,7 @@ class BaseNeuron:
         finally:
             # Ensure graceful shutdown even if run() completes normally
             if not self.stop_event.is_set():
+                self._shutdown_source = "normal_return"
                 await self._shutdown(signal.SIGTERM)
 
     async def run(self) -> None:
@@ -107,6 +120,61 @@ class BaseNeuron:
         """
         self._subtensor = None
 
+    def heartbeat(self) -> None:
+        """Record liveness progress for the watchdog."""
+        self._last_heartbeat = time.monotonic()
+
+    def register_shutdown_callback(self, fn: Callable[[], None]) -> None:
+        """Register a callable to run during cooperative shutdown."""
+        self._shutdown_callbacks.append(fn)
+
+    def start_watchdog(self, timeout_seconds: int = 600, grace_seconds: int = 10) -> None:
+        """Start a background watchdog task that exits on prolonged inactivity.
+
+        Args:
+            timeout_seconds: Max allowed time without heartbeat
+            grace_seconds: Time for cooperative shutdown before hard-exit
+        """
+        task = asyncio.create_task(self._watchdog(timeout_seconds, grace_seconds))
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    async def _watchdog(self, timeout_seconds: int, grace_seconds: int) -> None:
+        """Monitor heartbeats and terminate on stall."""
+        # Sleep in smaller chunks to remain responsive
+        sleep_step = max(1, timeout_seconds // 3)
+        while True:
+            await asyncio.sleep(sleep_step)
+            elapsed = time.monotonic() - self._last_heartbeat
+            if elapsed > timeout_seconds:
+                try:
+                    logger.error(
+                        "[WATCHDOG] No progress for %ss (>%ss). Initiating shutdown...",
+                        f"{elapsed:.0f}",
+                        timeout_seconds,
+                    )
+                except Exception:
+                    pass
+
+                # Emit compact asyncio task snapshot once before shutdown
+                try:
+                    await dump_asyncio_stacks(label="WATCHDOG")
+                except Exception:
+                    pass
+
+                # Attempt cooperative shutdown first
+                try:
+                    self._shutdown_source = "watchdog"
+                    await self._shutdown(signal.SIGTERM)
+                except Exception:
+                    pass
+
+                # Give a short grace period, then hard-exit
+                try:
+                    await asyncio.sleep(max(1, grace_seconds))
+                finally:
+                    os._exit(1)
+
     @staticmethod
     def calculate_window(block: int) -> int:
         """Calculate the window start block for a given block number.
@@ -118,7 +186,8 @@ class BaseNeuron:
             Window start block (aligned to WINDOW_LENGTH)
 
         Example:
-            window = self.calculate_window(12345)  # Returns 12000 if WINDOW_LENGTH=1000
+            # Returns 12000 if WINDOW_LENGTH=1000
+            window = self.calculate_window(12345)
         """
         return (block // WINDOW_LENGTH) * WINDOW_LENGTH
 
@@ -146,10 +215,20 @@ class BaseNeuron:
     def _install_signal_handlers(self, loop: asyncio.AbstractEventLoop) -> None:
         """Register handlers to trigger cooperative shutdown."""
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(
-                sig,
-                lambda s=sig: asyncio.create_task(self._shutdown(s)),  # type: ignore[misc]
-            )
+            handler = self._make_shutdown_handler(sig)
+            loop.add_signal_handler(sig, handler)
+
+    def _make_shutdown_handler(self, sig: signal.Signals) -> Callable[[], None]:
+        def _handler() -> None:
+            # Log receipt of an OS signal then schedule asynchronous teardown
+            try:
+                logger.warning("Received OS signal: %s", sig.name)
+            except Exception:
+                pass
+            self._shutdown_source = "os_signal"
+            asyncio.create_task(self._shutdown(sig))
+
+        return _handler
 
     async def _shutdown(self, sig: signal.Signals) -> None:
         """Set stop flag, cancel tasks, and join threads.
@@ -157,7 +236,15 @@ class BaseNeuron:
         This function is idempotent and safe to call multiple times.
         """
         try:
-            logger.warning("Shutting down due to signal: %s", sig.name)
+            reason = self._shutdown_source or "unknown"
+            if reason == "os_signal":
+                logger.warning("Shutting down due to OS signal: %s", sig.name)
+            elif reason == "watchdog":
+                logger.warning("Shutting down due to watchdog timeout")
+            elif reason == "normal_return":
+                logger.info("Cooperative shutdown (reason=normal_return)")
+            else:
+                logger.warning("Shutting down (reason=%s, signal=%s)", reason, sig.name)
         except Exception:
             pass
 
@@ -179,5 +266,14 @@ class BaseNeuron:
             except Exception:
                 pass
 
+        # Invoke registered cleanup callbacks (best-effort)
+        for cb in list(self._shutdown_callbacks):
+            try:
+                cb()
+            except Exception:
+                pass
+
         # Allow log buffers to flush
         await asyncio.sleep(0.1)
+        # Reset for next lifecycle start if reused
+        self._shutdown_source = None

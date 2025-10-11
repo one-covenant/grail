@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 
 @dataclass
@@ -29,9 +29,12 @@ class ValidationContext:
     challenge_randomness: str
 
     # Resources (shared, immutable)
-    model: AutoModelForCausalLM
-    tokenizer: AutoTokenizer
+    model: PreTrainedModel
+    tokenizer: PreTrainedTokenizerBase
     device: torch.device
+
+    # Optional identifiers / logging context (defaulted fields must follow non-defaults)
+    miner_uid: str | None = None  # Miner UID for logging/metrics namespacing
 
     # Cached intermediate results (populated by validators)
     cached_logits: torch.Tensor | None = None

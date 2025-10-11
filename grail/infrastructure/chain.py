@@ -136,6 +136,7 @@ class GrailChainManager:
         # Create queue for receiving commitment updates
         self._worker_queue = multiprocessing.Queue(maxsize=1)
 
+        # TODO: the logic for commitmenet fetching should be improved later on...
         # Start worker process
         self._worker_process = multiprocessing.Process(
             target=chain_commitment_worker,
@@ -184,10 +185,14 @@ class GrailChainManager:
 
     async def _poll_worker_queue(self) -> None:
         """Poll the worker queue for commitment updates."""
+        # Poll at reasonable interval (commitments change slowly)
+        # Use 30s or 5% of fetch interval, whichever is smaller
+        poll_interval = min(30.0, self.fetch_interval / 20)
+
         while True:
             try:
                 # Check queue non-blockingly
-                await asyncio.sleep(1)  # Poll every second
+                await asyncio.sleep(poll_interval)
 
                 if self._worker_queue is not None:
                     try:

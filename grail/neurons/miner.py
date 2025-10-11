@@ -3,14 +3,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import time
 import traceback
 from types import SimpleNamespace
 
 import bittensor as bt
 import torch
 
-import grail.cli.mine as cli_mine
 from grail.cli.mine import (
     MiningTimers,
     generate_rollouts_for_window,
@@ -40,14 +38,7 @@ class MinerNeuron(BaseNeuron):
         super().__init__()
         self.use_drand = use_drand
 
-    def _update_heartbeat(self) -> None:
-        """Update heartbeat to signal progress to watchdog.
-
-        Called at key points in the mining loop to prove the process is
-        making progress. Now that we have explicit timeouts on blockchain
-        calls, we don't need continuous background updates.
-        """
-        cli_mine.HEARTBEAT = time.monotonic()
+    # (heartbeat is now handled by BaseNeuron.heartbeat())
 
     async def run(self) -> None:
         """Main mining loop mirrored from the CLI implementation."""
@@ -76,25 +67,22 @@ class MinerNeuron(BaseNeuron):
                 raise
 
             # Initialize heartbeat (watchdog will monitor for stalls)
-            self._update_heartbeat()
+            self.heartbeat()
             logger.info("✅ Initialized watchdog heartbeat")
 
             # Get subtensor and metagraph for chain manager (use shared base method)
             subtensor = await self.get_subtensor()
-            self._update_heartbeat()
+            self.heartbeat()
             netuid = int(get_conf("BT_NETUID", get_conf("NETUID", 200)))
             metagraph = await subtensor.metagraph(netuid)
-            self._update_heartbeat()
+            self.heartbeat()
 
             # Initialize chain manager for credential commitments
             config = SimpleNamespace(netuid=netuid)
             chain_manager = GrailChainManager(config, wallet, metagraph, subtensor, credentials)
             await chain_manager.initialize()
-            # Store chain manager globally for watchdog cleanup
-            cli_mine.CHAIN_MANAGER = chain_manager
-
             logger.info("✅ Initialized chain manager and committed read credentials")
-            self._update_heartbeat()
+            self.heartbeat()
 
             # Use trainer UID's committed read credentials for checkpoints
             trainer_bucket = chain_manager.get_bucket(TRAINER_UID)
@@ -119,7 +107,7 @@ class MinerNeuron(BaseNeuron):
                 mining_config = MonitoringConfig.for_mining(wallet.name)
                 try:
                     subtensor_for_uid = await self.get_subtensor()
-                    self._update_heartbeat()
+                    self.heartbeat()
                 except Exception:
                     subtensor_for_uid = None
                 uid = None
@@ -127,16 +115,16 @@ class MinerNeuron(BaseNeuron):
                     uid = await get_own_uid_on_subnet(
                         subtensor_for_uid, 81, wallet.hotkey.ss58_address
                     )
-                    self._update_heartbeat()
+                    self.heartbeat()
                 run_name = f"miner-{uid}" if uid is not None else f"mining_{wallet.name}"
                 run_id = await monitor.start_run(run_name, mining_config.get("hyperparameters", {}))
-                self._update_heartbeat()
+                self.heartbeat()
                 logger.info(f"Started monitoring run: {run_id} (name={run_name})")
 
             while not self.stop_event.is_set():
                 try:
                     # Update heartbeat at start of each iteration
-                    self._update_heartbeat()
+                    self.heartbeat()
 
                     # Use shared subtensor from base class
                     subtensor = await self.get_subtensor()
@@ -163,7 +151,7 @@ class MinerNeuron(BaseNeuron):
                                 checkpoint_path = await checkpoint_manager.get_checkpoint(
                                     checkpoint_window
                                 )
-                            self._update_heartbeat()
+                            self.heartbeat()
 
                             # checkpoint_path = 'Qwen/Qwen3-4B-Instruct-2507'
                             if checkpoint_path is not None:
@@ -173,7 +161,7 @@ class MinerNeuron(BaseNeuron):
                                     checkpoint_path,
                                 )
                                 try:
-                                    # Pre-load cleanup to prevent VRAM growth when swapping checkpoints
+                                    # Pre-load cleanup to prevent VRAM growth when swapping
                                     model, tokenizer = clear_model_and_tokenizer(model, tokenizer)
                                     model = get_model(
                                         str(checkpoint_path), device=None, eval_mode=True
@@ -245,7 +233,7 @@ class MinerNeuron(BaseNeuron):
                                 f"✅ Successfully uploaded window {window_start} "
                                 f"with {len(inferences)} rollouts"
                             )
-                            self._update_heartbeat()
+                            self.heartbeat()
                             if monitor:
                                 await monitor.log_counter("mining.successful_uploads")
                                 await monitor.log_gauge("mining.uploaded_rollouts", len(inferences))
@@ -271,7 +259,6 @@ class MinerNeuron(BaseNeuron):
                     await asyncio.sleep(10)
                     continue
 
-        async def _main() -> None:
-            await asyncio.gather(_run(), cli_mine.watchdog())
-
-        await _main()
+        # Start process-level watchdog (handled by BaseNeuron)
+        self.start_watchdog(timeout_seconds=(60 * 10))
+        await _run()
