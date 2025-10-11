@@ -231,12 +231,14 @@ class ValidationService:
                     heartbeat_callback=heartbeat_callback,
                 )
 
+                # Update weight submission state
+                self._windows_processed_since_start += 1
+
                 # Submit weights if interval reached
-                await self._submit_weights_if_ready(current_block, meta)
+                await self._submit_weights_if_ready(current_block, target_window, meta)
 
                 # Update state
                 self._last_processed_window = target_window
-                self._windows_processed_since_start += 1
 
             except asyncio.CancelledError:
                 logger.info("Validation loop cancelled")
@@ -517,29 +519,26 @@ class ValidationService:
         if self._monitor:
             try:
                 await self._monitor.log_gauge(
-                    "validation/window_valid_rollouts",
+                    "validation/active_miners/window_valid_rollouts",
                     window_results.total_valid_rollouts,
                 )
                 await self._monitor.log_gauge(
-                    "validation/window_files_found",
+                    "validation/active_miners/window_files_found",
                     window_results.files_found,
                 )
                 await self._monitor.log_gauge(
-                    "validation/window_invalid_signatures",
+                    "validation/active_miners/window_invalid_signatures",
                     window_results.invalid_signatures,
                 )
                 await self._monitor.log_gauge(
-                    "validation/window_invalid_proofs",
+                    "validation/active_miners/window_invalid_proofs",
                     window_results.invalid_proofs,
                 )
                 await self._monitor.log_gauge(
-                    "validation/window_processing_errors",
+                    "validation/active_miners/window_processing_errors",
                     window_results.processing_errors,
                 )
-                await self._monitor.log_gauge(
-                    "profiling/window_seconds",
-                    float(window_results.window_timing_seconds),
-                )
+
                 await self._monitor.log_gauge(
                     "profiling/window_blocks",
                     int(window_results.window_timing_blocks),
@@ -547,12 +546,15 @@ class ValidationService:
             except Exception:
                 logger.debug("Failed to log aggregated window metrics", exc_info=True)
 
-    async def _submit_weights_if_ready(self, current_block: int, meta: Any) -> None:
+    async def _submit_weights_if_ready(
+        self, current_block: int, target_window: int, meta: Any
+    ) -> None:
         """Submit weights if interval has been reached.
 
         Args:
             current_block: Current block number
             meta: Metagraph instance
+            target_window: Target window to submit weights for
         """
         current_interval = int(current_block // WEIGHT_SUBMISSION_INTERVAL_BLOCKS)
 
@@ -566,6 +568,7 @@ class ValidationService:
                 f"Not enough windows for weight submission "
                 f"({self._windows_processed_since_start}/{WEIGHT_ROLLING_WINDOWS})"
             )
+            self._last_weights_interval_submitted = current_interval
             return
 
         # Aggregate metrics over rolling window
@@ -591,7 +594,7 @@ class ValidationService:
                 meta_hotkeys=list(meta.hotkeys),
                 meta_uids=list(meta.uids),
                 inference_counts=self._inference_counts,
-                target_window=current_block,
+                target_window=target_window,
                 availability_counts=self._availability_counts,
             )
 
@@ -624,7 +627,7 @@ class ValidationService:
             top_k = 5
             top_miners = sorted(non_zero_weights, key=lambda x: float(x[1]), reverse=True)[:top_k]
 
-            # Prepare human-readable lines
+            # Prepare human-readable lines for top miners
             lines: list[str] = []
             for rank, (hk, w) in enumerate(top_miners, start=1):
                 uid = uid_by_hotkey.get(hk)
@@ -644,6 +647,134 @@ class ValidationService:
                 },
                 "text",
             )
+
+            # Log active miners artifact
+            active_miners_lines: list[str] = []
+            for hk, _weight in non_zero_weights:
+                uid = uid_by_hotkey.get(hk)
+                ident = str(uid) if uid is not None else hk[:12]
+                active_miners_lines.append(f"UID {ident}")
+
+            await self._monitor.log_artifact(
+                "weights/submission/active_miners",
+                {
+                    "interval": current_interval,
+                    "block": current_block,
+                    "count": len(non_zero_weights),
+                    "text": "\n".join(active_miners_lines),
+                },
+                "text",
+            )
+
+            # Compute rollout statistics for top miners
+            top_miner_hotkeys = [hk for hk, _w in top_miners]
+            rollout_stats = {
+                "total_rollouts": [],
+                "unique_rollouts": [],
+                "successful_rollouts": [],
+            }
+
+            for hk in top_miner_hotkeys:
+                # Aggregate metrics across all windows for this hotkey
+                total_rollouts = 0
+                total_unique = 0
+                total_successful = 0
+
+                for _window_start, metrics in self._inference_counts[hk].items():
+                    total_rollouts += metrics.get("total", 0)
+                    total_unique += metrics.get("estimated_unique", 0)
+                    total_successful += metrics.get("estimated_successful", 0)
+
+                rollout_stats["total_rollouts"].append(total_rollouts)
+                rollout_stats["unique_rollouts"].append(total_unique)
+                rollout_stats["successful_rollouts"].append(total_successful)
+
+            # Calculate averages
+            avg_total = (
+                sum(rollout_stats["total_rollouts"]) / len(rollout_stats["total_rollouts"])
+                if rollout_stats["total_rollouts"]
+                else 0.0
+            )
+            avg_unique = (
+                sum(rollout_stats["unique_rollouts"]) / len(rollout_stats["unique_rollouts"])
+                if rollout_stats["unique_rollouts"]
+                else 0.0
+            )
+            avg_successful = (
+                sum(rollout_stats["successful_rollouts"])
+                / len(rollout_stats["successful_rollouts"])
+                if rollout_stats["successful_rollouts"]
+                else 0.0
+            )
+
+            # Prepare detailed rollout lines for each top miner
+            total_rollout_lines: list[str] = []
+            unique_rollout_lines: list[str] = []
+            successful_rollout_lines: list[str] = []
+
+            for i, hk in enumerate(top_miner_hotkeys):
+                uid = uid_by_hotkey.get(hk)
+                ident = str(uid) if uid is not None else hk[:12]
+                total_rollout_lines.append(f"{ident}: {rollout_stats['total_rollouts'][i]}")
+                unique_rollout_lines.append(f"{ident}: {rollout_stats['unique_rollouts'][i]}")
+                successful_rollout_lines.append(
+                    f"{ident}: {rollout_stats['successful_rollouts'][i]}"
+                )
+
+            # Log average rollouts artifact
+            await self._monitor.log_artifact(
+                "weights/submission/top_miners_avg_rollouts",
+                {
+                    "interval": current_interval,
+                    "block": current_block,
+                    "top_k": top_k,
+                    "avg_total_rollouts": avg_total,
+                    "text": (
+                        f"Average total rollouts for top {top_k} miners: {avg_total:.1f}\n\n"
+                        + "\n".join(total_rollout_lines)
+                    ),
+                },
+                "text",
+            )
+
+            # Log average unique rollouts artifact
+            await self._monitor.log_artifact(
+                "weights/submission/top_miners_avg_unique",
+                {
+                    "interval": current_interval,
+                    "block": current_block,
+                    "top_k": top_k,
+                    "avg_unique_rollouts": avg_unique,
+                    "text": (
+                        f"Average unique rollouts for top {top_k} miners: {avg_unique:.1f}\n\n"
+                        + "\n".join(unique_rollout_lines)
+                    ),
+                },
+                "text",
+            )
+
+            # Log average successful rollouts artifact
+            await self._monitor.log_artifact(
+                "weights/submission/top_miners_avg_successful",
+                {
+                    "interval": current_interval,
+                    "block": current_block,
+                    "top_k": top_k,
+                    "avg_successful_rollouts": avg_successful,
+                    "text": (
+                        f"Average successful rollouts for top {top_k} miners: {avg_successful:.1f}\n\n"
+                        + "\n".join(successful_rollout_lines)
+                    ),
+                },
+                "text",
+            )
+
+            # Log aggregate rollout statistics across all evaluated miners
+            await self._log_aggregate_rollout_stats(non_zero_weights)
+
+            # Compute per-UID rollout statistics over the rolling window (12 windows)
+            # For all miners with non-zero weight
+            await self._log_per_uid_rollout_stats(non_zero_weights, uid_by_hotkey)
 
     def _compute_target_validation_window(self, current_block: int) -> int:
         """Compute the target window for validation based on current block.
@@ -754,6 +885,169 @@ class ValidationService:
 
         eff_rate = (selected / active) if active else 0.0
         await self._monitor.log_gauge("miner_sampling/check_rate", eff_rate)
+
+    async def _log_aggregate_rollout_stats(self, non_zero_weights: list[tuple[str, float]]) -> None:
+        """Log aggregate rollout statistics across all evaluated miners.
+
+        Computes and logs 9 aggregate metrics under weights/aggregate_stats/:
+        - total_rollouts_avg/min/max
+        - unique_rollouts_avg/min/max
+        - successful_rollouts_avg/min/max
+
+        These show overall statistics across all miners over the 12-window rolling period.
+
+        Args:
+            non_zero_weights: List of (hotkey, weight) tuples for miners with non-zero weight
+        """
+        if not self._monitor:
+            return
+
+        # Collect per-miner aggregate rollouts
+        miner_total_rollouts: list[int] = []
+        miner_unique_rollouts: list[int] = []
+        miner_successful_rollouts: list[int] = []
+
+        for hk, _weight in non_zero_weights:
+            # Aggregate metrics across all windows for this hotkey
+            total_rollouts = 0
+            total_unique = 0
+            total_successful = 0
+
+            for _window_start, metrics in self._inference_counts[hk].items():
+                total_rollouts += metrics.get("total", 0)
+                total_unique += metrics.get("estimated_unique", 0)
+                total_successful += metrics.get("estimated_successful", 0)
+
+            miner_total_rollouts.append(total_rollouts)
+            miner_unique_rollouts.append(total_unique)
+            miner_successful_rollouts.append(total_successful)
+
+        # Compute aggregate statistics for total rollouts
+        if miner_total_rollouts:
+            total_avg = sum(miner_total_rollouts) / len(miner_total_rollouts)
+            total_min = min(miner_total_rollouts)
+            total_max = max(miner_total_rollouts)
+
+            await self._monitor.log_gauge("weights/aggregate_stats/total_rollouts_avg", total_avg)
+            await self._monitor.log_gauge(
+                "weights/aggregate_stats/total_rollouts_min", float(total_min)
+            )
+            await self._monitor.log_gauge(
+                "weights/aggregate_stats/total_rollouts_max", float(total_max)
+            )
+
+        # Compute aggregate statistics for unique rollouts
+        if miner_unique_rollouts:
+            unique_avg = sum(miner_unique_rollouts) / len(miner_unique_rollouts)
+            unique_min = min(miner_unique_rollouts)
+            unique_max = max(miner_unique_rollouts)
+
+            await self._monitor.log_gauge("weights/aggregate_stats/unique_rollouts_avg", unique_avg)
+            await self._monitor.log_gauge(
+                "weights/aggregate_stats/unique_rollouts_min", float(unique_min)
+            )
+            await self._monitor.log_gauge(
+                "weights/aggregate_stats/unique_rollouts_max", float(unique_max)
+            )
+
+        # Compute aggregate statistics for successful rollouts
+        if miner_successful_rollouts:
+            successful_avg = sum(miner_successful_rollouts) / len(miner_successful_rollouts)
+            successful_min = min(miner_successful_rollouts)
+            successful_max = max(miner_successful_rollouts)
+
+            await self._monitor.log_gauge(
+                "weights/aggregate_stats/successful_rollouts_avg", successful_avg
+            )
+            await self._monitor.log_gauge(
+                "weights/aggregate_stats/successful_rollouts_min", float(successful_min)
+            )
+            await self._monitor.log_gauge(
+                "weights/aggregate_stats/successful_rollouts_max", float(successful_max)
+            )
+
+    async def _log_per_uid_rollout_stats(
+        self, non_zero_weights: list[tuple[str, float]], uid_by_hotkey: dict[str, int]
+    ) -> None:
+        """Log per-UID rollout statistics over the rolling window.
+
+        For each miner with non-zero weight, computes and logs:
+        - total_rollouts_avg/min/max
+        - unique_rollouts_avg/min/max
+        - successful_rollouts_avg/min/max
+        - windows_count
+
+        Metrics are logged under {uid_str}/ namespace for per-UID tracking.
+
+        Args:
+            non_zero_weights: List of (hotkey, weight) tuples for miners with non-zero weight
+            uid_by_hotkey: Mapping of hotkey to UID
+        """
+        if not self._monitor:
+            return
+
+        for hk, _weight in non_zero_weights:
+            uid = uid_by_hotkey.get(hk)
+            if uid is None:
+                continue  # Skip if UID not found
+
+            uid_str = str(uid)
+
+            # Collect rollout counts per window for this miner
+            window_total_rollouts: list[int] = []
+            window_unique_rollouts: list[int] = []
+            window_successful_rollouts: list[int] = []
+
+            for _window_start, metrics in self._inference_counts[hk].items():
+                window_total_rollouts.append(metrics.get("total", 0))
+                window_unique_rollouts.append(metrics.get("estimated_unique", 0))
+                window_successful_rollouts.append(metrics.get("estimated_successful", 0))
+
+            # Compute statistics if we have data
+            if window_total_rollouts:
+                # Total rollouts statistics
+                total_avg = sum(window_total_rollouts) / len(window_total_rollouts)
+                total_min = min(window_total_rollouts)
+                total_max = max(window_total_rollouts)
+
+                await self._monitor.log_gauge(f"{uid_str}/total_rollouts_avg", total_avg)
+                await self._monitor.log_gauge(f"{uid_str}/total_rollouts_min", float(total_min))
+                await self._monitor.log_gauge(f"{uid_str}/total_rollouts_max", float(total_max))
+
+            if window_unique_rollouts:
+                # Unique rollouts statistics
+                unique_avg = sum(window_unique_rollouts) / len(window_unique_rollouts)
+                unique_min = min(window_unique_rollouts)
+                unique_max = max(window_unique_rollouts)
+
+                await self._monitor.log_gauge(f"{uid_str}/unique_rollouts_avg", unique_avg)
+                await self._monitor.log_gauge(f"{uid_str}/unique_rollouts_min", float(unique_min))
+                await self._monitor.log_gauge(f"{uid_str}/unique_rollouts_max", float(unique_max))
+
+            if window_successful_rollouts:
+                # Successful rollouts statistics
+                successful_avg = sum(window_successful_rollouts) / len(window_successful_rollouts)
+                successful_min = min(window_successful_rollouts)
+                successful_max = max(window_successful_rollouts)
+
+                await self._monitor.log_gauge(
+                    f"{uid_str}/successful_rollouts_avg",
+                    successful_avg,
+                )
+                await self._monitor.log_gauge(
+                    f"{uid_str}/successful_rollouts_min",
+                    float(successful_min),
+                )
+                await self._monitor.log_gauge(
+                    f"{uid_str}/successful_rollouts_max",
+                    float(successful_max),
+                )
+
+            # Log window count for this miner (useful for context)
+            await self._monitor.log_gauge(
+                f"{uid_str}/windows_count",
+                float(len(window_total_rollouts)),
+            )
 
     def cleanup(self) -> None:
         """Clean up resources.
