@@ -206,7 +206,12 @@ class MinerValidator:
                 miner_hotkey, uid, total_inferences, validation_state, monitor
             )
 
-        # Step 7: Compute final metrics and return
+        # Step 7: Log aggregated distribution metrics to W&B
+        self._log_aggregated_distribution_metrics(
+            uid=uid, miner_hotkey=miner_hotkey, validation_state=validation_state
+        )
+
+        # Step 8: Compute final metrics and return
         return await self._create_success_result(
             miner_hotkey=miner_hotkey,
             uid=uid,
@@ -387,6 +392,8 @@ class MinerValidator:
             "pr_invalid_sig": 0,
             "pr_invalid_proof": 0,
             "pr_processing_err": 0,
+            # Distribution metrics accumulation
+            "distribution_samples": [],  # List of (metrics, initial_metrics, reasons) tuples
         }
 
         total_planned_checks = len(indices_to_check)
@@ -459,6 +466,7 @@ class MinerValidator:
                     commit=commit_data,
                     prover_address=miner_hotkey,
                     challenge_randomness=window_rand,
+                    miner_uid=uid_str,
                     model=model,
                     tokenizer=tokenizer,
                     device=model.device,
@@ -471,6 +479,16 @@ class MinerValidator:
                     is_valid, checks = self._sat_pipeline.validate(ctx)
 
                 state["pr_total"] += 1
+
+                # Collect distribution metrics from context metadata
+                if "distribution_metrics" in ctx.metadata:
+                    state["distribution_samples"].append(
+                        (
+                            ctx.metadata.get("distribution_metrics"),
+                            ctx.metadata.get("distribution_initial_metrics"),
+                            ctx.metadata.get("distribution_reasons"),
+                        )
+                    )
 
                 # Check hard and soft validation results
                 if not self._process_validation_results(
@@ -760,6 +778,77 @@ class MinerValidator:
             logger.debug(f"Failed to hash rollout: {e}")
 
         return unique_rollouts
+
+    def _log_aggregated_distribution_metrics(
+        self, uid: int | None, miner_hotkey: str, validation_state: dict
+    ) -> None:
+        """Compute and log aggregated distribution metrics to W&B for this miner.
+
+        Aggregates across all validated rollouts in the window:
+        - Mean/median/std of distribution metrics
+        - Trigger rates for each check type
+        - Overall suspicious rollout percentage
+        """
+        try:
+            import wandb  # type: ignore
+
+            if getattr(wandb, "run", None) is None:
+                return
+
+            samples = validation_state.get("distribution_samples", [])
+            if not samples:
+                return
+
+            uid_str = str(uid) if uid is not None else f"{miner_hotkey[:12]}..."
+
+            # Separate metrics, initial_metrics, and reasons
+            metrics_list = [s[0] for s in samples if s[0] is not None]
+            initial_list = [s[1] for s in samples if s[1] is not None]
+            reasons_list = [s[2] for s in samples if s[2] is not None]
+
+            if not metrics_list:
+                return
+
+            # Aggregate full-sequence metrics
+            import numpy as np
+
+            agg_data: dict[str, float] = {}
+
+            for key in ["mean", "median", "q10", "min", "bc", "low_frac", "high_frac", "mid_frac"]:
+                values = [m.get(key, 0.0) for m in metrics_list if key in m]
+                if values:
+                    agg_data[f"{uid_str}/distribution/avg_{key}"] = float(np.mean(values))
+                    agg_data[f"{uid_str}/distribution/std_{key}"] = float(np.std(values))
+
+            # Aggregate initial-window metrics
+            if initial_list:
+                for key in ["q10", "bc", "median", "mean", "min"]:
+                    values = [m.get(key, 0.0) for m in initial_list if key in m]
+                    if values:
+                        agg_data[f"{uid_str}/distribution/avg_init_{key}"] = float(np.mean(values))
+
+            # Compute trigger rates (% of rollouts that triggered each check)
+            n_samples = len(reasons_list)
+            if n_samples > 0:
+                trigger_keys = ["median_low", "min_low", "bimodal_full", "bimodal_initial"]
+                for trigger_key in trigger_keys:
+                    trigger_count = sum(1 for r in reasons_list if r and r.get(trigger_key, False))
+                    trigger_rate = float(trigger_count) / float(n_samples)
+                    agg_data[f"{uid_str}/distribution/trigger_rate_{trigger_key}"] = trigger_rate
+
+                # Overall triggered rate
+                any_triggered = sum(1 for r in reasons_list if r and any(r.values()))
+                overall_rate = float(any_triggered) / float(n_samples)
+                agg_data[f"{uid_str}/distribution/trigger_rate_overall"] = overall_rate
+
+            # Add sample count
+            agg_data[f"{uid_str}/distribution/n_rollouts"] = float(n_samples)
+
+            wandb.log(agg_data)
+
+        except Exception as e:
+            # Never fail validation on logging errors
+            logger.debug(f"Failed to log aggregated distribution metrics: {e}")
 
     def _validate_grpo_groups(self, rollout_groups: dict[str, list[dict]]) -> bool:
         """Validate GRPO group constraints.
