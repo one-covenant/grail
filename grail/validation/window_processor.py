@@ -186,8 +186,9 @@ class WindowProcessor:
                 processing_errors += pr_processing_err
 
             except Exception as e:
-                uid_str = str(uid_by_hotkey.get(miner_hotkey, miner_hotkey))
-                logger.warning(f"[window={window} uid={uid_str}] Error processing miner: {e}")
+                # Log the error with miner context (uid already set above)
+                with miner_log_context(uid, window):
+                    logger.warning(f"Error processing miner: {e}")
                 continue
 
         # Compute total valid rollouts
