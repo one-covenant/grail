@@ -469,15 +469,18 @@ class CopycatService:
             metrics[FAILURE_FLAG_KEY] = 1
 
             # Log gating with violation details
-            uid_str = str(uid_by_hotkey.get(cheater, cheater))
+            from ..logging_utils import miner_log_context
+
+            uid = uid_by_hotkey.get(cheater, cheater)
             scopes = {v.scope for v in violation_map.get(cheater, [])}
             ratios = ", ".join(f"{v.ratio:.3f}" for v in violation_map.get(cheater, []))
 
-            logger.warning(
-                f"[window={window} uid={uid_str}] Copycat gating applied "
-                f"(scopes={','.join(sorted(scopes)) if scopes else 'unknown'} "
-                f"ratios={ratios or 'n/a'})"
-            )
+            with miner_log_context(uid, window):
+                logger.warning(
+                    f"Copycat gating applied "
+                    f"(scopes={','.join(sorted(scopes)) if scopes else 'unknown'} "
+                    f"ratios={ratios or 'n/a'})"
+                )
 
     def filter_cheater_rollouts(
         self,
