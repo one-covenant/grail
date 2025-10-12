@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 MAX_SAMPLES_PER_MINER_THRESHOLD = 20  # If <= this many rollouts, check all
 MAX_SAMPLES_PER_MINER = 40  # If > this many rollouts, sample GRPO groups
 SAMPLE_RATE = 0.10  # Fraction of GRPO groups to spot-check
-STOCHASTIC_CHECK_FAILURE_THRESHOLD = 0.26  # Soft-failure fraction to gate wallet
+STOCHASTIC_CHECK_FAILURE_THRESHOLD = 0.51  # Soft-failure fraction to gate wallet
 GRPO_ADV_SUM_TOLERANCE = 0.01  # Sum of advantages should be ~0
 REWARD_REL_TOL = 0.02  # Relative tolerance on reward bounds
 REWARD_ABS_TOL = 1e-6  # Absolute tolerance on reward bounds
