@@ -86,7 +86,7 @@ class GRAILProofValidator(Validator):
 
         # Verify model/layer binding
         model_info = ctx.commit.get("model", {})
-        expected_model = ctx.model.name_or_path
+        expected_model = getattr(ctx.model, "name_or_path", None)
         if model_info.get("name") != expected_model:
             logger.debug(f"Model mismatch: expected {expected_model}, got {model_info.get('name')}")
             ctx.checks[self.check_name] = False
@@ -125,7 +125,7 @@ class GRAILProofValidator(Validator):
 
         idxs = indices_from_root(tokens, ctx.challenge_randomness, seq_len, CHALLENGE_K)
 
-        # Run model inference
+        # Run model inference with hidden states
         full_ids = torch.tensor(tokens, dtype=torch.long, device=ctx.device).unsqueeze(0)
         try:
             with torch.inference_mode():
@@ -139,9 +139,8 @@ class GRAILProofValidator(Validator):
 
         h_layer = outs.hidden_states[LAYER_INDEX][0]
 
-        # Cache logits for termination validator
-        if outs.logits.size(1) >= 2:
-            ctx.cached_logits = outs.logits[0, -2, :].detach().to("cpu")
+        # Cache full logits for downstream validators (termination + distribution)
+        ctx.cached_logits = outs.logits[0].detach().to("cpu")
 
         # Verify proof commitments at challenged indices
         failed_checks = []

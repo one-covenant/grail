@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from .proof_test_utils import (
+from tests.proof_test_utils import (
     create_proof,
     hash_hex,
     load_model_and_tokenizer,
@@ -36,7 +36,7 @@ def device() -> str:
 @pytest.fixture(scope="module")
 def prompt() -> str:
     """Generate realistic SAT prompt for quantized model tests."""
-    from .proof_test_utils import generate_realistic_sat_prompt
+    from tests.proof_test_utils import generate_realistic_sat_prompt
 
     # Use raw prompt (no tokenizer) since we test different quantizations
     return generate_realistic_sat_prompt("test_quantized", 0.4)

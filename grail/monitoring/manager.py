@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from contextlib import contextmanager
 from typing import Any
 
@@ -23,9 +24,9 @@ logger = logging.getLogger(__name__)
 class MonitoringManager:
     """High-level interface for monitoring operations.
 
-    The MonitoringManager provides a simplified API for logging metrics and artifacts.
-    It handles buffering, batching, error recovery, and provides both sync and async
-    interfaces for different use cases.
+    The MonitoringManager provides a simplified API for logging metrics and
+    artifacts. It handles buffering, batching, error recovery, and provides
+    both sync and async interfaces for different use cases.
     """
 
     def __init__(self, backend: MonitoringBackend | None = None):
@@ -214,8 +215,24 @@ class MonitoringManager:
             yield
             return
 
-        with self.backend.timer(name, tags):
+        start_time = time.time()
+        try:
             yield
+        finally:
+            duration = time.time() - start_time
+            metric = MetricData(
+                name=f"{name}_duration",
+                value=duration,
+                metric_type=MetricType.TIMER,
+                tags=tags,
+                block_number=self._current_block,
+                window_number=self._current_window,
+            )
+            # Schedule async logging without blocking the caller
+            try:
+                asyncio.create_task(self.backend.log_metric(metric))
+            except Exception as e:
+                logger.warning(f"Failed to schedule timer metric {name}: {e}")
 
     async def log_artifact(self, name: str, data: Any, artifact_type: str) -> None:
         """Log an artifact.

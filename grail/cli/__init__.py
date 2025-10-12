@@ -63,6 +63,9 @@ def configure_logging(verbosity: int) -> None:
     ]:
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
+    # Add miner prefix filter for validation context (BEFORE creating handlers)
+    from ..logging_utils import MinerPrefixFilter
+
     console_handler = RichHandler(
         console=console,
         rich_tracebacks=True,
@@ -76,6 +79,9 @@ def configure_logging(verbosity: int) -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     console_handler.setFormatter(formatter)
+
+    # Add the miner prefix filter to the console handler
+    console_handler.addFilter(MinerPrefixFilter())
 
     root = logging.getLogger()
     root.handlers.clear()
@@ -127,6 +133,10 @@ def configure_logging(verbosity: int) -> None:
                 encoding="utf-8",
             )
             rotating_handler.setFormatter(formatter)
+
+            # Add the miner prefix filter to the file handler too
+            rotating_handler.addFilter(MinerPrefixFilter())
+
             root.addHandler(rotating_handler)
             msg_parts = [
                 "✅ File logging enabled (rotating):",
