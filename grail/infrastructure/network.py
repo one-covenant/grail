@@ -139,14 +139,20 @@ class ResilientSubtensor:
         if retry > 0:
             logger.info("✅ %s() succeeded on attempt %d", method_name, retry + 1)
 
-    async def _handle_timeout(
-        self, method_name: str, retry: int, retries: int, backoff_base: float
+    async def _handle_retry_backoff(
+        self,
+        reason: str,
+        method_name: str,
+        retry: int,
+        retries: int,
+        backoff_base: float,
     ) -> None:
-        """Handle timeout during retry attempt."""
+        """Handle retry backoff for timeout or cancellation events."""
         if retry < retries - 1:
             wait_time = backoff_base * (2**retry)
             logger.error(
-                "⏱️ Timeout in %s (attempt %d/%d), retrying in %ds",
+                "⏱️ %s in %s (attempt %d/%d), retrying in %ds",
+                reason,
                 method_name,
                 retry + 1,
                 retries,
@@ -195,7 +201,33 @@ class ResilientSubtensor:
                 self._handle_success(method_name, args, result, retry)
                 return result
             except asyncio.TimeoutError:
-                await self._handle_timeout(method_name, retry, retries, backoff_base)
+                await self._handle_retry_backoff(
+                    "Timeout",
+                    method_name,
+                    retry,
+                    retries,
+                    backoff_base,
+                )
+            except asyncio.CancelledError:
+                # If our task is actually being cancelled, propagate.
+                task = asyncio.current_task()
+                cancelling_count = 0
+                if task is not None and hasattr(task, "cancelling"):
+                    try:
+                        # Python 3.11+: number of cancellation requests
+                        cancelling_count = task.cancelling()  # type: ignore[attr-defined]
+                    except Exception:
+                        cancelling_count = 0
+                if cancelling_count > 0:
+                    raise
+                # Otherwise, treat as transient cancellation from underlying client
+                await self._handle_retry_backoff(
+                    "Cancellation",
+                    method_name,
+                    retry,
+                    retries,
+                    backoff_base,
+                )
 
         # All retries exhausted
         return self._handle_all_retries_failed(method_name, args, retries)
