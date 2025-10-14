@@ -82,6 +82,8 @@ class MinerNeuron(BaseNeuron):
             chain_manager = GrailChainManager(config, wallet, metagraph, subtensor, credentials)
             await chain_manager.initialize()
             logger.info("✅ Initialized chain manager and committed read credentials")
+            # Ensure background chain worker stops on shutdown
+            self.register_shutdown_callback(chain_manager.stop)
             self.heartbeat()
 
             # Use trainer UID's committed read credentials for checkpoints
@@ -113,7 +115,7 @@ class MinerNeuron(BaseNeuron):
                 uid = None
                 if subtensor_for_uid is not None:
                     uid = await get_own_uid_on_subnet(
-                        subtensor_for_uid, 81, wallet.hotkey.ss58_address
+                        subtensor_for_uid, netuid, wallet.hotkey.ss58_address
                     )
                     self.heartbeat()
                 run_name = f"miner-{uid}" if uid is not None else f"mining_{wallet.name}"

@@ -21,7 +21,6 @@ from ..infrastructure.chain import GrailChainManager
 from ..infrastructure.checkpoints import CheckpointManager
 from ..infrastructure.credentials import BucketCredentials
 from ..logging_utils import dump_asyncio_stacks
-from ..mining.rollout_generator import REASONING_START, SYSTEM_PROMPT
 from ..model.provider import (
     clear_model_and_tokenizer,
     get_model,
@@ -38,6 +37,7 @@ from ..shared.constants import (
     TRAINER_UID,
     WINDOW_LENGTH,
 )
+from ..shared.prompt_constants import REASONING_START, SYSTEM_PROMPT
 from .copycat_service import COPYCAT_SERVICE
 from .miner_validator import MinerValidator
 from .pipeline import ValidationPipeline

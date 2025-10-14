@@ -16,7 +16,8 @@ import torch
 import typer
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from ..environments import SATRolloutGenerator, generate_sat_problem
+from ..environments.loop import AgentEnvLoop
+from ..environments.sat_env import SATEnv, generate_sat_problem
 from ..grail import derive_canonical_sat
 from ..infrastructure.comms import sink_window_inferences
 from ..infrastructure.drand import get_drand_beacon
@@ -250,27 +251,6 @@ def generate_sat_problem_for_group(
     sat_seed_base = f"{wallet.hotkey.ss58_address}-{window_block_hash}-{base_nonce}"
     sat_problem = generate_sat_problem(sat_seed_base, difficulty)
     return sat_problem, sat_seed_base
-
-
-def create_rollout_generator(
-    model: AutoModelForCausalLM, tokenizer: AutoTokenizer, device: Any
-) -> SATRolloutGenerator:
-    """Create a GRPO rollout generator configured for the given model.
-
-    Args:
-        model: Loaded language model
-        tokenizer: Loaded tokenizer
-        device: Torch device (cuda/cpu)
-
-    Returns:
-        SATRolloutGenerator instance
-    """
-    return SATRolloutGenerator(
-        model,
-        tokenizer,
-        device,
-        rollouts_per_problem=ROLLOUTS_PER_PROBLEM,
-    )
 
 
 async def maybe_log_debug_sample(
@@ -558,7 +538,7 @@ async def generate_rollouts_for_window(
     problem_count = 0
 
     device = model.device
-    generator = create_rollout_generator(model, tokenizer, device)
+    loop = AgentEnvLoop(model, tokenizer, device)
 
     while True:
         current_block = await subtensor.get_current_block()
@@ -617,13 +597,14 @@ async def generate_rollouts_for_window(
                 len(sat_problem.clauses),
             )
 
-            # Run blocking model inference in thread pool to avoid blocking event loop
-            # This allows heartbeat keeper and other async tasks to continue running
+            # Generate GRPO rollouts using AgentEnvLoop
             grpo_rollouts = await asyncio.to_thread(
-                generator.generate_grpo_rollouts,
-                sat_problem,
+                loop.run_grpo_group,
+                lambda: SATEnv(),
+                ROLLOUTS_PER_PROBLEM,
                 combined_randomness,
                 wallet,
+                seed=seed,
             )
 
             if grpo_rollouts:

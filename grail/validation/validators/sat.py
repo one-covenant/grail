@@ -5,9 +5,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ...environments import generate_sat_problem
-from ...environments.sat import SATParser, create_sat_prompt
-from ...mining.rollout_generator import REASONING_START, SYSTEM_PROMPT
+from ...environments.sat_env import (
+    SATParser,
+    create_sat_prompt,
+    generate_sat_problem,
+)
+from ...shared.prompt_constants import REASONING_START, SYSTEM_PROMPT
 from ..base import Validator
 from ..context import ValidationContext
 

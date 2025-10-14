@@ -54,7 +54,7 @@ class BaseNeuron:
         # Registered cleanup callbacks to run during shutdown
         self._shutdown_callbacks: list[Callable[[], None]] = []
 
-        # Optional window-tracking primitives (set by subclasses if needed)
+        # Optional window-tracking primitives (set by subclasses)
         self.window_changed: asyncio.Event | None = None  # noqa: UP045
         self._notify_loop: asyncio.AbstractEventLoop | None = None  # noqa: UP045
         self.current_block: int = 0
@@ -129,7 +129,7 @@ class BaseNeuron:
         self._shutdown_callbacks.append(fn)
 
     def start_watchdog(self, timeout_seconds: int = 600, grace_seconds: int = 10) -> None:
-        """Start a background watchdog task that exits on prolonged inactivity.
+        """Start a background watchdog task on prolonged inactivity.
 
         Args:
             timeout_seconds: Max allowed time without heartbeat
@@ -220,7 +220,7 @@ class BaseNeuron:
 
     def _make_shutdown_handler(self, sig: signal.Signals) -> Callable[[], None]:
         def _handler() -> None:
-            # Log receipt of an OS signal then schedule asynchronous teardown
+            # Log receipt of OS signal then schedule async teardown
             try:
                 logger.warning("Received OS signal: %s", sig.name)
             except Exception:
