@@ -54,6 +54,11 @@ services:
       - GRAIL_METRIC_BUFFER_SIZE=${GRAIL_METRIC_BUFFER_SIZE}
       - GRAIL_METRIC_FLUSH_INTERVAL=${GRAIL_METRIC_FLUSH_INTERVAL}
       
+      # Network timeout and retry configuration
+      - BT_CALL_TIMEOUT=${BT_CALL_TIMEOUT:-15.0}
+      - BT_CALL_RETRIES=${BT_CALL_RETRIES:-3}
+      - BT_CALL_BACKOFF=${BT_CALL_BACKOFF:-5.0}
+      
       # Logging configuration
       - PROMTAIL_ENABLE=${PROMTAIL_ENABLE:-true}
       - GRAIL_LOG_FILE=${GRAIL_LOG_FILE:-/var/log/grail/grail.log}
