@@ -14,13 +14,13 @@ import pytest
 
 from grail.infrastructure.checkpoints import CheckpointManager
 from grail.scoring import WeightComputer
-from grail.validation import ValidationService, create_sat_validation_pipeline
+from grail.validation import ValidationService, create_env_validation_pipeline
 
 
 @pytest.fixture
 def validation_service(mock_wallet, mock_credentials, mock_monitor):
     """Create a ValidationService instance for testing."""
-    sat_pipeline = create_sat_validation_pipeline()
+    validation_pipeline = create_env_validation_pipeline()
     weight_computer = WeightComputer(
         rolling_windows=12,
         window_length=20,
@@ -37,11 +37,10 @@ def validation_service(mock_wallet, mock_credentials, mock_monitor):
     return ValidationService(
         wallet=mock_wallet,
         netuid=42,
-        sat_pipeline=sat_pipeline,
+        validation_pipeline=validation_pipeline,
         weight_computer=weight_computer,
         credentials=mock_credentials,
         checkpoint_manager=checkpoint_manager,
-        sat_reward_bounds=(0.0, 1.0),
         monitor=mock_monitor,
     )
 
