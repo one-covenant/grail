@@ -161,6 +161,7 @@ class AgentEnvLoop:
         for _ in range(count):
             env = env_factory()
             rollout = self.run_single_turn(env, randomness_hex, wallet, seed=seed)
+            logger.debug("Prompt length: %d", rollout.prompt_length)
             rollouts.append(rollout)
 
         advantages = self._compute_advantages([r.reward for r in rollouts])
