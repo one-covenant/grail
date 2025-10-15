@@ -160,14 +160,11 @@ def verify_commit_signature(commit: dict, wallet_address: str) -> bool:
         return False
 
 
-def derive_canonical_sat(
-    wallet_addr: str, window_hash: str, problem_index: int
-) -> tuple[str, float]:
-    """Derive canonical SAT seed and difficulty for miner/window/problem index.
+def derive_env_seed(wallet_addr: str, window_hash: str, problem_index: int) -> int:
+    """Derive canonical environment seed for miner/window/problem index.
 
-    The seed binds problems to the miner hotkey and the window block hash.
-    The difficulty is sampled ~uniformly in [0.3, 0.9] from a PRF of the
-    same material to eliminate miner control while keeping a broad spread.
+    The seed binds problems to the miner hotkey and the window block hash,
+    ensuring deterministic problem generation that validators can reproduce.
 
     Args:
         wallet_addr: Miner's SS58 wallet address
@@ -175,7 +172,7 @@ def derive_canonical_sat(
         problem_index: Problem index within the window
 
     Returns:
-        Tuple of (seed_hex, difficulty_float)
+        Integer seed for environment reset (derived from first 8 hex chars)
     """
     try:
         idx = int(problem_index)
@@ -183,8 +180,6 @@ def derive_canonical_sat(
         idx = 0
 
     material = f"{wallet_addr}:{window_hash}:{idx}".encode()
-    seed = hashlib.sha256(b"seed|" + material).hexdigest()
-    diff_digest = hashlib.sha256(b"diff|" + material).digest()
-    u = int.from_bytes(diff_digest[:8], "big") / float(1 << 64)
-    difficulty = 0.3 + 0.6 * u
-    return seed, float(difficulty)
+    seed_hex = hashlib.sha256(b"seed|" + material).hexdigest()
+    # Return int seed for env.reset(), using first 8 hex chars
+    return int(seed_hex[:8], 16)

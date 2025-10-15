@@ -16,6 +16,7 @@ Types:
 """
 
 from ..shared.digest import compute_completion_digest
+from .context import ValidationContext
 from .copycat_service import (
     COPYCAT_INTERVAL_THRESHOLD,
     COPYCAT_SERVICE,
@@ -27,13 +28,13 @@ from .copycat_service import (
 from .miner_validator import MinerValidator
 from .pipeline import (
     ValidationPipeline,
-    create_sat_validation_pipeline,
+    create_env_validation_pipeline,
     get_hard_check_keys,
     get_soft_check_keys,
 )
 from .sampling import MinerSampler
 from .service import ValidationService
-from .types import MinerResults, ValidationContext, WindowResults
+from .types import MinerResults, WindowResults
 from .window_processor import WindowProcessor
 
 __all__ = [
@@ -46,7 +47,7 @@ __all__ = [
     "COPYCAT_SERVICE",
     # Pipeline
     "ValidationPipeline",
-    "create_sat_validation_pipeline",
+    "create_env_validation_pipeline",
     "get_hard_check_keys",
     "get_soft_check_keys",
     # Copycat detection

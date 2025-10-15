@@ -105,9 +105,18 @@ SAMPLING_INITIAL_WINDOW_STEPS = 50
 # splitting into k identities yields k^(1-p) * s^p < s^p.
 SUPERLINEAR_EXPONENT = 4.0
 
+# Reward comparison tolerances (used by RewardValidator)
+REWARD_REL_TOL = 0.02
+REWARD_ABS_TOL = 1e-6
+
 # ────────────────  ROLLOUTS PER PROBLEM  ────────────────
 
 ROLLOUTS_PER_PROBLEM = int(os.getenv("GRAIL_ROLLOUTS_PER_PROBLEM", "4"))
+
+# ────────────────  ENVIRONMENT CONFIGURATION  ────────────────
+
+# Current environment ID (validators use this constant, never trust miner data)
+CURRENT_ENV_ID = "sat"
 
 # ────────────────  EMISSION BURN MECHANISM  ────────────────
 

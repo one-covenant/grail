@@ -21,7 +21,6 @@ from ..infrastructure.chain import GrailChainManager
 from ..infrastructure.checkpoints import CheckpointManager
 from ..infrastructure.credentials import BucketCredentials
 from ..logging_utils import dump_asyncio_stacks
-from ..mining.rollout_generator import REASONING_START, SYSTEM_PROMPT
 from ..model.provider import (
     clear_model_and_tokenizer,
     get_model,
@@ -38,6 +37,7 @@ from ..shared.constants import (
     TRAINER_UID,
     WINDOW_LENGTH,
 )
+from ..shared.prompt_constants import REASONING_START, SYSTEM_PROMPT
 from .copycat_service import COPYCAT_SERVICE
 from .miner_validator import MinerValidator
 from .pipeline import ValidationPipeline
@@ -75,11 +75,10 @@ class ValidationService:
         self,
         wallet: bt.wallet,
         netuid: int,
-        sat_pipeline: ValidationPipeline,
+        validation_pipeline: ValidationPipeline,
         weight_computer: WeightComputer,
         credentials: BucketCredentials,
         checkpoint_manager: CheckpointManager,
-        sat_reward_bounds: tuple[float, float],
         monitor: Any | None = None,
     ):
         """Initialize validation service.
@@ -87,20 +86,18 @@ class ValidationService:
         Args:
             wallet: Validator wallet for signing transactions
             netuid: Network UID for the subnet
-            sat_pipeline: SAT validation pipeline for rollout verification
+            validation_pipeline: Validation pipeline for rollout verification
             weight_computer: Weight computation engine
             credentials: Object storage credentials for rollout access
             checkpoint_manager: Checkpoint manager for model downloads
-            sat_reward_bounds: (low, high) bounds for reward validation
             monitor: Optional monitoring client for metrics
         """
         self._wallet = wallet
         self._netuid = netuid
-        self._sat_pipeline = sat_pipeline
+        self._validation_pipeline = validation_pipeline
         self._weight_computer = weight_computer
         self._credentials = credentials
         self._checkpoint_manager = checkpoint_manager
-        self._sat_reward_bounds = sat_reward_bounds
         self._monitor = monitor
 
         # Initialized during setup
@@ -293,10 +290,8 @@ class ValidationService:
         )
 
         # Miner validator
-        sat_reward_low, sat_reward_high = self._sat_reward_bounds
         self._miner_validator = MinerValidator(
-            sat_pipeline=self._sat_pipeline,
-            sat_reward_bounds=(sat_reward_low, sat_reward_high),
+            pipeline=self._validation_pipeline,
             text_log_limit=5,
         )
 
@@ -381,6 +376,23 @@ class ValidationService:
                         str(checkpoint_path), chat_template=chat_template
                     )
                     self._current_checkpoint_id = str(checkpoint_path)
+
+                # Log tokenizer version information for debugging
+                try:
+                    import tokenizers  # type: ignore
+                    import transformers
+
+                    logger.info(
+                        "VALIDATOR TOKENIZER INFO: transformers=%s, "
+                        "tokenizers=%s, name_or_path=%s, checkpoint=%s",
+                        transformers.__version__,
+                        tokenizers.__version__,
+                        getattr(self._tokenizer, "name_or_path", "unknown"),
+                        str(checkpoint_path),
+                    )
+                except Exception as e:
+                    logger.debug("Failed to log tokenizer version info: %s", e)
+
                 return True
             except Exception:
                 logger.exception(f"Failed to load checkpoint for window {target_window}")

@@ -93,24 +93,20 @@ class ValidationContext:
         wallet: Validator wallet for signing
         model: Language model for validation
         tokenizer: Tokenizer for decoding
-        sat_pipeline: SAT validation pipeline
+        validation_pipeline: Environment-agnostic validation pipeline
         credentials: Object storage credentials
         chain_manager: Chain manager for miner bucket credentials
         monitor: Optional monitoring client
         subtensor: Async subtensor instance
         uid_by_hotkey: Mapping of hotkey to UID for logging
-        sat_reward_low: Lower bound for SAT reward sanity checks
-        sat_reward_high: Upper bound for SAT reward sanity checks
     """
 
     wallet: Any  # bt.wallet
     model: Any  # AutoModelForCausalLM
     tokenizer: Any  # AutoTokenizer
-    sat_pipeline: Any  # ValidationPipeline
+    validation_pipeline: Any  # ValidationPipeline
     credentials: Any
     chain_manager: Any  # GrailChainManager
     monitor: Any | None
     subtensor: Any  # bt.subtensor
     uid_by_hotkey: dict[str, int]
-    sat_reward_low: float
-    sat_reward_high: float

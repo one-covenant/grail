@@ -13,7 +13,7 @@ import torch
 from transformers.modeling_utils import PreTrainedModel
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
-from grail.environments.sat import create_sat_prompt, generate_sat_problem
+from grail.environments.sat_env import create_sat_prompt, generate_sat_problem
 from grail.protocol.crypto import indices_from_root
 from grail.protocol.grail_verifier import GRAILVerifier
 from grail.shared.constants import (
@@ -242,11 +242,11 @@ def generate_realistic_sat_prompt(
         return base_prompt
 
     # Apply production chat template and system prompt
-    from grail.mining.rollout_generator import (
+    from grail.shared.chat_templates import build_qwen_chat_template
+    from grail.shared.prompt_constants import (
         REASONING_START,
         SYSTEM_PROMPT,
     )
-    from grail.shared.chat_templates import build_qwen_chat_template
 
     # Apply Qwen chat template (same as mining)
     try:

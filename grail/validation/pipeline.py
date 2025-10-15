@@ -9,9 +9,6 @@ from .context import ValidationContext
 from .validators import (
     DistributionValidator,
     GRAILProofValidator,
-    SATProblemValidator,
-    SATPromptValidator,
-    SATSolutionValidator,
     SchemaValidator,
     TerminationValidator,
     TokenValidator,
@@ -92,32 +89,39 @@ def get_soft_check_keys(pipeline: ValidationPipeline) -> tuple[str, ...]:
     return tuple(v.check_name for v in pipeline.validators if v.severity == "soft")
 
 
-def create_sat_validation_pipeline() -> ValidationPipeline:
-    """Create the standard SAT validation pipeline.
+def create_env_validation_pipeline() -> ValidationPipeline:
+    """Create the environment-agnostic validation pipeline.
 
-    Returns a pipeline with validators in dependency order:
+    Order:
     1. Schema validation (basic structure)
     2. Token validation (token IDs are valid)
     3. GRAIL proof validation (cryptographic proof)
-    4. SAT problem validation (problem regenerates correctly)
-    5. SAT prompt validation (prompt matches canonical form)
-    6. Termination validation (completion ends properly)
-    7. SAT solution validation (solution is correct)
-    8. Distribution validation (logprobs match model)
-
-    Returns:
-        ValidationPipeline configured for SAT environment
+    4. Environment prompt validation (env-registry based)
+    5. Termination validation (completion ends properly)
+    6. Environment evaluation (success/reward via env)
+    7. Reward validator (miner vs env)
+    8. Logprob validator (miner vs recomputed)
+    9. Distribution validation (soft heuristic)
     """
+    # Lazy import to avoid circular deps for new environment validators
+    from .validators.environment import (
+        EnvironmentEvaluationValidator,
+        EnvironmentPromptValidator,
+        LogprobValidator,
+        RewardValidator,
+    )
+
     validators = [
-        SchemaValidator(),  # FIRST - structure/types, no GPU
-        TokenValidator(),  # SECOND - vocab/length check
-        SATProblemValidator(),  # This always should be called before SATPromptValidator
-        SATPromptValidator(),
-        GRAILProofValidator(),  # Cryptographic proof validation
+        SchemaValidator(),
+        TokenValidator(),
+        EnvironmentPromptValidator(),
+        GRAILProofValidator(),
         TerminationValidator(),
+        EnvironmentEvaluationValidator(),
+        RewardValidator(),
+        LogprobValidator(),
         DistributionValidator(),
-        SATSolutionValidator(),
     ]
 
-    logger.info(f"Created SAT validation pipeline with {len(validators)} validators")
+    logger.info(f"Created env-agnostic validation pipeline with {len(validators)} validators")
     return ValidationPipeline(validators)

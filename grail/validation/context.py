@@ -33,6 +33,10 @@ class ValidationContext:
     tokenizer: PreTrainedTokenizerBase
     device: torch.device
 
+    # Trusted validator-derived values (never trust miner data for these)
+    window_hash: str = ""  # Window block hash from validator's chain query
+    group_index: int = 0  # File-order group index for deterministic seed derivation
+
     # Optional identifiers / logging context (defaulted fields must follow non-defaults)
     miner_uid: str | None = None  # Miner UID for logging/metrics namespacing
 

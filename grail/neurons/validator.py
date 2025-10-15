@@ -10,7 +10,6 @@ import os
 
 import bittensor as bt
 
-from grail.environments import get_sat_reward_bounds
 from grail.infrastructure.checkpoints import (
     CheckpointManager,
     default_checkpoint_cache_root,
@@ -28,7 +27,7 @@ from grail.shared.constants import (
     SUPERLINEAR_EXPONENT,
     WINDOW_LENGTH,
 )
-from grail.validation import create_sat_validation_pipeline
+from grail.validation import create_env_validation_pipeline
 from grail.validation.service import (
     WEIGHT_ROLLING_WINDOWS,
     ValidationService,
@@ -79,11 +78,11 @@ class ValidatorNeuron(BaseNeuron):
             validation_config = MonitoringConfig.for_validation(wallet.name)
             monitor.initialize(validation_config)
 
-        # Create validation pipeline
-        sat_pipeline = create_sat_validation_pipeline()
+        # Create validation pipeline (env-agnostic)
+        validation_pipeline = create_env_validation_pipeline()
         logger.info(
-            "✅ Created SAT validation pipeline with %s validators",
-            len(sat_pipeline.validators),
+            "✅ Created environment validation pipeline with %s validators",
+            len(validation_pipeline.validators),
         )
 
         # Create weight computer
@@ -102,17 +101,13 @@ class ValidatorNeuron(BaseNeuron):
             keep_limit=3,
         )
 
-        # Get SAT reward bounds
-        sat_reward_low, sat_reward_high = get_sat_reward_bounds()
-
         validation_service = ValidationService(
             wallet=wallet,
             netuid=NETUID,
-            sat_pipeline=sat_pipeline,
+            validation_pipeline=validation_pipeline,
             weight_computer=weight_computer,
             credentials=credentials,
             checkpoint_manager=checkpoint_manager,
-            sat_reward_bounds=(sat_reward_low, sat_reward_high),
             monitor=monitor,
         )
 

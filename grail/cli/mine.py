@@ -9,18 +9,26 @@ import math
 import os
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Union
 
 import bittensor as bt
 import torch
 import typer
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from ..environments import SATRolloutGenerator, generate_sat_problem
-from ..grail import derive_canonical_sat
+from ..environments.gsm8k_env import GSM8KEnv
+from ..environments.loop import AgentEnvLoop
+from ..environments.sat_env import SATEnv
+from ..grail import derive_env_seed
 from ..infrastructure.comms import sink_window_inferences
 from ..infrastructure.drand import get_drand_beacon
-from ..shared.constants import BLOCK_TIME_SECONDS, LAYER_INDEX, ROLLOUTS_PER_PROBLEM, WINDOW_LENGTH
+from ..shared.constants import (
+    BLOCK_TIME_SECONDS,
+    CURRENT_ENV_ID,
+    LAYER_INDEX,
+    ROLLOUTS_PER_PROBLEM,
+    WINDOW_LENGTH,
+)
 from . import console
 
 # --------------------------------------------------------------------------- #
@@ -60,7 +68,7 @@ def get_conf(key: str, default: Any = None) -> Any:
 
 def parse_filename(
     filename: str,
-) -> tuple[str | None, int | None, int | None]:
+) -> tuple[Union[str, None], Union[int, None], Union[int, None]]:
     """Parse filename to extract wallet, block, nonce"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -75,7 +83,7 @@ def parse_filename(
 
 def parse_window_filename(
     filename: str,
-) -> tuple[str | None, int | None]:
+) -> tuple[Union[str, None], Union[int, None]]:
     """Parse window filename to extract wallet and window_start"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -88,16 +96,26 @@ def parse_window_filename(
     return None, None
 
 
-def sign_rollout(rollout_data: dict, wallet: bt.wallet) -> dict:
-    """Sign a SAT rollout using the wallet hotkey"""
+def sign_rollout(rollout_data: dict[str, Any], wallet: bt.wallet) -> dict[str, Any]:
+    """Sign a rollout using the wallet hotkey (env-agnostic)."""
     # Create challenge string from key rollout data
-    sat_seed = rollout_data.get("sat_seed", "")
+    episode_seed = rollout_data.get("episode_seed", rollout_data.get("sat_seed", ""))
     block_hash = rollout_data.get("block_hash", "")
     nonce = rollout_data.get("nonce", "")
-    challenge = f"{sat_seed}{block_hash}{nonce}"
+
+    # Validate input types
+    if not isinstance(block_hash, str):
+        raise ValueError(f"block_hash must be str, got {type(block_hash).__name__}")
+    if not isinstance(nonce, (int, str)):
+        raise ValueError(f"nonce must be int or str, got {type(nonce).__name__}")
+
+    # Use delimiter to prevent collision attacks
+    challenge = f"{episode_seed}|{block_hash}|{nonce}"
     rollout_data["challenge"] = challenge
     rollout_data["hotkey"] = wallet.hotkey.ss58_address
-    rollout_data["signature"] = wallet.hotkey.sign(data=challenge).hex()
+    # Encode challenge to bytes before signing (explicit UTF-8)
+    signature = wallet.hotkey.sign(data=challenge.encode("utf-8")).hex()
+    rollout_data["signature"] = signature
     return rollout_data
 
 
@@ -120,10 +138,10 @@ class MiningTimers:
     """
 
     block_time_ema_s: float = float(BLOCK_TIME_SECONDS)
-    gen_time_ema_s: float | None = None
-    upload_time_ema_s: float | None = None
-    last_block_num: int | None = None
-    last_block_ts: float | None = None
+    gen_time_ema_s: Union[float, None] = None
+    upload_time_ema_s: Union[float, None] = None
+    last_block_num: Union[int, None] = None
+    last_block_ts: Union[float, None] = None
 
     def update_block_time_ema(self, current_block: int) -> None:
         """Update the EMA for block time using observed block deltas.
@@ -234,51 +252,12 @@ async def get_window_randomness(
         return window_block_hash, window_block_hash
 
 
-def compute_difficulty(inference_count: int) -> float:
-    """Compute SAT problem difficulty based on inference count.
-
-    Difficulty increases with more attempts to prevent easy problems
-    from being solved repeatedly. Capped at 0.9 for reasonable solve times.
-    """
-    return min(0.9, 0.3 + (inference_count * 0.01))
-
-
-def generate_sat_problem_for_group(
-    wallet: bt.wallet, window_block_hash: str, base_nonce: int, difficulty: float
-) -> tuple[Any, str]:
-    """Create a SAT problem and the base seed shared by a GRPO rollout group."""
-    sat_seed_base = f"{wallet.hotkey.ss58_address}-{window_block_hash}-{base_nonce}"
-    sat_problem = generate_sat_problem(sat_seed_base, difficulty)
-    return sat_problem, sat_seed_base
-
-
-def create_rollout_generator(
-    model: AutoModelForCausalLM, tokenizer: AutoTokenizer, device: Any
-) -> SATRolloutGenerator:
-    """Create a GRPO rollout generator configured for the given model.
-
-    Args:
-        model: Loaded language model
-        tokenizer: Loaded tokenizer
-        device: Torch device (cuda/cpu)
-
-    Returns:
-        SATRolloutGenerator instance
-    """
-    return SATRolloutGenerator(
-        model,
-        tokenizer,
-        device,
-        rollouts_per_problem=ROLLOUTS_PER_PROBLEM,
-    )
-
-
 async def maybe_log_debug_sample(
     tokenizer: AutoTokenizer,
     sample: Any,
     window_start: int,
     base_nonce: int,
-    monitor: Any | None,
+    monitor: Union[Any, None],
     text_logs_emitted: int,
     text_log_limit: int,
 ) -> int:
@@ -313,7 +292,10 @@ async def maybe_log_debug_sample(
         sample_text = tokenizer.decode(completion_ids, skip_special_tokens=False)
         sample_nonce = base_nonce * 10
         logger.debug(
-            "TEXT[mine] window=%s group=%s nonce=%s reward=%.3f adv=%.3f success=%s text=%s",
+            (
+                "TEXT[mine] window=%s group=%s nonce=%s reward=%.3f "
+                "adv=%.3f success=%s text=%s prompt_len=%d completion_len=%d"
+            ),
             window_start,
             base_nonce,
             sample_nonce,
@@ -321,6 +303,8 @@ async def maybe_log_debug_sample(
             float(sample.advantage),
             bool(sample.success),
             sample_text,
+            prompt_len,
+            completion_len,
         )
         if monitor:
             await monitor.log_artifact(
@@ -375,20 +359,17 @@ def package_rollout_data(
     base_nonce: int,
     rollout_idx: int,
     total_in_group: int,
-    sat_problem: Any,
-    sat_seed_base: str,
     window_start: int,
     current_block: int,
     window_block_hash: str,
     combined_randomness: str,
-    difficulty: float,
     use_drand: bool,
 ) -> dict:
     """Assemble the full on-chain/off-chain payload for a single rollout.
 
     This binds model outputs (tokens, commitments) to the randomness, model name,
-    and layer via a commit-binding signature, and includes proof and SAT
-    metadata required by validators.
+    and layer via a commit-binding signature, and includes proof metadata
+    required by validators.
 
     Args:
         model: Loaded model (for name_or_path)
@@ -397,24 +378,21 @@ def package_rollout_data(
         base_nonce: Base nonce for the group
         rollout_idx: Index within the group
         total_in_group: Total rollouts in group
-        sat_problem: SAT problem instance
-        sat_seed_base: SAT seed
         window_start: Window start block
         current_block: Current block
         window_block_hash: Window block hash
         combined_randomness: Challenge randomness
-        difficulty: SAT difficulty
         use_drand: Whether drand was used
 
     Returns:
         Signed dictionary ready to upload for validation
     """
     rollout_nonce = base_nonce * 10 + rollout_idx
-    rollout_sat_seed = f"{wallet.hotkey.ss58_address}-{window_block_hash}-{rollout_nonce}"
 
     # Sign commit binding (tokens, randomness, model, layer, commitments)
     from ..protocol.signatures import sign_commit_binding
 
+    logger.debug("Signing commit binding for rollout %s", rollout_idx)
     commit_sig = sign_commit_binding(
         tokens=rollout.tokens,
         randomness_hex=combined_randomness,
@@ -425,14 +403,13 @@ def package_rollout_data(
     )
 
     assignment = extract_assignment_from_rollout(rollout)
-    satisfied_clauses = count_satisfied_clauses(sat_problem, assignment)
+    # satisfied_clauses retained for backward-compat field; set to 0 in env-agnostic mode
+    satisfied_clauses = 0
 
     payload = {
         "window_start": window_start,
         "block": current_block,
         "nonce": rollout_nonce,
-        "sat_seed": rollout_sat_seed,
-        "difficulty": difficulty,
         "block_hash": window_block_hash,
         "randomness": combined_randomness,
         "use_drand": use_drand,
@@ -449,12 +426,6 @@ def package_rollout_data(
             },
             "signature": commit_sig.hex(),
             "beacon": rollout.beacon,
-            "sat_problem": {
-                "seed": sat_seed_base,
-                "num_vars": sat_problem.num_vars,
-                "clauses": sat_problem.clauses,
-                "difficulty": difficulty,
-            },
             "rollout": {
                 "trajectory": rollout.trajectory,
                 "total_reward": rollout.reward,
@@ -478,7 +449,7 @@ async def upload_inferences_with_metrics(
     window_start: int,
     inferences: list[dict],
     credentials: Any,
-    monitor: Any | None,
+    monitor: Union[Any, None],
 ) -> float:
     """Upload window payload to object storage and return elapsed seconds.
 
@@ -520,7 +491,7 @@ async def generate_rollouts_for_window(
     window_block_hash: str,
     combined_randomness: str,
     timers: MiningTimers,
-    monitor: Any | None,
+    monitor: Union[Any, None],
     use_drand: bool,
 ) -> list[dict]:
     """Generate as many GRPO rollouts as safely possible within a window.
@@ -558,7 +529,7 @@ async def generate_rollouts_for_window(
     problem_count = 0
 
     device = model.device
-    generator = create_rollout_generator(model, tokenizer, device)
+    loop = AgentEnvLoop(model, tokenizer, device)
 
     while True:
         current_block = await subtensor.get_current_block()
@@ -572,8 +543,10 @@ async def generate_rollouts_for_window(
         needed_blocks = timers.blocks_needed_for_next_gen()
         if blocks_remaining <= needed_blocks:
             logger.info(
-                "Stopping generation: %s blocks remain, need %s "
-                "(gen≈%.1fs, upload≈%.1fs, block≈%.2fs)",
+                (
+                    "Stopping generation: %s blocks remain, need %s "
+                    "(gen≈%.1fs, upload≈%.1fs, block≈%.2fs)"
+                ),
                 blocks_remaining,
                 needed_blocks,
                 (timers.gen_time_ema_s or 0.0),
@@ -602,28 +575,32 @@ async def generate_rollouts_for_window(
                     f"{torch.cuda.memory_allocated() / 1024**2:.2f}",
                 )
 
-            # Deterministically derive seed and difficulty from miner+window+index
+            # Deterministically derive environment seed from miner+window+index
             problem_index = max(0, problem_count - 1)
-            seed, difficulty = derive_canonical_sat(
-                wallet.hotkey.ss58_address, window_block_hash, problem_index
-            )
-            sat_problem = generate_sat_problem(seed, difficulty)
+            seed_int = derive_env_seed(wallet.hotkey.ss58_address, window_block_hash, problem_index)
             # Use deterministic problem index as rollout_group identifier
             base_nonce = problem_index
-            sat_seed_base = seed
             logger.debug(
-                "Generated SAT problem: %s vars, %s clauses",
-                sat_problem.num_vars,
-                len(sat_problem.clauses),
+                ("MINER SEED DERIVATION: hotkey=%s window_hash=%s problem_index=%d -> seed=%d"),
+                wallet.hotkey.ss58_address[:12],
+                window_block_hash[:12],
+                problem_index,
+                seed_int,
             )
 
-            # Run blocking model inference in thread pool to avoid blocking event loop
-            # This allows heartbeat keeper and other async tasks to continue running
+            # Generate GRPO rollouts using AgentEnvLoop
+            def _env_factory():
+                if CURRENT_ENV_ID == "gsm8k":
+                    return GSM8KEnv()
+                return SATEnv()
+
             grpo_rollouts = await asyncio.to_thread(
-                generator.generate_grpo_rollouts,
-                sat_problem,
+                loop.run_grpo_group,
+                _env_factory,
+                ROLLOUTS_PER_PROBLEM,
                 combined_randomness,
                 wallet,
+                seed=seed_int,
             )
 
             if grpo_rollouts:
@@ -652,7 +629,7 @@ async def generate_rollouts_for_window(
                 elapsed = time.time() - start_time
                 rollouts_per_sec = (len(inferences) / elapsed) if elapsed > 0 else 0
                 logger.info(
-                    "📊 Progress: %s rollouts from %s problems in %.1fs (%.1f rollouts/sec)",
+                    ("📊 Progress: %s rollouts from %s problems in %.1fs (%.1f rollouts/sec)"),
                     len(inferences),
                     problem_count,
                     elapsed,
@@ -675,13 +652,10 @@ async def generate_rollouts_for_window(
                     base_nonce,
                     rollout_idx,
                     len(grpo_rollouts),
-                    sat_problem,
-                    sat_seed_base,
                     window_start,
                     current_block,
                     window_block_hash,
                     combined_randomness,
-                    difficulty,
                     use_drand,
                 )
                 inferences.append(rollout_data)
@@ -703,15 +677,6 @@ async def generate_rollouts_for_window(
         except RuntimeError as e:
             if "CUDA" in str(e):
                 logger.error("CUDA error at inference %s: %s", inference_count, e)
-                logger.error(
-                    "SAT problem: vars=%s, clauses=%s",
-                    sat_problem.num_vars if "sat_problem" in locals() else "N/A",
-                    len(sat_problem.clauses) if "sat_problem" in locals() else "N/A",
-                )
-                logger.error(
-                    "Difficulty: %s",
-                    difficulty if "difficulty" in locals() else "N/A",
-                )
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 continue

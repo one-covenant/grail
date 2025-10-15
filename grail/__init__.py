@@ -8,13 +8,16 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 from .environments import (  # noqa: F401, E402, E501, F403, F405
-    # New reward system
+    # Loop and rollouts
+    AgentEnvLoop,
+    GRPORollout,
+    # Core reward system
     Parser,
     RewardVector,
+    SATEnv,
     SATParser,
-    # Existing classes
+    # SAT exports
     SATProblem,
-    SATRolloutGenerator,
     create_sat_reward_vector,
     generate_sat_problem,
 )
@@ -42,20 +45,24 @@ from .infrastructure.drand import (
     get_drand_beacon,
     get_round_at_time,
 )  # noqa: F401, E402, E501, F403, F405
-from .mining.rollout_generator import RolloutGenerator  # noqa: F401, E402, E501, F403, F405
+
+# RolloutGenerator removed; use AgentEnvLoop instead
 
 # flake8: noqa: E402,E501,F401,F403,F405
 
 __all__ = [
-    # New reward system
+    # Core reward system
     "Parser",
     "RewardVector",
-    "SATParser",
-    "create_sat_reward_vector",
-    # Existing SAT classes
+    # SAT
     "SATProblem",
+    "SATParser",
+    "SATEnv",
+    "create_sat_reward_vector",
     "generate_sat_problem",
-    "SATRolloutGenerator",
+    # Loop
+    "AgentEnvLoop",
+    "GRPORollout",
     # Entry points
     "main",
 ]
