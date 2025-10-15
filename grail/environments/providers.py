@@ -76,8 +76,10 @@ class GSM8KTaskSource(TaskSource):
             except Exception:
                 idx = 0
         elif seed is not None:
-            # Deterministic index from seed
-            idx = int(seed) % len(self._ds)
+            # Uniform sampling using floating-point scaling to avoid modular bias
+            # Convert seed to [0,1) then scale to dataset size
+            seed_normalized = (int(seed) % (2**32)) / (2**32)
+            idx = int(seed_normalized * len(self._ds))
         else:
             idx = 0
 

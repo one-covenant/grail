@@ -9,19 +9,26 @@ import math
 import os
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Union
 
 import bittensor as bt
 import torch
 import typer
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from ..environments.gsm8k_env import GSM8KEnv
 from ..environments.loop import AgentEnvLoop
 from ..environments.sat_env import SATEnv
 from ..grail import derive_env_seed
 from ..infrastructure.comms import sink_window_inferences
 from ..infrastructure.drand import get_drand_beacon
-from ..shared.constants import BLOCK_TIME_SECONDS, LAYER_INDEX, ROLLOUTS_PER_PROBLEM, WINDOW_LENGTH
+from ..shared.constants import (
+    BLOCK_TIME_SECONDS,
+    CURRENT_ENV_ID,
+    LAYER_INDEX,
+    ROLLOUTS_PER_PROBLEM,
+    WINDOW_LENGTH,
+)
 from . import console
 
 # --------------------------------------------------------------------------- #
@@ -61,7 +68,7 @@ def get_conf(key: str, default: Any = None) -> Any:
 
 def parse_filename(
     filename: str,
-) -> tuple[str | None, int | None, int | None]:
+) -> tuple[Union[str, None], Union[int, None], Union[int, None]]:
     """Parse filename to extract wallet, block, nonce"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -76,7 +83,7 @@ def parse_filename(
 
 def parse_window_filename(
     filename: str,
-) -> tuple[str | None, int | None]:
+) -> tuple[Union[str, None], Union[int, None]]:
     """Parse window filename to extract wallet and window_start"""
     # Remove prefix and extension
     basename = filename.split("/")[-1].replace(".json", "")
@@ -131,10 +138,10 @@ class MiningTimers:
     """
 
     block_time_ema_s: float = float(BLOCK_TIME_SECONDS)
-    gen_time_ema_s: float | None = None
-    upload_time_ema_s: float | None = None
-    last_block_num: int | None = None
-    last_block_ts: float | None = None
+    gen_time_ema_s: Union[float, None] = None
+    upload_time_ema_s: Union[float, None] = None
+    last_block_num: Union[int, None] = None
+    last_block_ts: Union[float, None] = None
 
     def update_block_time_ema(self, current_block: int) -> None:
         """Update the EMA for block time using observed block deltas.
@@ -250,7 +257,7 @@ async def maybe_log_debug_sample(
     sample: Any,
     window_start: int,
     base_nonce: int,
-    monitor: Any | None,
+    monitor: Union[Any, None],
     text_logs_emitted: int,
     text_log_limit: int,
 ) -> int:
@@ -285,7 +292,10 @@ async def maybe_log_debug_sample(
         sample_text = tokenizer.decode(completion_ids, skip_special_tokens=False)
         sample_nonce = base_nonce * 10
         logger.debug(
-            "TEXT[mine] window=%s group=%s nonce=%s reward=%.3f adv=%.3f success=%s text=%s prompt_len=%d completion_len=%d",
+            (
+                "TEXT[mine] window=%s group=%s nonce=%s reward=%.3f "
+                "adv=%.3f success=%s text=%s prompt_len=%d completion_len=%d"
+            ),
             window_start,
             base_nonce,
             sample_nonce,
@@ -439,7 +449,7 @@ async def upload_inferences_with_metrics(
     window_start: int,
     inferences: list[dict],
     credentials: Any,
-    monitor: Any | None,
+    monitor: Union[Any, None],
 ) -> float:
     """Upload window payload to object storage and return elapsed seconds.
 
@@ -481,7 +491,7 @@ async def generate_rollouts_for_window(
     window_block_hash: str,
     combined_randomness: str,
     timers: MiningTimers,
-    monitor: Any | None,
+    monitor: Union[Any, None],
     use_drand: bool,
 ) -> list[dict]:
     """Generate as many GRPO rollouts as safely possible within a window.
@@ -533,8 +543,10 @@ async def generate_rollouts_for_window(
         needed_blocks = timers.blocks_needed_for_next_gen()
         if blocks_remaining <= needed_blocks:
             logger.info(
-                "Stopping generation: %s blocks remain, need %s "
-                "(gen≈%.1fs, upload≈%.1fs, block≈%.2fs)",
+                (
+                    "Stopping generation: %s blocks remain, need %s "
+                    "(gen≈%.1fs, upload≈%.1fs, block≈%.2fs)"
+                ),
                 blocks_remaining,
                 needed_blocks,
                 (timers.gen_time_ema_s or 0.0),
@@ -577,9 +589,14 @@ async def generate_rollouts_for_window(
             )
 
             # Generate GRPO rollouts using AgentEnvLoop
+            def _env_factory():
+                if CURRENT_ENV_ID == "gsm8k":
+                    return GSM8KEnv()
+                return SATEnv()
+
             grpo_rollouts = await asyncio.to_thread(
                 loop.run_grpo_group,
-                lambda: SATEnv(),
+                _env_factory,
                 ROLLOUTS_PER_PROBLEM,
                 combined_randomness,
                 wallet,
@@ -612,7 +629,7 @@ async def generate_rollouts_for_window(
                 elapsed = time.time() - start_time
                 rollouts_per_sec = (len(inferences) / elapsed) if elapsed > 0 else 0
                 logger.info(
-                    "📊 Progress: %s rollouts from %s problems in %.1fs (%.1f rollouts/sec)",
+                    ("📊 Progress: %s rollouts from %s problems in %.1fs (%.1f rollouts/sec)"),
                     len(inferences),
                     problem_count,
                     elapsed,
