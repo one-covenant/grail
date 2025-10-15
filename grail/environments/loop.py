@@ -233,7 +233,7 @@ class AgentEnvLoop:
                 top_p=0.95,
                 top_k=50,
                 repetition_penalty=1.1,
-                output_scores=True,
+                output_logits=True,
                 return_dict_in_generate=True,
                 pad_token_id=self.tokenizer.eos_token_id,
                 eos_token_id=self.tokenizer.eos_token_id,
@@ -244,15 +244,16 @@ class AgentEnvLoop:
 
         logprobs = []
         for i, token_id in enumerate(completion_ids):
-            if i < len(outputs.scores):
+            if i < len(outputs.logits):
                 # Use log_softmax for numerical stability (matches validator)
-                log_probs_dist = torch.log_softmax(outputs.scores[i][0], dim=-1)
+                logits_step = outputs.logits[i][0]
+                log_probs_dist = torch.log_softmax(logits_step, dim=-1)
                 logprobs.append(log_probs_dist[token_id].item())
             else:
                 # This should never happen in normal generation
                 # If it does, it indicates a generation issue (e.g., early EOS)
                 logger.warning(
-                    "Missing score for completion token %d/%d; setting logprob to -inf",
+                    "Missing logits for completion token %d/%d; setting logprob to -inf",
                     i,
                     len(completion_ids),
                 )
