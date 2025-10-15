@@ -71,6 +71,20 @@ class AgentEnvLoop:
 
         self._hidden_dim = resolve_hidden_size(self.model)
 
+        # Log tokenizer version information for debugging
+        try:
+            import tokenizers  # type: ignore
+            import transformers
+
+            logger.info(
+                "MINER TOKENIZER INFO: transformers=%s, tokenizers=%s, name_or_path=%s",
+                transformers.__version__,
+                tokenizers.__version__,
+                getattr(tokenizer, "name_or_path", "unknown"),
+            )
+        except Exception as e:
+            logger.debug("Failed to log tokenizer version info: %s", e)
+
         # Inject Qwen chat template
         # TODO: this should be removed later on and we need to make sure
         # we directly use the checkpoint's template shared by the trainer

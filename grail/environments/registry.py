@@ -57,16 +57,12 @@ class SATEnvAdapter:
         obs = env.reset(seed=seed_int)
         messages = [{"role": m.role, "content": m.content} for m in obs.messages]
 
-        # Validate canonical chat template without mutation
-        # (expected to be provided via checkpoint/service)
+        # Validate canonical chat template (should be set by ValidationService)
         tpl = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
         try:
             current_tpl = getattr(tokenizer, "chat_template", None)
             if current_tpl != tpl:
-                logger.warning(
-                    "Tokenizer chat_template mismatch with expected Qwen "
-                    "template; proceeding without mutation"
-                )
+                logger.debug("Tokenizer chat_template differs from expected Qwen template")
         except Exception:
             logger.debug("Tokenizer chat_template check failed", exc_info=True)
 

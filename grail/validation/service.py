@@ -27,6 +27,7 @@ from ..model.provider import (
     get_tokenizer,
 )
 from ..scoring.weights import WeightComputer
+from ..shared.chat_templates import build_qwen_chat_template
 from ..shared.constants import (
     FAILURE_LOOKBACK_WINDOWS,
     MINER_SAMPLE_MAX,
@@ -36,6 +37,7 @@ from ..shared.constants import (
     TRAINER_UID,
     WINDOW_LENGTH,
 )
+from ..shared.prompt_constants import REASONING_START, SYSTEM_PROMPT
 from .copycat_service import COPYCAT_SERVICE
 from .miner_validator import MinerValidator
 from .pipeline import ValidationPipeline
@@ -368,9 +370,29 @@ class ValidationService:
                     self._model, self._tokenizer = clear_model_and_tokenizer(
                         self._model, self._tokenizer
                     )
+                    chat_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
                     self._model = get_model(str(checkpoint_path), device=None, eval_mode=True)
-                    self._tokenizer = get_tokenizer(str(checkpoint_path))
+                    self._tokenizer = get_tokenizer(
+                        str(checkpoint_path), chat_template=chat_template
+                    )
                     self._current_checkpoint_id = str(checkpoint_path)
+
+                # Log tokenizer version information for debugging
+                try:
+                    import tokenizers  # type: ignore
+                    import transformers
+
+                    logger.info(
+                        "VALIDATOR TOKENIZER INFO: transformers=%s, "
+                        "tokenizers=%s, name_or_path=%s, checkpoint=%s",
+                        transformers.__version__,
+                        tokenizers.__version__,
+                        getattr(self._tokenizer, "name_or_path", "unknown"),
+                        str(checkpoint_path),
+                    )
+                except Exception as e:
+                    logger.debug("Failed to log tokenizer version info: %s", e)
+
                 return True
             except Exception:
                 logger.exception(f"Failed to load checkpoint for window {target_window}")

@@ -44,6 +44,7 @@ class EnvironmentPromptValidator(Validator):
             canonical_seed = _derive_canonical_seed(ctx)
 
             adapter = get_adapter(env_id)
+
             # Pass integer seed through; adapter handles type as needed
             canonical_ids = adapter.build_prompt_ids(canonical_seed, ctx.tokenizer)
 
