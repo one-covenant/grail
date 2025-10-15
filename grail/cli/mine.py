@@ -89,16 +89,26 @@ def parse_window_filename(
     return None, None
 
 
-def sign_rollout(rollout_data: dict, wallet: bt.wallet) -> dict:
+def sign_rollout(rollout_data: dict[str, Any], wallet: bt.wallet) -> dict[str, Any]:
     """Sign a rollout using the wallet hotkey (env-agnostic)."""
     # Create challenge string from key rollout data
     episode_seed = rollout_data.get("episode_seed", rollout_data.get("sat_seed", ""))
     block_hash = rollout_data.get("block_hash", "")
     nonce = rollout_data.get("nonce", "")
-    challenge = f"{episode_seed}{block_hash}{nonce}"
+
+    # Validate input types
+    if not isinstance(block_hash, str):
+        raise ValueError(f"block_hash must be str, got {type(block_hash).__name__}")
+    if not isinstance(nonce, (int, str)):
+        raise ValueError(f"nonce must be int or str, got {type(nonce).__name__}")
+
+    # Use delimiter to prevent collision attacks
+    challenge = f"{episode_seed}|{block_hash}|{nonce}"
     rollout_data["challenge"] = challenge
     rollout_data["hotkey"] = wallet.hotkey.ss58_address
-    rollout_data["signature"] = wallet.hotkey.sign(data=challenge).hex()
+    # Encode challenge to bytes before signing (explicit UTF-8)
+    signature = wallet.hotkey.sign(data=challenge.encode("utf-8")).hex()
+    rollout_data["signature"] = signature
     return rollout_data
 
 
@@ -275,7 +285,7 @@ async def maybe_log_debug_sample(
         sample_text = tokenizer.decode(completion_ids, skip_special_tokens=False)
         sample_nonce = base_nonce * 10
         logger.debug(
-            "TEXT[mine] window=%s group=%s nonce=%s reward=%.3f adv=%.3f success=%s text=%s",
+            "TEXT[mine] window=%s group=%s nonce=%s reward=%.3f adv=%.3f success=%s text=%s prompt_len=%d completion_len=%d",
             window_start,
             base_nonce,
             sample_nonce,
@@ -283,6 +293,8 @@ async def maybe_log_debug_sample(
             float(sample.advantage),
             bool(sample.success),
             sample_text,
+            prompt_len,
+            completion_len,
         )
         if monitor:
             await monitor.log_artifact(
@@ -370,6 +382,7 @@ def package_rollout_data(
     # Sign commit binding (tokens, randomness, model, layer, commitments)
     from ..protocol.signatures import sign_commit_binding
 
+    logger.debug("Signing commit binding for rollout %s", rollout_idx)
     commit_sig = sign_commit_binding(
         tokens=rollout.tokens,
         randomness_hex=combined_randomness,

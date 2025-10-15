@@ -532,24 +532,31 @@ class MinerValidator:
 
         return state
 
-    def _verify_rollout_signature(self, rollout_data: dict) -> bool:
+    def _verify_rollout_signature(self, rollout_data: dict[str, Any]) -> bool:
         """Verify the signature of a rollout (replicated from CLI logic).
 
         Expects fields: challenge, hotkey, signature (hex string).
+        Challenge format: "{episode_seed}|{block_hash}|{nonce}" (with delimiters).
         """
         try:
             challenge = rollout_data.get("challenge")
             hotkey = rollout_data.get("hotkey")
             signature = rollout_data.get("signature")
 
+            # Validate required fields
             if not all([challenge, hotkey, signature]):
                 return False
 
+            # Validate types
+            if not isinstance(challenge, str):
+                return False
             if not isinstance(signature, str):
                 return False
 
             keypair = bt.Keypair(ss58_address=str(hotkey))
-            return bool(keypair.verify(data=str(challenge), signature=bytes.fromhex(signature)))
+            # Encode challenge to bytes to match signing logic (explicit UTF-8)
+            challenge_bytes = challenge.encode("utf-8")
+            return bool(keypair.verify(data=challenge_bytes, signature=bytes.fromhex(signature)))
         except Exception:
             return False
 
