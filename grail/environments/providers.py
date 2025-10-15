@@ -18,10 +18,11 @@ class TaskSpec:
 
 
 class SATTaskSource(TaskSource):
-    """Procedural SAT task provider wrapping the existing generator."""
+    """Procedural SAT task provider wrapping the existing generator.
 
-    def __init__(self, *, difficulty: float = 0.5) -> None:
-        self._difficulty = float(difficulty)
+    Difficulty is derived deterministically from the seed to ensure
+    miner and validator generate identical problems.
+    """
 
     def next(self, *, seed: int | None = None, task_id: str | None = None) -> TaskSpec:
         if task_id is not None:
@@ -32,14 +33,19 @@ class SATTaskSource(TaskSource):
             # Fallback deterministic material if not provided (not random here)
             seed_material = "sat-default-seed"
 
+        # Derive difficulty deterministically from seed
+        # Use modulo to map seed to difficulty range [0.3, 0.7]
+        seed_int = int(seed) if seed is not None else 12345
+        difficulty = 0.3 + (seed_int % 100) / 250.0  # Maps to [0.3, 0.7]
+
         # Lazy import to avoid circular dependency with sat_env
         from .sat_env import generate_sat_problem
 
-        problem = generate_sat_problem(seed_material, self._difficulty)
+        problem = generate_sat_problem(seed_material, difficulty)
         return TaskSpec(
             id=str(seed_material),
             payload=problem,
-            metadata={"difficulty": self._difficulty},
+            metadata={"difficulty": difficulty},
         )
 
 

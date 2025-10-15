@@ -27,13 +27,11 @@ class BeaconInfo(BaseModel):
     # Note: beacon.round removed - never used in validation
 
 
-class SATProblemInfo(BaseModel):
-    """SAT problem specification."""
+class EnvInfo(BaseModel):
+    """Environment identification and deterministic seed."""
 
-    seed: str
-    num_vars: int = Field(gt=0)
-    clauses: list[list[int]]
-    difficulty: float = Field(ge=0.0, le=1.0)
+    id: str
+    seed: int
 
 
 class RolloutMetadata(BaseModel):
@@ -62,7 +60,7 @@ class Commit(BaseModel):
     model: ModelInfo
     signature: str
     beacon: BeaconInfo
-    sat_problem: SATProblemInfo
+    env: EnvInfo | None = None  # Injected by validator, not sent by miner
     rollout: RolloutMetadata
 
     @field_validator("commitments")
@@ -88,25 +86,8 @@ class Commit(BaseModel):
             )
         return v
 
-    @field_validator("rollout")
-    @classmethod
-    def validate_assignment_if_success(cls, v: RolloutMetadata, info) -> RolloutMetadata:
-        """Assignment length must match num_vars if success claimed."""
-        if v.success:
-            sat = info.data.get("sat_problem", {})
-            if isinstance(sat, dict):
-                num_vars = sat.get("num_vars", 0)
-            elif isinstance(sat, SATProblemInfo):
-                num_vars = sat.num_vars
-            else:
-                num_vars = 0
-
-            if len(v.assignment) != num_vars:
-                raise ValueError(
-                    f"assignment length {len(v.assignment)} must equal "
-                    f"num_vars {num_vars} when success=True"
-                )
-        return v
+    # Note: Assignment shape validation is environment-specific and validated
+    # via environment adapters during EnvironmentEvaluationValidator.
 
 
 class RolloutData(BaseModel):
@@ -132,7 +113,6 @@ class RolloutData(BaseModel):
     block: int | None = None
     randomness: str | None = None
     use_drand: bool | None = None
-    difficulty: float | None = None
     timestamp: float | None = None
     rollout_index: int | None = None
     total_in_group: int | None = None

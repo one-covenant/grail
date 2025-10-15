@@ -27,7 +27,6 @@ from ..model.provider import (
     get_tokenizer,
 )
 from ..scoring.weights import WeightComputer
-from ..shared.chat_templates import build_qwen_chat_template
 from ..shared.constants import (
     FAILURE_LOOKBACK_WINDOWS,
     MINER_SAMPLE_MAX,
@@ -37,7 +36,6 @@ from ..shared.constants import (
     TRAINER_UID,
     WINDOW_LENGTH,
 )
-from ..shared.prompt_constants import REASONING_START, SYSTEM_PROMPT
 from .copycat_service import COPYCAT_SERVICE
 from .miner_validator import MinerValidator
 from .pipeline import ValidationPipeline
@@ -75,11 +73,10 @@ class ValidationService:
         self,
         wallet: bt.wallet,
         netuid: int,
-        sat_pipeline: ValidationPipeline,
+        validation_pipeline: ValidationPipeline,
         weight_computer: WeightComputer,
         credentials: BucketCredentials,
         checkpoint_manager: CheckpointManager,
-        sat_reward_bounds: tuple[float, float],
         monitor: Any | None = None,
     ):
         """Initialize validation service.
@@ -87,20 +84,18 @@ class ValidationService:
         Args:
             wallet: Validator wallet for signing transactions
             netuid: Network UID for the subnet
-            sat_pipeline: SAT validation pipeline for rollout verification
+            validation_pipeline: Validation pipeline for rollout verification
             weight_computer: Weight computation engine
             credentials: Object storage credentials for rollout access
             checkpoint_manager: Checkpoint manager for model downloads
-            sat_reward_bounds: (low, high) bounds for reward validation
             monitor: Optional monitoring client for metrics
         """
         self._wallet = wallet
         self._netuid = netuid
-        self._sat_pipeline = sat_pipeline
+        self._validation_pipeline = validation_pipeline
         self._weight_computer = weight_computer
         self._credentials = credentials
         self._checkpoint_manager = checkpoint_manager
-        self._sat_reward_bounds = sat_reward_bounds
         self._monitor = monitor
 
         # Initialized during setup
@@ -293,10 +288,8 @@ class ValidationService:
         )
 
         # Miner validator
-        sat_reward_low, sat_reward_high = self._sat_reward_bounds
         self._miner_validator = MinerValidator(
-            sat_pipeline=self._sat_pipeline,
-            sat_reward_bounds=(sat_reward_low, sat_reward_high),
+            pipeline=self._validation_pipeline,
             text_log_limit=5,
         )
 
@@ -375,11 +368,8 @@ class ValidationService:
                     self._model, self._tokenizer = clear_model_and_tokenizer(
                         self._model, self._tokenizer
                     )
-                    chat_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
                     self._model = get_model(str(checkpoint_path), device=None, eval_mode=True)
-                    self._tokenizer = get_tokenizer(
-                        str(checkpoint_path), chat_template=chat_template
-                    )
+                    self._tokenizer = get_tokenizer(str(checkpoint_path))
                     self._current_checkpoint_id = str(checkpoint_path)
                 return True
             except Exception:

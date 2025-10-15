@@ -107,7 +107,15 @@ def _generate_sat_problem(seed: str, difficulty: float = 0.5) -> _SATProblem:
                 clause.append(var)
         clauses.append(clause)
 
-    return _SATProblem(num_vars, clauses, seed)
+    problem = _SATProblem(num_vars, clauses, seed)
+    logger.debug(
+        ("Generated SAT problem: seed=%s difficulty=%.3f num_vars=%d num_clauses=%d"),
+        seed[:12] if len(seed) > 12 else seed,
+        difficulty,
+        num_vars,
+        num_clauses,
+    )
+    return problem
 
 
 def _create_sat_prompt(problem: _SATProblem) -> str:

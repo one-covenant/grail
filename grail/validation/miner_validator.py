@@ -90,24 +90,21 @@ class MinerValidator:
 
     def __init__(
         self,
-        sat_pipeline: ValidationPipeline,
-        sat_reward_bounds: tuple[float, float],
+        pipeline: ValidationPipeline,
         text_log_limit: int = 5,
     ):
         """Initialize miner validator.
 
         Args:
-            sat_pipeline: SAT validation pipeline
-            sat_reward_bounds: (low, high) bounds for reward sanity checks
+            pipeline: Environment-agnostic validation pipeline
             text_log_limit: Max number of text samples to log per miner
         """
-        self._sat_pipeline = sat_pipeline
-        self._sat_reward_low, self._sat_reward_high = sat_reward_bounds
+        self._pipeline = pipeline
         self._text_log_limit = text_log_limit
 
         # Derive check keys from pipeline validators (single source of truth)
-        self._hard_check_keys = get_hard_check_keys(sat_pipeline)
-        soft_check_keys = get_soft_check_keys(sat_pipeline)
+        self._hard_check_keys = get_hard_check_keys(pipeline)
+        soft_check_keys = get_soft_check_keys(pipeline)
         self._soft_check_key = soft_check_keys[0] if soft_check_keys else None
 
         logger.debug(
@@ -372,7 +369,7 @@ class MinerValidator:
         Returns:
             Validation state dict with counters and flags
         """
-        from ..protocol.signatures import derive_canonical_sat
+        from ..protocol.signatures import derive_env_seed
 
         # Initialize state
         state = {
@@ -428,21 +425,11 @@ class MinerValidator:
                     logger.warning("Invalid signature; invalidating uid")
                     break
 
-                # SAT seed verification
-                nonce = inference["nonce"]
-                expected_seed = f"{miner_hotkey}-{window_hash}-{nonce}"
-                if inference.get("sat_seed") != expected_seed:
-                    state["hard_failure"] = True
-                    logger.warning("Invalid SAT seed; invalidating uid")
-                    break
-
                 # Extract commit data
                 commit_data = inference["commit"]
                 rollout_meta = commit_data.get("rollout", {})
 
-                # Reward bounds check
-                if not self._check_reward_bounds(rollout_meta, state):
-                    break
+                # Reward validation is now handled by RewardValidator in the pipeline
 
                 # Track rollout group (skip if missing to avoid "None" grouping)
                 rollout_group_raw = inference.get("rollout_group")
@@ -453,19 +440,30 @@ class MinerValidator:
                 rollout_group = str(rollout_group_raw)
                 state["rollout_groups"][rollout_group].append(inference)
 
-                # Derive canonical SAT problem using file-order group index
+                # Derive file-order group index for deterministic seed derivation
                 group_index = int(group_index_by_id.get(rollout_group, 0))
-                can_seed, can_diff = derive_canonical_sat(miner_hotkey, window_hash, group_index)
 
-                satp = commit_data.setdefault("sat_problem", {})
-                satp["seed"] = can_seed
-                satp["difficulty"] = can_diff
+                # Inject canonical env field (validator-derived, never trust miner)
+                seed_int = derive_env_seed(miner_hotkey, window_hash, group_index)
 
-                # Run validation pipeline
+                # Debug: trace seed derivation inputs
+                logger.debug(
+                    (
+                        "VALIDATOR SEED DERIVATION: hotkey=%s window_hash=%s "
+                        "group_index=%d -> seed=%d"
+                    ),
+                    miner_hotkey[:12],
+                    window_hash[:12],
+                    group_index,
+                    seed_int,
+                )
+                # Run validation pipeline with trusted validator-derived values
                 ctx = ValidationContext(
                     commit=commit_data,
                     prover_address=miner_hotkey,
                     challenge_randomness=window_rand,
+                    window_hash=window_hash,
+                    group_index=group_index,
                     miner_uid=uid_str,
                     model=model,
                     tokenizer=tokenizer,
@@ -474,9 +472,9 @@ class MinerValidator:
 
                 if monitor:
                     with monitor.timer("profiling/rollout_verification"):
-                        is_valid, checks = self._sat_pipeline.validate(ctx)
+                        is_valid, checks = self._pipeline.validate(ctx)
                 else:
-                    is_valid, checks = self._sat_pipeline.validate(ctx)
+                    is_valid, checks = self._pipeline.validate(ctx)
 
                 state["pr_total"] += 1
 
@@ -503,6 +501,7 @@ class MinerValidator:
                 state["valid_count"] += 1
 
                 # Log sample text (debug)
+                nonce = inference.get("nonce")
                 await self._log_sample_text(
                     commit_data,
                     rollout_meta,
@@ -523,6 +522,7 @@ class MinerValidator:
                     state["unique_rollouts"], commit_data, rollout_meta
                 )
 
+                # Recompute per-rollout advantage check placeholder (group-based check later)
                 state["wallet_rollouts_buffer"].append(inference)
 
             except Exception as e:
@@ -580,44 +580,6 @@ class MinerValidator:
         state["nonces_seen"].add(nonce)
         return True
 
-    def _check_reward_bounds(self, rollout_meta: dict, state: dict) -> bool:
-        """Check reward is within expected bounds.
-
-        Returns:
-            False if hard failure detected
-        """
-        try:
-            total_reward = rollout_meta.get("total_reward")
-            if not isinstance(total_reward, (int, float)):
-                logger.debug("Missing or invalid total_reward; skipping")
-                return True  # Skip but don't fail
-
-            low, high = self._sat_reward_low, self._sat_reward_high
-            tr = float(total_reward)
-
-            lo = (
-                float("-inf")
-                if low == float("-inf")
-                else low - max(abs(low) * REWARD_REL_TOL, REWARD_ABS_TOL)
-            )
-            hi = (
-                float("inf")
-                if high == float("inf")
-                else high + max(abs(high) * REWARD_REL_TOL, REWARD_ABS_TOL)
-            )
-
-            if not (lo <= tr <= hi):
-                state["hard_failure"] = True
-                logger.warning(
-                    f"Reward {tr:.6f} outside bounds [{lo:.6f}, {hi:.6f}]; invalidating uid"
-                )
-                return False
-
-        except Exception:
-            pass
-
-        return True
-
     def _process_validation_results(
         self,
         checks: dict[str, bool],
@@ -650,7 +612,15 @@ class MinerValidator:
         if not hard_valid:
             state["pr_invalid_proof"] += 1
             state["hard_failure"] = True
-            logger.warning("Hard verification failed; invalidating uid")
+            failed_check = next(
+                (k for k in self._hard_check_keys if not checks.get(k, False)), None
+            )
+            if failed_check:
+                logger.warning(
+                    f"Hard verification failed on check '{failed_check}'; invalidating uid"
+                )
+            else:
+                logger.warning("Hard verification failed; invalidating uid")
             return False
 
         # Handle soft failure
@@ -667,24 +637,23 @@ class MinerValidator:
 
             if state["soft_failures"] >= soft_fail_cutoff:
                 state["soft_gate_triggered"] = True
+                soft_name = self._soft_check_key or "soft_check"
                 logger.warning(
-                    f"Soft-check threshold reached "
-                    f"({state['soft_failures']}/{total_planned_checks}); "
-                    "invalidating uid"
+                    f"Soft-check threshold reached for '{soft_name}' "
+                    f"({state['soft_failures']}/{total_planned_checks}); invalidating uid"
                 )
                 return False
 
         return True
 
     def _track_prompt_validity(self, checks: dict[str, bool], state: dict) -> None:
-        """Track prompt validity metrics (non-gating)."""
+        """Track prompt validity metrics (non-gating).
+
+        Uses environment-agnostic check names.
+        """
         try:
-            if (
-                checks.get("tokens_valid")
-                and checks.get("proof_valid")
-                and checks.get("sat_problem_valid")
-            ):
-                if checks.get("prompt_valid"):
+            if checks.get("tokens_valid") and checks.get("proof_valid"):
+                if checks.get("env_prompt_valid"):
                     state["prompt_valid_count"] += 1
                 else:
                     state["prompt_mismatch_count"] += 1
@@ -866,9 +835,12 @@ class MinerValidator:
                 return False
 
             # Check advantages sum to zero
-            advantages = [
-                r.get("commit", {}).get("rollout", {}).get("advantage", 0.0) for r in group_rollouts
-            ]
+            advantages = []
+            rewards = []
+            for r in group_rollouts:
+                meta = r.get("commit", {}).get("rollout", {})
+                advantages.append(float(meta.get("advantage", 0.0)))
+                rewards.append(float(meta.get("total_reward", 0.0)))
             advantage_sum = sum(advantages)
 
             if abs(advantage_sum) > GRPO_ADV_SUM_TOLERANCE:
@@ -878,14 +850,32 @@ class MinerValidator:
                 )
                 return False
 
-            # Check same base SAT problem
-            base_seeds = [
-                r.get("commit", {}).get("sat_problem", {}).get("seed") for r in group_rollouts
-            ]
+            # Optional: sanity check claimed advantages vs group rewards (zero-mean, normalized)
+            try:
+                n = len(rewards)
+                if n > 0:
+                    mean_r = sum(rewards) / n
+                    centered = [r - mean_r for r in rewards]
+                    # Avoid div-by-zero; compare shapes loosely
+                    denom = max(1e-8, (sum(x * x for x in centered) / n) ** 0.5)
+                    recomputed = [x / denom for x in centered]
+                    # Allow small tolerance per element
+                    for a, b in zip(advantages, recomputed):
+                        if abs(a - b) > 1e-3:
+                            logger.warning(
+                                "GRPO group %s advantage mismatch vs recomputed", group_id
+                            )
+                            return False
+            except Exception:
+                # Don't hard fail on numerical issues; already checked zero-sum
+                pass
+
+            # Check same base environment seed
+            base_seeds = [r.get("commit", {}).get("env", {}).get("seed") for r in group_rollouts]
 
             if len(set(base_seeds)) != 1:
                 logger.warning(
-                    f"GRPO group {group_id} has different base problems; invalidating uid"
+                    f"GRPO group {group_id} has different base env seeds; invalidating uid"
                 )
                 return False
 

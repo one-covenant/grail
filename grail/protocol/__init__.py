@@ -18,7 +18,7 @@ from .crypto import (
 # Re-export signature functions
 from .signatures import (
     build_commit_binding,
-    derive_canonical_sat,
+    derive_env_seed,
     hash_commitments,
     sign_commit_binding,
     verify_commit_signature,
@@ -42,7 +42,7 @@ __all__ = [
     "build_commit_binding",
     "sign_commit_binding",
     "verify_commit_signature",
-    "derive_canonical_sat",
+    "derive_env_seed",
     "hash_commitments",
     # Tokens
     "int_to_bytes",
