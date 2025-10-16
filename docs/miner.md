@@ -85,14 +85,15 @@ Set these in `.env` (see `.env.example` for full list and guidance):
 - Wallets
   - `BT_WALLET_COLD` (coldkey name)
   - `BT_WALLET_HOT` (hotkey name)
-- Model & generation (read-only for miners in this release)
-  - Do not override `GRAIL_MODEL_NAME` or `GRAIL_MAX_NEW_TOKENS`.
-  - Use `Qwen/Qwen3-4B-Instruct-2507` as the network default model in the first version.
-  - Set `GRAIL_MAX_NEW_TOKENS=1024` (mandatory in first version).
-  - Validators assume the network default model and generation cap; changes may cause rollouts to be rejected.
-  - `GRAIL_ROLLOUTS_PER_PROBLEM` is fixed at 4 in this release and must not be changed. Throughput tuning should be done via other parameters; still ensure generation finishes before the upload buffer (last 2 blocks).
+- Model & generation (dynamically loaded from R2 checkpoints)
+  - Model starts with `Qwen/Qwen3-4B-Instruct-2507` base but evolves through training
+  - Miners automatically load the latest checkpoint from the previous window
+  - Maximum new tokens is fixed at 1024 (hardcoded constant)
+  - Rollouts per problem is fixed at 16 (hardcoded constant)
+  - Models are shared via R2 storage and updated by the trainer after each window
+  - No manual model configuration required - checkpoints are loaded automatically
 - Performance tuning
-  - `GRAIL_GENERATION_BATCH_SIZE` (default: 1): Number of rollouts to generate in parallel per batch. Higher values increase throughput but require more VRAM. Must be ≤ 10. Start with 1 and gradually increase (2, 4, 5, 10) while monitoring GPU memory with `nvidia-smi`. Example: `export GRAIL_GENERATION_BATCH_SIZE=4` for ~3-4x throughput on A100.
+  - `GRAIL_GENERATION_BATCH_SIZE` (default: 1): Number of rollouts to generate in parallel per batch. Higher values increase throughput but require more VRAM. Must be ≤ 16 and must divide evenly into `ROLLOUTS_PER_PROBLEM`. Valid options: 1, 2, 4, 8, 16. Start with 1 and gradually increase while monitoring GPU memory with `nvidia-smi`. Example: `export GRAIL_GENERATION_BATCH_SIZE=4` for ~3-4x throughput on A100.
 - Object storage (R2/S3)
   - `R2_BUCKET_ID`, `R2_ACCOUNT_ID`
   - Dual credentials (recommended):
@@ -153,12 +154,13 @@ High-level loop (see `grail/cli/mine.py`):
 
 1. Load R2 credentials and initialize `GrailChainManager`; commit read credentials on-chain.
 2. Connect to subtensor; compute `window_start = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH`.
-3. For the window:
+3. **Load checkpoint**: Download the model checkpoint from the previous window (`window_start - WINDOW_LENGTH`) from R2.
+4. For the window:
    - Derive randomness: `sha256(block_hash + drand.randomness)` (or block hash only).
-   - Generate SAT problems (difficulty ramps) and create GRPO batches via `SATRolloutGenerator`.
+   - Generate SAT problems (difficulty ramps) and create GRPO batches using the loaded checkpoint.
    - Use `Prover` to commit/open GRAIL proofs and package signed rollouts.
-4. Upload the window’s rollouts to R2/S3 with write credentials.
-5. Repeat on the next window.
+5. Upload the window's rollouts to R2/S3 with write credentials.
+6. Repeat on the next window (loading new checkpoint if available).
 
 Artifacts uploaded per rollout include:
 - GRAIL commit (`tokens`, `s_vals`, signature, beacon)
@@ -182,7 +184,7 @@ Artifacts uploaded per rollout include:
 ## Best Practices
 
 - **Use NVIDIA A100 GPU** for optimal performance; this is currently required for proper GRAIL proof generation and verification.
-- Keep model-related envs at network defaults; do not override `GRAIL_MODEL_NAME` or `GRAIL_MAX_NEW_TOKENS`. Use `Qwen/Qwen3-4B-Instruct-2507` and set `GRAIL_MAX_NEW_TOKENS=1024` in the first version.
+- Models evolve through training: Start with `Qwen/Qwen3-4B-Instruct-2507` base but automatically load updated checkpoints from R2. Fixed at 1024 max new tokens and 16 rollouts per problem.
 - Reserve the final 2 blocks of each window for uploads; the miner does this automatically but avoid heavy generation near the end.
 - Use `--use-drand` (default) for robust challenge derivation; fall back with `--no-drand` only if needed.
 - Ensure R2 dual-credential setup: write locally, read credentials are committed on-chain by the miner.
