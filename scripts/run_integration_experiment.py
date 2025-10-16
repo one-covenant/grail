@@ -31,7 +31,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import IO, Any, Optional
+from typing import IO, Any
 
 # Configure logging
 logging.basicConfig(
@@ -146,7 +146,7 @@ class Tier3TestRunner:
         stderr_thread.start()
 
     def start_miner(
-        self, index: int, model_name: str, hotkey: Optional[str] = None
+        self, index: int, model_name: str, hotkey: str | None = None
     ) -> subprocess.Popen:
         """Start a miner with specific model and optionally specific hotkey."""
         name = f"miner-{index}"
@@ -269,7 +269,7 @@ class Tier3TestRunner:
         self,
         miner_models: list[str],
         validator_model: str,
-        miner_hotkeys: Optional[list[str]] = None,
+        miner_hotkeys: list[str] | None = None,
         validator_delay: int = 30,
     ) -> None:
         """Run the test with specified models and optionally specific hotkeys.
