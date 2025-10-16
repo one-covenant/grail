@@ -410,7 +410,7 @@ def check_answer(prompts, completions, answer, **kwargs):
     ]
 
     scores = []
-    for guess, true_answer in zip(extracted_responses, answer):
+    for guess, true_answer in zip(extracted_responses, answer, strict=False):
         score = 0
         if guess is None:
             scores.append(-2.0)
@@ -485,7 +485,7 @@ def check_numbers(prompts, completions, answer, **kwargs):
         )
     PRINTED_TIMES += 1
 
-    for guess, true_answer in zip(extracted_responses, answer):
+    for guess, true_answer in zip(extracted_responses, answer, strict=False):
         if guess is None:
             scores.append(-2.5)
             continue
