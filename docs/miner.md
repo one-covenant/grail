@@ -91,6 +91,8 @@ Set these in `.env` (see `.env.example` for full list and guidance):
   - Set `GRAIL_MAX_NEW_TOKENS=1024` (mandatory in first version).
   - Validators assume the network default model and generation cap; changes may cause rollouts to be rejected.
   - `GRAIL_ROLLOUTS_PER_PROBLEM` is fixed at 4 in this release and must not be changed. Throughput tuning should be done via other parameters; still ensure generation finishes before the upload buffer (last 2 blocks).
+- Performance tuning
+  - `GRAIL_GENERATION_BATCH_SIZE` (default: 1): Number of rollouts to generate in parallel per batch. Higher values increase throughput but require more VRAM. Must be ≤ 10. Start with 1 and gradually increase (2, 4, 5, 10) while monitoring GPU memory with `nvidia-smi`. Example: `export GRAIL_GENERATION_BATCH_SIZE=4` for ~3-4x throughput on A100.
 - Object storage (R2/S3)
   - `R2_BUCKET_ID`, `R2_ACCOUNT_ID`
   - Dual credentials (recommended):
