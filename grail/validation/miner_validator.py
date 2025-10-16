@@ -867,7 +867,7 @@ class MinerValidator:
                     denom = max(1e-8, (sum(x * x for x in centered) / n) ** 0.5)
                     recomputed = [x / denom for x in centered]
                     # Allow small tolerance per element
-                    for a, b in zip(advantages, recomputed):
+                    for a, b in zip(advantages, recomputed, strict=False):
                         if abs(a - b) > 1e-3:
                             logger.warning(
                                 "GRPO group %s advantage mismatch vs recomputed", group_id

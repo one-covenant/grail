@@ -4,13 +4,13 @@ import contextvars
 import logging
 import sys
 from collections.abc import Generator
-from typing import Any, Optional
+from typing import Any
 
-_uid_ctx: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+_uid_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "miner_uid",
     default=None,
 )
-_window_ctx: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+_window_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "miner_window",
     default=None,
 )
@@ -98,7 +98,7 @@ async def await_with_stall_log(
     label: str,
     *,
     threshold_seconds: float = 120.0,
-    log: Optional[logging.Logger] = None,
+    log: logging.Logger | None = None,
 ) -> Any:
     """Await a coroutine and emit one stall warning if it exceeds threshold.
 
@@ -127,7 +127,7 @@ async def await_with_stall_log(
 
 async def dump_asyncio_stacks(
     *,
-    log: Optional[logging.Logger] = None,
+    log: logging.Logger | None = None,
     max_tasks: int = 20,
     max_frames: int = 3,
     label: str = "WATCHDOG",

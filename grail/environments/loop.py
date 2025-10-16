@@ -165,7 +165,7 @@ class AgentEnvLoop:
             rollouts.append(rollout)
 
         advantages = self._compute_advantages([r.reward for r in rollouts])
-        for rollout, adv in zip(rollouts, advantages):
+        for rollout, adv in zip(rollouts, advantages, strict=False):
             rollout.advantage = float(adv)
 
         return rollouts
@@ -187,7 +187,7 @@ class AgentEnvLoop:
             rollouts.append(rollout)
 
         advantages = self._compute_advantages([r.reward for r in rollouts])
-        for rollout, adv in zip(rollouts, advantages):
+        for rollout, adv in zip(rollouts, advantages, strict=False):
             rollout.advantage = float(adv)
 
         return rollouts

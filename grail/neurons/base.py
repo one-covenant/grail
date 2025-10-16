@@ -19,7 +19,7 @@ import os
 import signal
 import threading
 import time
-from typing import Callable
+from collections.abc import Callable
 
 import bittensor as bt
 

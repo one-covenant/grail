@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import multiprocessing
-from typing import Any, Optional
+from typing import Any
 
 import bittensor as bt
 
@@ -46,11 +46,11 @@ class GrailChainManager:
 
         # Commitment tracking
         self.commitments: dict[int, Bucket] = {}
-        self._fetch_task: Optional[asyncio.Task] = None
+        self._fetch_task: asyncio.Task | None = None
 
         # Worker process for commitment fetching (avoids GIL contention)
-        self._worker_queue: Optional[multiprocessing.Queue] = None
-        self._worker_process: Optional[multiprocessing.Process] = None
+        self._worker_queue: multiprocessing.Queue | None = None
+        self._worker_process: multiprocessing.Process | None = None
 
         logger.info(f"Initialized GrailChainManager for netuid {self.netuid}")
 
@@ -207,7 +207,7 @@ class GrailChainManager:
             except Exception as e:
                 logger.error(f"Error polling worker queue: {e}")
 
-    def get_bucket(self, uid: int) -> Optional[Bucket]:
+    def get_bucket(self, uid: int) -> Bucket | None:
         """
         Get the bucket configuration for a given UID.
 
@@ -219,7 +219,7 @@ class GrailChainManager:
         """
         return self.commitments.get(uid)
 
-    def get_bucket_for_hotkey(self, hotkey: str) -> Optional[Bucket]:
+    def get_bucket_for_hotkey(self, hotkey: str) -> Bucket | None:
         """
         Get bucket configuration for a specific hotkey.
 
