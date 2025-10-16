@@ -1,6 +1,7 @@
 """Window processing orchestrator for GRAIL validation.
 
-Coordinates miner validation, copycat detection, and result aggregation for a single window.
+Coordinates miner validation, copycat detection, and result aggregation for a
+single window.
 """
 
 from __future__ import annotations
@@ -112,47 +113,8 @@ class WindowProcessor:
         miner_seconds_list: list[float] = []
         miner_blocks_list: list[int] = []
 
-        # TODO: REMOVE BEFORE COMMITTING TO GITHUB - This is for testing only!
-        # Filter to only process miner with UID 80
-        target_uid = 80
-        filtered_miners = []
+        # Process each miner
         for miner_hotkey in miners_to_check:
-            uid = uid_by_hotkey.get(miner_hotkey, miner_hotkey)
-            if uid == target_uid:
-                filtered_miners.append(miner_hotkey)
-                break  # Only need one miner with UID 80
-
-        if not filtered_miners:
-            logger.info(f"No miner found with UID {target_uid}, skipping window validation")
-            # Return empty results
-            window_t1 = time.monotonic()
-            window_seconds = window_t1 - window_t0
-            return WindowResults(
-                window_start=window,
-                window_block_hash=window_hash,
-                window_randomness=window_rand,
-                miner_results={},
-                total_valid_rollouts=0,
-                total_rollouts_processed=0,
-                invalid_signatures=0,
-                invalid_proofs=0,
-                processing_errors=0,
-                files_found=0,
-                all_valid_rollouts_for_upload=[],
-                window_cheaters=set(),
-                interval_cheaters=set(),
-                violation_details=[],
-                window_metrics={},
-                window_timing_seconds=window_seconds,
-                window_timing_blocks=0,
-                miner_timing_seconds=[],
-                miner_timing_blocks=[],
-            )
-
-        logger.info(f"Processing only miner with UID {target_uid}: {filtered_miners[0]}")
-
-        # Process each miner (now filtered to only UID 80)
-        for miner_hotkey in filtered_miners:
             # Update heartbeat
             if heartbeat_callback:
                 try:
@@ -168,7 +130,7 @@ class WindowProcessor:
                 b0 = None
 
             try:
-                # Validate miner (use .get() to avoid KeyError if hotkey not in map)
+                # Validate miner (use .get() to avoid KeyError)
                 uid = uid_by_hotkey.get(miner_hotkey, miner_hotkey)
                 with miner_log_context(uid, window):
                     result: MinerResults = await self._miner_validator.validate_miner(
@@ -216,9 +178,12 @@ class WindowProcessor:
                     )
 
                 # Aggregate processing counts
-                (pr_total, pr_invalid_sig, pr_invalid_proof, pr_processing_err) = (
-                    result.processed_counts
-                )
+                (
+                    pr_total,
+                    pr_invalid_sig,
+                    pr_invalid_proof,
+                    pr_processing_err,
+                ) = result.processed_counts
                 total_rollouts_processed += pr_total
                 invalid_signatures += pr_invalid_sig
                 invalid_proofs += pr_invalid_proof
@@ -284,8 +249,8 @@ class WindowProcessor:
 
         # Log window summary
         logger.info(
-            f"Window {window} complete: {total_valid_rollouts} valid rollouts, "
-            f"{files_found}/{len(filtered_miners)} files found (UID 80 only), "
+            f"Window {window}: {total_valid_rollouts} valid rollouts, "
+            f"{files_found}/{len(miners_to_check)} files found, "
             f"{len(cheaters_detected)} cheaters gated, "
             f"{window_seconds:.1f}s ({window_blocks} blocks)"
         )

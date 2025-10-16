@@ -340,7 +340,7 @@ async def create_subtensor(*, resilient: bool = True) -> bt.subtensor | Resilien
 
     if resilient:
         # Wrap with resilience layer for production use
-        timeout = float(os.getenv("BT_CALL_TIMEOUT", "10.0"))
+        timeout = float(os.getenv("BT_CALL_TIMEOUT", "15.0"))
         retries = int(os.getenv("BT_CALL_RETRIES", "3"))
         backoff = float(os.getenv("BT_CALL_BACKOFF", "5.0"))
 
