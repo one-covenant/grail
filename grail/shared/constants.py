@@ -111,7 +111,7 @@ REWARD_ABS_TOL = 1e-6
 
 # ────────────────  ROLLOUTS PER PROBLEM  ────────────────
 
-ROLLOUTS_PER_PROBLEM = 16
+ROLLOUTS_PER_PROBLEM = 4
 
 # ────────────────  ENVIRONMENT CONFIGURATION  ────────────────
 

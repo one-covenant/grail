@@ -576,7 +576,7 @@ async def generate_rollouts_for_window(
 
     device = model.device
     # Batch size for parallel rollout generation (tune per node for memory/throughput)
-    batch_size = int(os.getenv("GRAIL_GENERATION_BATCH_SIZE", "1"))
+    batch_size = int(os.getenv("GRAIL_GENERATION_BATCH_SIZE", "2"))
     if batch_size > ROLLOUTS_PER_PROBLEM:
         logger.warning(
             "GRAIL_GENERATION_BATCH_SIZE=%d exceeds ROLLOUTS_PER_PROBLEM=%d; capping at %d",
