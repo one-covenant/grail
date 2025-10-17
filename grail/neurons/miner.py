@@ -145,7 +145,7 @@ class MinerNeuron(BaseNeuron):
                         if current_checkpoint_window != checkpoint_window:
                             # Time checkpoint download/retrieval
                             timer_ctx = (
-                                monitor.timer("mining/checkpoint_download")
+                                monitor.timer("profiling/checkpoint_download")
                                 if monitor
                                 else contextlib.nullcontext()
                             )

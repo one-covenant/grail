@@ -82,9 +82,13 @@ Set these in `.env` (see `.env.example`). This file will be used with Docker Com
 - Wallets
   - `BT_WALLET_COLD` (coldkey name)
   - `BT_WALLET_HOT` (hotkey name)
-- Model (read-only for validators in this release)
-  - `GRAIL_MODEL_NAME` (mandatory: set to `Qwen/Qwen3-4B-Instruct-2507` in first version)
-  - `GRAIL_MAX_NEW_TOKENS` (mandatory: set to `1024` in first version)
+- Model (dynamically loaded from R2 checkpoints)
+  - Model starts with `Qwen/Qwen3-4B-Instruct-2507` base but evolves through training
+  - Validators automatically load the appropriate checkpoint for each validation window
+  - Maximum new tokens is fixed at 1024 (hardcoded constant)
+  - Rollouts per problem is fixed at 16 (hardcoded constant)
+  - Models are shared via R2 storage and updated by the trainer after each window
+  - No manual model configuration required - checkpoints are loaded automatically
 - Object storage (R2/S3)
   - `R2_BUCKET_ID`, `R2_ACCOUNT_ID`
   - Dual credentials (recommended):
@@ -215,6 +219,7 @@ The implementation lives in `grail/cli/validate.py`.
 
 - Determine current block; compute windows of length `WINDOW_LENGTH`.
 - Process the previous complete window: `target_window = current - WINDOW_LENGTH`.
+- **Load checkpoint**: Download the appropriate model checkpoint for the target window from R2.
 
 ### Discovery & Download
 
@@ -230,7 +235,7 @@ For each downloaded inference:
 - Window and block-hash must match the validator’s `target_window` and hash.
 - Nonce must be unique within a miner’s window file.
 - Signature check: hotkey verifies `challenge = sat_seed + block_hash + nonce`.
-- SAT seed must equal `{wallet_addr}-{target_window_hash}-{nonce}` (for GRPO rollouts, base seed `{wallet_addr}-{target_window_hash}-{rollout_group}` is reconstructed). Note: GRPO group size is fixed at 4 (`GRAIL_ROLLOUTS_PER_PROBLEM=4`) in this release and must not be changed by miners.
+- SAT seed must equal `{wallet_addr}-{target_window_hash}-{nonce}` (for GRPO rollouts, base seed `{wallet_addr}-{target_window_hash}-{rollout_group}` is reconstructed). Note: GRPO group size is fixed at 16 (hardcoded constant) in this release.
 - Challenge randomness for GRAIL proof: mix drand randomness (current round) with `target_window_hash`; fallback to hash-only on failures.
 - Verifier (`grail/grail.py`) checks token validity, sketch proof, model identity, and SAT reconstruction.
 

@@ -8,9 +8,13 @@ import hashlib
 import pathlib
 import sys
 from collections import Counter
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+if TYPE_CHECKING:
+    from grail.validation.copycat_service import CopycatTracker
 
 from .proof_test_utils import generate_realistic_sat_prompt
 
@@ -42,7 +46,7 @@ def _set_test_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def mock_subtensor():
+def mock_subtensor() -> AsyncMock:
     """Mock bittensor subtensor for testing."""
     subtensor = AsyncMock()
     subtensor.get_current_block = AsyncMock(return_value=1000)
@@ -55,7 +59,7 @@ def mock_subtensor():
 
 
 @pytest.fixture
-def mock_metagraph():
+def mock_metagraph() -> MagicMock:
     """Mock bittensor metagraph with sample miners."""
     metagraph = MagicMock()
     metagraph.hotkeys = [f"hotkey_{i}" for i in range(20)]
@@ -64,7 +68,7 @@ def mock_metagraph():
 
 
 @pytest.fixture
-def mock_chain_manager():
+def mock_chain_manager() -> MagicMock:
     """Mock GrailChainManager for credential access."""
     manager = MagicMock()
     manager.get_bucket = MagicMock(return_value=None)
@@ -73,7 +77,7 @@ def mock_chain_manager():
 
 
 @pytest.fixture
-def mock_credentials():
+def mock_credentials() -> MagicMock:
     """Mock bucket credentials."""
     credentials = MagicMock()
     credentials.access_key = "test_key"
@@ -82,7 +86,7 @@ def mock_credentials():
 
 
 @pytest.fixture
-def mock_wallet():
+def mock_wallet() -> MagicMock:
     """Mock bittensor wallet."""
     wallet = MagicMock()
     wallet.hotkey.ss58_address = "validator_hotkey_test"
@@ -90,7 +94,7 @@ def mock_wallet():
 
 
 @pytest.fixture
-def mock_monitor():
+def mock_monitor() -> AsyncMock:
     """Mock monitoring client."""
     monitor = AsyncMock()
     monitor.log_gauge = AsyncMock()
@@ -105,7 +109,7 @@ def mock_monitor():
 
 
 @pytest.fixture
-def sample_window_data():
+def sample_window_data() -> dict[str, str | int]:
     """Sample window metadata."""
     return {
         "window": 1000,
@@ -115,7 +119,7 @@ def sample_window_data():
 
 
 @pytest.fixture
-def sample_miner_rollouts():
+def sample_miner_rollouts() -> list[dict[str, str | int | float]]:
     """Sample rollouts for a miner."""
     return [
         {
@@ -130,7 +134,7 @@ def sample_miner_rollouts():
 
 
 @pytest.fixture
-def sample_validation_metrics():
+def sample_validation_metrics() -> dict[str, dict[str, int]]:
     """Sample validation metrics for multiple miners."""
     return {
         "miner_1": {"valid": 10, "checked": 12, "total": 20, "successful": 8, "unique": 10},
@@ -140,7 +144,7 @@ def sample_validation_metrics():
 
 
 @pytest.fixture
-def sample_rollout_counters():
+def sample_rollout_counters() -> dict[str, Counter[str]]:
     """Sample rollout counters for copycat detection."""
     return {
         "miner_1": Counter(["digest_1", "digest_2", "digest_3", "digest_4", "digest_5"]),
@@ -163,7 +167,7 @@ def sample_rollout_counters():
         (5, 0.2, 10, None, 10),  # Hits min
     ]
 )
-def sample_size_cases(request):
+def sample_size_cases(request: pytest.FixtureRequest) -> tuple[int, float, int, int | None, int]:
     """Parametrized test cases for sample size calculation."""
     return request.param
 
@@ -213,7 +217,7 @@ def sat_prompt_tokens(sat_prompts: list[str]) -> list[int]:
 
 
 @pytest.fixture(scope="session")
-def tracker():
+def tracker() -> "CopycatTracker":
     """CopycatTracker instance for testing."""
     from grail.validation.copycat_service import CopycatTracker
 

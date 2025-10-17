@@ -69,7 +69,7 @@ RNG_LABEL = {"sketch": b"sketch", "open": b"open", "sat": b"sat"}
 
 # ────────────────  TERMINATION VALIDATION HPs  ────────────────
 
-MAX_NEW_TOKENS = int(os.getenv("GRAIL_MAX_NEW_TOKENS", "1024"))
+MAX_NEW_TOKENS = 1024
 
 # Must match rollout generator default
 MIN_EOS_PROBABILITY = 0.1  # Minimum probability for valid EOS termination
@@ -111,7 +111,7 @@ REWARD_ABS_TOL = 1e-6
 
 # ────────────────  ROLLOUTS PER PROBLEM  ────────────────
 
-ROLLOUTS_PER_PROBLEM = int(os.getenv("GRAIL_ROLLOUTS_PER_PROBLEM", "4"))
+ROLLOUTS_PER_PROBLEM = 16
 
 # ────────────────  ENVIRONMENT CONFIGURATION  ────────────────
 
