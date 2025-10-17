@@ -10,7 +10,6 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..shared.constants import (
     TRAINER_BATCH_SIZE,
@@ -25,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 def compute_logprobs(
-    model: AutoModelForCausalLM,
+    model: Any,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
     prompt_lengths: list[int],
@@ -33,15 +32,18 @@ def compute_logprobs(
 ) -> torch.Tensor:
     """Compute sum log-probabilities over completion tokens for GRPO."""
 
-    with torch.amp.autocast(device_type="cuda", enabled=torch.cuda.is_available()):
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-        logits = outputs.logits
+    # Precision (fp16/bf16) is controlled by the caller via accelerator.autocast
+    outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+    logits = outputs.logits
 
     shift_logits = logits[:, :-1, :].contiguous()
     shift_labels = input_ids[:, 1:].contiguous()
 
     log_probs = F.log_softmax(shift_logits, dim=-1)
-    token_log_probs = log_probs.gather(2, shift_labels.unsqueeze(-1)).squeeze(-1)
+    token_log_probs = log_probs.gather(
+        2,
+        shift_labels.unsqueeze(-1),
+    ).squeeze(-1)
 
     seq_log_probs: list[torch.Tensor] = []
     seq_len_minus_1 = token_log_probs.shape[1]
@@ -58,7 +60,7 @@ def compute_logprobs(
 
 
 def compute_entropy(
-    model: AutoModelForCausalLM,
+    model: Any,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
     prompt_lengths: list[int],
@@ -66,9 +68,9 @@ def compute_entropy(
 ) -> torch.Tensor:
     """Compute mean entropy over completion tokens."""
 
-    with torch.amp.autocast(device_type="cuda", enabled=torch.cuda.is_available()):
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-        logits = outputs.logits[:, :-1, :].contiguous()
+    # Precision is controlled by the caller via accelerator.autocast
+    outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+    logits = outputs.logits[:, :-1, :].contiguous()
 
     probs = F.softmax(logits, dim=-1)
     log_probs = F.log_softmax(logits, dim=-1)
@@ -89,12 +91,11 @@ def compute_entropy(
 
 
 async def train_grpo_epoch(
-    model: AutoModelForCausalLM,
-    ref_model: AutoModelForCausalLM,
-    tokenizer: AutoTokenizer,
+    model: Any,
+    ref_model: Any,
+    tokenizer: Any,
     groups: list[GRPOGroup],
     optimizer: torch.optim.Optimizer,
-    scaler: torch.cuda.amp.GradScaler,
     accelerator: Accelerator,
     monitor: Any,
     window: int,
@@ -125,6 +126,7 @@ async def train_grpo_epoch(
         batch_prompt_lens: list[int] = []
         batch_comp_lens: list[int] = []
         batch_advantages: list[float] = []
+        batch_behavior_seq_logprobs: list[float | None] = []
 
         for rollout in batch_rollouts:
             tokens = rollout.tokens[:TRAINER_MAX_LENGTH]
@@ -132,6 +134,19 @@ async def train_grpo_epoch(
             batch_prompt_lens.append(rollout.prompt_length)
             batch_comp_lens.append(rollout.completion_length)
             batch_advantages.append(rollout.advantage)
+            # If miner provided per-token logprobs, aggregate over completion
+            provided = None
+            if getattr(rollout, "token_logprobs", None):
+                tlp: list[float] = list(rollout.token_logprobs or [])
+                # Two supported shapes: per-completion only, or per-shifted-seq
+                if len(tlp) == max(0, rollout.completion_length):
+                    provided = float(sum(tlp))
+                else:
+                    start_idx = max(0, rollout.prompt_length - 1)
+                    end_idx = min(len(tlp), start_idx + rollout.completion_length)
+                    if end_idx > start_idx:
+                        provided = float(sum(tlp[start_idx:end_idx]))
+            batch_behavior_seq_logprobs.append(provided)
 
         max_len = max(len(tokens) for tokens in batch_tokens)
         pad_id = tokenizer.pad_token_id
@@ -154,22 +169,48 @@ async def train_grpo_epoch(
             device=accelerator.device,
         )
 
-        logprobs_current = compute_logprobs(
-            model,
-            input_ids_tensor,
-            attention_mask_tensor,
-            batch_prompt_lens,
-            batch_comp_lens,
-        )
-
-        with torch.no_grad():
-            logprobs_ref = compute_logprobs(
-                ref_model,
+        # Forward pass under autocast for mixed precision
+        with accelerator.autocast():
+            logprobs_current = compute_logprobs(
+                model,
                 input_ids_tensor,
                 attention_mask_tensor,
                 batch_prompt_lens,
                 batch_comp_lens,
             )
+
+        # Behavior/reference logprobs: prefer miner-provided values when present
+        all_have_behavior = all(x is not None for x in batch_behavior_seq_logprobs)
+        any_have_behavior = any(x is not None for x in batch_behavior_seq_logprobs)
+        if all_have_behavior:
+            logprobs_ref = torch.tensor(
+                list(batch_behavior_seq_logprobs),
+                dtype=torch.float32,
+                device=accelerator.device,
+            )
+        else:
+            with torch.no_grad():
+                with accelerator.autocast():
+                    logprobs_ref = compute_logprobs(
+                        ref_model,
+                        input_ids_tensor,
+                        attention_mask_tensor,
+                        batch_prompt_lens,
+                        batch_comp_lens,
+                    )
+            if any_have_behavior:
+                provided_vals = [(x if x is not None else 0.0) for x in batch_behavior_seq_logprobs]
+                provided_tensor = torch.tensor(
+                    provided_vals,
+                    dtype=logprobs_ref.dtype,
+                    device=accelerator.device,
+                )
+                mask_tensor = torch.tensor(
+                    [x is not None for x in batch_behavior_seq_logprobs],
+                    dtype=torch.bool,
+                    device=accelerator.device,
+                )
+                logprobs_ref = torch.where(mask_tensor, provided_tensor, logprobs_ref)
 
         # Use log-probability ratio for a symmetric KL-like penalty
         log_ratio = logprobs_current - logprobs_ref
@@ -184,28 +225,26 @@ async def train_grpo_epoch(
         loss_pg = -(advantages_normalized * logprobs_current).mean()
         loss_kl = TRAINER_KL_COEF * log_ratio.pow(2).mean()
 
-        entropies = compute_entropy(
-            model,
-            input_ids_tensor,
-            attention_mask_tensor,
-            batch_prompt_lens,
-            batch_comp_lens,
-        )
+        with accelerator.autocast():
+            entropies = compute_entropy(
+                model,
+                input_ids_tensor,
+                attention_mask_tensor,
+                batch_prompt_lens,
+                batch_comp_lens,
+            )
         loss_entropy = -TRAINER_ENTROPY_COEF * entropies.mean()
 
         loss_total = loss_pg + loss_kl + loss_entropy
 
-        optimizer.zero_grad()
-        scaler.scale(loss_total).backward()
-
-        scaler.unscale_(optimizer)
+        optimizer.zero_grad(set_to_none=True)
+        accelerator.backward(loss_total)
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), TRAINER_GRAD_CLIP)
         if torch.isnan(grad_norm) or torch.isinf(grad_norm):
             logger.warning("NaN/Inf gradient norm detected; skipping batch")
             continue
 
-        scaler.step(optimizer)
-        scaler.update()
+        optimizer.step()
 
         epoch_metrics["loss_total"].append(loss_total.item())
         epoch_metrics["loss_pg"].append(loss_pg.item())
@@ -218,6 +257,9 @@ async def train_grpo_epoch(
         epoch_metrics["advantage_mean_normalized"].append(advantages_normalized.mean().item())
         epoch_metrics["advantage_std_normalized"].append(advantages_normalized.std().item())
         epoch_metrics["kl_divergence"].append(log_ratio.pow(2).mean().item())
+        if any_have_behavior:
+            frac = float(sum(1 for x in batch_behavior_seq_logprobs if x is not None))
+            epoch_metrics["behavior_frac"].append(frac / max(1, len(batch_behavior_seq_logprobs)))
 
     return {
         metric: sum(values) / len(values) if values else 0.0

@@ -50,7 +50,6 @@ class WindowResults:
         invalid_proofs: Count of proof validation failures
         processing_errors: Count of processing exceptions
         files_found: Number of miner window files found
-        all_valid_rollouts_for_upload: All valid rollouts (post-gating)
         window_cheaters: Miners gated at window scope
         interval_cheaters: Miners gated at interval scope
         violation_details: All copycat violations detected
@@ -71,7 +70,6 @@ class WindowResults:
     invalid_proofs: int
     processing_errors: int
     files_found: int
-    all_valid_rollouts_for_upload: list[dict]
     window_cheaters: set[str]
     interval_cheaters: set[str]
     violation_details: list[Any]  # CopycatViolation

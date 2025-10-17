@@ -234,6 +234,14 @@ class CheckpointManager:
             windows.add(window)
         return sorted(windows)
 
+    async def get_latest_checkpoint(self) -> Path | None:
+        """Return local path for the most recent remote checkpoint, if any."""
+        windows = await self.list_remote_windows()
+        if not windows:
+            return None
+        latest = max(windows)
+        return await self.get_checkpoint(latest)
+
     async def get_recent_checkpoints(self, n: int) -> list[Path]:
         """Get the N most recent checkpoints available locally or remotely.
 
