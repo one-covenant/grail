@@ -158,21 +158,31 @@ class TestGRAILVerifier:
         assert diagnostics["histogram_diff"] == 0
 
     def test_robustness_to_small_drift(self, verifier, randomness):
-        """Small numerical drift should not cause verification failure."""
+        """Small drift should not break verification when top-5 are well-separated.
+
+        Realistic scenario: Important activations in trained models are clearly separated,
+        so tiny numerical drift from framework/GPU differences shouldn't change ordering.
+        """
         r_vec = verifier.generate_r_vec(randomness)
-        hidden = torch.randn(4096)
+
+        # Build realistic hidden state: well-separated top-5 with background noise
+        hidden = torch.randn(4096) * 0.1
+        top_indices = [10, 20, 30, 40, 50]
+        hidden[top_indices] = torch.tensor([5.0, 4.0, 3.0, 2.0, 1.0])
+
         commitment = verifier.create_commitment(hidden, r_vec, position=0)
 
         # Add small drift (simulating cross-framework variance)
-        drift = torch.randn(4096) * 1e-5
-        hidden_drifted = hidden + drift
+        hidden_drifted = hidden + torch.randn(4096) * 1e-5
 
         is_valid, diagnostics = verifier.verify_commitment(
             hidden_drifted, commitment, r_vec, sequence_length=100
         )
 
-        assert is_valid, f"Small drift caused failure: {diagnostics}"
+        assert is_valid, f"Well-separated top-5 should be robust to small drift: {diagnostics}"
         assert diagnostics["sketch_diff"] < PROOF_SKETCH_TOLERANCE
+        assert diagnostics["rank_matches"] == 5
+        assert diagnostics["histogram_valid"]
 
     def test_rejects_different_hidden_state(self, verifier, randomness):
         """Completely different hidden state should be rejected."""
