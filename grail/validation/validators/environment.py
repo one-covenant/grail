@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 
 import torch
 
@@ -126,11 +127,8 @@ class EnvironmentEvaluationValidator(Validator):
             rollout = ctx.commit.get("rollout", {})
             prompt_len = int(rollout.get("prompt_length", 0))
             completion_len = int(rollout.get("completion_length", 0))
-            completion_ids = (
-                tokens[prompt_len : prompt_len + completion_len]
-                if completion_len > 0
-                else tokens[prompt_len:]
-            )
+            end_idx = prompt_len + completion_len if completion_len > 0 else len(tokens)
+            completion_ids = tokens[prompt_len:end_idx]
             completion_text = ctx.tokenizer.decode(completion_ids, skip_special_tokens=False)
 
             adapter = get_adapter(env_id)
@@ -155,11 +153,11 @@ class RewardValidator(Validator):
             env_res = ctx.metadata.get("env_eval_result", {})
             env_reward = float(env_res.get("reward"))
 
-            lo = env_reward - max(abs(env_reward) * REWARD_REL_TOL, REWARD_ABS_TOL)
-            hi = env_reward + max(abs(env_reward) * REWARD_REL_TOL, REWARD_ABS_TOL)
-            ok = lo <= miner_reward <= hi
-            ctx.checks[self.check_name] = bool(ok)
-            return bool(ok)
+            ok = math.isclose(
+                miner_reward, env_reward, rel_tol=REWARD_REL_TOL, abs_tol=REWARD_ABS_TOL
+            )
+            ctx.checks[self.check_name] = ok
+            return ok
         except Exception as e:
             logger.debug(f"Reward validation error: {e}")
             ctx.checks[self.check_name] = False
@@ -193,14 +191,17 @@ class LogprobValidator(Validator):
 
             comp_ids = tokens[prompt_len : prompt_len + completion_len]
 
-            # Align claimed logprobs to completion region
-            if len(claimed) == completion_len:
-                claimed_comp = claimed
-            elif len(claimed) == len(tokens) and len(tokens) >= prompt_len + completion_len:
-                claimed_comp = claimed[prompt_len : prompt_len + completion_len]
-            else:
-                # Fallback: align to last completion_len entries
-                claimed_comp = claimed[-completion_len:] if completion_len > 0 else []
+            # Miner expect to generate token_logprobs as: [0.0] * prompt_len + logprobs
+            # So len(claimed) should equal len(tokens) = prompt_len + completion_len
+            if len(claimed) != len(tokens):
+                logger.debug(
+                    "Logprob length mismatch: expected %d, got %d", len(tokens), len(claimed)
+                )
+                ctx.checks[self.check_name] = False
+                return False
+
+            # Extract completion logprobs (skip prompt region)
+            claimed_comp = claimed[prompt_len : prompt_len + completion_len]
 
             # Debug: log alignment and first few claimed logprobs
             logger.debug(
@@ -263,8 +264,8 @@ class LogprobValidator(Validator):
                     first_mismatch_details["diff"],
                 )
 
-            ctx.checks[self.check_name] = bool(ok)
-            return bool(ok)
+            ctx.checks[self.check_name] = ok
+            return ok
         except Exception as e:
             logger.debug(f"Logprob validation error: {e}")
             ctx.checks[self.check_name] = False
