@@ -34,7 +34,9 @@ class TestSampleSizeCalculation:
             (1000, 0.5, 10, 100, 100),  # Large pool, hits max
         ],
     )
-    def test_respects_min_max_bounds(self, active_count, rate, min_size, max_size, expected):
+    def test_respects_min_max_bounds(
+        self, active_count: int, rate: float, min_size: int, max_size: int | None, expected: int
+    ) -> None:
         """Given various pool sizes, sample size should respect min/max bounds."""
         sampler = MinerSampler(
             sample_rate=rate, sample_min=min_size, sample_max=max_size, concurrency=8
@@ -44,7 +46,7 @@ class TestSampleSizeCalculation:
 
         assert result == expected
 
-    def test_zero_rate_returns_zero(self):
+    def test_zero_rate_returns_zero(self) -> None:
         """Given zero sample rate, should return zero regardless of pool size."""
         sampler = MinerSampler(sample_rate=0.0, sample_min=0, sample_max=100, concurrency=8)
 
@@ -54,7 +56,7 @@ class TestSampleSizeCalculation:
 class TestDeterministicSelection:
     """Test that selection is deterministic and reproducible."""
 
-    def test_same_inputs_produce_same_output(self):
+    def test_same_inputs_produce_same_output(self) -> None:
         """Given identical inputs, selection should be deterministic."""
         sampler = MinerSampler(sample_rate=0.5, sample_min=2, sample_max=10, concurrency=8)
 
@@ -72,7 +74,7 @@ class TestDeterministicSelection:
         assert results[0] == results[1] == results[2]
         assert len(results[0]) == 10  # 20 * 0.5
 
-    def test_different_window_hash_changes_selection(self):
+    def test_different_window_hash_changes_selection(self) -> None:
         """Given different window hash, selection should differ (deterministically)."""
         sampler = MinerSampler(sample_rate=0.5, sample_min=2, sample_max=10, concurrency=8)
 
@@ -94,7 +96,7 @@ class TestDeterministicSelection:
 class TestFairDistribution:
     """Test that selection fairly distributes across miners."""
 
-    def test_prioritizes_less_selected_miners(self):
+    def test_prioritizes_less_selected_miners(self) -> None:
         """Given selection history, should prioritize miners with fewer selections."""
         sampler = MinerSampler(sample_rate=0.5, sample_min=2, sample_max=5, concurrency=8)
 
@@ -113,13 +115,13 @@ class TestFairDistribution:
 
         assert len(selected_from_less) >= 3  # At least 3 out of 5 should be from less-selected
 
-    def test_tie_breaking_is_consistent(self):
+    def test_tie_breaking_is_consistent(self) -> None:
         """Given miners with equal selection counts, tie-breaking should be deterministic."""
         window_hash = "consistent_hash"
         hotkeys = [f"hotkey_{i}" for i in range(5)]
 
         # Compute tie-break values twice
-        def compute_tie_breaks(hks, w_hash):
+        def compute_tie_breaks(hks: list[str], w_hash: str) -> list[int]:
             return [
                 int.from_bytes(hashlib.sha256(f"{w_hash}:{hk}".encode()).digest()[:8], "big")
                 for hk in hks
@@ -142,7 +144,9 @@ class TestEdgeCases:
             ([f"hk_{i}" for i in range(3)], "hash", 0.0, []),  # Zero rate returns empty
         ],
     )
-    def test_handles_edge_cases(self, active_hotkeys, window_hash, sample_rate, expected):
+    def test_handles_edge_cases(
+        self, active_hotkeys: list[str], window_hash: str, sample_rate: float, expected: list[str]
+    ) -> None:
         """Given edge case inputs, sampler should handle gracefully."""
         sampler = MinerSampler(sample_rate=sample_rate, sample_min=0, sample_max=10, concurrency=8)
 
@@ -150,7 +154,7 @@ class TestEdgeCases:
 
         assert result == expected
 
-    def test_all_miners_same_count_uses_hash_ordering(self):
+    def test_all_miners_same_count_uses_hash_ordering(self) -> None:
         """Given all miners with same count, should use deterministic hash ordering."""
         sampler = MinerSampler(sample_rate=0.5, sample_min=1, sample_max=5, concurrency=8)
 

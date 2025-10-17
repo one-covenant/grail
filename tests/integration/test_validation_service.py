@@ -9,8 +9,12 @@ These tests verify behavior, not just component existence.
 
 from collections import deque
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from unittest.mock import AsyncMock, MagicMock
 
 from grail.infrastructure.checkpoints import CheckpointManager
 from grail.scoring import WeightComputer
@@ -18,7 +22,9 @@ from grail.validation import ValidationService, create_env_validation_pipeline
 
 
 @pytest.fixture
-def validation_service(mock_wallet, mock_credentials, mock_monitor):
+def validation_service(
+    mock_wallet: "MagicMock", mock_credentials: "MagicMock", mock_monitor: "AsyncMock"
+) -> ValidationService:
     """Create a ValidationService instance for testing."""
     validation_pipeline = create_env_validation_pipeline()
     weight_computer = WeightComputer(
@@ -48,7 +54,7 @@ def validation_service(mock_wallet, mock_credentials, mock_monitor):
 class TestRollingHistoryManagement:
     """Test rolling history tracking for miner selection and inference counts."""
 
-    def test_updates_counts_on_first_window(self, validation_service):
+    def test_updates_counts_on_first_window(self, validation_service: ValidationService) -> None:
         """Given first window, should add all miners to counts."""
         history = deque(maxlen=3)
         counts = {}
@@ -59,7 +65,7 @@ class TestRollingHistoryManagement:
         assert len(history) == 1
         assert history[0] == {"miner_1", "miner_2"}
 
-    def test_accumulates_counts_across_windows(self, validation_service):
+    def test_accumulates_counts_across_windows(self, validation_service: ValidationService) -> None:
         """Given multiple windows, should accumulate counts correctly."""
         history = deque(maxlen=3)
         counts = {}
@@ -70,7 +76,9 @@ class TestRollingHistoryManagement:
         assert counts == {"miner_1": 1, "miner_2": 2, "miner_3": 1}
         assert len(history) == 2
 
-    def test_evicts_oldest_window_when_maxlen_exceeded(self, validation_service):
+    def test_evicts_oldest_window_when_maxlen_exceeded(
+        self, validation_service: ValidationService
+    ) -> None:
         """Given maxlen windows, should evict oldest and adjust counts."""
         history = deque(maxlen=3)
         counts = {}
@@ -93,7 +101,7 @@ class TestRollingHistoryManagement:
         assert counts["miner_3"] == 1  # Unchanged
         assert counts["miner_4"] == 1  # New entry
 
-    def test_handles_empty_window_gracefully(self, validation_service):
+    def test_handles_empty_window_gracefully(self, validation_service: ValidationService) -> None:
         """Given empty miner set, should not crash."""
         history = deque(maxlen=3)
         counts = {}
@@ -103,7 +111,9 @@ class TestRollingHistoryManagement:
         assert len(history) == 1
         assert counts == {}
 
-    def test_handles_overlapping_miners_correctly(self, validation_service):
+    def test_handles_overlapping_miners_correctly(
+        self, validation_service: ValidationService
+    ) -> None:
         """Given overlapping miner sets, should maintain correct counts."""
         history = deque(maxlen=2)
         counts = {}
@@ -127,7 +137,7 @@ class TestRollingHistoryManagement:
 class TestServiceLifecycle:
     """Test service lifecycle management."""
 
-    def test_cleanup_stops_chain_manager(self, validation_service):
+    def test_cleanup_stops_chain_manager(self, validation_service: ValidationService) -> None:
         """Given cleanup call, should stop chain manager worker process."""
         from unittest.mock import MagicMock
 
@@ -139,7 +149,9 @@ class TestServiceLifecycle:
         # Should call stop on chain manager
         mock_chain.stop.assert_called_once()
 
-    def test_cleanup_handles_missing_chain_manager(self, validation_service):
+    def test_cleanup_handles_missing_chain_manager(
+        self, validation_service: ValidationService
+    ) -> None:
         """Given no chain manager, cleanup should not crash."""
         validation_service._chain_manager = None
 
