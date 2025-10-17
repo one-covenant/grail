@@ -20,12 +20,12 @@ from grail.validation.copycat_service import COPYCAT_SERVICE, COPYCAT_TRACKER, C
 class TestServiceInitialization:
     """Test that service initializes correctly."""
 
-    def test_creates_service_instance(self):
+    def test_creates_service_instance(self) -> None:
         """Given no arguments, service should initialize successfully."""
         service = CopycatService()
         assert service is not None
 
-    def test_singleton_exists(self):
+    def test_singleton_exists(self) -> None:
         """Given global singleton, it should be accessible."""
         assert COPYCAT_SERVICE is not None
         assert isinstance(COPYCAT_SERVICE, CopycatService)
@@ -34,7 +34,7 @@ class TestServiceInitialization:
 class TestIntervalManagement:
     """Test interval reset behavior."""
 
-    def test_reset_interval_callable(self):
+    def test_reset_interval_callable(self) -> None:
         """Given interval ID, reset should be callable without error."""
         service = CopycatService()
 
@@ -44,7 +44,7 @@ class TestIntervalManagement:
         # Tracker should be updated
         assert COPYCAT_TRACKER.current_interval_id == 42
 
-    def test_reset_different_intervals(self):
+    def test_reset_different_intervals(self) -> None:
         """Given multiple resets, should update each time."""
         service = CopycatService()
 
@@ -61,7 +61,7 @@ class TestIntervalManagement:
 class TestRolloutFiltering:
     """Test rollout filtering logic."""
 
-    def test_filters_cheater_rollouts(self):
+    def test_filters_cheater_rollouts(self) -> None:
         """Given rollouts and cheaters, should filter correctly."""
         service = CopycatService()
 
@@ -80,7 +80,7 @@ class TestRolloutFiltering:
         assert len(filtered) == 1
         assert filtered[0]["hotkey"] == "miner_2"
 
-    def test_empty_cheaters_returns_all(self):
+    def test_empty_cheaters_returns_all(self) -> None:
         """Given no cheaters, all rollouts should be returned."""
         service = CopycatService()
 
@@ -93,7 +93,7 @@ class TestRolloutFiltering:
 
         assert filtered == rollouts
 
-    def test_empty_rollouts_returns_empty(self):
+    def test_empty_rollouts_returns_empty(self) -> None:
         """Given empty rollouts, should return empty."""
         service = CopycatService()
 
@@ -101,7 +101,7 @@ class TestRolloutFiltering:
 
         assert filtered == []
 
-    def test_all_cheaters_returns_empty(self):
+    def test_all_cheaters_returns_empty(self) -> None:
         """Given all rollouts from cheaters, should return empty list."""
         service = CopycatService()
 
@@ -114,7 +114,7 @@ class TestRolloutFiltering:
 
         assert filtered == []
 
-    def test_preserves_rollout_structure(self):
+    def test_preserves_rollout_structure(self) -> None:
         """Given complex rollouts, should preserve structure."""
         service = CopycatService()
 
@@ -139,7 +139,7 @@ class TestRolloutFiltering:
 class TestServiceIntegration:
     """Test service integration with global tracker."""
 
-    def test_uses_global_tracker(self):
+    def test_uses_global_tracker(self) -> None:
         """Given service, it should use the global COPYCAT_TRACKER."""
         service = CopycatService()
 
@@ -151,7 +151,7 @@ class TestServiceIntegration:
         COPYCAT_SERVICE.reset_interval(interval_id=100)
         assert COPYCAT_TRACKER.current_interval_id == 100
 
-    def test_multiple_instances_share_state(self):
+    def test_multiple_instances_share_state(self) -> None:
         """Given multiple service instances, they share global tracker."""
         service1 = CopycatService()
         service2 = CopycatService()

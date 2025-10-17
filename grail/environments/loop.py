@@ -62,12 +62,14 @@ class AgentEnvLoop:
         device: str = "cuda",
         max_new_tokens: int = MAX_NEW_TOKENS,
         temperature: float = 0.7,
+        batch_size: int = 1,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
         self.max_new_tokens = int(max_new_tokens)
         self.temperature = float(temperature)
+        self.batch_size = int(batch_size)
 
         self._hidden_dim = resolve_hidden_size(self.model)
 
@@ -113,7 +115,7 @@ class AgentEnvLoop:
         rendered, prompt_ids = self._render_chat(
             [{"role": m.role, "content": m.content} for m in obs.messages]
         )
-        all_ids, logprobs, prompt_len = self._generate_with_logprobs(prompt_ids)
+        all_ids, prompt_len = self._generate_tokens(prompt_ids)
         completion_ids = all_ids[prompt_len:]
         completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=False)
 
@@ -121,10 +123,13 @@ class AgentEnvLoop:
             ChatMessage(role="assistant", content=completion_text)
         )
 
-        commitments, signature, beacon, proof_version = self._compute_commitments(
-            all_ids,
-            randomness_hex,
-            wallet,
+        commitments, logprobs, signature, beacon, proof_version = (
+            self._compute_commitments_and_logprobs(
+                all_ids,
+                prompt_len,
+                randomness_hex,
+                wallet,
+            )
         )
 
         # Build trajectory for compatibility (step_idx, action, reward)
@@ -158,14 +163,66 @@ class AgentEnvLoop:
     ) -> list[GRPORollout]:
         """Generate multiple rollouts for GRPO and compute advantages."""
         rollouts: list[GRPORollout] = []
-        for _ in range(count):
-            env = env_factory()
-            rollout = self.run_single_turn(env, randomness_hex, wallet, seed=seed)
-            logger.debug("Prompt length: %d", rollout.prompt_length)
-            rollouts.append(rollout)
+
+        # Process in batches for efficient generation
+        for batch_start in range(0, count, self.batch_size):
+            batch_end = min(batch_start + self.batch_size, count)
+            batch_count = batch_end - batch_start
+
+            # Create and reset batch of environments
+            envs = [env_factory() for _ in range(batch_count)]
+            obs_list = [env.reset(seed=seed) for env in envs]
+
+            # Collect prompts for batch
+            prompts_list = [
+                [{"role": m.role, "content": m.content} for m in obs.messages] for obs in obs_list
+            ]
+
+            # Batch generate tokens (logprobs computed later with commitments)
+            batch_results = self._batch_generate_tokens(prompts_list)
+
+            # Process each rollout in the batch
+            for env, _obs, (all_ids, prompt_len) in zip(
+                envs, obs_list, batch_results, strict=False
+            ):
+                completion_ids = all_ids[prompt_len:]
+                completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=False)
+
+                next_obs, reward, terminated, truncated, info = env.step(
+                    ChatMessage(role="assistant", content=completion_text)
+                )
+
+                commitments, logprobs, signature, beacon, proof_version = (
+                    self._compute_commitments_and_logprobs(
+                        all_ids,
+                        prompt_len,
+                        randomness_hex,
+                        wallet,
+                    )
+                )
+
+                action_val = info.get("assignment", [])
+                trajectory = [(0, action_val, float(reward))]
+
+                rollout = GRPORollout(
+                    tokens=all_ids,
+                    token_logprobs=[0.0] * prompt_len + logprobs,
+                    prompt_length=int(prompt_len),
+                    completion_length=int(len(completion_ids)),
+                    reward=float(reward),
+                    advantage=0.0,
+                    trajectory=trajectory,
+                    success=bool(info.get("success", False)),
+                    commitments=commitments,
+                    signature=signature,
+                    beacon=beacon,
+                    proof_version=proof_version,
+                )
+                logger.debug("Prompt length: %d", rollout.prompt_length)
+                rollouts.append(rollout)
 
         advantages = self._compute_advantages([r.reward for r in rollouts])
-        for rollout, adv in zip(rollouts, advantages):
+        for rollout, adv in zip(rollouts, advantages, strict=False):
             rollout.advantage = float(adv)
 
         return rollouts
@@ -178,8 +235,8 @@ class AgentEnvLoop:
     ) -> list[GRPORollout]:
         """Vectorized GRPO group generation (batched prompts and generation).
 
-        Initial implementation: sequential fallback. Optimization with batched
-        generate can be added later without API change.
+        Uses sequential fallback through run_single_turn, which now efficiently
+        computes logprobs and commitments in a single forward pass.
         """
         rollouts: list[GRPORollout] = []
         for env in envs:
@@ -187,7 +244,7 @@ class AgentEnvLoop:
             rollouts.append(rollout)
 
         advantages = self._compute_advantages([r.reward for r in rollouts])
-        for rollout, adv in zip(rollouts, advantages):
+        for rollout, adv in zip(rollouts, advantages, strict=False):
             rollout.advantage = float(adv)
 
         return rollouts
@@ -214,11 +271,14 @@ class AgentEnvLoop:
 
         return rendered, prompt_ids
 
-    def _generate_with_logprobs(
+    def _generate_tokens(
         self,
         prompt_ids: list[int],
-    ) -> tuple[list[int], list[float], int]:
-        # Use pre-computed prompt_ids from _render_chat to ensure consistency
+    ) -> tuple[list[int], int]:
+        """Generate completion tokens without computing logprobs.
+
+        Logprobs will be computed in a single forward pass with commitments.
+        """
         input_ids = torch.tensor([prompt_ids], dtype=torch.long).to(self.device)
         attention_mask = torch.ones_like(input_ids).to(self.device)
         prompt_len = int(input_ids.shape[1])
@@ -233,62 +293,145 @@ class AgentEnvLoop:
                 top_p=0.95,
                 top_k=50,
                 repetition_penalty=1.1,
-                output_logits=True,
                 return_dict_in_generate=True,
                 pad_token_id=self.tokenizer.eos_token_id,
                 eos_token_id=self.tokenizer.eos_token_id,
             )
 
         all_token_ids = outputs.sequences[0].tolist()
-        completion_ids = all_token_ids[prompt_len:]
+        return all_token_ids, prompt_len
 
-        logprobs = []
-        for i, token_id in enumerate(completion_ids):
-            if i < len(outputs.logits):
-                # Use log_softmax for numerical stability (matches validator)
-                logits_step = outputs.logits[i][0]
-                log_probs_dist = torch.log_softmax(logits_step, dim=-1)
-                logprobs.append(log_probs_dist[token_id].item())
-            else:
-                # This should never happen in normal generation
-                # If it does, it indicates a generation issue (e.g., early EOS)
-                logger.warning(
-                    "Missing logits for completion token %d/%d; setting logprob to -inf",
-                    i,
-                    len(completion_ids),
-                )
-                logprobs.append(float("-inf"))
+    def _batch_generate_tokens(
+        self,
+        prompts_list: list[list[dict[str, str]]],
+    ) -> list[tuple[list[int], int]]:
+        """Batch generate completion tokens without computing logprobs.
 
-        # Debug: log first few logprobs to verify they're non-zero
-        if logprobs:
-            first_5_logprobs = logprobs[: min(5, len(logprobs))]
-            logger.debug(
-                "MINER LOGPROBS: completion_len=%d first_5=%s",
-                len(logprobs),
-                [f"{lp:.6f}" for lp in first_5_logprobs],
+        Uses left-padding to handle variable-length prompts efficiently.
+        Logprobs will be computed in a single forward pass with commitments.
+        """
+        batch_size = len(prompts_list)
+
+        # Fast path for single prompt
+        if batch_size == 1:
+            _, prompt_ids = self._render_chat(prompts_list[0])
+            return [self._generate_tokens(prompt_ids)]
+
+        # Render all prompts and collect token IDs
+        prompt_ids_list = []
+        for prompts in prompts_list:
+            _, prompt_ids = self._render_chat(prompts)
+            prompt_ids_list.append(prompt_ids)
+
+        # Store original prompt lengths (before padding)
+        original_prompt_lens = [len(p) for p in prompt_ids_list]
+        max_prompt_len = max(original_prompt_lens)
+
+        # Left-pad all prompts to same length (standard for causal LM)
+        pad_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+        padded_inputs = []
+        attention_masks = []
+
+        for prompt_ids in prompt_ids_list:
+            pad_len = max_prompt_len - len(prompt_ids)
+            padded = [pad_id] * pad_len + prompt_ids
+            mask = [0] * pad_len + [1] * len(prompt_ids)
+            padded_inputs.append(padded)
+            attention_masks.append(mask)
+
+        input_ids = torch.tensor(padded_inputs, dtype=torch.long).to(self.device)
+        attention_mask = torch.tensor(attention_masks, dtype=torch.long).to(self.device)
+
+        # Batch generate (no logits output for efficiency)
+        with torch.inference_mode():
+            outputs = self.model.generate(
+                input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=self.max_new_tokens,
+                temperature=self.temperature,
+                do_sample=True,
+                top_p=0.95,
+                top_k=50,
+                repetition_penalty=1.1,
+                return_dict_in_generate=True,
+                pad_token_id=pad_id,
+                eos_token_id=self.tokenizer.eos_token_id,
             )
 
-        return all_token_ids, logprobs, prompt_len
+        # Extract results for each sequence
+        results = []
+        for batch_idx in range(batch_size):
+            original_prompt_len = original_prompt_lens[batch_idx]
+            pad_len = max_prompt_len - original_prompt_len
 
-    def _compute_commitments(
+            # Get full generated sequence (includes: padding + original_prompt + completion)
+            full_seq = outputs.sequences[batch_idx].tolist()
+
+            # Strip left padding to recover [original_prompt + completion]
+            all_token_ids = full_seq[pad_len:]
+
+            results.append((all_token_ids, original_prompt_len))
+
+        return results
+
+    def _compute_commitments_and_logprobs(
         self,
         all_token_ids: list[int],
+        prompt_len: int,
         randomness_hex: str,
         wallet: bt.wallet,
-    ) -> tuple[list[dict], bytes, dict, str]:
+    ) -> tuple[list[dict], list[float], bytes, dict, str]:
+        """Compute GRAIL commitments and token logprobs in a single forward pass.
+
+        This is more efficient than computing them separately, as it requires
+        only one forward pass through the model.
+        """
         from ..protocol.grail_verifier import GRAILVerifier
 
         verifier = GRAILVerifier(hidden_dim=self._hidden_dim)
         r_vec = verifier.generate_r_vec(randomness_hex)
 
         commitments: list[dict] = []
+        logprobs: list[float] = []
+
         with torch.inference_mode():
             token_tensor = torch.tensor([all_token_ids], dtype=torch.long).to(self.device)
             model_outputs = self.model(token_tensor, output_hidden_states=True)
+
+            # Extract hidden states for commitments
             h_layer = model_outputs.hidden_states[LAYER_INDEX][0]
             for pos in range(len(all_token_ids)):
                 if pos < h_layer.size(0):
                     commitments.append(verifier.create_commitment(h_layer[pos], r_vec, pos))
+
+            # Extract logits for logprobs computation
+            # model_outputs.logits shape: [batch_size, seq_len, vocab_size]
+            # We need logprobs for completion tokens (positions prompt_len onwards)
+            logits = model_outputs.logits[0]  # [seq_len, vocab_size]
+            completion_ids = all_token_ids[prompt_len:]
+
+            for i, token_id in enumerate(completion_ids):
+                # Position in logits is (prompt_len - 1 + i) because logits[i] predicts token[i+1]
+                logit_pos = prompt_len - 1 + i
+                if logit_pos < logits.size(0):
+                    log_probs_dist = torch.log_softmax(logits[logit_pos], dim=-1)
+                    logprobs.append(log_probs_dist[token_id].item())
+                else:
+                    logger.warning(
+                        "Missing logits for completion token %d/%d; setting logprob to -inf",
+                        i,
+                        len(completion_ids),
+                    )
+                    logprobs.append(float("-inf"))
+
+            # Debug: log first few logprobs to verify they're non-zero
+            if logprobs:
+                first_5_logprobs = logprobs[: min(5, len(logprobs))]
+                logger.debug(
+                    "MINER LOGPROBS: completion_len=%d first_5=%s",
+                    len(logprobs),
+                    [f"{lp:.6f}" for lp in first_5_logprobs],
+                )
 
         commitment_data = json.dumps(commitments, sort_keys=True)
         commitment_hash = hashlib.sha256(commitment_data.encode()).digest()
@@ -297,7 +440,7 @@ class AgentEnvLoop:
         beacon = {"randomness": randomness_hex}
         proof_version = GRAIL_PROOF_VERSION
 
-        return commitments, signature, beacon, proof_version
+        return commitments, logprobs, signature, beacon, proof_version
 
     def _compute_advantages(self, rewards: list[float]) -> list[float]:
         """GRPO advantages: zero-mean within group, variance-normalized."""

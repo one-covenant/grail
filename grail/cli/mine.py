@@ -352,6 +352,52 @@ def count_satisfied_clauses(sat_problem: Any, assignment: list[bool]) -> int:
     return satisfied
 
 
+async def log_generation_timing(
+    subtensor: bt.subtensor,
+    timers: MiningTimers,
+    window_start: int,
+    generation_duration: float,
+    rollout_count: int,
+    monitor: Any | None,
+) -> bool:
+    """Log generation timing metrics and check if generation finished safely.
+
+    Args:
+        subtensor: Bittensor subtensor client for block queries
+        timers: Mining timers with EMA estimates
+        window_start: Start block of current window
+        generation_duration: Time taken for rollout generation
+        rollout_count: Number of rollouts generated
+        monitor: Optional monitoring client
+
+    Returns:
+        True if generation finished with safe buffer for upload, False otherwise
+    """
+    post_gen_block = await subtensor.get_current_block()
+    blocks_remaining = (window_start + WINDOW_LENGTH) - post_gen_block
+    time_remaining_s = blocks_remaining * timers.block_time_ema_s
+    needed_blocks_for_upload = max(
+        1, math.ceil((timers.upload_time_ema_s or 0.0) / max(0.001, timers.block_time_ema_s))
+    )
+
+    generation_safe = blocks_remaining > needed_blocks_for_upload
+
+    logger.info(
+        "Generation timing: %d blocks remaining, %.1fs left, upload needs %d blocks - %s",
+        blocks_remaining,
+        time_remaining_s,
+        needed_blocks_for_upload,
+        "✅ SAFE" if generation_safe else "⚠️ TIGHT",
+    )
+
+    if monitor:
+        await monitor.log_gauge(
+            "profiling/generation_finished_safely", 1.0 if generation_safe else 0.0
+        )
+
+    return generation_safe
+
+
 def package_rollout_data(
     model: AutoModelForCausalLM,
     wallet: bt.wallet,
@@ -465,7 +511,7 @@ async def upload_inferences_with_metrics(
     """
     upload_start = time.time()
     if monitor:
-        with monitor.timer("mining.upload_duration"):
+        with monitor.timer("profiling/upload"):
             await sink_window_inferences(
                 wallet,
                 window_start,
@@ -529,7 +575,19 @@ async def generate_rollouts_for_window(
     problem_count = 0
 
     device = model.device
-    loop = AgentEnvLoop(model, tokenizer, device)
+    # Batch size for parallel rollout generation (tune per node for memory/throughput)
+    batch_size = int(os.getenv("GRAIL_GENERATION_BATCH_SIZE", "1"))
+    if batch_size > ROLLOUTS_PER_PROBLEM:
+        logger.warning(
+            "GRAIL_GENERATION_BATCH_SIZE=%d exceeds ROLLOUTS_PER_PROBLEM=%d; capping at %d",
+            batch_size,
+            ROLLOUTS_PER_PROBLEM,
+            ROLLOUTS_PER_PROBLEM,
+        )
+        batch_size = ROLLOUTS_PER_PROBLEM
+    loop = AgentEnvLoop(model, tokenizer, device, batch_size=batch_size)
+    if batch_size > 1:
+        logger.info("Using batch_size=%d for parallel rollout generation", batch_size)
 
     while True:
         current_block = await subtensor.get_current_block()
@@ -594,14 +652,28 @@ async def generate_rollouts_for_window(
                     return GSM8KEnv()
                 return SATEnv()
 
-            grpo_rollouts = await asyncio.to_thread(
-                loop.run_grpo_group,
-                _env_factory,
-                ROLLOUTS_PER_PROBLEM,
-                combined_randomness,
-                wallet,
-                seed=seed_int,
-            )
+            # Time the rollout generation for both logging and monitoring
+            rollout_gen_start = time.time()
+            if monitor:
+                with monitor.timer("profiling/rollout_generation"):
+                    grpo_rollouts = await asyncio.to_thread(
+                        loop.run_grpo_group,
+                        _env_factory,
+                        ROLLOUTS_PER_PROBLEM,
+                        combined_randomness,
+                        wallet,
+                        seed=seed_int,
+                    )
+            else:
+                grpo_rollouts = await asyncio.to_thread(
+                    loop.run_grpo_group,
+                    _env_factory,
+                    ROLLOUTS_PER_PROBLEM,
+                    combined_randomness,
+                    wallet,
+                    seed=seed_int,
+                )
+            rollout_gen_duration = time.time() - rollout_gen_start
 
             if grpo_rollouts:
                 text_logs_emitted = await maybe_log_debug_sample(
@@ -619,10 +691,16 @@ async def generate_rollouts_for_window(
                 sum(r.reward for r in grpo_rollouts) / len(grpo_rollouts) if grpo_rollouts else 0
             )
             logger.info(
-                "GRPO batch: %s/%s successful, mean reward: %.3f",
+                "GRPO batch: %s/%s successful, mean reward: %.3f, generation time: %.2fs",
                 successful_count,
                 len(grpo_rollouts),
                 mean_reward,
+                rollout_gen_duration,
+            )
+
+            # Check generation timing and log metrics
+            await log_generation_timing(
+                subtensor, timers, window_start, rollout_gen_duration, len(grpo_rollouts), monitor
             )
 
             if problem_count % 2 == 0:
@@ -636,12 +714,12 @@ async def generate_rollouts_for_window(
                     rollouts_per_sec,
                 )
                 if monitor:
-                    await monitor.log_gauge("mining.rollouts_generated", len(inferences))
-                    await monitor.log_gauge("mining.problems_processed", problem_count)
-                    await monitor.log_gauge("mining.rollouts_per_second", rollouts_per_sec)
+                    await monitor.log_gauge("mining/rollouts_generated", len(inferences))
+                    await monitor.log_gauge("mining/problems_processed", problem_count)
+                    await monitor.log_gauge("mining/rollouts_per_second", rollouts_per_sec)
                     if successful_rollouts + failed_rollouts > 0:
                         success_rate = successful_rollouts / (successful_rollouts + failed_rollouts)
-                        await monitor.log_gauge("mining.success_rate", success_rate)
+                        await monitor.log_gauge("mining/success_rate", success_rate)
 
             # Package each rollout with signatures and proofs for validation
             for rollout_idx, rollout in enumerate(grpo_rollouts):
@@ -665,7 +743,7 @@ async def generate_rollouts_for_window(
                     total_reward += rollout.reward
                     if monitor:
                         await monitor.log_counter("mining.successful_rollouts")
-                        await monitor.log_histogram("mining.reward_distribution", rollout.reward)
+                        await monitor.log_histogram("mining/reward_distribution", rollout.reward)
                 else:
                     failed_rollouts += 1
                     if monitor:
@@ -686,22 +764,26 @@ async def generate_rollouts_for_window(
             continue
 
     elapsed_time = time.time() - start_time
+    avg_gen_time = timers.gen_time_ema_s or 0.0
+
     logger.info(
-        "🎯 Generated %s rollouts in %.1fs for window %s",
+        "🎯 Generated %s rollouts in %.1fs for window %s (avg gen time: %.2fs/problem)",
         len(inferences),
         elapsed_time,
         window_start,
+        avg_gen_time,
     )
     if monitor:
         await monitor.log_counter("mining.windows_completed")
-        await monitor.log_gauge("mining.window_duration", elapsed_time)
-        await monitor.log_gauge("mining.total_rollouts_in_window", len(inferences))
+        await monitor.log_gauge("profiling/window_duration", elapsed_time)
+        await monitor.log_gauge("mining/total_rollouts_in_window", len(inferences))
+        await monitor.log_gauge("profiling/average_generation_time", avg_gen_time)
         if successful_rollouts + failed_rollouts > 0:
             final_success_rate = successful_rollouts / (successful_rollouts + failed_rollouts)
-            await monitor.log_gauge("mining.final_success_rate", final_success_rate)
+            await monitor.log_gauge("mining/final_success_rate", final_success_rate)
         if successful_rollouts > 0:
             avg_reward = total_reward / successful_rollouts
-            await monitor.log_gauge("mining.average_reward", avg_reward)
+            await monitor.log_gauge("mining/average_reward", avg_reward)
 
     return inferences
 

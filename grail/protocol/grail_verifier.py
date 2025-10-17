@@ -49,6 +49,23 @@ def log_magnitude_bucket(value: float, num_buckets: int = PROOF_NUM_BUCKETS) -> 
     Returns:
         Signed bucket index in [-num_buckets+1, 0, num_buckets-1]
     """
+    # Handle NaN values - these indicate numerical instability in the model
+    if math.isnan(value):
+        logger.warning(
+            "NaN value encountered in hidden state. This typically indicates "
+            "numerical instability in quantized models (especially GPTQ-Int8) "
+            "or missing CUDA kernels. Treating as zero bucket."
+        )
+        return 0
+
+    # Handle infinity values
+    if math.isinf(value):
+        logger.warning(
+            "Infinity value encountered in hidden state. This indicates "
+            "numerical overflow. Clamping to maximum bucket."
+        )
+        return num_buckets - 1 if value > 0 else -(num_buckets - 1)
+
     abs_val = abs(value)
 
     # Deadzone for near-zero values
