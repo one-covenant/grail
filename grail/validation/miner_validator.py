@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 # Validation constants (aligned with pre-refactor validate.py)
 MAX_SAMPLES_PER_MINER_THRESHOLD = 20  # If <= this many rollouts, check all
-MAX_SAMPLES_PER_MINER = 40  # If > this many rollouts, sample GRPO groups
+MAX_SAMPLES_PER_MINER = 32  # If > this many rollouts, sample GRPO groups
 SAMPLE_RATE = 0.10  # Fraction of GRPO groups to spot-check
 STOCHASTIC_CHECK_FAILURE_THRESHOLD = 0.51  # Soft-failure fraction to gate wallet
 GRPO_ADV_SUM_TOLERANCE = 0.01  # Sum of advantages should be ~0
@@ -867,7 +867,7 @@ class MinerValidator:
                     denom = max(1e-8, (sum(x * x for x in centered) / n) ** 0.5)
                     recomputed = [x / denom for x in centered]
                     # Allow small tolerance per element
-                    for a, b in zip(advantages, recomputed):
+                    for a, b in zip(advantages, recomputed, strict=False):
                         if abs(a - b) > 1e-3:
                             logger.warning(
                                 "GRPO group %s advantage mismatch vs recomputed", group_id
