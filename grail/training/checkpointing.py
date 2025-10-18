@@ -124,13 +124,6 @@ async def publish_checkpoint(
             use_write=True,
         )
 
-        await upload_file_chunked(
-            f"{CHECKPOINT_PREFIX}latest_stable",
-            str(target_window).encode(),
-            credentials=credentials,
-            use_write=True,
-        )
-
         logger.info("✅ Published checkpoint for window %s", target_window)
 
         try:
