@@ -185,10 +185,16 @@ class CheckpointManager:
 
                 # Attempt fallback to latest checkpoint if available
                 latest_window = await self._find_latest_checkpoint_window()
-                if latest_window is None or latest_window == window:
+                if latest_window is None:
+                    logger.debug("No checkpoints available for fallback")
+                    return None
+
+                if latest_window == window:
+                    logger.debug("Latest window same as requested, no fallback available")
                     return None
 
                 if latest_window in self._fallback_attempted:
+                    logger.debug("Already attempted fallback to window %s", latest_window)
                     return None
 
                 logger.warning(
@@ -446,12 +452,13 @@ class CheckpointManager:
             credentials=self.credentials,
             use_write=False,
         )
+
         latest_window = None
         for key in keys:
             parts = key.split("/")
             if len(parts) < 2:
                 continue
-            prefix = parts[1]
+            prefix = parts[2]
             if not prefix.startswith("checkpoint-"):
                 continue
             try:

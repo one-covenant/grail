@@ -663,6 +663,12 @@ async def download_file_chunked(
             return data
 
         except Exception as e:
+            # Don't retry for 404 errors - file simply doesn't exist
+            is_not_found = "404" in str(e) or "Not Found" in str(e)
+            if is_not_found:
+                logger.debug(f"File not found: {key}")
+                return None
+
             if attempt < max_retries - 1:
                 wait_time = 2**attempt
                 logger.warning(
