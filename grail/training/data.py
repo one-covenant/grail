@@ -117,18 +117,12 @@ async def load_grpo_groups(
         miner_ident = f"UID {miner_uid}" if miner_uid is not None else miner_hotkey[:12]
 
         if not isinstance(window_data, dict):
-            logger.debug(
-                "Invalid window data format from miner %s",
-                miner_ident,
-            )
+            logger.debug("Invalid window data format from miner %s", miner_ident)
             continue
 
         inferences = window_data.get("inferences", [])
         if not isinstance(inferences, list):
-            logger.debug(
-                "Invalid inferences format from miner %s",
-                miner_ident,
-            )
+            logger.debug("Invalid inferences format from miner %s", miner_ident)
             continue
 
         # Tag each rollout with the miner hotkey
@@ -152,6 +146,20 @@ async def load_grpo_groups(
 
         commit = rollout_dict.get("commit", {})
         rollout_meta = commit.get("rollout", {})
+
+        # Log non-finite or obviously invalid token logprobs arrays
+        tlp = rollout_meta.get("token_logprobs", None)
+        if isinstance(tlp, list) and tlp:
+            # Cheap checks without importing torch here
+            any_non_finite = any(
+                (x is None)
+                or (isinstance(x, float) and (x != x or x == float("inf") or x == float("-inf")))
+                for x in tlp
+            )
+            if any_non_finite:
+                logger.debug(
+                    "Non-finite token_logprobs detected; ignored during training",
+                )
 
         try:
             grouped.setdefault(group_id, []).append(
