@@ -47,8 +47,6 @@ class SATEnvAdapter:
         tokenizer: PreTrainedTokenizerBase,
     ) -> list[int]:
         # Lazy imports to avoid heavy deps in import graph
-        from ..shared.chat_templates import build_qwen_chat_template
-        from ..shared.prompt_constants import REASONING_START, SYSTEM_PROMPT
         from .sat_env import SATEnv
 
         env = SATEnv()
@@ -56,16 +54,6 @@ class SATEnvAdapter:
         seed_int = seed
         obs = env.reset(seed=seed_int)
         messages = [{"role": m.role, "content": m.content} for m in obs.messages]
-
-        # Validate canonical chat template (should be set by ValidationService)
-        tpl = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
-        try:
-            current_tpl = getattr(tokenizer, "chat_template", None)
-            if current_tpl != tpl:
-                msg = "Tokenizer chat_template differs from expected Qwen template"
-                logger.debug(msg)
-        except Exception:
-            logger.debug("Tokenizer chat_template check failed", exc_info=True)
 
         rendered = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
@@ -125,23 +113,11 @@ class GSM8KEnvAdapter:
         tokenizer: PreTrainedTokenizerBase,
     ) -> list[int]:
         # Lazy imports to avoid heavy deps in import graph
-        from ..shared.chat_templates import build_qwen_chat_template
-        from ..shared.prompt_constants import REASONING_START, SYSTEM_PROMPT
         from .gsm8k_env import GSM8KEnv
 
         env = GSM8KEnv()
         obs = env.reset(seed=seed)
         messages = [{"role": m.role, "content": m.content} for m in obs.messages]
-
-        # Validate canonical chat template (should be set by ValidationService)
-        tpl = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
-        try:
-            current_tpl = getattr(tokenizer, "chat_template", None)
-            if current_tpl != tpl:
-                msg = "Tokenizer chat_template differs from expected Qwen template"
-                logger.debug(msg)
-        except Exception:
-            logger.debug("Tokenizer chat_template check failed", exc_info=True)
 
         rendered = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True

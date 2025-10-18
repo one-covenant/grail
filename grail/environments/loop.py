@@ -20,10 +20,8 @@ from typing import Any
 import bittensor as bt
 import torch
 
-from ..shared.chat_templates import build_qwen_chat_template
 from ..shared.constants import GRAIL_PROOF_VERSION, LAYER_INDEX, MAX_NEW_TOKENS
 from ..shared.hf_compat import resolve_hidden_size
-from ..shared.prompt_constants import REASONING_START, SYSTEM_PROMPT
 from .core import ChatMessage, MultiTurnEnv
 
 logger = logging.getLogger(__name__)
@@ -86,20 +84,6 @@ class AgentEnvLoop:
             )
         except Exception as e:
             logger.debug("Failed to log tokenizer version info: %s", e)
-
-        # Inject Qwen chat template
-        # TODO: this should be removed later on and we need to make sure
-        # we directly use the checkpoint's template shared by the trainer
-        tpl = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
-        try:
-            current_tpl = getattr(self.tokenizer, "chat_template", None)
-            if current_tpl != tpl:
-                logger.warning("MINER: Setting Qwen chat template (was different)")
-                self.tokenizer.chat_template = tpl
-            else:
-                logger.debug("MINER: Chat template already matches Qwen template")
-        except Exception:
-            pass
 
     def run_single_turn(
         self,

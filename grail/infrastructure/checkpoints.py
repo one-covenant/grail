@@ -12,6 +12,14 @@ Design goals:
  - Atomic download process to avoid partial/corrupt states.
  - Local cache with retention policy (last N + milestone windows).
  - Remote cleanup helpers for the trainer to enforce retention upstream.
+ - Automatic fallback to latest checkpoint when requested window unavailable.
+
+Checkpoint Retrieval Strategy:
+ - Primary: Attempt to download the exact checkpoint for the requested window.
+ - Fallback: If the requested window's checkpoint is not available, automatically
+   fall back to the latest (highest window number) checkpoint available in R2.
+   This ensures miners/validators can continue operating even if the latest
+   window's checkpoint hasn't been published yet.
 
 The module intentionally stays independent from model-loading details. It only
 manages files on disk and in R2; callers handle loading into Torch/Transformers.
@@ -89,11 +97,15 @@ class CheckpointManager:
         self.keep_limit = max(1, keep_limit)
         self._metadata_cache: dict[int, CheckpointMetadata] = {}
         self._download_locks: dict[int, asyncio.Lock] = {}
+        self._fallback_attempted: set[int] = set()
 
     # ----------------------------- High-level API --------------------------- #
 
     async def get_checkpoint(self, window: int) -> Path | None:
         """Ensure checkpoint for *window* is available locally and return path.
+
+        If the exact checkpoint for the requested window is not available,
+        falls back to the latest (highest window number) checkpoint available.
 
         Notes (testing only):
         If GRAIL_CHECKPOINT_MOD10 == True, the incoming window is
@@ -169,9 +181,32 @@ class CheckpointManager:
                 tmp_dir.rename(local_dir)
                 return local_dir
             except Exception:
-                logger.error("Failed to download checkpoint for window %s", window, exc_info=True)
                 shutil.rmtree(tmp_dir, ignore_errors=True)
-                return None
+
+                # Attempt fallback to latest checkpoint if available
+                latest_window = await self._find_latest_checkpoint_window()
+                if latest_window is None:
+                    logger.debug("No checkpoints available for fallback")
+                    return None
+
+                if latest_window == window:
+                    logger.debug("Latest window same as requested, no fallback available")
+                    return None
+
+                if latest_window in self._fallback_attempted:
+                    logger.debug("Already attempted fallback to window %s", latest_window)
+                    return None
+
+                logger.warning(
+                    "Using latest checkpoint window %s (requested %s)",
+                    latest_window,
+                    window,
+                )
+                self._fallback_attempted.add(latest_window)
+                try:
+                    return await self.get_checkpoint(latest_window)
+                finally:
+                    self._fallback_attempted.discard(latest_window)
 
     async def cleanup_local(self, current_window: int) -> None:
         """Remove cached checkpoints outside the retention policy."""
@@ -409,6 +444,31 @@ class CheckpointManager:
                 milestone -= interval_blocks
 
         return keep
+
+    async def _find_latest_checkpoint_window(self) -> int | None:
+        """Find the highest window number available in R2."""
+        keys = await comms.list_bucket_files(
+            CHECKPOINT_PREFIX,
+            credentials=self.credentials,
+            use_write=False,
+        )
+
+        latest_window = None
+        for key in keys:
+            parts = key.split("/")
+            if len(parts) < 2:
+                continue
+            prefix = parts[2]
+            if not prefix.startswith("checkpoint-"):
+                continue
+            try:
+                # Extract window number from "checkpoint-{window}"
+                window = int(prefix.split("-")[1])
+                if latest_window is None or window > latest_window:
+                    latest_window = window
+            except (IndexError, ValueError):
+                continue
+        return latest_window
 
 
 # --------------------------------------------------------------------------- #
