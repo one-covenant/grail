@@ -352,7 +352,9 @@ class TransferProgress:
 
             # Create a visual progress bar for logs
             bar_length = 30
-            filled_length = int(bar_length * self.transferred // self.total_size)
+            filled_length = (
+                int(bar_length * self.transferred // self.total_size) if self.total_size > 0 else 0
+            )
             bar = "█" * filled_length + "░" * (bar_length - filled_length)
 
             # Format sizes
