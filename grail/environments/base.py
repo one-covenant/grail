@@ -1,5 +1,8 @@
 """Base classes for reward computation and parsing."""
 
+from __future__ import annotations
+
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Any
@@ -21,6 +24,128 @@ class Parser(ABC):
             Parsed structured output that can be consumed by reward functions
         """
         pass
+
+
+class ThinkingParser(Parser):
+    """Base parser for environments using thinking + answer tags.
+
+    Provides shared logic for detecting thinking and answer blocks using
+    standard GRAIL prompt constants:
+    - Thinking: <start_working_out>...</end_working_out>
+    - Answer: <SOLUTION>...</SOLUTION>
+
+    Validates proper ordering: thinking should come before answer.
+    Subclasses should override parse() to define complete env-specific parsing.
+    """
+
+    def __init__(self) -> None:
+        """Initialize with lazy-loaded prompt constants."""
+        super().__init__()
+        self._constants_loaded = False
+        self._tag_think_open: str = ""
+        self._tag_think_close: str = ""
+        self._tag_solution_open: str = ""
+        self._tag_solution_close: str = ""
+
+    def _ensure_constants_loaded(self) -> None:
+        """Lazy load prompt constants to avoid circular import."""
+        if self._constants_loaded:
+            return
+
+        from ..shared.prompt_constants import (
+            REASONING_END_TOKEN,
+            REASONING_START_TOKEN,
+            SOLUTION_END_TOKEN,
+            SOLUTION_START_TOKEN,
+        )
+
+        self._tag_think_open = REASONING_START_TOKEN
+        self._tag_think_close = REASONING_END_TOKEN
+        self._tag_solution_open = SOLUTION_START_TOKEN
+        self._tag_solution_close = SOLUTION_END_TOKEN
+        self._constants_loaded = True
+
+    def _get_thinking_pattern(self) -> re.Pattern[str]:
+        """Get compiled thinking block pattern."""
+        self._ensure_constants_loaded()
+        return re.compile(
+            (rf"<{self._tag_think_open}>" r".*?" rf"</{self._tag_think_close}>"),
+            re.IGNORECASE | re.DOTALL,
+        )
+
+    def _get_answer_pattern(self) -> re.Pattern[str]:
+        """Get compiled answer block pattern."""
+        self._ensure_constants_loaded()
+        return re.compile(
+            (
+                rf"<{self._tag_solution_open}>"
+                r"(?P<content>.*?)"
+                rf"</{self._tag_solution_close}>"
+            ),
+            re.IGNORECASE | re.DOTALL,
+        )
+
+    def _get_think_then_answer_pattern(self) -> re.Pattern[str]:
+        """Get compiled thinking→answer pattern (strict ordering)."""
+        self._ensure_constants_loaded()
+        return re.compile(
+            (
+                rf"<{self._tag_think_open}>"
+                r".*?"
+                rf"</{self._tag_think_close}>"
+                r".*?"
+                rf"<{self._tag_solution_open}>"
+                r"(?P<content>.*?)"
+                rf"</{self._tag_solution_close}>"
+            ),
+            re.IGNORECASE | re.DOTALL,
+        )
+
+    def _detect_thinking_block(self, text: str) -> bool:
+        """Check if text contains thinking block. Returns True if found."""
+        return bool(self._get_thinking_pattern().search(text or ""))
+
+    def _detect_answer_block(self, text: str) -> bool:
+        """Check if text contains answer block. Returns True if found."""
+        return bool(self._get_answer_pattern().search(text or ""))
+
+    def _get_thinking_block(self, text: str) -> str | None:
+        """Extract thinking block content if present. Returns None otherwise."""
+        match = self._get_thinking_pattern().search(text or "")
+        if match:
+            return match.group(0)
+        return None
+
+    def _get_answer_block(self, text: str) -> str | None:
+        """Extract answer block content if present. Returns None otherwise."""
+        match = self._get_answer_pattern().search(text or "")
+        if match:
+            return match.group("content")
+        return None
+
+    def _get_answer_with_thinking_check(self, text: str) -> tuple[str | None, int, bool]:
+        """Extract answer, preferring thinking→answer ordering.
+
+        Returns:
+            (answer_content, trailing_chars, has_proper_ordering)
+            - answer_content: None if no answer found
+            - trailing_chars: chars after </SOLUTION> tag
+            - has_proper_ordering: True if thinking comes before answer
+        """
+        text = text or ""
+
+        # Check for proper ordering: thinking→answer
+        if self._detect_thinking_block(text):
+            match = self._get_think_then_answer_pattern().search(text)
+            if match:
+                return match.group("content"), len(text) - match.end(), True
+
+        # Fallback: answer without thinking
+        match = self._get_answer_pattern().search(text)
+        if match:
+            return match.group("content"), len(text) - match.end(), False
+
+        return None, 0, False
 
 
 class RewardVector:
