@@ -781,17 +781,26 @@ async def file_exists_with_deadline(
         client = await _get_cached_client(credentials, use_write)
         bucket_id = get_bucket_id(credentials, use_write)
 
-        # Try compressed first
+        # Try both compressed and uncompressed versions
         checked_keys = []
         if not key.endswith(".gz"):
             checked_keys.append(key + ".gz")
+            checked_keys.append(key)  # Also check uncompressed
         else:
             checked_keys.append(key)
+            checked_keys.append(key[:-3])  # Remove .gz and check uncompressed
 
+        logger.debug(
+            f"file_exists_with_deadline: Checking key {key}, trying variants: {checked_keys}"
+        )
         for candidate in checked_keys:
             try:
                 response = await client.head_object(Bucket=bucket_id, Key=candidate)
-            except Exception:
+                logger.debug(f"file_exists_with_deadline: Found {candidate}")
+            except Exception as e:
+                logger.debug(
+                    f"file_exists_with_deadline: {candidate} not found: {type(e).__name__}"
+                )
                 continue
 
             last_modified = response.get("LastModified")
@@ -802,6 +811,7 @@ async def file_exists_with_deadline(
             return True, False, upload_time
 
         # Not found in either compressed nor plain form
+        logger.debug(f"file_exists_with_deadline: No variants found for {key}")
         return False, False, None
     except Exception as e:
         logger.debug(
@@ -826,6 +836,35 @@ async def list_bucket_files(
     except Exception:
         logger.error("Failed to list bucket files with prefix %s", prefix, exc_info=True)
         return []
+
+
+async def get_file_size(
+    key: str,
+    credentials: BucketCredentials | Bucket | dict | None = None,
+    use_write: bool = False,
+) -> int | None:
+    """Get the size of a file on R2. Returns None if file doesn't exist or on error."""
+    try:
+        client = await _get_cached_client(credentials, use_write)
+        bucket_id = get_bucket_id(credentials, use_write)
+
+        # Try exact key first
+        try:
+            response = await client.head_object(Bucket=bucket_id, Key=key)
+            return response.get("ContentLength")
+        except Exception:
+            # Try compressed version if key doesn't end with .gz
+            if not key.endswith(".gz"):
+                try:
+                    compressed_key = key + ".gz"
+                    response = await client.head_object(Bucket=bucket_id, Key=compressed_key)
+                    return response.get("ContentLength")
+                except Exception:
+                    pass
+        return None
+    except Exception as e:
+        logger.debug(f"Failed to get file size for {key}: {e}")
+        return None
 
 
 async def delete_prefix(
