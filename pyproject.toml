@@ -43,6 +43,7 @@ dependencies = [
     "typer==0.16.1",
     "rich==14.1.0",
     "wandb>=0.21.3",
+    "scipy>=1.7.0",
 ]
 
 [project.optional-dependencies]
@@ -142,6 +143,8 @@ module = [
     "trl.*",
     "accelerate.*",
     "vllm.*",
+    "scipy",
+    "scipy.*",
 ]
 ignore_missing_imports = true
 
@@ -158,6 +161,7 @@ addopts = [
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
+    "gpu_real_data: marks tests as GPU real-data tests (long-running, requires GPU)",
 ]
 
 [tool.coverage.run]
