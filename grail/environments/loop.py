@@ -136,6 +136,59 @@ class AgentEnvLoop:
             proof_version=proof_version,
         )
 
+    def generate_batch_for_eval(
+        self,
+        env_factory: Callable[[], MultiTurnEnv],
+        count: int,
+        *,
+        seed: int | None = None,
+    ) -> list[tuple[float, bool]]:
+        """Lightweight batch generation for evaluation (no GRAIL proofs/commitments).
+
+        This is ~2x faster than run_grpo_group() as it skips expensive proof computation,
+        wallet signing, and advantage calculation.
+
+        Args:
+            env_factory: Factory function to create environment instances
+            count: Number of rollouts to generate
+            seed: Optional seed for environment reset
+
+        Returns:
+            List of (reward, success) tuples for each rollout
+        """
+        results: list[tuple[float, bool]] = []
+
+        # Process in batches for efficient generation
+        for batch_start in range(0, count, self.batch_size):
+            batch_end = min(batch_start + self.batch_size, count)
+            batch_count = batch_end - batch_start
+
+            # Create and reset batch of environments
+            envs = [env_factory() for _ in range(batch_count)]
+            obs_list = [env.reset(seed=seed) for env in envs]
+
+            # Collect prompts for batch
+            prompts_list = [
+                [{"role": m.role, "content": m.content} for m in obs.messages] for obs in obs_list
+            ]
+
+            # Batch generate tokens (no logprobs/commitments needed for eval)
+            batch_results = self._batch_generate_tokens(prompts_list)
+
+            # Process each rollout in the batch
+            for env, (all_ids, prompt_len) in zip(envs, batch_results, strict=False):
+                completion_ids = all_ids[prompt_len:]
+                completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=False)
+
+                # Step environment to get reward
+                _next_obs, reward, _terminated, _truncated, info = env.step(
+                    ChatMessage(role="assistant", content=completion_text)
+                )
+
+                results.append((float(reward), bool(info.get("success", False))))
+
+        return results
+
     def run_grpo_group(
         self,
         env_factory: Callable[[], MultiTurnEnv],
@@ -145,7 +198,7 @@ class AgentEnvLoop:
         *,
         seed: int | None = None,
     ) -> list[GRPORollout]:
-        """Generate multiple rollouts for GRPO and compute advantages."""
+        """Generate multiple rollouts for GRPO with proofs and compute advantages."""
         rollouts: list[GRPORollout] = []
 
         # Process in batches for efficient generation
