@@ -4,16 +4,21 @@ This module provides reusable fixtures for testing the validation service layer.
 Fixtures follow pytest best practices with proper scoping and dependency injection.
 """
 
+from __future__ import annotations
+
 import hashlib
 import pathlib
 import sys
 from collections import Counter
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 if TYPE_CHECKING:
+    from accelerate import Accelerator
+
     from grail.validation.copycat_service import CopycatTracker
 
 from .proof_test_utils import generate_realistic_sat_prompt
@@ -217,8 +222,114 @@ def sat_prompt_tokens(sat_prompts: list[str]) -> list[int]:
 
 
 @pytest.fixture(scope="session")
-def tracker() -> "CopycatTracker":
+def tracker() -> CopycatTracker:
     """CopycatTracker instance for testing."""
     from grail.validation.copycat_service import CopycatTracker
 
     return CopycatTracker()
+
+
+# ============================================================================
+# TRAINER-SPECIFIC FIXTURES
+# ============================================================================
+
+
+@pytest.fixture
+def seeded_torch_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Set all random seeds for reproducibility and force CPU execution.
+
+    Enables deterministic behavior in torch and ensures tests run on CPU
+    for consistent results across runs.
+    """
+    import random
+
+    import numpy as np
+    import torch
+
+    # Set Python random seed
+    random.seed(42)
+    # Set NumPy seed
+    np.random.seed(42)
+    # Set torch seed on CPU
+    torch.manual_seed(42)
+
+    # Force CPU execution
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+
+    # Enable deterministic algorithms in torch (may reduce performance)
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.deterministic = True
+
+
+@pytest.fixture
+def tiny_qwen_model_and_tokenizer() -> tuple[Any, Any]:
+    """Load Qwen 1.5B model and tokenizer, ensure pad_token_id is set.
+
+    Uses a small model suitable for fast CPU-based testing. Lazy-loads
+    to avoid slow imports in unrelated tests.
+
+    Returns:
+        Tuple of (model, tokenizer)
+    """
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    model_name = "Qwen/Qwen2.5-1.5B"
+
+    # Load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    # Load model on CPU
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+        torch_dtype="auto",
+        device_map="cpu",
+    )
+    model.eval()
+
+    return model, tokenizer
+
+
+@pytest.fixture
+def monkeypatch_trainer_constants(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Override trainer constants for fast tests.
+
+    Shrinks batch size, max length, and gradient accumulation steps
+    to speed up test execution while maintaining correctness.
+    """
+    import grail.shared.constants as constants
+
+    monkeypatch.setattr(constants, "TRAINER_MAX_LENGTH", 256)
+    monkeypatch.setattr(constants, "TRAINER_BATCH_SIZE", 4)
+    monkeypatch.setattr(constants, "TRAINER_GRAD_ACCUM_STEPS", 2)
+    monkeypatch.setattr(constants, "ROLLOUTS_PER_PROBLEM", 4)
+
+
+@pytest.fixture
+def accelerator_cpu() -> Accelerator:
+    """Create Accelerator instance configured for CPU execution.
+
+    Returns a deterministic, CPU-based accelerator suitable for testing.
+    """
+    from accelerate import Accelerator
+
+    return Accelerator(
+        mixed_precision="no",
+        device_placement=False,
+    )
+
+
+@pytest.fixture
+def gsm8k_env_factory() -> Callable[[], Any]:
+    """Factory function for creating GSM8KEnv instances.
+
+    Returns a callable that creates fresh GSM8KEnv instances for tests.
+    """
+    from grail.environments.gsm8k_env import GSM8KEnv
+
+    def _make_env() -> Any:
+        return GSM8KEnv()
+
+    return _make_env
