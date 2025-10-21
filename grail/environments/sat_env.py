@@ -16,12 +16,10 @@ from collections.abc import Callable
 from typing import Any, cast
 
 from ..shared.prompt_constants import (
-    REASONING_END_TOKEN,
-    REASONING_START_TOKEN,
     SOLUTION_END_TOKEN,
     SOLUTION_START_TOKEN,
 )
-from .base import Parser, RewardVector
+from .base import Parser, RewardVector, ThinkingParser
 from .core import ChatMessage, Observation, SingleTurnEnv
 from .providers import SATTaskSource, TaskSpec
 from .rubric import RewardVectorRubric
@@ -130,49 +128,19 @@ def _create_sat_prompt(problem: _SATProblem) -> str:
 
 
 # ============================================================================
-# PARSER (used by reward functions and env)
+# SAT PARSER (Inherits from ThinkingParser)
 # ============================================================================
 
 
-class SATParser(Parser):
-    """Parser for extracting boolean assignments and formatting metadata."""
+class SATParser(ThinkingParser):
+    """Parser for extracting boolean assignments and formatting metadata.
 
-    _TAG_SOLUTION_OPEN = SOLUTION_START_TOKEN
-    _TAG_SOLUTION_CLOSE = SOLUTION_END_TOKEN
-    _TAG_THINK_OPEN = REASONING_START_TOKEN
-    _TAG_THINK_CLOSE = REASONING_END_TOKEN
+    Inherits thinking and answer tag detection from ThinkingParser base class.
+    """
 
-    _ANSWER_OPEN = re.compile(rf"<{_TAG_SOLUTION_OPEN}>", re.IGNORECASE)
-    _ANSWER_CLOSE = re.compile(rf"</{_TAG_SOLUTION_CLOSE}>", re.IGNORECASE)
-    _THINK_OPEN = re.compile(rf"<{_TAG_THINK_OPEN}>", re.IGNORECASE)
-    _THINK_CLOSE = re.compile(rf"</{_TAG_THINK_CLOSE}>", re.IGNORECASE)
-
-    _ANSWER_PAIR = re.compile(
-        (
-            rf"<{_TAG_SOLUTION_OPEN}>"
-            r"(?P<content>.*?)"
-            rf"</{_TAG_SOLUTION_CLOSE}>"
-        ),
-        re.IGNORECASE | re.DOTALL,
-    )
-
-    _THINK_BLOCK = re.compile(
-        (rf"<{_TAG_THINK_OPEN}>" r".*?" rf"</{_TAG_THINK_CLOSE}>"),
-        re.IGNORECASE | re.DOTALL,
-    )
-
-    _THINK_THEN_ANSWER_PAIR = re.compile(
-        (
-            rf"<{_TAG_THINK_OPEN}>"
-            r".*?"
-            rf"</{_TAG_THINK_CLOSE}>"
-            r".*?"
-            rf"<{_TAG_SOLUTION_OPEN}>"
-            r"(?P<content>.*?)"
-            rf"</{_TAG_SOLUTION_CLOSE}>"
-        ),
-        re.IGNORECASE | re.DOTALL,
-    )
+    # Additional SAT-specific regex patterns (not in base class)
+    _ANSWER_OPEN = re.compile(rf"<{SOLUTION_START_TOKEN}>", re.IGNORECASE)
+    _ANSWER_CLOSE = re.compile(rf"</{SOLUTION_END_TOKEN}>", re.IGNORECASE)
 
     def _exact_token_count(self, answer_text: str) -> int:
         tokens = re.findall(r"[01]", answer_text)
@@ -181,8 +149,8 @@ class SATParser(Parser):
     def parse(self, completion: str, problem: _SATProblem) -> dict[str, Any]:
         text = completion or ""
 
-        has_thinking = bool(self._THINK_BLOCK.search(text))
-        has_answer = bool(self._ANSWER_PAIR.search(text))
+        has_thinking = self._detect_thinking_block(text)
+        has_answer = self._detect_answer_block(text)
         num_ans_opens = len(self._ANSWER_OPEN.findall(text))
         num_ans_closes = len(self._ANSWER_CLOSE.findall(text))
 
@@ -193,9 +161,9 @@ class SATParser(Parser):
         if has_answer:
             pair_match = None
             if has_thinking:
-                pair_match = self._THINK_THEN_ANSWER_PAIR.search(text)
+                pair_match = self._get_think_then_answer_pattern().search(text)
             if pair_match is None:
-                pair_match = self._ANSWER_PAIR.search(text)
+                pair_match = self._get_answer_pattern().search(text)
 
             if pair_match is not None:
                 answer_text = pair_match.group("content")
@@ -286,22 +254,23 @@ def _sat_strict_format_reward(parsed: Any, _: _SATProblem) -> float:
 
 
 def _sat_soft_format_reward(parsed: Any, _: _SATProblem) -> float:
-    if isinstance(parsed, dict) and parsed.get("has_answer"):
-        return 0.2
-    return 0.0
+    """Soft format reward for SAT - delegates to shared implementation."""
+    from .reward_components import soft_format_reward
+
+    return soft_format_reward(parsed, None)
+
+
+def _sat_no_trailing_reward(parsed: Any, _: _SATProblem) -> float:
+    """No trailing reward for SAT - delegates to shared implementation."""
+    from .reward_components import no_trailing_reward
+
+    return no_trailing_reward(parsed, None)
 
 
 def _sat_answer_shape_reward(parsed: Any, problem: _SATProblem) -> float:
     if isinstance(parsed, dict):
         bits = re.findall(r"[01]", parsed.get("answer_text", ""))
         return 0.3 if len(bits) == problem.num_vars else 0.0
-    return 0.0
-
-
-def _sat_no_trailing_reward(parsed: Any, _: _SATProblem) -> float:
-    if isinstance(parsed, dict) and parsed.get("has_answer"):
-        trailing = int(parsed.get("trailing_after_answer", 0))
-        return max(0.0, 0.2 - 0.001 * trailing)
     return 0.0
 
 
