@@ -38,9 +38,9 @@ MODEL_NAME = os.getenv("GRAIL_MODEL_NAME", "Qwen/Qwen3-4B-Instruct-2507")
 LAYER_INDEX = -1
 
 # Trainer hyperparameters (env configurable)
-TRAINER_LR = float(os.getenv("GRAIL_TRAINER_LR", "2e-6"))
+TRAINER_LR = float(os.getenv("GRAIL_TRAINER_LR", "2e-5"))
 TRAINER_EPOCHS = int(os.getenv("GRAIL_TRAINER_EPOCHS", "2"))
-TRAINER_BATCH_SIZE = int(os.getenv("GRAIL_TRAINER_BATCH_SIZE", "4"))
+TRAINER_BATCH_SIZE = int(os.getenv("GRAIL_TRAINER_BATCH_SIZE", "12"))
 TRAINER_MAX_LENGTH = int(os.getenv("GRAIL_TRAINER_MAX_LENGTH", "1024"))
 TRAINER_GRAD_CLIP = float(os.getenv("GRAIL_TRAINER_GRAD_CLIP", "0.5"))
 TRAINER_WARMUP_STEPS = int(os.getenv("GRAIL_TRAINER_WARMUP_STEPS", "10"))
@@ -48,6 +48,21 @@ TRAINER_KL_COEF = float(os.getenv("GRAIL_TRAINER_KL_COEF", "0.02"))
 TRAINER_ENTROPY_COEF = float(os.getenv("GRAIL_TRAINER_ENTROPY_COEF", "0.001"))
 TRAINER_ADV_CLIP_PERCENTILE = float(os.getenv("GRAIL_TRAINER_ADV_CLIP_PERCENTILE", "99.0"))
 TRAINER_GROUP_ADV_SUM_TOL = float(os.getenv("GRAIL_TRAINER_GROUP_ADV_SUM_TOL", "0.01"))
+TRAINER_GRAD_ACCUM_STEPS = int(os.getenv("GRAIL_TRAINER_GRAD_ACCUM_STEPS", "2"))
+
+# Importance sampling and PPO-style clipping
+TRAINER_USE_IS = os.getenv("GRAIL_TRAINER_USE_IS", "1") == "1"
+TRAINER_PPO_CLIP_EPS = float(os.getenv("GRAIL_TRAINER_PPO_CLIP_EPS", "0.2"))
+
+# Log-ratio clamp for numerical stability when exponentiating to ratios
+TRAINER_LOGRATIO_CLAMP = float(os.getenv("GRAIL_TRAINER_LOGRATIO_CLAMP", "5.0"))
+
+# Adaptive KL settings
+TRAINER_ADAPTIVE_KL = os.getenv("GRAIL_TRAINER_ADAPTIVE_KL", "1") == "1"
+TRAINER_KL_TARGET = float(os.getenv("GRAIL_TRAINER_KL_TARGET", "0.04"))
+TRAINER_KL_ADAPT_RATE = float(os.getenv("GRAIL_TRAINER_KL_ADAPT_RATE", "1.5"))
+TRAINER_KL_MIN = float(os.getenv("GRAIL_TRAINER_KL_MIN", "0.001"))
+TRAINER_KL_MAX = float(os.getenv("GRAIL_TRAINER_KL_MAX", "0.2"))
 
 # Trainer miner trust filtering (weight-based)
 TRAINER_MIN_AGGREGATE_WEIGHT = float(os.getenv("GRAIL_TRAINER_MIN_AGGREGATE_WEIGHT", "0.01"))
@@ -58,7 +73,7 @@ CHECKPOINT_RETENTION_LIMIT = int(os.getenv("GRAIL_CHECKPOINT_RETENTION_LIMIT", "
 CHECKPOINT_MILESTONE_INTERVAL = int(os.getenv("GRAIL_CHECKPOINT_MILESTONE_INTERVAL", "100"))
 
 # Trainer identity used for checkpoint publication
-TRAINER_UID = 0
+TRAINER_UID = 80
 
 # ────────────────  LOGGING  ────────────────
 

@@ -10,14 +10,12 @@ from accelerate import Accelerator
 
 from grail.shared.constants import (
     NETUID,
-    TRAINER_LR,
-    TRAINER_WARMUP_STEPS,
 )
 
 from .algorithms import GRPOAlgorithm, TrainingAlgorithm
+from .algorithms.grpo import load_grpo_groups
 from .checkpointing import publish_checkpoint
 from .config import TrainingConfig
-from .data import load_grpo_groups
 from .trust import get_trusted_miner_hotkeys
 
 if TYPE_CHECKING:
@@ -29,7 +27,11 @@ logger = logging.getLogger(__name__)
 
 
 class TrainerService:
-    """Coordinates model setup, algorithm epochs, and checkpoint publishing."""
+    """Coordinates algorithm epochs and checkpoint publishing.
+
+    Optimizer and scheduler are persistent across windows to maintain
+    training state. Each window is a single training step.
+    """
 
     def __init__(
         self,
@@ -43,6 +45,8 @@ class TrainerService:
         train_model: Any,
         ref_model: Any,
         tokenizer: Any,
+        optimizer: torch.optim.Optimizer | None = None,
+        scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
         chain_manager: Any | None = None,
     ) -> None:
         self.wallet = wallet
@@ -55,7 +59,11 @@ class TrainerService:
         self.ref_model = ref_model
         self.tokenizer = tokenizer
         self.chain_manager = chain_manager
-        self.accelerator = Accelerator(mixed_precision="fp16")
+        self.accelerator = Accelerator(mixed_precision="no")
+
+        # Persistent optimizer and scheduler across windows
+        self.optimizer = optimizer
+        self.scheduler = scheduler
 
     async def train_window(self, window: int, subtensor: Any) -> bool:
         # Deterministic seeding
@@ -68,6 +76,9 @@ class TrainerService:
         # Get trusted miners from chain weights
         trusted_hotkeys = await self._get_trusted_miners(subtensor)
 
+        # TODO: this should be removed later on but right now we only trust uid 80 for testing
+        trusted_hotkeys = {metagraph.hotkeys[80]}
+
         # Skip training if no trusted miners available
         if not trusted_hotkeys:
             logger.warning(
@@ -79,7 +90,7 @@ class TrainerService:
         # Load data directly from trusted miners using shared chain manager
         groups = await load_grpo_groups(
             window,
-            self.config,
+            self.config.group_adv_sum_tolerance,
             trusted_hotkeys,
             self.credentials,
             self.chain_manager,
@@ -93,25 +104,26 @@ class TrainerService:
             )
             return False
 
-        # Models and tokenizer prepared once; optimizer per window
+        # Use persistent models
         model = self.train_model
         ref_model = self.ref_model
         tokenizer = self.tokenizer
 
-        optimizer = torch.optim.AdamW(model.parameters(), lr=TRAINER_LR)
-        model, ref_model, optimizer = self.accelerator.prepare(
+        # Ensure optimizer and scheduler are initialized
+        if self.optimizer is None or self.scheduler is None:
+            raise RuntimeError(
+                "Optimizer and scheduler must be initialized before training windows"
+            )
+
+        # Prepare models and optimizer for distributed training
+        model, ref_model, opt = self.accelerator.prepare(
             model,
             ref_model,
-            optimizer,
+            self.optimizer,
         )
+
         if hasattr(ref_model, "eval"):
             ref_model.eval()
-
-        scheduler = torch.optim.lr_scheduler.LinearLR(
-            optimizer,
-            start_factor=0.1,
-            total_iters=max(1, TRAINER_WARMUP_STEPS),
-        )
 
         for epoch in range(self.config.epochs):
             logger.info("Epoch %s/%s", epoch + 1, self.config.epochs)
@@ -120,20 +132,20 @@ class TrainerService:
                 ref_model,
                 tokenizer,
                 groups,
-                optimizer,
+                opt,
                 self.accelerator,
                 self.monitor,
                 window,
                 self.config,
             )
 
-            scheduler.step()
+            self.scheduler.step()
             if self.monitor:
                 for key, value in metrics.items():
                     await self.monitor.log_gauge(f"training.{key}", value)
                 await self.monitor.log_gauge(
                     "training.lr",
-                    scheduler.get_last_lr()[0],
+                    self.scheduler.get_last_lr()[0],
                 )
                 await self.monitor.log_counter("training.epochs_completed")
 
@@ -145,6 +157,15 @@ class TrainerService:
                 metrics.get("loss_kl", 0.0),
                 metrics.get("loss_entropy", 0.0),
             )
+
+        # Check if training produced any meaningful results before publishing
+        # If all batches were skipped (NaN/Inf), metrics will be empty or all zeros
+        if not metrics or all(v == 0.0 for v in metrics.values()):
+            logger.warning(
+                "No valid training metrics for window %s; skipping checkpoint publish",
+                window,
+            )
+            return False
 
         # Publish checkpoint for the same window used for updates
         target_window = window
