@@ -145,6 +145,30 @@ class CheckpointManager:
                     logger.warning("Failed to verify cached checkpoint: %s", exc)
                 shutil.rmtree(local_dir, ignore_errors=True)
 
+            # Check READY marker to ensure checkpoint is fully uploaded
+            is_ready = await self._is_checkpoint_ready(window)
+            if not is_ready:
+                logger.warning(
+                    "Checkpoint for window %s not ready (READY marker not found); falling back to latest ready checkpoint",
+                    window,
+                )
+                # Fall back to latest ready checkpoint to keep mining operational
+                latest_ready_window = await self._find_latest_ready_checkpoint_window()
+                if latest_ready_window is None:
+                    logger.error("No ready checkpoints available for fallback")
+                    return None
+                if latest_ready_window == window:
+                    logger.debug("Latest ready checkpoint same as requested, no fallback available")
+                    return None
+
+                logger.info(
+                    "Falling back from window %s to latest ready window %s",
+                    window,
+                    latest_ready_window,
+                )
+                # Recursively call with the latest ready window
+                return await self.get_checkpoint(latest_ready_window)
+
             tmp_dir = self.cache_root / f"checkpoint-{window}.partial"
             if tmp_dir.exists():
                 shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -257,17 +281,51 @@ class CheckpointManager:
         windows: set[int] = set()
         for key in keys:
             parts = key.split("/")
-            if len(parts) < 2:
-                continue
-            prefix = parts[1]
-            if not prefix.startswith("checkpoint-"):
-                continue
-            try:
-                window = int(prefix.split("-")[1])
-            except (IndexError, ValueError):
-                continue
-            windows.add(window)
+            # Scan all path segments for a 'checkpoint-<window>' directory
+            for segment in parts:
+                if not segment.startswith("checkpoint-"):
+                    continue
+                try:
+                    window = int(segment.split("-", 1)[1])
+                except (IndexError, ValueError):
+                    continue
+                windows.add(window)
+                break  # Only one checkpoint window per key path
         return sorted(windows)
+
+    async def _is_checkpoint_ready(self, window: int) -> bool:
+        """Check if a checkpoint has been marked as READY (fully uploaded).
+
+        The trainer creates a READY file as the final step of publishing a checkpoint.
+        This prevents miners from downloading partially uploaded checkpoints.
+
+        Returns:
+            True if READY marker exists, False otherwise.
+        """
+        ready_key = f"{CHECKPOINT_PREFIX}checkpoint-{window}/READY"
+        return await comms.file_exists(ready_key, credentials=self.credentials, use_write=False)
+
+    async def _find_latest_ready_checkpoint_window(self) -> int | None:
+        """Find the highest window number with READY marker (fully uploaded).
+
+        Used when requested checkpoint is not ready yet. Falls back to latest
+        available ready checkpoint to keep mining/validation operational.
+
+        Returns:
+            Window number of latest ready checkpoint, or None if none are ready.
+        """
+        windows = await self.list_remote_windows()
+        if not windows:
+            return None
+
+        # Check windows in descending order to find latest ready one
+        for window in sorted(windows, reverse=True):
+            if await self._is_checkpoint_ready(window):
+                logger.info(f"Found latest ready checkpoint at window {window}")
+                return window
+
+        logger.warning("No ready checkpoints found")
+        return None
 
     async def get_latest_checkpoint(self) -> Path | None:
         """Return local path for the most recent remote checkpoint, if any."""
@@ -429,6 +487,9 @@ class CheckpointManager:
         if current_window < 0:
             return keep
 
+        # Always keep windows 0-9
+        keep.update(range(10))
+
         # Keep latest windows up to limit
         for idx in range(self.keep_limit):
             window = current_window - idx * WINDOW_LENGTH
@@ -456,14 +517,15 @@ class CheckpointManager:
         latest_window = None
         for key in keys:
             parts = key.split("/")
-            if len(parts) < 2:
+            # Expect keys like 'grail/checkpoints/checkpoint-<window>/...'
+            if len(parts) < 3:
                 continue
-            prefix = parts[2]
-            if not prefix.startswith("checkpoint-"):
+            segment = parts[2]
+            if not segment.startswith("checkpoint-"):
                 continue
             try:
-                # Extract window number from "checkpoint-{window}"
-                window = int(prefix.split("-")[1])
+                # Extract window number from "checkpoint-<window>"
+                window = int(segment.split("-", 1)[1])
                 if latest_window is None or window > latest_window:
                     latest_window = window
             except (IndexError, ValueError):
