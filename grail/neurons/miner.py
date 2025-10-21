@@ -155,7 +155,19 @@ class MinerNeuron(BaseNeuron):
                                 )
                             self.heartbeat()
 
-                            # checkpoint_path = 'Qwen/Qwen3-4B-Instruct-2507'
+                            # If requested checkpoint doesn't exist, fetch latest instead
+                            if checkpoint_path is None:
+                                logger.warning(
+                                    "Checkpoint for window %s not available, fetching latest...",
+                                    checkpoint_window,
+                                )
+                                try:
+                                    checkpoint_path = (
+                                        await checkpoint_manager.get_latest_checkpoint()
+                                    )
+                                except Exception as e:
+                                    logger.warning("Failed to fetch latest checkpoint: %s", e)
+
                             if checkpoint_path is not None:
                                 logger.info(
                                     "🔁 Loading checkpoint for window %s from %s",
@@ -178,12 +190,11 @@ class MinerNeuron(BaseNeuron):
                                         checkpoint_window,
                                     )
                                     raise
-                            else:
+                            elif model is None or tokenizer is None:
                                 logger.error(
-                                    "No checkpoint available for window %s - cannot mine",
-                                    checkpoint_window,
+                                    "No checkpoint available and no model loaded, cannot mine"
                                 )
-                                await asyncio.sleep(30)
+                                await asyncio.sleep(60)
                                 continue
 
                     # Ensure model and tokenizer are loaded before mining
