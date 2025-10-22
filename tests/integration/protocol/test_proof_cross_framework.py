@@ -66,6 +66,7 @@ def production_prompts(tokenizer: PreTrainedTokenizerBase) -> list[str]:
     ]
 
 
+@pytest.mark.integration
 class TestProofCrossFramework:
     """Cross-framework compatibility tests for GRAIL proof."""
 

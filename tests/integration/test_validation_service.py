@@ -51,6 +51,7 @@ def validation_service(
     )
 
 
+@pytest.mark.integration
 class TestRollingHistoryManagement:
     """Test rolling history tracking for miner selection and inference counts."""
 
@@ -134,6 +135,7 @@ class TestRollingHistoryManagement:
         assert counts["miner_5"] == 1  # New
 
 
+@pytest.mark.integration
 class TestServiceLifecycle:
     """Test service lifecycle management."""
 

@@ -157,7 +157,7 @@ addopts = [
     "--strict-markers",
     "--strict-config",
     "--verbose",
-    "-m not gpu_real_data and not long",  # Exclude GPU and long-running tests by default
+    "-m not gpu_real_data and not long and not integration",  # Exclude GPU, long-running, and integration tests by default
 ]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",

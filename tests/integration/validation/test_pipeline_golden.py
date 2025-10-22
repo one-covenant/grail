@@ -69,6 +69,7 @@ def _stub_registry(monkeypatch: pytest.MonkeyPatch, adapter: Any) -> None:
     monkeypatch.setattr(env_mod, "get_adapter", _get_adapter, raising=True)
 
 
+@pytest.mark.integration
 def test_pipeline_golden_valid_rollout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
