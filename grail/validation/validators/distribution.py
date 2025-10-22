@@ -7,7 +7,6 @@ import logging
 import torch
 
 from ...shared.constants import (
-    SAMPLING_BC_THRESHOLD,
     SAMPLING_HIGH_P,
     SAMPLING_INITIAL_WINDOW_STEPS,
     SAMPLING_LOW_P,
@@ -99,7 +98,7 @@ class DistributionValidator(Validator):
             return None
 
     def _compute_metrics(self, probs: list[float]) -> dict:
-        """Compute distribution statistics (bimodality, quantiles)."""
+        """Compute distribution statistics (quantiles and fractions)."""
         try:
             import numpy as np
 
@@ -162,8 +161,8 @@ class DistributionValidator(Validator):
         reasons: dict[str, bool] = {
             "median_low": False,
             "min_low": False,
-            "bimodal_full": False,
-            "bimodal_initial": False,
+            "q10_low": False,
+            "q10_low_initial": False,
         }
 
         # Unimodal low (all probs clustered low)
@@ -176,23 +175,19 @@ class DistributionValidator(Validator):
             logger.debug(f"Suspicious: min prob {metrics['min']} too low")
             reasons["min_low"] = True
 
-        # Bimodal distribution (full sequence)
-        low_q10 = metrics.get("q10", 0.0) <= SAMPLING_LOW_Q10_MAX
-        high_bc = metrics.get("bc", 0.0) >= SAMPLING_BC_THRESHOLD
-        if low_q10 and high_bc:
-            logger.debug(f"Suspicious: bimodal (q10={metrics.get('q10')}, bc={metrics.get('bc')})")
-            reasons["bimodal_full"] = True
+        # Low Q10 distribution (full sequence)
+        if metrics.get("q10", 0.0) <= SAMPLING_LOW_Q10_MAX:
+            logger.debug(f"Suspicious: low q10 {metrics.get('q10')}")
+            reasons["q10_low"] = True
 
         # Check initial window for prefix exploits
         initial_metrics: dict | None = None
         k = min(SAMPLING_INITIAL_WINDOW_STEPS, len(probs))
         if k > 0:
             initial_metrics = self._compute_metrics(probs[:k])
-            init_low_q10 = initial_metrics.get("q10", 0.0) <= SAMPLING_LOW_Q10_MAX
-            init_high_bc = initial_metrics.get("bc", 0.0) >= SAMPLING_BC_THRESHOLD
-            if init_low_q10 and init_high_bc:
-                logger.debug("Suspicious: bimodal in initial window")
-                reasons["bimodal_initial"] = True
+            if initial_metrics.get("q10", 0.0) <= SAMPLING_LOW_Q10_MAX:
+                logger.debug("Suspicious: low q10 in initial window")
+                reasons["q10_low_initial"] = True
 
         suspicious = any(reasons.values())
         return suspicious, reasons, initial_metrics
