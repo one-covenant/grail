@@ -248,12 +248,6 @@ class WandBBackend(MonitoringBackend):
             # Include temporal context in the data
             self._add_temporal_context(data, metric)
 
-            # Debug: Log what we're sending to WandB for validation/mining/training metrics
-            if metric.name.startswith(("training/", "validation/", "mining/")):
-                logger.debug(
-                    f"WandB log: {metric.name} -> {list(data.keys())}, block_number={data.get('block_number')}, window_number={data.get('window_number')}"
-                )
-
             # Log to wandb in thread pool without step parameter
             # wandb will use timestamp as x-axis as configured
             await asyncio.get_event_loop().run_in_executor(None, self._wandb_module.log, data)
