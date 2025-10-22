@@ -9,7 +9,7 @@ import os
 import tempfile
 import time
 from datetime import datetime
-from typing import Any, cast
+from typing import Any
 
 import bittensor as bt
 from aiobotocore.session import get_session
