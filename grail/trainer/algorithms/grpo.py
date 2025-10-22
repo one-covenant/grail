@@ -599,10 +599,10 @@ async def train_grpo_epoch(
             log_ratio, min=-TRAINER_LOGRATIO_CLAMP, max=TRAINER_LOGRATIO_CLAMP
         )
 
-        # CRITICAL FIX: DO NOT normalize advantages across batch
-        # Advantages are already zero-sum within each GRPO group
-        # Batch-level normalization destroys the group-relative signal
-        # Optional: clip extreme outliers by percentile (but NO z-score normalization)
+        # Advantage normalization for stable gradients
+        # IMPORTANT: Normalize advantages to have unit variance while preserving zero-sum
+        # This prevents gradient explosion when advantages have large magnitude
+        # Clip extreme outliers first, then standardize
         try:
             perc_val = float(TRAINER_ADV_CLIP_PERCENTILE)
             q = max(0.0, min(100.0, perc_val)) / 100.0
@@ -613,8 +613,15 @@ async def train_grpo_epoch(
             if torch.isfinite(clip_val):
                 advantages_tensor = advantages_tensor.clamp(-clip_val, clip_val)
 
-        # Use raw advantages (already zero-sum per group)
-        advantages_normalized = advantages_tensor
+        # Z-score normalization: (adv - mean) / std
+        # This preserves zero-sum property and stabilizes gradients
+        if advantages_tensor.std() > 1e-8:
+            advantages_normalized = (advantages_tensor - advantages_tensor.mean()) / (
+                advantages_tensor.std() + 1e-8
+            )
+        else:
+            # If all advantages are identical, no gradient signal
+            advantages_normalized = advantages_tensor
 
         # Policy gradient loss with importance sampling and PPO-style clipping
         if TRAINER_USE_IS:
