@@ -22,7 +22,6 @@ from grail.infrastructure.checkpoints import (
 )
 from grail.infrastructure.comms import get_file_size, upload_file_chunked
 from grail.shared.constants import (
-    MODEL_NAME,
     TRAINER_BATCH_SIZE,
     TRAINER_ENTROPY_COEF,
     TRAINER_EPOCHS,
@@ -31,9 +30,104 @@ from grail.shared.constants import (
     TRAINER_LR,
     TRAINER_MAX_LENGTH,
     TRAINER_WARMUP_STEPS,
+    WINDOW_LENGTH,
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def finalize_checkpoint_ready(
+    current_block: int,
+    credentials: Any,
+) -> list[int]:
+    """Add READY markers to checkpoints that have been fully uploaded.
+
+    Checkpoints become READY as soon as they're uploaded (have metadata), but only
+    if the current block is before the window starts (N + WINDOW_LENGTH). This ensures
+    miners/validators have time to download before needing the checkpoint.
+
+    Args:
+        current_block: Current blockchain block number
+        credentials: R2 credentials for uploading READY marker
+
+    Returns:
+        List of window numbers that were finalized (had READY added)
+    """
+    from grail.infrastructure.comms import list_bucket_files, upload_file_chunked
+
+    # List all checkpoint directories
+    keys = await list_bucket_files(
+        CHECKPOINT_PREFIX,
+        credentials=credentials,
+        use_write=True,
+    )
+
+    finalized_windows = []
+    checkpoint_windows = set()
+
+    # Extract unique checkpoint window numbers
+    for key in keys:
+        parts = key.split("/")
+        if len(parts) >= 3 and parts[2].startswith("checkpoint-"):
+            try:
+                window = int(parts[2].split("-", 1)[1])
+                checkpoint_windows.add(window)
+            except (IndexError, ValueError):
+                continue
+
+    # Add READY markers if checkpoint uploaded before window starts
+    for window in checkpoint_windows:
+        deadline_block = window + WINDOW_LENGTH
+
+        # Skip if past deadline - checkpoint wasn't ready on time
+        if current_block >= deadline_block:
+            logger.warning(
+                "Checkpoint %s missed READY deadline (block %s >= %s)",
+                window,
+                current_block,
+                deadline_block,
+            )
+            continue
+
+        # Check if READY already exists
+        ready_key = f"{CHECKPOINT_PREFIX}checkpoint-{window}/READY"
+        if ready_key in keys:
+            continue  # Already has READY marker
+
+        # Check if checkpoint has metadata (indicates complete upload)
+        metadata_key = f"{CHECKPOINT_PREFIX}checkpoint-{window}/metadata.json.gz"
+        metadata_key_uncompressed = f"{CHECKPOINT_PREFIX}checkpoint-{window}/metadata.json"
+        has_metadata = metadata_key in keys or metadata_key_uncompressed in keys
+
+        if not has_metadata:
+            logger.debug(
+                "Checkpoint window %s missing metadata, skipping READY marker",
+                window,
+            )
+            continue
+
+        # Add READY marker at deterministic block
+        try:
+            await upload_file_chunked(
+                ready_key,
+                b"",
+                credentials=credentials,
+                use_write=True,
+            )
+            logger.info(
+                "✅ Added READY marker for checkpoint window %s at block %s",
+                window,
+                current_block,
+            )
+            finalized_windows.append(window)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Failed to add READY marker for checkpoint window %s: %s",
+                window,
+                exc,
+            )
+
+    return finalized_windows
 
 
 async def publish_checkpoint(
@@ -78,7 +172,6 @@ async def publish_checkpoint(
         metadata = CheckpointMetadata(
             window=target_window,
             parent_window=trained_on_window,
-            model_name=MODEL_NAME,
             file_manifest=file_manifest,
             training_config=training_config,
             git_commit=os.getenv("GIT_COMMIT", "unknown"),
@@ -94,7 +187,7 @@ async def publish_checkpoint(
         (temp_dir / "manifest.sig").write_text(signature)
 
         remote_prefix = f"{CHECKPOINT_PREFIX}checkpoint-{target_window}"
-        semaphore = asyncio.Semaphore(4)
+        semaphore = asyncio.Semaphore(8)
 
         async def upload_file(path: Path) -> bool:
             async with semaphore:
@@ -123,19 +216,20 @@ async def publish_checkpoint(
             (path, path.stat().st_size) for path in temp_dir.rglob("*") if path.is_file()
         ]
         for local_path, expected_size in files_to_verify:
-            rel_path = local_path.relative_to(temp_dir)
-            remote_key = f"{remote_prefix}/{str(rel_path)}"
+            rel_path = str(local_path.relative_to(temp_dir))
+            remote_key = f"{remote_prefix}/{rel_path}"
 
-            # JSON files are compressed automatically, so check for .gz version
-            if remote_key.endswith(".json"):
+            # Only small JSON files (<10MB) are compressed; check for .gz version accordingly
+            is_small_json = remote_key.endswith(".json") and expected_size < 10 * 1024 * 1024
+            if is_small_json:
                 remote_key = remote_key + ".gz"
 
             remote_size = await get_file_size(remote_key, credentials=credentials, use_write=True)
             if remote_size is None:
                 logger.error("Failed to verify uploaded file (not found): %s", rel_path)
                 return False
-            # For JSON files, we can't verify size due to compression, just verify non-zero
-            if rel_path.name.endswith(".json"):
+            # For compressed JSON, we can't verify exact size due to compression
+            if is_small_json:
                 if remote_size <= 0:
                     logger.error(
                         "Invalid size for compressed file %s: remote=%d bytes",
@@ -155,14 +249,13 @@ async def publish_checkpoint(
                     return False
         logger.info("✅ All checkpoint files verified successfully")
 
-        await upload_file_chunked(
-            f"{remote_prefix}/READY",
-            b"",
-            credentials=credentials,
-            use_write=True,
+        # NOTE: READY marker is NOT added here to ensure determinism
+        # It will be added by finalize_checkpoint_ready() before window starts (block < target_window + WINDOW_LENGTH)
+        logger.info(
+            "✅ Published checkpoint files for window %s (READY marker deadline: block %s)",
+            target_window,
+            target_window + WINDOW_LENGTH,
         )
-
-        logger.info("✅ Published checkpoint for window %s", target_window)
 
         try:
             await checkpoint_manager.cleanup_remote(target_window)
