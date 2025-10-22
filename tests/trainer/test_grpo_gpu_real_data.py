@@ -59,12 +59,12 @@ class TestConfig:
 
     env_id: str = TEST_ENV_ID
     model_name: str = "Qwen/Qwen2.5-1.5B-Instruct"
-    learning_rate: float = 5e-5
-    num_iterations: int = 100  # Number of GRPO iterations (online training loop)
-    num_epochs_per_iteration: int = 1  # Epochs per iteration
-    problems_per_iteration: int = 2  # Problems to generate per iteration
+    learning_rate: float = 1e-6  # Reduced 50x to prevent collapse
+    num_iterations: int = 10  # Number of GRPO iterations (online training loop)
+    num_epochs_per_iteration: int = 2  # Epochs per iteration
+    problems_per_iteration: int = 4  # Problems to generate per iteration
     problems_per_batch: int = 2  # Problems per training batch
-    batch_size: int = 2
+    batch_size: int = 4  # Rollouts per batch for training
     max_length: int = 512
     num_train_problems: int = 30
     num_eval_problems: int = 10
