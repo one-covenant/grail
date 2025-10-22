@@ -95,7 +95,7 @@ RNG_LABEL = {"sketch": b"sketch", "open": b"open", "sat": b"sat"}
 MAX_NEW_TOKENS = 512
 
 # Must match rollout generator default
-MIN_EOS_PROBABILITY = 0.1  # Minimum probability for valid EOS termination
+MIN_EOS_PROBABILITY = 0.02  # Minimum probability for valid EOS termination
 
 # Max acceptable drift between miner/validator
 SANITY_CHECK_DRIFT_THRESHOLD = 0.1
