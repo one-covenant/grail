@@ -36,7 +36,6 @@ def synthetic_grpo_groups(
 
     for group_idx in range(2):
         rollouts = []
-        advantage_sum = 0.0
 
         for rollout_idx in range(4):
             # Create rollout with varying tokens and lengths
@@ -59,11 +58,11 @@ def synthetic_grpo_groups(
             )
 
             rollouts.append(rollout)
-            advantage_sum += advantage
 
         # Adjust last rollout to ensure sum is near zero
         if rollouts:
-            rollouts[-1].advantage = -advantage_sum
+            current_sum = sum(r.advantage for r in rollouts[:-1])
+            rollouts[-1].advantage = -current_sum
 
         group = GRPOGroup(group_id=f"g{group_idx}", rollouts=rollouts)
         groups.append(group)
@@ -80,7 +79,6 @@ def synthetic_grpo_groups_with_behavior(
 
     for group_idx in range(2):
         rollouts = []
-        advantage_sum = 0.0
 
         for rollout_idx in range(4):
             tokens = list(range(1, 12))
@@ -107,10 +105,10 @@ def synthetic_grpo_groups_with_behavior(
             )
 
             rollouts.append(rollout)
-            advantage_sum += advantage
 
         if rollouts:
-            rollouts[-1].advantage = -advantage_sum
+            current_sum = sum(r.advantage for r in rollouts[:-1])
+            rollouts[-1].advantage = -current_sum
 
         group = GRPOGroup(group_id=f"g{group_idx}", rollouts=rollouts)
         groups.append(group)
@@ -121,6 +119,7 @@ def synthetic_grpo_groups_with_behavior(
 class TestGRPOEpochMetricsStructure:
     """Test full train_grpo_epoch produces expected metrics."""
 
+    @pytest.mark.long
     @pytest.mark.asyncio
     async def test_epoch_produces_all_metrics(
         self,
@@ -162,6 +161,7 @@ class TestGRPOEpochMetricsStructure:
         }
         assert expected_keys.issubset(set(metrics.keys()))
 
+    @pytest.mark.long
     @pytest.mark.asyncio
     async def test_epoch_metrics_are_finite(
         self,
@@ -195,6 +195,7 @@ class TestGRPOEpochMetricsStructure:
                 ), f"Metric {key} is NaN"
                 assert value != float("inf"), f"Metric {key} is infinite"
 
+    @pytest.mark.long
     @pytest.mark.asyncio
     async def test_epoch_with_behavior_logprobs(
         self,
@@ -226,6 +227,7 @@ class TestGRPOEpochMetricsStructure:
         if "behavior_frac" in metrics:
             assert 0.0 <= metrics["behavior_frac"] <= 1.0
 
+    @pytest.mark.long
     @pytest.mark.asyncio
     async def test_grad_norm_positive_after_optimization(
         self,
@@ -263,10 +265,13 @@ class TestGRPOGroupValidation:
         self, synthetic_grpo_groups: list[GRPOGroup], monkeypatch_trainer_constants: None
     ) -> None:
         """Test synthetic groups are valid."""
-        from grail.shared.constants import TRAINER_GROUP_ADV_SUM_TOL
+        from grail.shared.constants import ROLLOUTS_PER_PROBLEM, TRAINER_GROUP_ADV_SUM_TOL
 
         for group in synthetic_grpo_groups:
-            assert group.is_valid(advantage_tolerance=TRAINER_GROUP_ADV_SUM_TOL)
+            assert group.is_valid(
+                advantage_tolerance=TRAINER_GROUP_ADV_SUM_TOL,
+                rollouts_per_problem=ROLLOUTS_PER_PROBLEM,
+            )
 
     def test_invalid_group_rejected(self) -> None:
         """Test invalid group fails validation."""
@@ -292,6 +297,7 @@ class TestGRPOGroupValidation:
 class TestTokenTruncation:
     """Test handling of sequences longer than TRAINER_MAX_LENGTH."""
 
+    @pytest.mark.long
     @pytest.mark.asyncio
     async def test_long_sequence_truncated_and_trained(
         self,
@@ -351,6 +357,7 @@ class TestTokenTruncation:
 class TestBatchPadding:
     """Test right-padding and attention mask correctness."""
 
+    @pytest.mark.long
     @pytest.mark.asyncio
     async def test_variable_length_batch_padded(
         self,

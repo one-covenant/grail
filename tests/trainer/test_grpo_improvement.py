@@ -82,8 +82,9 @@ class SimpleToyEnv(SingleTurnEnv):
 
 @pytest.mark.slow
 class TestGRPOImprovementOnToyEnv:
-    """Test GRPO learning on simple toy task."""
+    """Quick tests for GRPO learning on toy environment."""
 
+    @pytest.mark.long
     @pytest.mark.asyncio
     async def test_grpo_learns_on_toy_task(
         self,
@@ -191,6 +192,7 @@ class TestGRPOImprovementOnToyEnv:
 
         logger.info("=== Test passed: Training completed without crashes and weights changed ===\n")
 
+    @pytest.mark.long
     @pytest.mark.asyncio
     async def test_grpo_no_nan_loss(
         self,

@@ -1,5 +1,12 @@
 """GPU-based Online GRPO test with real GSM8K data and completions.
 
+⚠️  LONG-RUNNING GPU TEST: This test is marked with @pytest.mark.gpu_real_data
+To run this test explicitly:
+  - pytest -m gpu_real_data
+To exclude it from normal test runs:
+  - pytest -m "not gpu_real_data"
+  - pytest tests/ --ignore=tests/trainer/test_grpo_gpu_real_data.py
+
 This test validates online GRPO on real data by:
 1. Loading GSM8K problems with deterministic seeds
 2. For each of 10 iterations:
