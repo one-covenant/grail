@@ -25,6 +25,12 @@ from grail.monitoring import get_monitoring_manager
 from grail.monitoring.config import MonitoringConfig
 from grail.shared.constants import TRAINER_UID, WINDOW_LENGTH
 from grail.shared.subnet import get_own_uid_on_subnet
+from grail.shared.window_utils import (
+    WindowWaitTracker,
+    calculate_next_window,
+    log_window_wait_initial,
+    log_window_wait_periodic,
+)
 
 from .base import BaseNeuron
 
@@ -52,6 +58,7 @@ class MinerNeuron(BaseNeuron):
         model = None
         tokenizer = None
         current_checkpoint_window: int | None = None
+        window_wait_tracker = WindowWaitTracker(log_interval_secs=120)
 
         async def _run() -> None:
             nonlocal model, tokenizer, current_checkpoint_window
@@ -137,8 +144,24 @@ class MinerNeuron(BaseNeuron):
                     checkpoint_window = window_start - WINDOW_LENGTH
 
                     if window_start <= last_window_start:
+                        if window_wait_tracker.should_log_initial():
+                            log_window_wait_initial(
+                                current_block=current_block,
+                                last_processed_window=last_window_start,
+                                window_length=WINDOW_LENGTH,
+                            )
+                        elif window_wait_tracker.should_log_periodic():
+                            next_window = calculate_next_window(last_window_start, WINDOW_LENGTH)
+                            log_window_wait_periodic(
+                                next_window=next_window,
+                                elapsed_seconds=window_wait_tracker.get_elapsed_seconds(),
+                            )
+
                         await asyncio.sleep(2)
                         continue
+
+                    # Window is available - reset tracker
+                    window_wait_tracker.reset()
 
                     # Load checkpoint (required - miners always use checkpoints)
                     if checkpoint_window is not None and checkpoint_window >= 0:

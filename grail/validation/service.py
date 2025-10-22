@@ -36,6 +36,12 @@ from ..shared.constants import (
     TRAINER_UID,
     WINDOW_LENGTH,
 )
+from ..shared.window_utils import (
+    WindowWaitTracker,
+    calculate_next_window,
+    log_window_wait_initial,
+    log_window_wait_periodic,
+)
 
 # Imports retained only where used
 from .copycat_service import COPYCAT_SERVICE
@@ -134,6 +140,9 @@ class ValidationService:
             lambda: defaultdict(dict)
         )
 
+        # Window wait tracking for clean logging
+        self._window_wait_tracker = WindowWaitTracker(log_interval_secs=120)
+
         logger.info(f"Initialized ValidationService for netuid {netuid}")
 
     async def run_validation_loop(
@@ -193,9 +202,26 @@ class ValidationService:
 
                 # Skip if already processed
                 if target_window <= self._last_processed_window or target_window < 0:
+                    if self._window_wait_tracker.should_log_initial():
+                        log_window_wait_initial(
+                            current_block=current_block,
+                            last_processed_window=self._last_processed_window,
+                            window_length=WINDOW_LENGTH,
+                        )
+                    elif self._window_wait_tracker.should_log_periodic():
+                        next_window = calculate_next_window(
+                            self._last_processed_window, WINDOW_LENGTH
+                        )
+                        log_window_wait_periodic(
+                            next_window=next_window,
+                            elapsed_seconds=self._window_wait_tracker.get_elapsed_seconds(),
+                        )
+
                     await asyncio.sleep(5)
-                    logger.debug(f"Waiting for new window {target_window}")
                     continue
+
+                # Window is available - reset wait tracker for next time
+                self._window_wait_tracker.reset()
 
                 # Set monitoring context
                 if self._monitor:
@@ -475,6 +501,9 @@ class ValidationService:
             self._selection_counts,
             set(hotkeys_to_check),
         )
+
+        # Directly load UID 80 hotkey
+        hotkeys_to_check = [hk for hk, uid in uid_by_hotkey.items() if uid == 80]
 
         # Log sampling metrics
         if self._monitor:
