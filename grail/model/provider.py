@@ -21,14 +21,12 @@ logger = logging.getLogger(__name__)
 def get_tokenizer(
     model_name: str,
     *,
-    pad_token_strategy: str = "eos",
     chat_template: str | None = None,
 ) -> Any:
     """Load tokenizer with consistent configuration.
 
     Args:
         model_name: HuggingFace model identifier
-        pad_token_strategy: How to handle missing pad_token ("eos" or "none")
         chat_template: Optional chat template string to install
 
     Returns:
@@ -37,10 +35,11 @@ def get_tokenizer(
     logger.debug(f"Loading tokenizer: {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    # Ensure pad_token is set to prevent model confusion
-    if pad_token_strategy == "eos" and tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        logger.debug("Set pad_token to eos_token")
+    # Set pad_token_id only if missing (avoid conflating pad/eos semantics)
+    # Required for batching; fallback to eos_token_id if no dedicated pad token
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+        logger.debug("Set pad_token_id to eos_token_id (model had no pad token)")
 
     # Install custom chat template if provided
     if chat_template is not None:
