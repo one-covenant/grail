@@ -790,7 +790,7 @@ class MinerValidator:
 
             agg_data: dict[str, float] = {}
 
-            for key in ["mean", "median", "q10", "min", "bc", "low_frac", "high_frac", "mid_frac"]:
+            for key in ["mean", "median", "q10", "min", "low_frac", "high_frac", "mid_frac"]:
                 values = [m.get(key, 0.0) for m in metrics_list if key in m]
                 if values:
                     agg_data[f"{uid_str}/distribution/avg_{key}"] = float(np.mean(values))
