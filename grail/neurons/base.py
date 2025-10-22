@@ -165,7 +165,8 @@ class BaseNeuron:
                 # Attempt cooperative shutdown first
                 try:
                     self._shutdown_source = "watchdog"
-                    await self._shutdown(signal.SIGTERM)
+                    loop = asyncio.get_running_loop()
+                    loop.call_soon(asyncio.create_task, self._shutdown(signal.SIGTERM))
                 except Exception:
                     pass
 
