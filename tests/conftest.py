@@ -24,6 +24,12 @@ if TYPE_CHECKING:
 from .proof_test_utils import generate_realistic_sat_prompt
 
 # ============================================================================
+# Test Constants
+# ============================================================================
+
+TEST_MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
+
+# ============================================================================
 # Test Environment Setup
 # ============================================================================
 
@@ -191,10 +197,8 @@ def sat_prompts() -> list[str]:
     """
     from transformers import AutoTokenizer
 
-    from grail.shared.constants import MODEL_NAME
-
     # Load tokenizer for chat template application
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    tokenizer = AutoTokenizer.from_pretrained(TEST_MODEL_ID)
 
     seeds = [
         "test_seed_easy_01",
@@ -215,9 +219,7 @@ def sat_prompt_tokens(sat_prompts: list[str]) -> list[int]:
     """Tokenized SAT prompts for testing."""
     from transformers import AutoTokenizer
 
-    from grail.shared.constants import MODEL_NAME
-
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    tokenizer = AutoTokenizer.from_pretrained(TEST_MODEL_ID)
     return [tokenizer.encode(prompt, add_special_tokens=False) for prompt in sat_prompts]
 
 
