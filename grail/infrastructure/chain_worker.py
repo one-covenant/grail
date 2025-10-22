@@ -111,8 +111,11 @@ def _fetch_commitments_sync(
         # Create hotkey to UID mapping
         hotkey_to_uid = dict(zip(metagraph.hotkeys, metagraph.uids, strict=False))
         commitments = {}
+        total_entries = 0
+        skipped_entries = 0
 
         for key, value in query_result:
+            total_entries += 1
             try:
                 # Decode the commitment
                 decoded_ss58 = decode_account_id(key[0])
@@ -122,10 +125,12 @@ def _fetch_commitments_sync(
 
             except Exception as e:
                 logger.debug(f"Failed to decode metadata for key {key}: {e}")
+                skipped_entries += 1
                 continue
 
             # Skip if hotkey not in metagraph
             if decoded_ss58 not in hotkey_to_uid:
+                skipped_entries += 1
                 continue
 
             uid = hotkey_to_uid[decoded_ss58]
@@ -133,6 +138,7 @@ def _fetch_commitments_sync(
             # Validate commitment length (new format only)
             if len(commitment_str) != 128:
                 logger.debug(f"Invalid commitment length for UID {uid}: {len(commitment_str)}")
+                skipped_entries += 1
                 continue
 
             try:
@@ -149,11 +155,18 @@ def _fetch_commitments_sync(
                     secret_access_key=secret_access_key,
                 )
                 commitments[uid] = bucket
-                logger.debug(f"Retrieved bucket commitment for UID {uid}")
 
             except ValidationError as e:
                 logger.debug(f"Failed to validate bucket for UID {uid}: {e}")
+                skipped_entries += 1
                 continue
+
+        # Log summary of fetch operation
+        if skipped_entries > 0:
+            logger.debug(
+                f"Commitment fetch summary: {len(commitments)} valid, "
+                f"{skipped_entries} skipped out of {total_entries} total"
+            )
 
         return commitments
 
