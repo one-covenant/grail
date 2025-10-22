@@ -20,10 +20,8 @@ from typing import Any
 import bittensor as bt
 import torch
 
-from ..shared.chat_templates import build_qwen_chat_template
 from ..shared.constants import GRAIL_PROOF_VERSION, LAYER_INDEX, MAX_NEW_TOKENS
 from ..shared.hf_compat import resolve_hidden_size
-from ..shared.prompt_constants import REASONING_START, SYSTEM_PROMPT
 from .core import ChatMessage, MultiTurnEnv
 
 logger = logging.getLogger(__name__)
@@ -87,20 +85,6 @@ class AgentEnvLoop:
         except Exception as e:
             logger.debug("Failed to log tokenizer version info: %s", e)
 
-        # Inject Qwen chat template
-        # TODO: this should be removed later on and we need to make sure
-        # we directly use the checkpoint's template shared by the trainer
-        tpl = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
-        try:
-            current_tpl = getattr(self.tokenizer, "chat_template", None)
-            if current_tpl != tpl:
-                logger.warning("MINER: Setting Qwen chat template (was different)")
-                self.tokenizer.chat_template = tpl
-            else:
-                logger.debug("MINER: Chat template already matches Qwen template")
-        except Exception:
-            pass
-
     def run_single_turn(
         self,
         env: MultiTurnEnv,
@@ -152,6 +136,59 @@ class AgentEnvLoop:
             proof_version=proof_version,
         )
 
+    def generate_batch_for_eval(
+        self,
+        env_factory: Callable[[], MultiTurnEnv],
+        count: int,
+        *,
+        seed: int | None = None,
+    ) -> list[tuple[float, bool]]:
+        """Lightweight batch generation for evaluation (no GRAIL proofs/commitments).
+
+        This is ~2x faster than run_grpo_group() as it skips expensive proof computation,
+        wallet signing, and advantage calculation.
+
+        Args:
+            env_factory: Factory function to create environment instances
+            count: Number of rollouts to generate
+            seed: Optional seed for environment reset
+
+        Returns:
+            List of (reward, success) tuples for each rollout
+        """
+        results: list[tuple[float, bool]] = []
+
+        # Process in batches for efficient generation
+        for batch_start in range(0, count, self.batch_size):
+            batch_end = min(batch_start + self.batch_size, count)
+            batch_count = batch_end - batch_start
+
+            # Create and reset batch of environments
+            envs = [env_factory() for _ in range(batch_count)]
+            obs_list = [env.reset(seed=seed) for env in envs]
+
+            # Collect prompts for batch
+            prompts_list = [
+                [{"role": m.role, "content": m.content} for m in obs.messages] for obs in obs_list
+            ]
+
+            # Batch generate tokens (no logprobs/commitments needed for eval)
+            batch_results = self._batch_generate_tokens(prompts_list)
+
+            # Process each rollout in the batch
+            for env, (all_ids, prompt_len) in zip(envs, batch_results, strict=False):
+                completion_ids = all_ids[prompt_len:]
+                completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=False)
+
+                # Step environment to get reward
+                _next_obs, reward, _terminated, _truncated, info = env.step(
+                    ChatMessage(role="assistant", content=completion_text)
+                )
+
+                results.append((float(reward), bool(info.get("success", False))))
+
+        return results
+
     def run_grpo_group(
         self,
         env_factory: Callable[[], MultiTurnEnv],
@@ -161,7 +198,7 @@ class AgentEnvLoop:
         *,
         seed: int | None = None,
     ) -> list[GRPORollout]:
-        """Generate multiple rollouts for GRPO and compute advantages."""
+        """Generate multiple rollouts for GRPO with proofs and compute advantages."""
         rollouts: list[GRPORollout] = []
 
         # Process in batches for efficient generation
@@ -278,10 +315,17 @@ class AgentEnvLoop:
         """Generate completion tokens without computing logprobs.
 
         Logprobs will be computed in a single forward pass with commitments.
+        Returns tokens trimmed of right padding.
         """
         input_ids = torch.tensor([prompt_ids], dtype=torch.long).to(self.device)
         attention_mask = torch.ones_like(input_ids).to(self.device)
         prompt_len = int(input_ids.shape[1])
+
+        # Use proper pad_token_id; only fallback to eos if no pad token exists
+        pad_id = self.tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = self.tokenizer.eos_token_id
+            logger.debug("Using eos_token_id as pad_token_id fallback")
 
         with torch.inference_mode():
             outputs = self.model.generate(
@@ -294,11 +338,12 @@ class AgentEnvLoop:
                 top_k=50,
                 repetition_penalty=1.1,
                 return_dict_in_generate=True,
-                pad_token_id=self.tokenizer.eos_token_id,
+                pad_token_id=pad_id,
                 eos_token_id=self.tokenizer.eos_token_id,
             )
 
-        all_token_ids = outputs.sequences[0].tolist()
+        # Trim right padding before returning
+        all_token_ids, _ = self._trim_right_padding(outputs.sequences[0], prompt_len)
         return all_token_ids, prompt_len
 
     def _batch_generate_tokens(
@@ -365,14 +410,54 @@ class AgentEnvLoop:
             pad_len = max_prompt_len - original_prompt_len
 
             # Get full generated sequence (includes: padding + original_prompt + completion)
-            full_seq = outputs.sequences[batch_idx].tolist()
+            full_seq = outputs.sequences[batch_idx]
 
             # Strip left padding to recover [original_prompt + completion]
-            all_token_ids = full_seq[pad_len:]
+            seq_without_left_pad = full_seq[pad_len:]
+
+            # Trim right padding before returning
+            all_token_ids, _ = self._trim_right_padding(seq_without_left_pad, original_prompt_len)
 
             results.append((all_token_ids, original_prompt_len))
 
         return results
+
+    def _trim_right_padding(
+        self,
+        seq: torch.Tensor,
+        prompt_len: int,
+    ) -> tuple[list[int], int]:
+        """Trim trailing padding from sequence, preserving EOS semantics.
+
+        Args:
+            seq: Full token sequence [prompt_len + completion]
+            prompt_len: Length of prompt portion
+
+        Returns:
+            (trimmed_token_ids, effective_completion_len)
+        """
+        pad_id = self.tokenizer.pad_token_id
+        eos_id = self.tokenizer.eos_token_id
+
+        # Extract completion portion
+        completion = seq[prompt_len:]
+
+        # Case 1: pad_id != eos_id (separate tokens)
+        if pad_id is not None and pad_id != eos_id:
+            # Trim trailing pad_id tokens
+            eff_comp = int((completion != pad_id).sum().item())
+        # Case 2: pad_id == eos_id or no pad_id (same token)
+        else:
+            # Keep up to and including first EOS in completion
+            eos_hits = (completion == eos_id).nonzero(as_tuple=False)
+            if eos_hits.numel() > 0:
+                eff_comp = int(eos_hits[0].item()) + 1
+            else:
+                eff_comp = completion.size(0)
+
+        # Trim and convert to list
+        trimmed = seq[: prompt_len + eff_comp]
+        return trimmed.tolist(), eff_comp
 
     def _compute_commitments_and_logprobs(
         self,

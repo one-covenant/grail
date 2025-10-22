@@ -73,11 +73,7 @@ class MonitoringConfig:
             {
                 "run_name": run_name,
                 "tags": config["tags"] + ["mining"],
-                "hyperparameters": {
-                    "operation_type": "mining",
-                    "wallet_name": wallet_part,
-                    "model_name": os.getenv("GRAIL_MODEL_NAME", "microsoft/DialoGPT-medium"),
-                },
+                "hyperparameters": {"operation_type": "mining", "wallet_name": wallet_part},
             }
         )
 
@@ -138,7 +134,6 @@ class MonitoringConfig:
                 "hyperparameters": {
                     "operation_type": "training",
                     "wallet_name": wallet_part,
-                    "model_name": os.getenv("GRAIL_MODEL_NAME", "microsoft/DialoGPT-medium"),
                     "rollouts_per_problem": int(os.getenv("GRAIL_ROLLOUTS_PER_PROBLEM", "4")),
                 },
             }

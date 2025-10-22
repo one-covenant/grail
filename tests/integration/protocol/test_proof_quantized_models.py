@@ -42,6 +42,7 @@ def prompt() -> str:
     return generate_realistic_sat_prompt("test_quantized", 0.4)
 
 
+@pytest.mark.integration
 class TestProofQuantizedModels:
     """GRAIL proof should reject proofs when quantization differs between systems."""
 

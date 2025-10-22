@@ -99,7 +99,6 @@ class WindowProcessor:
         # Initialize aggregation structures
         window_metrics: dict[str, dict[str, int]] = {}
         miner_rollout_counters: dict[str, tuple[Counter[str], int]] = {}
-        all_valid_rollouts: list[dict] = []
         text_logs_emitted: dict[str, int] = {}
 
         # Aggregated counters
@@ -132,6 +131,7 @@ class WindowProcessor:
             try:
                 # Validate miner (use .get() to avoid KeyError)
                 uid = uid_by_hotkey.get(miner_hotkey, miner_hotkey)
+
                 with miner_log_context(uid, window):
                     result: MinerResults = await self._miner_validator.validate_miner(
                         miner_hotkey=miner_hotkey,
@@ -168,8 +168,7 @@ class WindowProcessor:
                 if result.metrics is not None:
                     window_metrics[miner_hotkey] = result.metrics
 
-                if result.rollouts:
-                    all_valid_rollouts.extend(result.rollouts)
+                # No longer aggregate rollouts for upload
 
                 if result.digest_counter is not None:
                     miner_rollout_counters[miner_hotkey] = (
@@ -224,11 +223,7 @@ class WindowProcessor:
             window=window,
         )
 
-        # Filter cheater rollouts
-        all_valid_rollouts = self._copycat_service.filter_cheater_rollouts(
-            rollouts=all_valid_rollouts,
-            cheaters=cheaters_detected,
-        )
+        # No rollout filtering/upload; only metrics and gating are applied
 
         # Recompute total_valid_rollouts after gating
         total_valid_rollouts = sum(
@@ -272,7 +267,6 @@ class WindowProcessor:
             invalid_proofs=invalid_proofs,
             processing_errors=processing_errors,
             files_found=files_found,
-            all_valid_rollouts_for_upload=all_valid_rollouts,
             window_cheaters=window_cheaters,
             interval_cheaters=interval_cheaters,
             violation_details=violations,

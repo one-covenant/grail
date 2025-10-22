@@ -17,7 +17,7 @@ from botocore.config import Config
 from datasets import Dataset
 from huggingface_hub import HfFolder
 from safetensors.torch import load_file, save_file
-from tqdm import tqdm
+from tqdm import tqdm  # type: ignore[import-untyped]
 from transformers import AutoModelForCausalLM
 
 from ..shared.constants import WINDOW_LENGTH
@@ -92,10 +92,6 @@ def _make_cache_key(
         elif isinstance(credentials, dict):
             account_id = credentials.get("account_id", "").strip()
             key_id = credentials.get("access_key_id", "").strip()
-        else:
-            # Fallback for unknown types
-            account_id = str(credentials)
-            key_id = ""
     else:
         # Use environment variables for hash
         account_id = os.getenv("R2_ACCOUNT_ID", "")
@@ -288,11 +284,12 @@ def get_bucket_id(
     """
     if credentials is not None:
         if isinstance(credentials, BucketCredentials):
-            return credentials.bucket_name
+            return str(credentials.bucket_name)
         elif isinstance(credentials, Bucket):
-            return credentials.name.strip()
+            return str(credentials.name).strip()
         elif isinstance(credentials, dict):
-            name = credentials.get("name", credentials.get("bucket_name", "")).strip()
+            name_raw = credentials.get("name", credentials.get("bucket_name", ""))
+            name = str(name_raw).strip()
             if name:
                 return name
 
@@ -352,7 +349,9 @@ class TransferProgress:
 
             # Create a visual progress bar for logs
             bar_length = 30
-            filled_length = int(bar_length * self.transferred // self.total_size)
+            filled_length = (
+                int(bar_length * self.transferred // self.total_size) if self.total_size > 0 else 0
+            )
             bar = "█" * filled_length + "░" * (bar_length - filled_length)
 
             # Format sizes
@@ -381,11 +380,12 @@ class TransferProgress:
     @staticmethod
     def _format_bytes(num_bytes: int) -> str:
         """Format bytes to human-readable string"""
+        size = float(num_bytes)
         for unit in ["B", "KB", "MB", "GB"]:
-            if num_bytes < 1024.0:
-                return f"{num_bytes:.1f}{unit}"
-            num_bytes /= 1024.0
-        return f"{num_bytes:.1f}TB"
+            if size < 1024.0:
+                return f"{size:.1f}{unit}"
+            size /= 1024.0
+        return f"{size:.1f}TB"
 
     @staticmethod
     def _format_time(seconds: float) -> str:
@@ -402,23 +402,33 @@ class TransferProgress:
 async def upload_file_chunked(
     key: str,
     data: bytes,
-    chunk_size: int = 100 * 1024 * 1024,
+    chunk_size: int | None = None,
     max_retries: int = 3,
     compress: bool = True,
     credentials: BucketCredentials | None = None,
     use_write: bool = False,
 ) -> bool:
     """Upload file in chunks optimized for H100 high-bandwidth - 100MB chunks with compression"""
-    # Compress data if enabled and it's JSON
-    if compress and key.endswith(".json"):
+    # Compress small JSON only; skip binaries/large files
+    if compress and key.endswith(".json") and len(data) < 10 * 1024 * 1024:
         original_size = len(data)
-        data = gzip.compress(data, compresslevel=1)  # Fast compression
+        data = gzip.compress(data, compresslevel=6)
         key = key + ".gz"
         logger.info(
             f"🗜️ Compressed {original_size} → {len(data)} bytes ({100 * (1 - len(data) / original_size):.1f}% reduction)"
         )
 
     total_size = len(data)
+    # Adaptive chunk sizing based on total size
+    if chunk_size is None:
+        if total_size < 50 * 1024 * 1024:
+            chunk_size = total_size
+        elif total_size < 500 * 1024 * 1024:
+            chunk_size = 50 * 1024 * 1024
+        elif total_size < 5 * 1024 * 1024 * 1024:
+            chunk_size = 200 * 1024 * 1024
+        else:
+            chunk_size = 500 * 1024 * 1024
     progress = TransferProgress(total_size, f"Upload {key}")
 
     # For small files, use single upload
@@ -439,8 +449,8 @@ async def upload_file_chunked(
         response = await client.create_multipart_upload(Bucket=bucket_id, Key=key)
         upload_id = response["UploadId"]
 
-        # Upload chunks concurrently with limited concurrency
-        semaphore = asyncio.Semaphore(30)  # High concurrency for H100 bandwidth
+        # Upload chunks concurrently with limited concurrency (fewer for larger chunks)
+        semaphore = asyncio.Semaphore(10 if chunk_size >= 200 * 1024 * 1024 else 30)
         tasks = []
 
         for i in range(0, total_size, chunk_size):
@@ -570,6 +580,7 @@ async def download_file_chunked(
     max_retries: int = 3,
     credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = False,
+    chunk_size: int | None = None,
 ) -> bytes | None:
     """Download file in chunks with automatic decompression"""
     actual_key = key
@@ -605,27 +616,36 @@ async def download_file_chunked(
             progress = TransferProgress(total_size, f"Download {actual_key}")
 
             # For small files, download in one go
-            chunk_size = 100 * 1024 * 1024  # 100MB chunks
+            if chunk_size is None:
+                if total_size < 50 * 1024 * 1024:
+                    chunk_size = total_size
+                elif total_size < 500 * 1024 * 1024:
+                    chunk_size = 50 * 1024 * 1024
+                elif total_size < 5 * 1024 * 1024 * 1024:
+                    chunk_size = 200 * 1024 * 1024
+                else:
+                    chunk_size = 500 * 1024 * 1024
+
             if total_size <= chunk_size:
                 bucket_id = get_bucket_id(credentials, use_write)
                 response = await client.get_object(Bucket=bucket_id, Key=actual_key)
                 try:
-                    data = await response["Body"].read()
-                    progress.update(len(data))
+                    payload: bytes = await response["Body"].read()
+                    progress.update(len(payload))
                     progress.close()  # Log final stats
 
                     # Decompress if needed
                     if is_compressed:
-                        data = gzip.decompress(data)
-                        logger.debug(f"🗜️ Decompressed to {len(data)} bytes")
-                    return data  # type: ignore[no-any-return]
+                        payload = gzip.decompress(payload)
+                        logger.debug(f"🗜️ Decompressed to {len(payload)} bytes")
+                    return payload
                 finally:
                     # Close response body
                     response["Body"].close()
 
             # For large files, download in chunks
-            chunks = []
-            semaphore = asyncio.Semaphore(30)  # High concurrency for H100 bandwidth
+            chunks: list[bytes] = []
+            semaphore = asyncio.Semaphore(10 if chunk_size >= 200 * 1024 * 1024 else 30)
             tasks = []
 
             for start in range(0, total_size, chunk_size):
@@ -651,18 +671,26 @@ async def download_file_chunked(
                 if isinstance(result, Exception):
                     logger.error(f"Download chunk {i} failed: {result}")
                     raise result
-                chunks.append(result)
+                if not isinstance(result, (bytes, bytearray)):
+                    raise TypeError("Invalid chunk type")
+                chunks.append(bytes(result))
 
-            data = b"".join(chunks)  # type: ignore[arg-type]
+            assembled: bytes = b"".join(chunks)
             progress.close()  # Log final stats
 
             # Decompress if needed
             if is_compressed:
-                data = gzip.decompress(data)
-                logger.debug(f"🗜️ Decompressed to {len(data)} bytes")
-            return data
+                assembled = gzip.decompress(assembled)
+                logger.debug(f"🗜️ Decompressed to {len(assembled)} bytes")
+            return assembled
 
         except Exception as e:
+            # Don't retry for 404 errors - file simply doesn't exist
+            is_not_found = "404" in str(e) or "Not Found" in str(e)
+            if is_not_found:
+                logger.debug(f"File not found: {key}")
+                return None
+
             if attempt < max_retries - 1:
                 wait_time = 2**attempt
                 logger.warning(
@@ -696,9 +724,9 @@ async def _download_chunk_with_semaphore(
                 response = await client.get_object(
                     Bucket=bucket_id, Key=key, Range=f"bytes={start}-{end}"
                 )
-                data = await response["Body"].read()
-                progress.update(len(data))
-                return data  # type: ignore[no-any-return]
+                payload: bytes = await response["Body"].read()
+                progress.update(len(payload))
+                return payload
             except Exception as e:
                 if attempt < max_retries - 1:
                     wait_time = 2**attempt
@@ -773,16 +801,19 @@ async def file_exists_with_deadline(
         client = await _get_cached_client(credentials, use_write)
         bucket_id = get_bucket_id(credentials, use_write)
 
-        # Try compressed first
+        # Try both compressed and uncompressed versions
         checked_keys = []
         if not key.endswith(".gz"):
             checked_keys.append(key + ".gz")
+            checked_keys.append(key)  # Also check uncompressed
         else:
             checked_keys.append(key)
+            checked_keys.append(key[:-3])  # Remove .gz and check uncompressed
 
         for candidate in checked_keys:
             try:
                 response = await client.head_object(Bucket=bucket_id, Key=candidate)
+                logger.debug(f"file_exists_with_deadline: Found {candidate}")
             except Exception:
                 continue
 
@@ -793,7 +824,6 @@ async def file_exists_with_deadline(
                     return False, True, upload_time
             return True, False, upload_time
 
-        # Not found in either compressed nor plain form
         return False, False, None
     except Exception as e:
         logger.debug(
@@ -818,6 +848,37 @@ async def list_bucket_files(
     except Exception:
         logger.error("Failed to list bucket files with prefix %s", prefix, exc_info=True)
         return []
+
+
+async def get_file_size(
+    key: str,
+    credentials: BucketCredentials | Bucket | dict | None = None,
+    use_write: bool = False,
+) -> int | None:
+    """Get the size of a file on R2. Returns None if file doesn't exist or on error."""
+    try:
+        client = await _get_cached_client(credentials, use_write)
+        bucket_id = get_bucket_id(credentials, use_write)
+
+        # Try exact key first
+        try:
+            response = await client.head_object(Bucket=bucket_id, Key=key)
+            size = response.get("ContentLength")
+            return int(size) if isinstance(size, int) else None
+        except Exception:
+            # Try compressed version if key doesn't end with .gz
+            if not key.endswith(".gz"):
+                try:
+                    compressed_key = key + ".gz"
+                    response = await client.head_object(Bucket=bucket_id, Key=compressed_key)
+                    size2 = response.get("ContentLength")
+                    return int(size2) if isinstance(size2, int) else None
+                except Exception:
+                    pass
+        return None
+    except Exception as e:
+        logger.debug(f"Failed to get file size for {key}: {e}")
+        return None
 
 
 async def delete_prefix(

@@ -16,6 +16,7 @@ from grail.validation.copycat_service import (
     COPYCAT_WINDOW_THRESHOLD,
     CopycatTracker,
 )
+from tests.conftest import TEST_MODEL_ID
 
 
 def generate_sat_completion_tokens(
@@ -210,9 +211,7 @@ class TestCopycatWithRealisticSAT:
         """Convert SAT prompt to mock token IDs."""
         from transformers import AutoTokenizer
 
-        from grail.shared.constants import MODEL_NAME
-
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+        tokenizer = AutoTokenizer.from_pretrained(TEST_MODEL_ID)
         # Use first SAT prompt and tokenize it
         tokens = tokenizer.encode(sat_prompts[0])
         return tokens
@@ -270,9 +269,7 @@ class TestCopycatWithRealisticSAT:
         """Test with multiple SAT prompts, some copied, some unique."""
         from transformers import AutoTokenizer
 
-        from grail.shared.constants import MODEL_NAME
-
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+        tokenizer = AutoTokenizer.from_pretrained(TEST_MODEL_ID)
         tracker.reset_interval(0)
 
         # miner1 & miner2: 3 copied + 7 unique (30% overlap, below threshold)

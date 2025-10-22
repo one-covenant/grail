@@ -83,7 +83,6 @@ Object-storage utilities for miner/validator coordination:
 Typer-based CLI with subcommands: `mine`, `validate` (and experimental `train`).
 
  Best practices for miners:
-- Do not override model-related environment variables (`GRAIL_MODEL_NAME`, `GRAIL_MAX_NEW_TOKENS`, `GRAIL_ROLLOUTS_PER_PROBLEM`).
 - Leave the final 2 blocks of each window for upload; generation should stop near the end automatically.
 - Prefer `uv sync` for reproducible installs.
 
@@ -109,18 +108,18 @@ The GRAIL protocol ensures:
 ### Protocol & Config (from `grail/shared/constants.py`)
 - **PRIME_Q**: 2,147,483,647 (mod prime for sketches)
 - **CHALLENGE_K**: 16 (minimum challenged positions)
-- **TOLERANCE**: 3 (numeric tolerance for comparisons)
-- **MODEL_NAME**: default `Qwen/Qwen3-4B-Instruct-2507` (override via `GRAIL_MODEL_NAME`)
-- **MAX_NEW_TOKENS**: configurable generation cap (default 1024 via env)
 - **WINDOW_LENGTH**: 50 blocks per scoring window
 
 ### Supported Environments
 - **3-SAT**: Variables 3–10, Clauses 5–20, Clause length 3; deterministic from seed
+- **GSM8K**: Math word problems from the GSM8K dataset with step-by-step reasoning verification
 
 ### Model Requirements
 - Hugging Face Transformers compatible, exposes token ids/logprobs
-- A100 GPU required for optimal performance and passing verification (We plan to support other GPUs in the future)
-- CUDA recommended for throughput
+- **OS and hardware-agnostic**: Runs on any platform with floating point precision within tolerance
+- Accelerators (GPU/TPU) recommended for throughput
+
+For detailed hardware specifications, see [`compute.min.yaml`](compute.min.yaml).
 
 ## Setup
 

@@ -4,19 +4,30 @@ This module provides reusable fixtures for testing the validation service layer.
 Fixtures follow pytest best practices with proper scoping and dependency injection.
 """
 
+from __future__ import annotations
+
 import hashlib
 import pathlib
 import sys
 from collections import Counter
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 if TYPE_CHECKING:
+    from accelerate import Accelerator
+
     from grail.validation.copycat_service import CopycatTracker
 
 from .proof_test_utils import generate_realistic_sat_prompt
+
+# ============================================================================
+# Test Constants
+# ============================================================================
+
+TEST_MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
 
 # ============================================================================
 # Test Environment Setup
@@ -186,10 +197,8 @@ def sat_prompts() -> list[str]:
     """
     from transformers import AutoTokenizer
 
-    from grail.shared.constants import MODEL_NAME
-
     # Load tokenizer for chat template application
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    tokenizer = AutoTokenizer.from_pretrained(TEST_MODEL_ID)
 
     seeds = [
         "test_seed_easy_01",
@@ -210,15 +219,134 @@ def sat_prompt_tokens(sat_prompts: list[str]) -> list[int]:
     """Tokenized SAT prompts for testing."""
     from transformers import AutoTokenizer
 
-    from grail.shared.constants import MODEL_NAME
-
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    tokenizer = AutoTokenizer.from_pretrained(TEST_MODEL_ID)
     return [tokenizer.encode(prompt, add_special_tokens=False) for prompt in sat_prompts]
 
 
 @pytest.fixture(scope="session")
-def tracker() -> "CopycatTracker":
+def tracker() -> CopycatTracker:
     """CopycatTracker instance for testing."""
     from grail.validation.copycat_service import CopycatTracker
 
     return CopycatTracker()
+
+
+# ============================================================================
+# TRAINER-SPECIFIC FIXTURES
+# ============================================================================
+
+
+@pytest.fixture
+def seeded_torch_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Set all random seeds for reproducibility and force CPU execution.
+
+    Enables deterministic behavior in torch on CPU and ensures tests run on CPU
+    for consistent results across runs. Avoids CUBLAS determinism issues by
+    keeping deterministic disabled for CUDA-using code.
+    """
+    import random
+
+    import numpy as np
+    import torch
+
+    # Set Python random seed
+    random.seed(42)
+    # Set NumPy seed
+    np.random.seed(42)
+    # Set torch seed on CPU
+    torch.manual_seed(42)
+
+    # Force CPU execution BEFORE any cuda calls
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
+    # Disable CUDA to force CPU usage
+    if torch.cuda.is_available():
+        torch.cuda.is_available = lambda: False
+
+    # Enable deterministic algorithms in torch (CPU-safe only)
+    try:
+        torch.use_deterministic_algorithms(False)  # Disable to avoid CUBLAS issues
+    except Exception:
+        pass
+    torch.backends.cudnn.deterministic = True
+
+
+@pytest.fixture
+def tiny_qwen_model_and_tokenizer() -> tuple[Any, Any]:
+    """Load Qwen 1.5B model and tokenizer, ensure pad_token_id is set.
+
+    Uses a small model suitable for fast CPU-based testing. Lazy-loads
+    to avoid slow imports in unrelated tests.
+
+    Returns:
+        Tuple of (model, tokenizer)
+    """
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    model_name = "Qwen/Qwen2.5-1.5B"
+
+    # Load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    # Load model on CPU
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+        torch_dtype="auto",
+        device_map="cpu",
+    )
+    model.eval()
+
+    return model, tokenizer
+
+
+@pytest.fixture
+def monkeypatch_trainer_constants(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Override trainer constants for fast tests.
+
+    Shrinks batch size, max length, and gradient accumulation steps
+    to speed up test execution while maintaining correctness.
+    """
+    import grail.shared.constants as constants
+
+    monkeypatch.setattr(constants, "TRAINER_MAX_LENGTH", 256)
+    monkeypatch.setattr(constants, "TRAINER_BATCH_SIZE", 4)
+    monkeypatch.setattr(constants, "TRAINER_GRAD_ACCUM_STEPS", 2)
+    monkeypatch.setattr(constants, "ROLLOUTS_PER_PROBLEM", 4)
+
+
+@pytest.fixture
+def accelerator_cpu() -> Accelerator:
+    """Create Accelerator instance configured for CPU execution.
+
+    Returns a deterministic, CPU-based accelerator suitable for testing.
+    """
+    import torch
+    from accelerate import Accelerator
+
+    # Disable CUDA to force CPU
+    torch.cuda.is_available = lambda: False
+
+    acc = Accelerator(
+        mixed_precision="no",
+        device_placement=True,  # Enable device placement to ensure CPU is used
+        cpu=True,  # Explicitly request CPU device
+    )
+    return acc
+
+
+@pytest.fixture
+def gsm8k_env_factory() -> Callable[[], Any]:
+    """Factory function for creating GSM8KEnv instances.
+
+    Returns a callable that creates fresh GSM8KEnv instances for tests.
+    """
+    from grail.environments.gsm8k_env import GSM8KEnv
+
+    def _make_env() -> Any:
+        return GSM8KEnv()
+
+    return _make_env

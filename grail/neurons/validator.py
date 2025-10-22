@@ -76,7 +76,11 @@ class ValidatorNeuron(BaseNeuron):
         monitor = get_monitoring_manager()
         if monitor:
             validation_config = MonitoringConfig.for_validation(wallet.name)
-            monitor.initialize(validation_config)
+            # Use start_run instead of initialize to avoid creating multiple wandb runs
+            # (CLI already initialized the backend globally)
+            run_name = validation_config.get("run_name", f"validation_{wallet.name}")
+            hyperparams = validation_config.get("hyperparameters", {})
+            await monitor.start_run(run_name, hyperparams)
 
         # Create validation pipeline (env-agnostic)
         validation_pipeline = create_env_validation_pipeline()

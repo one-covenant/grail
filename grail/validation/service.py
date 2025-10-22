@@ -27,7 +27,6 @@ from ..model.provider import (
     get_tokenizer,
 )
 from ..scoring.weights import WeightComputer
-from ..shared.chat_templates import build_qwen_chat_template
 from ..shared.constants import (
     FAILURE_LOOKBACK_WINDOWS,
     MINER_SAMPLE_MAX,
@@ -37,7 +36,14 @@ from ..shared.constants import (
     TRAINER_UID,
     WINDOW_LENGTH,
 )
-from ..shared.prompt_constants import REASONING_START, SYSTEM_PROMPT
+from ..shared.window_utils import (
+    WindowWaitTracker,
+    calculate_next_window,
+    log_window_wait_initial,
+    log_window_wait_periodic,
+)
+
+# Imports retained only where used
 from .copycat_service import COPYCAT_SERVICE
 from .miner_validator import MinerValidator
 from .pipeline import ValidationPipeline
@@ -134,6 +140,9 @@ class ValidationService:
             lambda: defaultdict(dict)
         )
 
+        # Window wait tracking for clean logging
+        self._window_wait_tracker = WindowWaitTracker(log_interval_secs=120)
+
         logger.info(f"Initialized ValidationService for netuid {netuid}")
 
     async def run_validation_loop(
@@ -193,13 +202,30 @@ class ValidationService:
 
                 # Skip if already processed
                 if target_window <= self._last_processed_window or target_window < 0:
+                    if self._window_wait_tracker.should_log_initial():
+                        log_window_wait_initial(
+                            current_block=current_block,
+                            last_processed_window=self._last_processed_window,
+                            window_length=WINDOW_LENGTH,
+                        )
+                    elif self._window_wait_tracker.should_log_periodic():
+                        next_window = calculate_next_window(
+                            self._last_processed_window, WINDOW_LENGTH
+                        )
+                        log_window_wait_periodic(
+                            next_window=next_window,
+                            elapsed_seconds=self._window_wait_tracker.get_elapsed_seconds(),
+                        )
+
                     await asyncio.sleep(5)
-                    logger.debug(f"Waiting for new window {target_window}")
                     continue
 
-                # Set monitoring context
+                # Window is available - reset wait tracker for next time
+                self._window_wait_tracker.reset()
+
+                # Set monitoring context (use block_number for x-axis)
                 if self._monitor:
-                    self._monitor.set_block_context(current_block, target_window)
+                    self._monitor.set_block_context(current_block, None)
 
                 # Load checkpoint for this window
                 checkpoint_loaded = await self._load_checkpoint_for_window(target_window)
@@ -370,11 +396,9 @@ class ValidationService:
                     self._model, self._tokenizer = clear_model_and_tokenizer(
                         self._model, self._tokenizer
                     )
-                    chat_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
                     self._model = get_model(str(checkpoint_path), device=None, eval_mode=True)
-                    self._tokenizer = get_tokenizer(
-                        str(checkpoint_path), chat_template=chat_template
-                    )
+                    # Do not inject chat template; rely on checkpoint/tokenizer config
+                    self._tokenizer = get_tokenizer(str(checkpoint_path))
                     self._current_checkpoint_id = str(checkpoint_path)
 
                 # Log tokenizer version information for debugging

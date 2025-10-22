@@ -15,8 +15,8 @@ from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from grail.shared.constants import (
     CHALLENGE_K,
     GRAIL_PROOF_VERSION,
-    MODEL_NAME,
 )
+from tests.conftest import TEST_MODEL_ID
 from tests.proof_test_utils import (
     create_proof,
     verify_proof,
@@ -39,7 +39,7 @@ def device() -> str:
 def model(device: str) -> PreTrainedModel:
     """Model fixture (module-scoped to avoid reloading)."""
     return AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME, torch_dtype=torch.float32, device_map=device
+        TEST_MODEL_ID, torch_dtype=torch.float32, device_map=device
     )
 
 
@@ -48,7 +48,7 @@ def tokenizer() -> PreTrainedTokenizerBase:
     """Tokenizer fixture (module-scoped)."""
     return cast(
         PreTrainedTokenizerBase,
-        AutoTokenizer.from_pretrained(MODEL_NAME),
+        AutoTokenizer.from_pretrained(TEST_MODEL_ID),
     )
 
 
@@ -66,6 +66,7 @@ def production_prompts(tokenizer: PreTrainedTokenizerBase) -> list[str]:
     ]
 
 
+@pytest.mark.integration
 class TestProofCrossFramework:
     """Cross-framework compatibility tests for GRAIL proof."""
 
@@ -128,7 +129,7 @@ class TestProofCrossFramework:
 
         # First run: generate proof
         model1 = AutoModelForCausalLM.from_pretrained(
-            MODEL_NAME, torch_dtype=torch.float32, device_map=device
+            TEST_MODEL_ID, torch_dtype=torch.float32, device_map=device
         )
         proof = create_proof(
             model1,
@@ -143,7 +144,7 @@ class TestProofCrossFramework:
 
         # Second run: verify with fresh model
         model2 = AutoModelForCausalLM.from_pretrained(
-            MODEL_NAME, torch_dtype=torch.float32, device_map=device
+            TEST_MODEL_ID, torch_dtype=torch.float32, device_map=device
         )
         is_valid, diagnostics = verify_proof(model2, proof, challenge, device)
         del model2

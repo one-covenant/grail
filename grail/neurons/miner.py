@@ -25,6 +25,12 @@ from grail.monitoring import get_monitoring_manager
 from grail.monitoring.config import MonitoringConfig
 from grail.shared.constants import TRAINER_UID, WINDOW_LENGTH
 from grail.shared.subnet import get_own_uid_on_subnet
+from grail.shared.window_utils import (
+    WindowWaitTracker,
+    calculate_next_window,
+    log_window_wait_initial,
+    log_window_wait_periodic,
+)
 
 from .base import BaseNeuron
 
@@ -52,6 +58,7 @@ class MinerNeuron(BaseNeuron):
         model = None
         tokenizer = None
         current_checkpoint_window: int | None = None
+        window_wait_tracker = WindowWaitTracker(log_interval_secs=120)
 
         async def _run() -> None:
             nonlocal model, tokenizer, current_checkpoint_window
@@ -136,9 +143,29 @@ class MinerNeuron(BaseNeuron):
                     # Miners use the checkpoint published after the previous window finished
                     checkpoint_window = window_start - WINDOW_LENGTH
 
+                    # Set monitoring context for metrics (use block_number for x-axis)
+                    if monitor:
+                        monitor.set_block_context(current_block, None)
+
                     if window_start <= last_window_start:
+                        if window_wait_tracker.should_log_initial():
+                            log_window_wait_initial(
+                                current_block=current_block,
+                                last_processed_window=last_window_start,
+                                window_length=WINDOW_LENGTH,
+                            )
+                        elif window_wait_tracker.should_log_periodic():
+                            next_window = calculate_next_window(last_window_start, WINDOW_LENGTH)
+                            log_window_wait_periodic(
+                                next_window=next_window,
+                                elapsed_seconds=window_wait_tracker.get_elapsed_seconds(),
+                            )
+
                         await asyncio.sleep(2)
                         continue
+
+                    # Window is available - reset tracker
+                    window_wait_tracker.reset()
 
                     # Load checkpoint (required - miners always use checkpoints)
                     if checkpoint_window is not None and checkpoint_window >= 0:
@@ -155,7 +182,6 @@ class MinerNeuron(BaseNeuron):
                                 )
                             self.heartbeat()
 
-                            # checkpoint_path = 'Qwen/Qwen3-4B-Instruct-2507'
                             if checkpoint_path is not None:
                                 logger.info(
                                     "🔁 Loading checkpoint for window %s from %s",
@@ -178,12 +204,11 @@ class MinerNeuron(BaseNeuron):
                                         checkpoint_window,
                                     )
                                     raise
-                            else:
+                            elif model is None or tokenizer is None:
                                 logger.error(
-                                    "No checkpoint available for window %s - cannot mine",
-                                    checkpoint_window,
+                                    "No checkpoint available and no model loaded, cannot mine"
                                 )
-                                await asyncio.sleep(30)
+                                await asyncio.sleep(60)
                                 continue
 
                     # Ensure model and tokenizer are loaded before mining
@@ -237,18 +262,18 @@ class MinerNeuron(BaseNeuron):
                             )
                             self.heartbeat()
                             if monitor:
-                                await monitor.log_counter("mining.successful_uploads")
-                                await monitor.log_gauge("mining.uploaded_rollouts", len(inferences))
+                                await monitor.log_counter("mining/successful_uploads")
+                                await monitor.log_gauge("mining/uploaded_rollouts", len(inferences))
 
                         except Exception as e:
                             logger.error(f"❌ Failed to upload window {window_start}: {e}")
                             logger.error(traceback.format_exc())
                             if monitor:
-                                await monitor.log_counter("mining.failed_uploads")
+                                await monitor.log_counter("mining/failed_uploads")
                     else:
                         logger.warning(f"No inferences generated for window {window_start}")
                         if monitor:
-                            await monitor.log_counter("mining.empty_windows")
+                            await monitor.log_counter("mining/empty_windows")
 
                     last_window_start = window_start
                     await checkpoint_manager.cleanup_local(window_start)

@@ -43,6 +43,7 @@ dependencies = [
     "typer==0.16.1",
     "rich==14.1.0",
     "wandb>=0.21.3",
+    "scipy>=1.7.0",
 ]
 
 [project.optional-dependencies]
@@ -142,6 +143,8 @@ module = [
     "trl.*",
     "accelerate.*",
     "vllm.*",
+    "scipy",
+    "scipy.*",
 ]
 ignore_missing_imports = true
 
@@ -154,11 +157,21 @@ addopts = [
     "--strict-markers",
     "--strict-config",
     "--verbose",
+    "-m not gpu_real_data and not long and not integration",  # Exclude GPU, long-running, and integration tests by default
 ]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
+    "gpu_real_data: marks tests as GPU real-data tests (long-running, requires GPU) - include with: pytest -m gpu_real_data",
+    "long: marks tests as long-running (typically 10-15min, opt-in) - include with: pytest -m long",
 ]
+# Test suite selection:
+# - pytest                                    = Run all tests EXCEPT GPU and long-running (default, ~2 min)
+# - pytest -m long                            = Run ONLY long-running tests
+# - pytest -m gpu_real_data                  = Run ONLY GPU real-data tests
+# - pytest -m "gpu_real_data or long"        = Run both GPU and long-running tests
+# - pytest --override-ini="addopts=" tests/  = Run ALL tests including GPU and long-running
+# - pytest -m "not gpu_real_data and not long" tests/ = Explicitly exclude both
 
 [tool.coverage.run]
 source = ["grail"]

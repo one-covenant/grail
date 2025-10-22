@@ -60,6 +60,8 @@ def configure_logging(verbosity: int) -> None:
         "asyncio",
         "aiobotocore.regions",
         "botocore",
+        "datasets",
+        "filelock",
     ]:
         logging.getLogger(noisy).setLevel(logging.WARNING)
 

@@ -194,6 +194,10 @@ class ResilientSubtensor:
         retries = object.__getattribute__(self, "_retries")
         backoff_base = object.__getattribute__(self, "_backoff_base")
 
+        # Double timeout for metagraph calls
+        if method_name == "metagraph":
+            timeout = timeout * 2
+
         # Retry loop
         for retry in range(retries):
             try:
