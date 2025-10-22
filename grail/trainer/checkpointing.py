@@ -38,16 +38,18 @@ logger = logging.getLogger(__name__)
 
 async def finalize_checkpoint_ready(
     current_block: int,
+    current_window: int,
     credentials: Any,
 ) -> list[int]:
-    """Add READY markers to checkpoints that have been fully uploaded.
+    """Add READY marker to the current window's checkpoint if it's been fully uploaded.
 
-    Checkpoints become READY as soon as they're uploaded (have metadata), but only
+    The checkpoint becomes READY as soon as it's uploaded (has metadata), but only
     if the current block is before the window starts (N + WINDOW_LENGTH). This ensures
     miners/validators have time to download before needing the checkpoint.
 
     Args:
         current_block: Current blockchain block number
+        current_window: Current window number to check
         credentials: R2 credentials for uploading READY marker
 
     Returns:
@@ -62,70 +64,56 @@ async def finalize_checkpoint_ready(
         use_write=True,
     )
 
-    finalized_windows = []
-    checkpoint_windows = set()
+    finalized_windows: list[int] = []
+    deadline_block = current_window + WINDOW_LENGTH
 
-    # Extract unique checkpoint window numbers
-    for key in keys:
-        parts = key.split("/")
-        if len(parts) >= 3 and parts[2].startswith("checkpoint-"):
-            try:
-                window = int(parts[2].split("-", 1)[1])
-                checkpoint_windows.add(window)
-            except (IndexError, ValueError):
-                continue
+    # Skip if past deadline - checkpoint wasn't ready on time
+    if current_block >= deadline_block:
+        logger.warning(
+            "Checkpoint %s missed READY deadline (block %s >= %s)",
+            current_window,
+            current_block,
+            deadline_block,
+        )
+        return finalized_windows
 
-    # Add READY markers if checkpoint uploaded before window starts
-    for window in checkpoint_windows:
-        deadline_block = window + WINDOW_LENGTH
+    # Check if READY already exists
+    ready_key = f"{CHECKPOINT_PREFIX}checkpoint-{current_window}/READY"
+    if ready_key in keys:
+        return finalized_windows  # Already has READY marker
 
-        # Skip if past deadline - checkpoint wasn't ready on time
-        if current_block >= deadline_block:
-            logger.warning(
-                "Checkpoint %s missed READY deadline (block %s >= %s)",
-                window,
-                current_block,
-                deadline_block,
-            )
-            continue
+    # Check if checkpoint has metadata (indicates complete upload)
+    metadata_key = f"{CHECKPOINT_PREFIX}checkpoint-{current_window}/metadata.json.gz"
+    metadata_key_uncompressed = f"{CHECKPOINT_PREFIX}checkpoint-{current_window}/metadata.json"
+    has_metadata = metadata_key in keys or metadata_key_uncompressed in keys
 
-        # Check if READY already exists
-        ready_key = f"{CHECKPOINT_PREFIX}checkpoint-{window}/READY"
-        if ready_key in keys:
-            continue  # Already has READY marker
+    if not has_metadata:
+        logger.debug(
+            "Checkpoint window %s missing metadata, skipping READY marker",
+            current_window,
+        )
+        return finalized_windows
 
-        # Check if checkpoint has metadata (indicates complete upload)
-        metadata_key = f"{CHECKPOINT_PREFIX}checkpoint-{window}/metadata.json.gz"
-        metadata_key_uncompressed = f"{CHECKPOINT_PREFIX}checkpoint-{window}/metadata.json"
-        has_metadata = metadata_key in keys or metadata_key_uncompressed in keys
-
-        if not has_metadata:
-            logger.debug(
-                "Checkpoint window %s missing metadata, skipping READY marker",
-                window,
-            )
-            continue
-
-        # Add READY marker at deterministic block
-        try:
-            await upload_file_chunked(
-                ready_key,
-                b"",
-                credentials=credentials,
-                use_write=True,
-            )
-            logger.info(
-                "✅ Added READY marker for checkpoint window %s at block %s",
-                window,
-                current_block,
-            )
-            finalized_windows.append(window)
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "Failed to add READY marker for checkpoint window %s: %s",
-                window,
-                exc,
-            )
+    # Add READY marker at deterministic block
+    try:
+        await upload_file_chunked(
+            ready_key,
+            b"",
+            credentials=credentials,
+            use_write=True,
+        )
+        logger.info(
+            "✅ Added READY marker for checkpoint window %s at block %s",
+            current_window,
+            current_block,
+        )
+        finalized_windows.append(current_window)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "Failed to add READY marker for checkpoint window %s: %s",
+            current_window,
+            exc,
+        )
 
     return finalized_windows
 
