@@ -387,6 +387,7 @@ async def train_grpo_epoch(
     monitor: Any,
     window: int,
     batch_size: int = TRAINER_BATCH_SIZE,
+    algorithm: Any = None,  # TrainingAlgorithm instance for global counters
 ) -> dict[str, float]:
     """Run a single GRPO training epoch and return aggregated metrics."""
     model.train()
@@ -418,6 +419,7 @@ async def train_grpo_epoch(
         batch_comp_lens: list[int] = []
         batch_advantages: list[float] = []
         batch_behavior_seq_logprobs: list[float | None] = []
+        batch_rewards: list[float] = []
 
         for rollout in batch_rollouts:
             tokens = rollout.tokens[:TRAINER_MAX_LENGTH]
@@ -434,6 +436,7 @@ async def train_grpo_epoch(
             batch_comp_lens.append(actual_comp_len)
 
             batch_advantages.append(rollout.advantage)
+            batch_rewards.append(rollout.reward)
 
             # If miner provided per-token logprobs, aggregate over completion
             provided = None
@@ -757,6 +760,34 @@ async def train_grpo_epoch(
         epoch_metrics["behavior_logprobs_frac"].append(
             num_have_behavior / max(1, len(batch_behavior_seq_logprobs))
         )
+        # Track reward curve
+        epoch_metrics["reward_mean"].append(torch.tensor(batch_rewards).mean().item())
+        epoch_metrics["reward_std"].append(torch.tensor(batch_rewards).std().item())
+
+        # Log per-batch metrics if monitor is available for fine-grained tracking
+        if monitor is not None and algorithm is not None:
+            # Use global batch counter for smooth, continuous x-axis across all windows
+            algorithm.global_batch_counter += 1
+            batch_log_metrics = {
+                "loss_total": loss_total.item(),
+                "loss_pg": loss_pg.item(),
+                "loss_kl": loss_kl.item(),
+                "loss_entropy": loss_entropy.item(),
+                "grad_norm": grad_norm_scalar if grad_norm_scalar is not None else 0.0,
+                "advantage_mean": advantages_tensor.mean().item(),
+                "reward_mean": torch.tensor(batch_rewards).mean().item(),
+                "kl_divergence": kl_value,
+                "entropy_mean": entropies.mean().item(),
+            }
+            for key, value in batch_log_metrics.items():
+                try:
+                    await monitor.log_gauge(
+                        f"training/batch/{key}",
+                        value,
+                        tags={"batch_step": str(algorithm.global_batch_counter)},  # Global counter
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Failed to log batch metric %s: %s", key, exc)
 
     # Handle remaining accumulated gradients at epoch end
     if grad_accum_counter > 0:
@@ -791,6 +822,9 @@ class GRPOAlgorithm(TrainingAlgorithm):
         config: TrainingConfig,
     ) -> dict[str, float]:
         """Train for one epoch using GRPO algorithm."""
+        # Increment global epoch counter for continuous tracking
+        self.global_epoch_counter += 1
+
         return await train_grpo_epoch(
             model,
             ref_model,
@@ -800,4 +834,5 @@ class GRPOAlgorithm(TrainingAlgorithm):
             accelerator,
             monitor,
             window,
+            algorithm=self,  # Pass self to access global counters
         )

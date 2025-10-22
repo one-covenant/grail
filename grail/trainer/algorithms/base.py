@@ -20,6 +20,11 @@ class TrainingAlgorithm:
 
     name: str = "base"
 
+    def __init__(self) -> None:
+        """Initialize algorithm with global counters for smooth metric tracking."""
+        self.global_batch_counter: int = 0  # Continuous batch counter across all windows
+        self.global_epoch_counter: int = 0  # Continuous epoch counter across all windows
+
     async def train_epoch(
         self,
         model: Any,
