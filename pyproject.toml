@@ -162,6 +162,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "gpu_real_data: marks tests as GPU real-data tests (long-running, requires GPU)",
+    "long: marks tests as long-running (opt-in, typically 10-15min)",
 ]
 
 [tool.coverage.run]
