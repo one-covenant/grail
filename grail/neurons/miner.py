@@ -143,6 +143,10 @@ class MinerNeuron(BaseNeuron):
                     # Miners use the checkpoint published after the previous window finished
                     checkpoint_window = window_start - WINDOW_LENGTH
 
+                    # Set monitoring context for metrics (use block_number for x-axis)
+                    if monitor:
+                        monitor.set_block_context(current_block, None)
+
                     if window_start <= last_window_start:
                         if window_wait_tracker.should_log_initial():
                             log_window_wait_initial(
@@ -258,18 +262,18 @@ class MinerNeuron(BaseNeuron):
                             )
                             self.heartbeat()
                             if monitor:
-                                await monitor.log_counter("mining.successful_uploads")
-                                await monitor.log_gauge("mining.uploaded_rollouts", len(inferences))
+                                await monitor.log_counter("mining/successful_uploads")
+                                await monitor.log_gauge("mining/uploaded_rollouts", len(inferences))
 
                         except Exception as e:
                             logger.error(f"❌ Failed to upload window {window_start}: {e}")
                             logger.error(traceback.format_exc())
                             if monitor:
-                                await monitor.log_counter("mining.failed_uploads")
+                                await monitor.log_counter("mining/failed_uploads")
                     else:
                         logger.warning(f"No inferences generated for window {window_start}")
                         if monitor:
-                            await monitor.log_counter("mining.empty_windows")
+                            await monitor.log_counter("mining/empty_windows")
 
                     last_window_start = window_start
                     await checkpoint_manager.cleanup_local(window_start)

@@ -72,6 +72,14 @@ class TrainerService:
         # `window` is the target (past) window for training, not the current window
         self._seed_all(window)
 
+        # Get current block and window for monitoring context
+        current_block = await subtensor.get_current_block()
+        current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
+
+        # Set monitoring context for all metrics (use block_number for x-axis)
+        if self.monitor:
+            self.monitor.set_block_context(current_block, None)
+
         # Get metagraph for UID mapping
         metagraph = await subtensor.metagraph(NETUID)
         uid_by_hotkey = dict(zip(metagraph.hotkeys, metagraph.uids, strict=True))
@@ -156,9 +164,9 @@ class TrainerService:
                             self.config.epochs,
                         )
                         if self.monitor:
-                            await self.monitor.log_counter("training.deadline_hit")
+                            await self.monitor.log_counter("training/deadline_hit")
                             await self.monitor.log_gauge(
-                                "training.epochs_completed_before_deadline", epoch
+                                "training/epochs_completed_before_deadline", epoch
                             )
                         break
                 except Exception as e:
@@ -179,21 +187,29 @@ class TrainerService:
 
                 self.scheduler.step()
                 if self.monitor:
+                    # Log per-epoch metrics with global epoch counter for continuous x-axis
+                    global_epoch = self.algorithm.global_epoch_counter
                     for key, value in metrics.items():
-                        await self.monitor.log_gauge(f"training.{key}", value)
+                        await self.monitor.log_gauge(
+                            f"training/epoch/{key}",
+                            value,
+                            tags={"epoch": str(global_epoch)},  # Global counter for smooth curves
+                        )
                     await self.monitor.log_gauge(
-                        "training.lr",
+                        "training/epoch/lr",
                         self.scheduler.get_last_lr()[0],
+                        tags={"epoch": str(global_epoch)},  # Global counter for smooth curves
                     )
-                    await self.monitor.log_counter("training.epochs_completed")
+                    await self.monitor.log_counter("training/epochs_completed")
 
                 logger.info(
-                    "Epoch %s metrics: loss=%.4f pg=%.4f kl=%.4f entropy=%.4f",
+                    "Epoch %s metrics: loss=%.4f pg=%.4f kl=%.4f entropy=%.4f reward_mean=%.4f",
                     epoch + 1,
                     metrics.get("loss_total", 0.0),
                     metrics.get("loss_pg", 0.0),
                     metrics.get("loss_kl", 0.0),
                     metrics.get("loss_entropy", 0.0),
+                    metrics.get("reward_mean", 0.0),
                 )
                 epochs_completed = epoch + 1
 
@@ -203,7 +219,24 @@ class TrainerService:
                 "Training completed in %.1fs for %s epochs", training_duration, epochs_completed
             )
             if self.monitor:
-                await self.monitor.log_gauge("profiling/training_duration", training_duration)
+                window_num = window // WINDOW_LENGTH
+                await self.monitor.log_gauge(
+                    "profiling/training_duration",
+                    training_duration,
+                    tags={"window_number": str(window_num)},
+                )
+
+                # Log window-level summary metrics (final epoch's metrics for this window)
+                # These are plotted against block_number for a high-level view
+                window_num = window // WINDOW_LENGTH
+                logger.debug(
+                    "Logging window summary for window %s (window_number=%s)", window, window_num
+                )
+                for key, value in metrics.items():
+                    await self.monitor.log_gauge(
+                        f"training/block/{key}",
+                        value,
+                    )
 
             # Unwrap model for publishing
             unwrapped = self.accelerator.unwrap_model(model)
@@ -256,7 +289,12 @@ class TrainerService:
 
         publish_duration = time.monotonic() - publish_start
         if self.monitor:
-            await self.monitor.log_gauge("profiling/checkpoint_publish_duration", publish_duration)
+            window_num = checkpoint_publish_window // WINDOW_LENGTH
+            await self.monitor.log_gauge(
+                "profiling/checkpoint_publish_duration",
+                publish_duration,
+                tags={"window_number": str(window_num)},
+            )
 
         # Verify checkpoint was published before deadline
         try:
@@ -269,11 +307,11 @@ class TrainerService:
                     next_window,
                 )
                 if self.monitor:
-                    await self.monitor.log_counter("training.checkpoint_published_late")
+                    await self.monitor.log_counter("training/checkpoint_published_late")
             else:
                 logger.info("✅ Checkpoint published before deadline with margin")
                 if self.monitor:
-                    await self.monitor.log_counter("training.checkpoint_published_on_time")
+                    await self.monitor.log_counter("training/checkpoint_published_on_time")
         except Exception as e:
             logger.warning("Failed to verify checkpoint deadline: %s", e)
 

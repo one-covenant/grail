@@ -223,9 +223,9 @@ class ValidationService:
                 # Window is available - reset wait tracker for next time
                 self._window_wait_tracker.reset()
 
-                # Set monitoring context
+                # Set monitoring context (use block_number for x-axis)
                 if self._monitor:
-                    self._monitor.set_block_context(current_block, target_window)
+                    self._monitor.set_block_context(current_block, None)
 
                 # Load checkpoint for this window
                 checkpoint_loaded = await self._load_checkpoint_for_window(target_window)

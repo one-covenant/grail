@@ -111,6 +111,24 @@ class MonitoringManager:
         self._current_block = block_number
         self._current_window = window_number
 
+    def _attach_context_tags(self, tags: dict[str, str] | None) -> dict[str, str] | None:
+        """Attach reserved context tags so x-axis is always present per-metric.
+
+        Returns a new dict when additions are needed, otherwise returns the
+        original reference to avoid extra allocations.
+        """
+        if self._current_window is None and self._current_block is None:
+            return tags
+
+        merged = dict(tags) if tags else {}
+        # Provide window_number so step_metric can bind from the first sample
+        if self._current_window is not None and "window_number" not in merged:
+            merged["window_number"] = str(self._current_window)
+        # Provide block_number as a secondary reference (not a reserved x-axis)
+        if self._current_block is not None and "block_number" not in merged:
+            merged["block_number"] = str(self._current_block)
+        return merged
+
     async def log_counter(
         self,
         name: str,
@@ -134,7 +152,7 @@ class MonitoringManager:
             name,
             value,
             MetricType.COUNTER,
-            tags,
+            self._attach_context_tags(tags),
             block_number=self._current_block,
             window_number=self._current_window,
         )
@@ -164,7 +182,7 @@ class MonitoringManager:
             name,
             value,
             MetricType.GAUGE,
-            tags,
+            self._attach_context_tags(tags),
             block_number=self._current_block,
             window_number=self._current_window,
         )
@@ -190,7 +208,7 @@ class MonitoringManager:
             name,
             value,
             MetricType.HISTOGRAM,
-            tags,
+            self._attach_context_tags(tags),
             block_number=self._current_block,
             window_number=self._current_window,
         )
@@ -224,7 +242,7 @@ class MonitoringManager:
                 name=f"{name}_duration",
                 value=duration,
                 metric_type=MetricType.TIMER,
-                tags=tags,
+                tags=self._attach_context_tags(tags),
                 block_number=self._current_block,
                 window_number=self._current_window,
             )

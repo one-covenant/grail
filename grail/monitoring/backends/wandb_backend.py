@@ -39,6 +39,8 @@ class WandBBackend(MonitoringBackend):
         self._start_time: float | None = None
         # Cache of persistent tables by name to allow incremental row appends
         self._tables: dict[str, Any] = {}
+        # Track which metric names we have already defined a step for (avoid spam)
+        self._defined_step_for: set[str] = set()
 
     def initialize(self, config: dict[str, Any]) -> None:
         """Initialize wandb backend synchronously (no network calls).
@@ -150,30 +152,76 @@ class WandBBackend(MonitoringBackend):
             self._wandb_module.define_metric("global_step")
 
             # Define which metric families use which x-axis
-            # Training metrics use epoch/batch_step/window_number as appropriate
+            # IMPORTANT: Define specific patterns LAST so they override the default
+            # Training metrics use epoch/batch_step for batch-level granularity
             self._wandb_module.define_metric("training/epoch/*", step_metric="epoch")
             self._wandb_module.define_metric("training/batch/*", step_metric="batch_step")
-            self._wandb_module.define_metric("training/window/*", step_metric="window_number")
+            # Training block metrics go under their own namespace
+            self._wandb_module.define_metric("training/block/*", step_metric="block_number")
 
-            # Mining and validation use block_number (blockchain-specific)
+            # Mining and validation use block_number (blockchain progression)
             self._wandb_module.define_metric("mining/*", step_metric="block_number")
             self._wandb_module.define_metric("validation/*", step_metric="block_number")
-
-            # Profiling and weights metrics use block_number by default
-            self._wandb_module.define_metric("profiling/*", step_metric="block_number")
             self._wandb_module.define_metric("weights/*", step_metric="block_number")
-
-            # Miner-specific metrics (validation) use block_number
             self._wandb_module.define_metric("miner_sampling/*", step_metric="block_number")
 
-            # Default fallback for any other metrics
-            self._wandb_module.define_metric("*", step_metric="block_number")
+            # Profiling metrics for mining/validation: use block_number for consistency
+            self._wandb_module.define_metric("profiling/*", step_metric="block_number")
+
+            # Per-UID metrics (e.g., "55/total_rollouts_avg") use block_number
+            # These are logged during validation for each miner UID
+            for uid in range(256):  # Cover all possible UIDs
+                self._wandb_module.define_metric(f"{uid}/*", step_metric="block_number")
 
             logger.debug(
                 "Configured wandb with multi-axis metrics (epoch, batch_step, window_number, block_number)"
             )
 
         return run
+
+    def _maybe_define_step_for_name(self, name: str) -> None:
+        """Define the appropriate step metric for a specific metric name.
+
+        This is idempotent and safe to call repeatedly.
+        """
+        if self._wandb_module is None or self.run is None:
+            return
+        if name in self._defined_step_for:
+            return
+
+        step_metric: str | None = None
+        if name.startswith("training/epoch/"):
+            step_metric = "epoch"
+        elif name.startswith("training/batch/"):
+            step_metric = "batch_step"
+        elif name.startswith("training/block/"):
+            step_metric = "block_number"
+        elif name.startswith("mining/"):
+            step_metric = "block_number"
+        elif name.startswith("validation/"):
+            step_metric = "block_number"
+        elif name.startswith("weights/"):
+            step_metric = "block_number"
+        elif name.startswith("miner_sampling/"):
+            step_metric = "block_number"
+        elif name.startswith("profiling/"):
+            step_metric = "block_number"
+        else:
+            # Per-UID metrics like "55/total_rollouts_avg"
+            try:
+                uid_prefix = name.split("/", 1)[0]
+                if uid_prefix.isdigit():
+                    step_metric = "block_number"
+            except Exception:
+                step_metric = None
+
+        if step_metric is not None:
+            try:
+                self._wandb_module.define_metric(name, step_metric=step_metric)
+                self._defined_step_for.add(name)
+            except Exception:
+                # Best effort; if define_metric fails we still log the metric
+                pass
 
     async def log_metric(self, metric: MetricData) -> None:
         """Log a single metric to wandb.
@@ -191,11 +239,20 @@ class WandBBackend(MonitoringBackend):
             if not self._wandb_run_started:
                 return
 
+            # Proactively define step per metric name to force correct x-axis
+            self._maybe_define_step_for_name(metric.name)
+
             # Prepare data for wandb
             data = self._prepare_metric_data(metric)
 
             # Include temporal context in the data
             self._add_temporal_context(data, metric)
+
+            # Debug: Log what we're sending to WandB for validation/mining/training metrics
+            if metric.name.startswith(("training/", "validation/", "mining/")):
+                logger.debug(
+                    f"WandB log: {metric.name} -> {list(data.keys())}, block_number={data.get('block_number')}, window_number={data.get('window_number')}"
+                )
 
             # Log to wandb in thread pool without step parameter
             # wandb will use timestamp as x-axis as configured
@@ -220,6 +277,10 @@ class WandBBackend(MonitoringBackend):
             if not self._wandb_run_started:
                 return
 
+            # Proactively define step for each metric in the batch
+            for metric in metrics:
+                self._maybe_define_step_for_name(metric.name)
+
             # Combine all metrics into a single data dict
             data: dict[str, Any] = {}
             latest_timestamp = None
@@ -234,11 +295,12 @@ class WandBBackend(MonitoringBackend):
                     latest_timestamp = metric.timestamp
 
             # Include temporal context using the latest metric
+            # This adds window_number, block_number, and timestamp as reference metrics
             if metrics:
                 self._add_temporal_context(data, metrics[-1])
 
             # Log all metrics in one call without step parameter
-            # wandb will use timestamp as x-axis as configured
+            # WandB uses the configured step_metric (window_number for most metrics)
             await asyncio.get_event_loop().run_in_executor(None, self._wandb_module.log, data)
 
         except Exception as e:
@@ -255,7 +317,7 @@ class WandBBackend(MonitoringBackend):
         """
         # Reserved tag keys that should be extracted as x-axis fields, not appended to name
         # These are used for custom step metrics (epoch, batch_step, window_number, etc.)
-        RESERVED_TAGS = {"epoch", "batch_step", "window_number", "global_step"}
+        RESERVED_TAGS = {"epoch", "batch_step", "window_number", "global_step", "block_number"}
 
         # Start with clean metric name (no tags appended)
         name = metric.name
@@ -266,23 +328,26 @@ class WandBBackend(MonitoringBackend):
             reserved_fields: dict[str, Any] = {}
             non_reserved_tags: dict[str, str] = {}
 
-            for key, value in metric.tags.items():
+            for key, raw in metric.tags.items():
                 if key in RESERVED_TAGS:
-                    # Reserved tags become x-axis fields in the logged dict
-                    # Try to convert to numeric type for proper x-axis
-                    converted_value: int | float | str = value
-                    if isinstance(value, str) and value.isdigit():
-                        converted_value = int(value)
-                    elif isinstance(value, str):
-                        try:
-                            converted_value = float(value)
-                        except ValueError:
-                            converted_value = value
-                    reserved_fields[key] = converted_value
+                    # Reserved tags become x-axis fields in the logged dict.
+                    # Coerce from string to int where possible, else float, else leave as string.
+                    # Note: tags are typed as str in MetricData, so we avoid unreachable
+                    # branches for numeric types to satisfy static analysis.
+                    coerced: Any = raw
+                    if isinstance(raw, str):
+                        if raw.isdigit():
+                            coerced = int(raw)
+                        else:
+                            try:
+                                coerced = float(raw)
+                            except Exception:
+                                coerced = raw
+                    reserved_fields[key] = coerced
                 else:
                     # Non-reserved tags: preserve old behavior (append to name)
                     # This maintains backward compatibility for any custom tags
-                    non_reserved_tags[key] = value
+                    non_reserved_tags[key] = str(raw)
 
             # Only append non-reserved tags to metric name (backward compatible)
             if non_reserved_tags:
@@ -303,7 +368,10 @@ class WandBBackend(MonitoringBackend):
                 value = value.item()
             elif isinstance(value, (int, float)):
                 # Ensure it's a Python native type, not numpy
-                value = float(value) if isinstance(value, float) else int(value)
+                try:
+                    value = float(value) if not float(value).is_integer() else int(value)
+                except Exception:
+                    value = float(value)
 
         # Add the metric itself
         result[name] = value
@@ -361,11 +429,15 @@ class WandBBackend(MonitoringBackend):
             data: The data dictionary to update
             metric: The metric containing temporal information
         """
-        # Primary x-axis: block number
+        # Add window_number if present (for training/window metrics)
+        if metric.window_number is not None and "window_number" not in data:
+            data["window_number"] = metric.window_number
+
+        # Add block_number for all metrics (primary x-axis for mining/validation/profiling)
         if metric.block_number is not None:
             data["block_number"] = metric.block_number
 
-        # Secondary metrics for different views
+        # Secondary metrics for different views (these don't affect x-axis)
         if metric.timestamp:
             data["timestamp"] = metric.timestamp
 
@@ -376,10 +448,6 @@ class WandBBackend(MonitoringBackend):
                 data["elapsed_hours"] = round(elapsed_seconds / 3600, 3)
             elif not hasattr(self, "_start_time"):
                 self._start_time = metric.timestamp
-
-        # Window number for GRAIL-specific context
-        if metric.window_number is not None:
-            data["window_number"] = metric.window_number
 
     @contextmanager
     def timer(self, name: str, tags: dict[str, str] | None = None) -> Generator[None, None, None]:

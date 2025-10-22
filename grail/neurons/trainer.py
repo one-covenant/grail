@@ -94,12 +94,12 @@ class TrainerNeuron(BaseNeuron):
                 if success:
                     logger.info("✅ Trained window %s", target_window)
                     if self._context.monitor:
-                        await self._context.monitor.log_counter("training.success")
+                        await self._context.monitor.log_counter("training/success")
                 else:
                     logger.warning("⚠️ Training issue (w=%s)", target_window)
                     logger.warning("Retrying next window")
                     if self._context.monitor:
-                        await self._context.monitor.log_counter("training.failed")
+                        await self._context.monitor.log_counter("training/failed")
 
                 # Finalize the checkpoint if we are still in the current window
                 # If not, we never finalize the checkpoint and the checkpoint is

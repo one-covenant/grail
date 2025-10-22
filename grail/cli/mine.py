@@ -388,7 +388,8 @@ async def log_generation_timing(
 
     if monitor:
         await monitor.log_gauge(
-            "profiling/generation_finished_safely", 1.0 if generation_safe else 0.0
+            "profiling/generation_finished_safely",
+            1.0 if generation_safe else 0.0,
         )
 
     return generation_safe
@@ -738,12 +739,12 @@ async def generate_rollouts_for_window(
                     successful_rollouts += 1
                     total_reward += rollout.reward
                     if monitor:
-                        await monitor.log_counter("mining.successful_rollouts")
+                        await monitor.log_counter("mining/successful_rollouts")
                         await monitor.log_histogram("mining/reward_distribution", rollout.reward)
                 else:
                     failed_rollouts += 1
                     if monitor:
-                        await monitor.log_counter("mining.failed_rollouts")
+                        await monitor.log_counter("mining/failed_rollouts")
 
             timers.update_gen_time_ema(time.time() - gen_start)
             await asyncio.sleep(0.01)
@@ -770,10 +771,16 @@ async def generate_rollouts_for_window(
         avg_gen_time,
     )
     if monitor:
-        await monitor.log_counter("mining.windows_completed")
-        await monitor.log_gauge("profiling/window_duration", elapsed_time)
+        await monitor.log_counter("mining/windows_completed")
+        await monitor.log_gauge(
+            "profiling/window_duration",
+            elapsed_time,
+        )
         await monitor.log_gauge("mining/total_rollouts_in_window", len(inferences))
-        await monitor.log_gauge("profiling/average_generation_time", avg_gen_time)
+        await monitor.log_gauge(
+            "profiling/average_generation_time",
+            avg_gen_time,
+        )
         if successful_rollouts + failed_rollouts > 0:
             final_success_rate = successful_rollouts / (successful_rollouts + failed_rollouts)
             await monitor.log_gauge("mining/final_success_rate", final_success_rate)
