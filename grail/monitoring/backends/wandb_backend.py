@@ -139,12 +139,39 @@ class WandBBackend(MonitoringBackend):
         run = self._wandb_module.init(**init_kwargs)
         self.run = run
 
-        # Define block_number as the primary x-axis for all metrics
-        # This is more meaningful for blockchain systems
+        # Define custom x-axis metrics for different metric families
+        # This allows different panels to use different x-axes
         if run is not None:
+            # Define all possible x-axis metrics
             self._wandb_module.define_metric("block_number")
+            self._wandb_module.define_metric("epoch")
+            self._wandb_module.define_metric("batch_step")
+            self._wandb_module.define_metric("window_number")
+            self._wandb_module.define_metric("global_step")
+
+            # Define which metric families use which x-axis
+            # Training metrics use epoch/batch_step/window_number as appropriate
+            self._wandb_module.define_metric("training/epoch/*", step_metric="epoch")
+            self._wandb_module.define_metric("training/batch/*", step_metric="batch_step")
+            self._wandb_module.define_metric("training/window/*", step_metric="window_number")
+
+            # Mining and validation use block_number (blockchain-specific)
+            self._wandb_module.define_metric("mining/*", step_metric="block_number")
+            self._wandb_module.define_metric("validation/*", step_metric="block_number")
+
+            # Profiling and weights metrics use block_number by default
+            self._wandb_module.define_metric("profiling/*", step_metric="block_number")
+            self._wandb_module.define_metric("weights/*", step_metric="block_number")
+
+            # Miner-specific metrics (validation) use block_number
+            self._wandb_module.define_metric("miner_sampling/*", step_metric="block_number")
+
+            # Default fallback for any other metrics
             self._wandb_module.define_metric("*", step_metric="block_number")
-            logger.debug("Configured wandb to use block_number as x-axis")
+
+            logger.debug(
+                "Configured wandb with multi-axis metrics (epoch, batch_step, window_number, block_number)"
+            )
 
         return run
 
@@ -226,12 +253,44 @@ class WandBBackend(MonitoringBackend):
         Returns:
             Dictionary suitable for wandb.log()
         """
-        # Create metric name with tags
+        # Reserved tag keys that should be extracted as x-axis fields, not appended to name
+        # These are used for custom step metrics (epoch, batch_step, window_number, etc.)
+        RESERVED_TAGS = {"epoch", "batch_step", "window_number", "global_step"}
+
+        # Start with clean metric name (no tags appended)
         name = metric.name
+        result = {}
+
+        # Process tags if present
         if metric.tags:
-            # Flatten tags into metric name for wandb
-            tag_parts = [f"{k}_{v}" for k, v in metric.tags.items()]
-            name = f"{metric.name}_{'_'.join(tag_parts)}"
+            reserved_fields: dict[str, Any] = {}
+            non_reserved_tags: dict[str, str] = {}
+
+            for key, value in metric.tags.items():
+                if key in RESERVED_TAGS:
+                    # Reserved tags become x-axis fields in the logged dict
+                    # Try to convert to numeric type for proper x-axis
+                    converted_value: int | float | str = value
+                    if isinstance(value, str) and value.isdigit():
+                        converted_value = int(value)
+                    elif isinstance(value, str):
+                        try:
+                            converted_value = float(value)
+                        except ValueError:
+                            converted_value = value
+                    reserved_fields[key] = converted_value
+                else:
+                    # Non-reserved tags: preserve old behavior (append to name)
+                    # This maintains backward compatibility for any custom tags
+                    non_reserved_tags[key] = value
+
+            # Only append non-reserved tags to metric name (backward compatible)
+            if non_reserved_tags:
+                tag_parts = [f"{k}_{v}" for k, v in non_reserved_tags.items()]
+                name = f"{metric.name}_{'_'.join(tag_parts)}"
+
+            # Add reserved fields to result dict (will be logged alongside metric)
+            result.update(reserved_fields)
 
         # Ensure value is properly typed for wandb
         value = metric.value
@@ -246,7 +305,9 @@ class WandBBackend(MonitoringBackend):
                 # Ensure it's a Python native type, not numpy
                 value = float(value) if isinstance(value, float) else int(value)
 
-        return {name: value}
+        # Add the metric itself
+        result[name] = value
+        return result
 
     def _to_wandb_histogram(self, value: Any) -> Any:
         """Convert arbitrary value into a wandb.Histogram when possible.
