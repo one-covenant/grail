@@ -12,14 +12,13 @@ Design goals:
  - Atomic download process to avoid partial/corrupt states.
  - Local cache with retention policy (last N + milestone windows).
  - Remote cleanup helpers for the trainer to enforce retention upstream.
- - Automatic fallback to latest checkpoint when requested window unavailable.
 
 Checkpoint Retrieval Strategy:
- - Primary: Attempt to download the exact checkpoint for the requested window.
- - Fallback: If the requested window's checkpoint is not available, automatically
-   fall back to the latest (highest window number) checkpoint available in R2.
-   This ensures miners/validators can continue operating even if the latest
-   window's checkpoint hasn't been published yet.
+ - With the trainer always publishing checkpoints for every window, this module
+   now simply downloads and validates the requested checkpoint.
+ - If a checkpoint is not ready (READY marker not found), returns None and the
+   caller should wait/retry rather than falling back to an older checkpoint.
+ - This ensures consistent model versions across miners and validators.
 
 The module intentionally stays independent from model-loading details. It only
 manages files on disk and in R2; callers handle loading into Torch/Transformers.
@@ -62,7 +61,6 @@ class CheckpointMetadata:
 
     window: int
     parent_window: int | None
-    model_name: str
     file_manifest: dict[str, str]
     training_config: dict[str, Any] = field(default_factory=dict)
     git_commit: str = "unknown"
@@ -104,13 +102,20 @@ class CheckpointManager:
     async def get_checkpoint(self, window: int) -> Path | None:
         """Ensure checkpoint for *window* is available locally and return path.
 
-        If the exact checkpoint for the requested window is not available,
-        falls back to the latest (highest window number) checkpoint available.
+        With the trainer always publishing checkpoints for every window, this method
+        now simply downloads and validates the requested checkpoint without fallback.
+        If the checkpoint is not ready, returns None and the caller should wait/retry.
 
         Notes (testing only):
         If GRAIL_CHECKPOINT_MOD10 == True, the incoming window is
         deterministically remapped to [0..9] via modulo 10 to allow
         testing against a small fixed set of checkpoints.
+
+        Args:
+            window: Target window for checkpoint
+
+        Returns:
+            Path to local checkpoint directory, or None if not available/ready
         """
 
         # Testing hook: remap any input window to [0..9] when enabled
@@ -149,25 +154,10 @@ class CheckpointManager:
             is_ready = await self._is_checkpoint_ready(window)
             if not is_ready:
                 logger.warning(
-                    "Checkpoint for window %s not ready (READY marker not found); falling back to latest ready checkpoint",
+                    "Checkpoint for window %s not ready (READY marker not found); will retry later",
                     window,
                 )
-                # Fall back to latest ready checkpoint to keep mining operational
-                latest_ready_window = await self._find_latest_ready_checkpoint_window()
-                if latest_ready_window is None:
-                    logger.error("No ready checkpoints available for fallback")
-                    return None
-                if latest_ready_window == window:
-                    logger.debug("Latest ready checkpoint same as requested, no fallback available")
-                    return None
-
-                logger.info(
-                    "Falling back from window %s to latest ready window %s",
-                    window,
-                    latest_ready_window,
-                )
-                # Recursively call with the latest ready window
-                return await self.get_checkpoint(latest_ready_window)
+                return None
 
             tmp_dir = self.cache_root / f"checkpoint-{window}.partial"
             if tmp_dir.exists():
@@ -175,9 +165,16 @@ class CheckpointManager:
             tmp_dir.mkdir(parents=True, exist_ok=True)
 
             try:
+                logger.info("Starting checkpoint download for window %s", window)
                 if metadata is not None and metadata.file_manifest:
                     # Preferred path: use manifest for exact file set and integrity checks
+                    logger.debug(
+                        "Downloading %s files for checkpoint window %s using manifest",
+                        len(metadata.file_manifest),
+                        window,
+                    )
                     await self._download_files(metadata, tmp_dir)
+                    logger.debug("Verifying integrity for checkpoint window %s", window)
                     if not await self._verify_integrity(tmp_dir, metadata.file_manifest):
                         raise CheckpointDownloadError(f"Integrity check failed for window {window}")
 
@@ -188,7 +185,6 @@ class CheckpointManager:
                             {
                                 "window": metadata.window,
                                 "parent_window": metadata.parent_window,
-                                "model_name": metadata.model_name,
                                 "file_manifest": metadata.file_manifest,
                                 "training_config": metadata.training_config,
                                 "git_commit": metadata.git_commit,
@@ -200,37 +196,24 @@ class CheckpointManager:
                     )
                 else:
                     # Fallback path: list and download everything under the prefix
+                    logger.debug(
+                        "Downloading checkpoint window %s without manifest (best-effort)",
+                        window,
+                    )
                     await self._download_all_in_prefix(window, tmp_dir)
 
+                logger.info("Checkpoint download completed for window %s, finalizing...", window)
                 tmp_dir.rename(local_dir)
+                logger.info("✅ Checkpoint for window %s ready at %s", window, local_dir)
                 return local_dir
-            except Exception:
+            except Exception as exc:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
-
-                # Attempt fallback to latest checkpoint if available
-                latest_window = await self._find_latest_checkpoint_window()
-                if latest_window is None:
-                    logger.debug("No checkpoints available for fallback")
-                    return None
-
-                if latest_window == window:
-                    logger.debug("Latest window same as requested, no fallback available")
-                    return None
-
-                if latest_window in self._fallback_attempted:
-                    logger.debug("Already attempted fallback to window %s", latest_window)
-                    return None
-
-                logger.warning(
-                    "Using latest checkpoint window %s (requested %s)",
-                    latest_window,
+                logger.error(
+                    "Checkpoint download/integrity failed for window %s: %s",
                     window,
+                    exc,
                 )
-                self._fallback_attempted.add(latest_window)
-                try:
-                    return await self.get_checkpoint(latest_window)
-                finally:
-                    self._fallback_attempted.discard(latest_window)
+                return None
 
     async def cleanup_local(self, current_window: int) -> None:
         """Remove cached checkpoints outside the retention policy."""
@@ -280,17 +263,18 @@ class CheckpointManager:
         )
         windows: set[int] = set()
         for key in keys:
-            parts = key.split("/")
-            # Scan all path segments for a 'checkpoint-<window>' directory
-            for segment in parts:
-                if not segment.startswith("checkpoint-"):
-                    continue
-                try:
-                    window = int(segment.split("-", 1)[1])
-                except (IndexError, ValueError):
-                    continue
-                windows.add(window)
-                break  # Only one checkpoint window per key path
+            # Keys look like: grail/checkpoints/checkpoint-<window>/...
+            # Extract window from the checkpoint-<window> segment
+            try:
+                # Split into parts: ['grail', 'checkpoints', 'checkpoint-<window>', ...]
+                parts = key.split("/")
+                if len(parts) >= 3:
+                    checkpoint_segment = parts[2]  # 'checkpoint-<window>'
+                    if checkpoint_segment.startswith("checkpoint-"):
+                        window = int(checkpoint_segment.split("-", 1)[1])
+                        windows.add(window)
+            except (IndexError, ValueError):
+                continue
         return sorted(windows)
 
     async def _is_checkpoint_ready(self, window: int) -> bool:
@@ -304,36 +288,6 @@ class CheckpointManager:
         """
         ready_key = f"{CHECKPOINT_PREFIX}checkpoint-{window}/READY"
         return await comms.file_exists(ready_key, credentials=self.credentials, use_write=False)
-
-    async def _find_latest_ready_checkpoint_window(self) -> int | None:
-        """Find the highest window number with READY marker (fully uploaded).
-
-        Used when requested checkpoint is not ready yet. Falls back to latest
-        available ready checkpoint to keep mining/validation operational.
-
-        Returns:
-            Window number of latest ready checkpoint, or None if none are ready.
-        """
-        windows = await self.list_remote_windows()
-        if not windows:
-            return None
-
-        # Check windows in descending order to find latest ready one
-        for window in sorted(windows, reverse=True):
-            if await self._is_checkpoint_ready(window):
-                logger.info(f"Found latest ready checkpoint at window {window}")
-                return window
-
-        logger.warning("No ready checkpoints found")
-        return None
-
-    async def get_latest_checkpoint(self) -> Path | None:
-        """Return local path for the most recent remote checkpoint, if any."""
-        windows = await self.list_remote_windows()
-        if not windows:
-            return None
-        latest = max(windows)
-        return await self.get_checkpoint(latest)
 
     async def get_recent_checkpoints(self, n: int) -> list[Path]:
         """Get the N most recent checkpoints available locally or remotely.
@@ -392,7 +346,6 @@ class CheckpointManager:
         metadata = CheckpointMetadata(
             window=payload.get("window", window),
             parent_window=payload.get("parent_window"),
-            model_name=payload.get("model_name", ""),
             file_manifest=payload.get("file_manifest", {}),
             training_config=payload.get("training_config", {}),
             git_commit=payload.get("git_commit", "unknown"),
@@ -415,7 +368,7 @@ class CheckpointManager:
         return None
 
     async def _download_files(self, metadata: CheckpointMetadata, tmp_dir: Path) -> None:
-        semaphore = asyncio.Semaphore(4)
+        semaphore = asyncio.Semaphore(8)
 
         async def _download(filename: str) -> None:
             async with semaphore:
@@ -557,3 +510,39 @@ def iter_checkpoints(cache_root: Path) -> Iterable[Path]:
         checkpoints.append((window, entry))
     for _, path in sorted(checkpoints):
         yield path
+
+
+# --------------------------------------------------------------------------- #
+#                        DEPRECATED: Fallback Logic                           #
+# --------------------------------------------------------------------------- #
+# The following function was used when the trainer might skip publishing
+# checkpoints for some windows. Now that the trainer ALWAYS publishes
+# checkpoints (even if training is skipped), this fallback logic is no longer
+# needed. Preserved here for reference only.
+
+
+async def _find_latest_ready_checkpoint_window_DEPRECATED(
+    checkpoint_manager: CheckpointManager,
+) -> int | None:
+    """Find the highest window number with READY marker (fully uploaded).
+
+    DEPRECATED: No longer needed since trainer always publishes checkpoints.
+
+    Used when requested checkpoint is not ready yet. Falls back to latest
+    available ready checkpoint to keep mining/validation operational.
+
+    Returns:
+        Window number of latest ready checkpoint, or None if none are ready.
+    """
+    windows = await checkpoint_manager.list_remote_windows()
+    if not windows:
+        return None
+
+    # Check windows in descending order to find latest ready one
+    for window in sorted(windows, reverse=True):
+        if await checkpoint_manager._is_checkpoint_ready(window):
+            logger.info(f"Found latest ready checkpoint at window {window}")
+            return window
+
+    logger.warning("No ready checkpoints found")
+    return None
