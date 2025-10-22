@@ -37,18 +37,21 @@ Grail validators:
 
 ## Prerequisites
 
-- Linux, Docker and Docker Compose installed
-- **NVIDIA A100 GPU with CUDA support (required)**
-- At least 20GB RAM recommended
+- Any operating system (Linux, macOS, Windows, etc.)
+- Docker and Docker Compose installed
+- **Any hardware platform** with floating point precision within tolerance
+- At least 40GB RAM recommended for optimal performance
 - Bittensor wallet (cold/hot) registered on the target subnet
 - Cloudflare R2 (or S3-compatible) bucket and credentials
   - **Create a Bucket: Name it the same as your account ID and set the region to ENAM.**
 - Optional: WandB account for monitoring
 
+For detailed hardware specifications, see [`compute.min.yaml`](../compute.min.yaml).
+
 Hardware requirements:
-- **NVIDIA A100 GPU is required** for the current version to ensure consistent verification across the network
-- GPU-agnostic verification is coming soon, which will enable support for other hardware configurations
-- The verifier has been optimized and tested on NVIDIA A100
+- **OS and hardware-agnostic**: Runs on any platform (Linux, macOS, Windows; any CPU/GPU)
+- Key constraint: Floating point precision must be within tolerance thresholds
+- At least 40GB RAM recommended for optimal performance
 
 ---
 
@@ -280,42 +283,7 @@ Normalize to weights across miners; set on-chain with `set_weights`.
 **Validator Not Starting:**
 - Check logs: `docker logs grail-validator`
 - Verify wallet path: Ensure `~/.bittensor` is accessible
-- Check GPU: Run `nvidia-smi` to verify NVIDIA A100 availability
-- GPU requirement: Currently requires NVIDIA A100 for consistent verification
+- Check hardware support: Ensure your platform's floating point precision is within tolerance thresholds
 
 **Watchtower Not Updating:**
-- Check registry access: `docker pull ghcr.io/one-covenant/grail:latest`
-- Verify Watchtower logs: `docker logs watchtower`
-- Ensure container has label `com.centurylinklabs.watchtower.enable=true`
-
-**Network Issues:**
-- Ensure ports are accessible if using external axon
-- Check firewall rules for Docker networks
-- Verify subtensor endpoint connectivity
-
-**Container Health:**
-```bash
-# Check container status
-docker ps --format "table {{.Names}}\t{{.Status}}\t{{.State}}"
-
-# Inspect container details
-docker inspect grail-validator
-```
-
----
-
-## Reference
-
-- Validator entrypoint: `grail/cli/validate.py`
-- Verifier & protocol: `grail/grail.py`
-- SAT environment & rewards: `grail/environments/sat.py`
-- Storage & downloads: `grail/infrastructure/comms.py`
-- Credentials & chain: `grail/infrastructure/credentials.py`, `grail/infrastructure/chain.py`
-
----
-
-## Support
-
-For issues or questions:
-- GitHub Issues: https://github.com/one-covenant/grail/issues
-- Discord: https://discord.com/channels/799672011265015819/1354089114189955102
+- Check registry access: `

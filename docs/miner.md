@@ -31,17 +31,18 @@ Grail miners:
 
 ## Prerequisites
 
-- Linux with NVIDIA A100 GPU and CUDA drivers installed
+- Any operating system (Linux, macOS, Windows)
 - Python (via `uv venv`) and Git
 - Bittensor wallet (cold/hot) registered on the target subnet
 - Cloudflare R2 (or S3-compatible) bucket and credentials
   - **Create a Bucket: Name it the same as your account ID and set the region to ENAM.**
 - Optional: WandB account for monitoring
 
+For detailed hardware specifications, see [`compute.min.yaml`](../compute.min.yaml).
+
 Hardware requirements:
-- **NVIDIA A100 GPU is required** for the current version
-- The codebase has been optimized and tested on NVIDIA A100
-- GPU-agnostic verification is coming soon, which will enable support for other hardware configurations
+- **OS and hardware-agnostic**: Any platform with floating point precision within tolerance
+- At least 40GB RAM recommended
 - Network bandwidth needs are modest; uploads are JSON rollouts
 
 ---
@@ -183,14 +184,13 @@ Artifacts uploaded per rollout include:
 
 ## Best Practices
 
-- **Use NVIDIA A100 GPU** for optimal performance; this is currently required for proper GRAIL proof generation and verification.
+- **Any platform supported**: Run on any OS/hardware with floating point precision within tolerance. Use accelerators for best throughput.
 - Models evolve through training: Start with `Qwen/Qwen3-4B-Instruct-2507` base but automatically load updated checkpoints from R2. Fixed at 1024 max new tokens and 16 rollouts per problem.
 - Reserve the final 2 blocks of each window for uploads; the miner does this automatically but avoid heavy generation near the end.
 - Use `--use-drand` (default) for robust challenge derivation; fall back with `--no-drand` only if needed.
 - Ensure R2 dual-credential setup: write locally, read credentials are committed on-chain by the miner.
-- Monitor GPU memory on your A100; the miner periodically empties cache, but size your rollouts to avoid OOM.
+- Monitor GPU memory; the miner periodically empties cache, but size your rollouts to avoid OOM.
 - Increase verbosity with `-vv` when diagnosing sampling, group sizes, or upload issues.
-- Note: GPU-agnostic verification is under development and will expand hardware support in future releases.
 
 
 ## Support
