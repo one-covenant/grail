@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -10,6 +11,8 @@ from accelerate import Accelerator
 
 from grail.shared.constants import (
     NETUID,
+    TRAINER_UPLOAD_BUFFER_BLOCKS,
+    WINDOW_LENGTH,
 )
 
 from .algorithms import GRPOAlgorithm, TrainingAlgorithm
@@ -66,7 +69,7 @@ class TrainerService:
         self.scheduler = scheduler
 
     async def train_window(self, window: int, subtensor: Any) -> bool:
-        # Deterministic seeding
+        # `window` is the target (past) window for training, not the current window
         self._seed_all(window)
 
         # Get metagraph for UID mapping
@@ -79,115 +82,207 @@ class TrainerService:
         # TODO: this should be removed later on but right now we only trust uid 80 for testing
         trusted_hotkeys = {metagraph.hotkeys[80]}
 
-        # Skip training if no trusted miners available
+        # Load data directly from trusted miners using shared chain manager
+        groups = []
+        training_skipped = False
+
         if not trusted_hotkeys:
             logger.warning(
-                "No trusted miners for window %s; will wait for next window",
+                "No trusted miners for window %s; will publish unchanged checkpoint",
                 window,
             )
-            return False
-
-        # Load data directly from trusted miners using shared chain manager
-        groups = await load_grpo_groups(
-            window,
-            self.config.group_adv_sum_tolerance,
-            trusted_hotkeys,
-            self.credentials,
-            self.chain_manager,
-            uid_by_hotkey,
-        )
-
-        if not groups:
-            logger.warning(
-                ("No valid GRPO groups for window %s; will wait for next window"),
+            training_skipped = True
+        else:
+            groups = await load_grpo_groups(
                 window,
+                self.config.group_adv_sum_tolerance,
+                trusted_hotkeys,
+                self.credentials,
+                self.chain_manager,
+                uid_by_hotkey,
             )
-            return False
+
+            if not groups:
+                logger.warning(
+                    "No valid GRPO groups for window %s; will publish unchanged checkpoint",
+                    window,
+                )
+                training_skipped = True
 
         # Use persistent models
         model = self.train_model
         ref_model = self.ref_model
         tokenizer = self.tokenizer
 
-        # Ensure optimizer and scheduler are initialized
-        if self.optimizer is None or self.scheduler is None:
-            raise RuntimeError(
-                "Optimizer and scheduler must be initialized before training windows"
-            )
+        # Calculate window timing
+        current_window = window + WINDOW_LENGTH
+        next_window = current_window + WINDOW_LENGTH
+        deadline_block = next_window - TRAINER_UPLOAD_BUFFER_BLOCKS
 
-        # Prepare models and optimizer for distributed training
-        model, ref_model, opt = self.accelerator.prepare(
-            model,
-            ref_model,
-            self.optimizer,
-        )
+        # Only train if we have valid data
+        epochs_completed = 0
+        metrics: dict[str, Any] = {}
 
-        if hasattr(ref_model, "eval"):
-            ref_model.eval()
+        if not training_skipped:
+            # Ensure optimizer and scheduler are initialized
+            if self.optimizer is None or self.scheduler is None:
+                raise RuntimeError(
+                    "Optimizer and scheduler must be initialized before training windows"
+                )
 
-        for epoch in range(self.config.epochs):
-            logger.info("Epoch %s/%s", epoch + 1, self.config.epochs)
-            metrics = await self.algorithm.train_epoch(
+            # Prepare models and optimizer for distributed training
+            model, ref_model, opt = self.accelerator.prepare(
                 model,
                 ref_model,
-                tokenizer,
-                groups,
-                opt,
-                self.accelerator,
-                self.monitor,
-                window,
-                self.config,
+                self.optimizer,
             )
 
-            self.scheduler.step()
-            if self.monitor:
-                for key, value in metrics.items():
-                    await self.monitor.log_gauge(f"training.{key}", value)
-                await self.monitor.log_gauge(
-                    "training.lr",
-                    self.scheduler.get_last_lr()[0],
+            if hasattr(ref_model, "eval"):
+                ref_model.eval()
+
+            training_start = time.monotonic()
+
+            for epoch in range(self.config.epochs):
+                # Check deadline before starting epoch
+                try:
+                    current_block = await subtensor.get_current_block()
+                    if current_block >= deadline_block:
+                        logger.warning(
+                            "⏰ Upload deadline reached at block %s (target: %s); "
+                            "stopping training after %s/%s epochs",
+                            current_block,
+                            deadline_block,
+                            epoch,
+                            self.config.epochs,
+                        )
+                        if self.monitor:
+                            await self.monitor.log_counter("training.deadline_hit")
+                            await self.monitor.log_gauge(
+                                "training.epochs_completed_before_deadline", epoch
+                            )
+                        break
+                except Exception as e:
+                    logger.warning("Failed to check deadline: %s", e)
+
+                logger.info("Epoch %s/%s", epoch + 1, self.config.epochs)
+                metrics = await self.algorithm.train_epoch(
+                    model,
+                    ref_model,
+                    tokenizer,
+                    groups,
+                    opt,
+                    self.accelerator,
+                    self.monitor,
+                    window,
+                    self.config,
                 )
-                await self.monitor.log_counter("training.epochs_completed")
 
+                self.scheduler.step()
+                if self.monitor:
+                    for key, value in metrics.items():
+                        await self.monitor.log_gauge(f"training.{key}", value)
+                    await self.monitor.log_gauge(
+                        "training.lr",
+                        self.scheduler.get_last_lr()[0],
+                    )
+                    await self.monitor.log_counter("training.epochs_completed")
+
+                logger.info(
+                    "Epoch %s metrics: loss=%.4f pg=%.4f kl=%.4f entropy=%.4f",
+                    epoch + 1,
+                    metrics.get("loss_total", 0.0),
+                    metrics.get("loss_pg", 0.0),
+                    metrics.get("loss_kl", 0.0),
+                    metrics.get("loss_entropy", 0.0),
+                )
+                epochs_completed = epoch + 1
+
+            # Log total training time
+            training_duration = time.monotonic() - training_start
             logger.info(
-                "Epoch %s metrics: loss=%.4f pg=%.4f kl=%.4f entropy=%.4f",
-                epoch + 1,
-                metrics.get("loss_total", 0.0),
-                metrics.get("loss_pg", 0.0),
-                metrics.get("loss_kl", 0.0),
-                metrics.get("loss_entropy", 0.0),
+                "Training completed in %.1fs for %s epochs", training_duration, epochs_completed
             )
+            if self.monitor:
+                await self.monitor.log_gauge("profiling/training_duration", training_duration)
 
-        # Check if training produced any meaningful results before publishing
-        # If all batches were skipped (NaN/Inf), metrics will be empty or all zeros
-        if not metrics or all(v == 0.0 for v in metrics.values()):
-            logger.warning(
-                "No valid training metrics for window %s; skipping checkpoint publish",
+            # Unwrap model for publishing
+            unwrapped = self.accelerator.unwrap_model(model)
+        else:
+            # Training was skipped; use model as-is
+            logger.info("Training skipped for window %s; publishing unchanged checkpoint", window)
+            unwrapped = model
+
+        # Publish checkpoint with deadline enforcement
+        # Publish checkpoint for CURRENT window (where it will be used), not the past window trained on
+        checkpoint_publish_window = current_window  # Use current_window, not target window
+
+        if training_skipped:
+            logger.info(
+                "💾 Publishing unchanged checkpoint for window %s (training skipped)",
+                checkpoint_publish_window,
+            )
+        else:
+            logger.info(
+                "💾 Publishing checkpoint for window %s (trained on window %s)",
+                checkpoint_publish_window,
                 window,
             )
-            return False
 
-        # Publish checkpoint for the same window used for updates
-        target_window = window
-        logger.info("💾 Publishing checkpoint for window %s", target_window)
+        # Time the checkpoint publishing
+        publish_start = time.monotonic()
+        if self.monitor:
+            with self.monitor.timer("profiling/checkpoint_publish"):
+                success = await publish_checkpoint(
+                    unwrapped,
+                    tokenizer,
+                    checkpoint_publish_window,
+                    window,
+                    self.wallet,
+                    self.credentials,
+                    self.checkpoint_manager,
+                    seed=window,
+                )
+        else:
+            success = await publish_checkpoint(
+                unwrapped,
+                tokenizer,
+                checkpoint_publish_window,
+                window,
+                self.wallet,
+                self.credentials,
+                self.checkpoint_manager,
+                seed=window,
+            )
 
-        unwrapped = self.accelerator.unwrap_model(model)
-        success = await publish_checkpoint(
-            unwrapped,
-            tokenizer,
-            target_window,
-            window,
-            self.wallet,
-            self.credentials,
-            self.checkpoint_manager,
-            seed=window,
-        )
+        publish_duration = time.monotonic() - publish_start
+        if self.monitor:
+            await self.monitor.log_gauge("profiling/checkpoint_publish_duration", publish_duration)
+
+        # Verify checkpoint was published before deadline
+        try:
+            final_block = await subtensor.get_current_block()
+            if final_block >= next_window:
+                logger.warning(
+                    "⚠️ Checkpoint published after start of next window! "
+                    "Current block %s >= deadline %s",
+                    final_block,
+                    next_window,
+                )
+                if self.monitor:
+                    await self.monitor.log_counter("training.checkpoint_published_late")
+            else:
+                logger.info("✅ Checkpoint published before deadline with margin")
+                if self.monitor:
+                    await self.monitor.log_counter("training.checkpoint_published_on_time")
+        except Exception as e:
+            logger.warning("Failed to verify checkpoint deadline: %s", e)
 
         if not success:
             logger.error(
-                "Failed to publish checkpoint",
+                "Failed to publish checkpoint for window %s (trained on window %s)",
+                checkpoint_publish_window,
+                window,
             )
-            logger.error("Window: %s", target_window)
 
         return success
 

@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import torch
 
 from grail.infrastructure.chain import GrailChainManager
-from grail.shared.constants import NETUID, WINDOW_LENGTH
+from grail.shared.constants import NETUID, READY_MARKER_UPLOAD_BLOCKS, WINDOW_LENGTH
+from grail.trainer.checkpointing import finalize_checkpoint_ready
 from grail.trainer.service import TrainerService
 
 from .base import BaseNeuron
@@ -46,6 +49,8 @@ class TrainerNeuron(BaseNeuron):
         self._context = context
         self._optimizer: torch.optim.Optimizer | None = None
         self._scheduler: torch.optim.lr_scheduler.LRScheduler | None = None
+        self._wait_start_time: float | None = None
+        self._last_wait_log: float = 0.0
 
     async def run(self) -> None:
         # Start the built-in watchdog (15 minute timeout)
@@ -72,10 +77,14 @@ class TrainerNeuron(BaseNeuron):
                 target_window = current_window - WINDOW_LENGTH
 
                 if target_window <= last_processed_window or target_window < 0:
+                    await self._handle_wait_for_window(
+                        target_window, current_block, last_processed_window
+                    )
                     await asyncio.sleep(10)
                     continue
 
                 logger.info("🎓 Training window %s", target_window)
+                # Train on target window (past window), not current window
                 success = await self._train_window(target_window)
 
                 if success:
@@ -88,11 +97,24 @@ class TrainerNeuron(BaseNeuron):
                     if self._context.monitor:
                         await self._context.monitor.log_counter("training.failed")
 
+                # Finalize the checkpoint if we are still in the current window
+                # If not, we never finalize the checkpoint and the checkpoint is
+                # going to be cleaned up later on.
+                current_block = await subtensor.get_current_block()
+                current_block = current_block + READY_MARKER_UPLOAD_BLOCKS
+                try:
+                    finalized = await finalize_checkpoint_ready(
+                        current_block, self._context.credentials
+                    )
+                    if finalized:
+                        logger.info("✅ Finalized READY markers for checkpoint(s): %s", finalized)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to finalize checkpoint READY markers: %s", exc)
+
                 # Mark window as processed regardless of outcome
                 last_processed_window = target_window
-
-                # Sleep before checking for next window to avoid tight loops
-                await asyncio.sleep(10)
+                self._wait_start_time = None
+                self._last_wait_log = 0.0
 
             except asyncio.CancelledError:  # pragma: no cover - coop shutdown
                 break
@@ -101,6 +123,41 @@ class TrainerNeuron(BaseNeuron):
                 # Force reconnect on next iteration
                 self.reset_subtensor()
                 await asyncio.sleep(30)
+
+    async def _handle_wait_for_window(
+        self, target_window: int, current_block: int, last_processed_window: int
+    ) -> None:
+        """Display progress while waiting for the next training window."""
+        # Initialize wait tracking on first call for this window
+        if self._wait_start_time is None:
+            self._wait_start_time = time.monotonic()
+            self._last_wait_log = self._wait_start_time
+
+            # Calculate ETA
+            blocks_to_next_window = (last_processed_window + 1 - current_block) * WINDOW_LENGTH
+            est_seconds = max(0, blocks_to_next_window * 12)  # ~12s per block
+            eta_time = datetime.now() + timedelta(seconds=int(est_seconds))
+
+            logger.info(
+                "⏳ Window %d not ready (last processed: %d). "
+                "Waiting for window %d... ETA: ~%s (%s)",
+                target_window,
+                last_processed_window,
+                last_processed_window + 1,
+                str(timedelta(seconds=int(est_seconds))).split(".")[0],
+                eta_time.strftime("%H:%M:%S"),
+            )
+
+        # Periodic status update every 120 seconds
+        current_time = time.monotonic()
+        if current_time - self._last_wait_log >= 120:
+            elapsed = int(current_time - self._wait_start_time)
+            logger.info(
+                "⏳ Still waiting for window %d... (elapsed: %s)",
+                last_processed_window + 1,
+                str(timedelta(seconds=elapsed)).split(".")[0],
+            )
+            self._last_wait_log = current_time
 
     async def _initialize_chain_manager(self) -> None:
         """Initialize chain manager for miner data fetching."""

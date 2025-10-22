@@ -32,15 +32,20 @@ UPLOAD_GRACE_PERIOD = BLOCK_TIME_VARIANCE + NETWORK_UPLOAD_LATENCY
 # Validators use drand from this many seconds AFTER upload deadline
 DRAND_FUTURE_BUFFER = 30
 
+# Trainer checkpoint upload buffer (blocks before window ends to force publish)
+TRAINER_UPLOAD_BUFFER_BLOCKS = 10  # ~60 seconds at 12s/block
+
+# Time needed to upload the READY marker file to object storage
+READY_MARKER_UPLOAD_BLOCKS = 1  # ~12 seconds at 12s/block
+
 # ────────────────  MODEL CONFIGURATION  ────────────────
 
-MODEL_NAME = os.getenv("GRAIL_MODEL_NAME", "Qwen/Qwen3-4B-Instruct-2507")
 LAYER_INDEX = -1
 
 # Trainer hyperparameters (env configurable)
-TRAINER_LR = float(os.getenv("GRAIL_TRAINER_LR", "2e-5"))
+TRAINER_LR = float(os.getenv("GRAIL_TRAINER_LR", "1e-6"))
 TRAINER_EPOCHS = int(os.getenv("GRAIL_TRAINER_EPOCHS", "2"))
-TRAINER_BATCH_SIZE = int(os.getenv("GRAIL_TRAINER_BATCH_SIZE", "12"))
+TRAINER_BATCH_SIZE = int(os.getenv("GRAIL_TRAINER_BATCH_SIZE", "4"))
 TRAINER_MAX_LENGTH = int(os.getenv("GRAIL_TRAINER_MAX_LENGTH", "1024"))
 TRAINER_GRAD_CLIP = float(os.getenv("GRAIL_TRAINER_GRAD_CLIP", "0.5"))
 TRAINER_WARMUP_STEPS = int(os.getenv("GRAIL_TRAINER_WARMUP_STEPS", "10"))
@@ -83,12 +88,11 @@ TRACE = 5
 
 PRIME_Q = 2_147_483_647
 CHALLENGE_K = 16
-TOLERANCE = 3
 RNG_LABEL = {"sketch": b"sketch", "open": b"open", "sat": b"sat"}
 
 # ────────────────  TERMINATION VALIDATION HPs  ────────────────
 
-MAX_NEW_TOKENS = 1024
+MAX_NEW_TOKENS = 512
 
 # Must match rollout generator default
 MIN_EOS_PROBABILITY = 0.1  # Minimum probability for valid EOS termination
@@ -130,12 +134,12 @@ REWARD_ABS_TOL = 1e-6
 
 # ────────────────  ROLLOUTS PER PROBLEM  ────────────────
 
-ROLLOUTS_PER_PROBLEM = 4
+ROLLOUTS_PER_PROBLEM = 16
 
 # ────────────────  ENVIRONMENT CONFIGURATION  ────────────────
 
 # Current environment ID (validators use this constant, never trust miner data)
-CURRENT_ENV_ID = "sat"
+CURRENT_ENV_ID = "gsm8k"
 
 # ────────────────  EMISSION BURN MECHANISM  ────────────────
 
@@ -196,4 +200,4 @@ GRAIL_PROOF_VERSION = "v1"
 # ────────────────  CHECKPOINT MOD10  ────────────────
 
 # Only for testing purposes; going to be removed later on
-GRAIL_CHECKPOINT_MOD10 = True
+GRAIL_CHECKPOINT_MOD10 = False
