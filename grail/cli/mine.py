@@ -285,11 +285,7 @@ async def maybe_log_debug_sample(
     try:
         prompt_len = int(getattr(sample, "prompt_length", 0) or 0)
         completion_len = int(getattr(sample, "completion_length", 0) or 0)
-        if completion_len > 0 and prompt_len >= 0:
-            completion_ids = sample.tokens[prompt_len : prompt_len + completion_len]
-        else:
-            completion_ids = sample.tokens[prompt_len:]
-        sample_text = tokenizer.decode(completion_ids, skip_special_tokens=False)
+        sample_text = tokenizer.decode(sample.tokens, skip_special_tokens=False)
         sample_nonce = base_nonce * 10
         logger.debug(
             (
