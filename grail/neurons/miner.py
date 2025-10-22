@@ -155,19 +155,6 @@ class MinerNeuron(BaseNeuron):
                                 )
                             self.heartbeat()
 
-                            # If requested checkpoint doesn't exist, fetch latest instead
-                            if checkpoint_path is None:
-                                logger.warning(
-                                    "Checkpoint for window %s not available, fetching latest...",
-                                    checkpoint_window,
-                                )
-                                try:
-                                    checkpoint_path = (
-                                        await checkpoint_manager.get_latest_checkpoint()
-                                    )
-                                except Exception as e:
-                                    logger.warning("Failed to fetch latest checkpoint: %s", e)
-
                             if checkpoint_path is not None:
                                 logger.info(
                                     "🔁 Loading checkpoint for window %s from %s",
