@@ -502,9 +502,6 @@ class ValidationService:
             set(hotkeys_to_check),
         )
 
-        # Directly load UID 80 hotkey
-        hotkeys_to_check = [hk for hk, uid in uid_by_hotkey.items() if uid == 80]
-
         # Log sampling metrics
         if self._monitor:
             await self._log_sampling_metrics(

@@ -87,9 +87,6 @@ class TrainerService:
         # Get trusted miners from chain weights
         trusted_hotkeys = await self._get_trusted_miners(subtensor)
 
-        # TODO: this should be removed later on but right now we only trust uid 80 for testing
-        trusted_hotkeys = {metagraph.hotkeys[80]}
-
         # Load data directly from trusted miners using shared chain manager
         groups = []
         training_skipped = False
