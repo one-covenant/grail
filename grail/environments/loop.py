@@ -315,10 +315,17 @@ class AgentEnvLoop:
         """Generate completion tokens without computing logprobs.
 
         Logprobs will be computed in a single forward pass with commitments.
+        Returns tokens trimmed of right padding.
         """
         input_ids = torch.tensor([prompt_ids], dtype=torch.long).to(self.device)
         attention_mask = torch.ones_like(input_ids).to(self.device)
         prompt_len = int(input_ids.shape[1])
+
+        # Use proper pad_token_id; only fallback to eos if no pad token exists
+        pad_id = self.tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = self.tokenizer.eos_token_id
+            logger.debug("Using eos_token_id as pad_token_id fallback")
 
         with torch.inference_mode():
             outputs = self.model.generate(
@@ -331,11 +338,12 @@ class AgentEnvLoop:
                 top_k=50,
                 repetition_penalty=1.1,
                 return_dict_in_generate=True,
-                pad_token_id=self.tokenizer.eos_token_id,
+                pad_token_id=pad_id,
                 eos_token_id=self.tokenizer.eos_token_id,
             )
 
-        all_token_ids = outputs.sequences[0].tolist()
+        # Trim right padding before returning
+        all_token_ids, _ = self._trim_right_padding(outputs.sequences[0], prompt_len)
         return all_token_ids, prompt_len
 
     def _batch_generate_tokens(
@@ -402,14 +410,54 @@ class AgentEnvLoop:
             pad_len = max_prompt_len - original_prompt_len
 
             # Get full generated sequence (includes: padding + original_prompt + completion)
-            full_seq = outputs.sequences[batch_idx].tolist()
+            full_seq = outputs.sequences[batch_idx]
 
             # Strip left padding to recover [original_prompt + completion]
-            all_token_ids = full_seq[pad_len:]
+            seq_without_left_pad = full_seq[pad_len:]
+
+            # Trim right padding before returning
+            all_token_ids, _ = self._trim_right_padding(seq_without_left_pad, original_prompt_len)
 
             results.append((all_token_ids, original_prompt_len))
 
         return results
+
+    def _trim_right_padding(
+        self,
+        seq: torch.Tensor,
+        prompt_len: int,
+    ) -> tuple[list[int], int]:
+        """Trim trailing padding from sequence, preserving EOS semantics.
+
+        Args:
+            seq: Full token sequence [prompt_len + completion]
+            prompt_len: Length of prompt portion
+
+        Returns:
+            (trimmed_token_ids, effective_completion_len)
+        """
+        pad_id = self.tokenizer.pad_token_id
+        eos_id = self.tokenizer.eos_token_id
+
+        # Extract completion portion
+        completion = seq[prompt_len:]
+
+        # Case 1: pad_id != eos_id (separate tokens)
+        if pad_id is not None and pad_id != eos_id:
+            # Trim trailing pad_id tokens
+            eff_comp = int((completion != pad_id).sum().item())
+        # Case 2: pad_id == eos_id or no pad_id (same token)
+        else:
+            # Keep up to and including first EOS in completion
+            eos_hits = (completion == eos_id).nonzero(as_tuple=False)
+            if eos_hits.numel() > 0:
+                eff_comp = int(eos_hits[0].item()) + 1
+            else:
+                eff_comp = completion.size(0)
+
+        # Trim and convert to list
+        trimmed = seq[: prompt_len + eff_comp]
+        return trimmed.tolist(), eff_comp
 
     def _compute_commitments_and_logprobs(
         self,
