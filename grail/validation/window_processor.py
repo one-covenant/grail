@@ -132,10 +132,6 @@ class WindowProcessor:
                 # Validate miner (use .get() to avoid KeyError)
                 uid = uid_by_hotkey.get(miner_hotkey, miner_hotkey)
 
-                # TODO: REMOVE - Temporary filter to only accept rollouts from UID 80
-                if uid != 80:
-                    continue
-
                 with miner_log_context(uid, window):
                     result: MinerResults = await self._miner_validator.validate_miner(
                         miner_hotkey=miner_hotkey,
