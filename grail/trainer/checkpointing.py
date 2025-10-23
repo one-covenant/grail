@@ -30,6 +30,7 @@ from grail.shared.constants import (
     TRAINER_LR,
     TRAINER_MAX_LENGTH,
     TRAINER_WARMUP_STEPS,
+    UPLOAD_TIMEOUT,
     WINDOW_LENGTH,
 )
 
@@ -175,28 +176,61 @@ async def publish_checkpoint(
         (temp_dir / "manifest.sig").write_text(signature)
 
         remote_prefix = f"{CHECKPOINT_PREFIX}checkpoint-{target_window}"
-        semaphore = asyncio.Semaphore(8)
+        semaphore = asyncio.Semaphore(4)
 
         async def upload_file(path: Path) -> bool:
             async with semaphore:
                 rel_path = path.relative_to(temp_dir)
                 remote_key = f"{remote_prefix}/{rel_path}"
                 try:
+                    # Get upload timeout from environment (default 180 sec per chunk - 3 minutes)
+                    upload_timeout = UPLOAD_TIMEOUT
+                    file_size_mb = path.stat().st_size / (1024 * 1024)
+                    logger.debug(
+                        "Uploading %s (%d MB) with timeout=%ds",
+                        rel_path,
+                        file_size_mb,
+                        upload_timeout,
+                    )
                     return await upload_file_chunked(
                         remote_key,
                         path.read_bytes(),
                         credentials=credentials,
                         use_write=True,
+                        upload_timeout=upload_timeout,
                     )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "Upload TIMEOUT for %s (exceeds %s seconds)",
+                        rel_path,
+                        UPLOAD_TIMEOUT,
+                    )
+                    return False
                 except Exception as exc:  # noqa: BLE001
                     logger.error("Failed to upload %s: %s", rel_path, exc)
                     return False
 
+        # Calculate total bytes to upload and time the upload phase
         upload_tasks = [upload_file(path) for path in temp_dir.rglob("*") if path.is_file()]
+        total_bytes = sum(path.stat().st_size for path in temp_dir.rglob("*") if path.is_file())
+        total_mb = total_bytes / (1024 * 1024)
+
+        upload_start = time.time()
         results = await asyncio.gather(*upload_tasks)
+        upload_duration = time.time() - upload_start
+
         if not all(results):
             logger.error("Some checkpoint files failed to upload for window %s", target_window)
             return False
+
+        # Calculate and log upload speed
+        upload_speed_mbps = total_mb / upload_duration if upload_duration > 0 else 0
+        logger.info(
+            "⬆️ Upload summary: %.1f MB in %.1fs (%.1f MB/s)",
+            total_mb,
+            upload_duration,
+            upload_speed_mbps,
+        )
 
         # Verify all uploaded files have the correct size
         logger.info("Verifying uploaded checkpoint files...")
