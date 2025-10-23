@@ -48,68 +48,77 @@ class GRAILProofValidator(Validator):
             proof_version = ctx.commit.get("proof_version")
 
             if not proof_version or proof_version != GRAIL_PROOF_VERSION:
-                logger.debug(f"Invalid or missing proof version: {proof_version}")
-                ctx.checks[self.check_name] = False
-                return False
+                logger.debug(
+                    f"[proof_valid] Proof version validation failed | "
+                    f"Expected: {GRAIL_PROOF_VERSION} | "
+                    f"Got: {proof_version}"
+                )
 
             if not commitments:
-                logger.debug("Missing commitments in proof")
-                ctx.checks[self.check_name] = False
-                return False
+                logger.debug(
+                    f"[proof_valid] Commitments missing or empty | commitments={commitments}"
+                )
 
         except KeyError as e:
-            logger.debug(f"Missing required field in commit: {e}")
-            ctx.checks[self.check_name] = False
-            return False
+            logger.debug(f"[proof_valid] Required field missing in commit | Missing field: {e}")
 
         # Validate structure
         if not isinstance(commitments, list) or len(tokens) != len(commitments):
             logger.debug(
-                f"Invalid commitments: len(tokens)={len(tokens)}, "
-                f"len(commitments)={len(commitments)}"
+                f"[proof_valid] Commitments structure mismatch | "
+                f"tokens_len={len(tokens)} | "
+                f"commitments_len={len(commitments)} | "
+                f"commitments_type={type(commitments).__name__}"
             )
-            ctx.checks[self.check_name] = False
-            return False
 
         # Minimum sequence length check
         seq_len = len(tokens)
         if seq_len < CHALLENGE_K:
-            logger.debug(f"Sequence too short: {seq_len} < {CHALLENGE_K}")
-            ctx.checks[self.check_name] = False
-            return False
+            logger.debug(
+                f"[proof_valid] Sequence too short | Expected: >={CHALLENGE_K} | Got: {seq_len}"
+            )
 
         # Verify commit signature binding
         if not verify_commit_signature(ctx.commit, ctx.prover_address):
-            logger.debug("Commit signature verification failed")
-            ctx.checks[self.check_name] = False
-            return False
+            logger.debug(
+                f"[proof_valid] Signature verification failed | "
+                f"prover_address={ctx.prover_address} | "
+                f"tokens_hash={hash(tuple(tokens))} | "
+                f"Possible causes: invalid signature, tampered data, wrong prover"
+            )
 
         # Verify model/layer binding
         model_info = ctx.commit.get("model", {})
         expected_model = getattr(ctx.model, "name_or_path", None)
         if model_info.get("name") != expected_model:
-            logger.debug(f"Model mismatch: expected {expected_model}, got {model_info.get('name')}")
-            ctx.checks[self.check_name] = False
-            return False
+            logger.debug(
+                f"[proof_valid] Model mismatch | "
+                f"Expected: {expected_model} | "
+                f"Got: {model_info.get('name')}"
+            )
 
         try:
             layer_claim = int(model_info.get("layer_index"))
         except (TypeError, ValueError):
-            logger.debug("Invalid layer_index in commit")
-            ctx.checks[self.check_name] = False
-            return False
+            logger.debug(
+                f"[proof_valid] Invalid layer_index in commit | "
+                f"layer_index_value={model_info.get('layer_index')} | "
+                f"layer_index_type={type(model_info.get('layer_index')).__name__}"
+            )
 
         if layer_claim != LAYER_INDEX:
-            logger.debug(f"Layer mismatch: expected {LAYER_INDEX}, got {layer_claim}")
-            ctx.checks[self.check_name] = False
-            return False
+            logger.debug(
+                f"[proof_valid] Layer mismatch | Expected: {LAYER_INDEX} | Got: {layer_claim}"
+            )
 
         # Get beacon randomness
         beacon = ctx.commit.get("beacon", {})
         if not beacon or "randomness" not in beacon:
-            logger.debug("Missing beacon randomness")
-            ctx.checks[self.check_name] = False
-            return False
+            logger.debug(
+                f"[proof_valid] Beacon randomness missing | "
+                f"beacon_present={bool(beacon)} | "
+                f"beacon_keys={list(beacon.keys()) if beacon else []}"
+            )
 
         randomness_hex = beacon["randomness"]
 
@@ -131,9 +140,15 @@ class GRAILProofValidator(Validator):
             with torch.inference_mode():
                 outs = ctx.model(full_ids, output_hidden_states=True)
         except RuntimeError as e:
-            logger.error(f"Model inference failed: {e}")
             vocab_size = resolve_vocab_size(ctx.model.config)
-            logger.error(f"Vocab={vocab_size}, tokens range=[{min(tokens)}, {max(tokens)}]")
+            logger.error(
+                f"[proof_valid] Model inference failed | "
+                f"error={str(e)} | "
+                f"vocab_size={vocab_size} | "
+                f"token_range=[{min(tokens)}, {max(tokens)}] | "
+                f"seq_len={seq_len} | "
+                f"device={ctx.device}"
+            )
             ctx.checks[self.check_name] = False
             return False
 
@@ -146,9 +161,12 @@ class GRAILProofValidator(Validator):
         failed_checks = []
         for i in idxs:
             if i >= len(commitments):
-                logger.debug(f"Index {i} out of bounds for commitments length {len(commitments)}")
-                ctx.checks[self.check_name] = False
-                return False
+                logger.debug(
+                    f"[proof_valid] Challenge index out of bounds | "
+                    f"index={i} | "
+                    f"commitments_len={len(commitments)} | "
+                    f"sequence_length={seq_len}"
+                )
 
             is_valid, diagnostics = verifier.verify_commitment(
                 h_layer[i], commitments[i], r_vec, seq_len
@@ -157,22 +175,34 @@ class GRAILProofValidator(Validator):
             if not is_valid:
                 failed_checks.append((i, diagnostics))
                 logger.debug(
-                    f"Proof verification failed at position {i}: "
-                    f"sketch_diff={diagnostics['sketch_diff']} "
-                    f"(tol={diagnostics['sketch_tolerance']}), "
-                    f"rank_matches={diagnostics['rank_matches']}"
-                    f"/{diagnostics['rank_tolerance']}, "
-                    f"hist_diff={diagnostics['histogram_diff']}"
-                    f"/{diagnostics['histogram_tolerance']}"
+                    f"[proof_valid] Commitment verification failed at position {i} | "
+                    f"Sketch: diff={diagnostics['sketch_diff']:.6f} | "
+                    f"tolerance={diagnostics['sketch_tolerance']:.6f} | "
+                    f"Rank: matches={diagnostics['rank_matches']} | "
+                    f"tolerance={diagnostics['rank_tolerance']} | "
+                    f"Histogram: diff={diagnostics['histogram_diff']:.6f} | "
+                    f"tolerance={diagnostics['histogram_tolerance']:.6f}"
                 )
 
         if failed_checks:
+            failure_details = "; ".join(f"pos={i}" for i, _ in failed_checks)
             logger.debug(
-                f"Proof verification failed at {len(failed_checks)}/{CHALLENGE_K} positions"
+                f"[proof_valid] FAILED | "
+                f"failed_positions={len(failed_checks)}/{CHALLENGE_K} | "
+                f"positions=[{failure_details}] | "
+                f"seq_len={seq_len} | "
+                f"model={model_info.get('name')} | "
+                f"layer={layer_claim}"
             )
             ctx.checks[self.check_name] = False
             return False
 
-        logger.debug("GRAIL proof verification successful")
+        logger.debug(
+            f"[proof_valid] SUCCESS | "
+            f"seq_len={seq_len} | "
+            f"verified_positions={CHALLENGE_K} | "
+            f"model={model_info.get('name')} | "
+            f"layer={layer_claim}"
+        )
         ctx.checks[self.check_name] = True
         return True

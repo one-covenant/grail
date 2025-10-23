@@ -65,6 +65,7 @@ class CheckpointMetadata:
     training_config: dict[str, Any] = field(default_factory=dict)
     git_commit: str = "unknown"
     created_at: float = 0.0
+    model_name: str | None = None
 
     def remote_prefix(self) -> str:
         return f"{CHECKPOINT_PREFIX}checkpoint-{self.window}"
