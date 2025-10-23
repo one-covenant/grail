@@ -158,6 +158,9 @@ async def publish_checkpoint(
             json.dumps(training_config, sort_keys=True).encode()
         ).hexdigest()
 
+        # Extract model name for checkpoint metadata
+        model_name: str | None = getattr(model, "name_or_path", None)
+
         metadata = CheckpointMetadata(
             window=target_window,
             parent_window=trained_on_window,
@@ -165,6 +168,7 @@ async def publish_checkpoint(
             training_config=training_config,
             git_commit=os.getenv("GIT_COMMIT", "unknown"),
             created_at=time.time(),
+            model_name=model_name,
         )
 
         metadata_dict = {**metadata.__dict__, "config_hash": config_hash}

@@ -94,9 +94,7 @@ def get_model(
     model = AutoModelForCausalLM.from_pretrained(model_name, use_safetensors=use_safetensors)
 
     # Preserve original model name for GRAIL proof validation
-    if hasattr(model, "name_or_path") and original_model_name != model_name:
-        model.name_or_path = original_model_name
-        logger.debug(f"Preserved original model name: {original_model_name}")
+    model.name_or_path = original_model_name
 
     # Move to device
     model = model.to(device)
