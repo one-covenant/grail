@@ -134,7 +134,6 @@ class MonitoringConfig:
                 "hyperparameters": {
                     "operation_type": "training",
                     "wallet_name": wallet_part,
-                    "rollouts_per_problem": int(os.getenv("GRAIL_ROLLOUTS_PER_PROBLEM", "4")),
                 },
             }
         )

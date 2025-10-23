@@ -156,7 +156,6 @@ class Tier3TestRunner:
         env = self.base_env.copy()
         env.update(
             {
-                "GRAIL_MODEL_NAME": model_name,
                 "WANDB_RUN_NAME": (f"tier3-miner-{index}-{model_name.split('/')[-1]}"),
                 "WANDB_TAGS": f"tier3,miner,{model_name.split('/')[-1]}",
                 "CUDA_VISIBLE_DEVICES": str(gpu_id),
@@ -204,7 +203,6 @@ class Tier3TestRunner:
         env = self.base_env.copy()
         env.update(
             {
-                "GRAIL_MODEL_NAME": model_name,
                 "WANDB_RUN_NAME": f"tier3-validator-{model_name.split('/')[-1]}",
                 "WANDB_TAGS": f"tier3,validator,{model_name.split('/')[-1]}",
                 "CUDA_VISIBLE_DEVICES": str(gpu_id),

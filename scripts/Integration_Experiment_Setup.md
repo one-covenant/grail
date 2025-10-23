@@ -78,7 +78,7 @@ Key parameters to configure in `.env`:
 - `WANDB_API_KEY` - For monitoring in WandB
 - `WANDB_PROJECT` - WandB project name
 
-NOTE: Don't set `BT_WALLET_HOT` and `GRAIL_MODEL_NAME` in the `.env` file.
+NOTE: Don't set `BT_WALLET_HOT` in the `.env` file.
 
 See `.env.example` for detailed instructions on obtaining each value.
 

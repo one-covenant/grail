@@ -274,7 +274,7 @@ Normalize to weights across miners; set on-chain with `set_weights`.
 ### Common Issues
 
 - No files found: ensure miners committed read creds on-chain; verify bucket name (should be the same as your account ID) and permissions.
-- Frequent verification failures: check model alignment (`GRAIL_MODEL_NAME`), drand connectivity; fall back with `--no-drand`.
+- Frequent verification failures: check drand connectivity; fall back with `--no-drand`.
 - Weight setting fails: wallet funding/permissions and network connectivity.
 - Test mode confusion: `--test-mode` validates only your own files; disable for production.
 

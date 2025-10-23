@@ -44,7 +44,6 @@ def _set_test_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GRAIL_MONITORING_BACKEND", "null")
     monkeypatch.setenv("BT_NETWORK", "test")
     monkeypatch.setenv("NETUID", "1")
-    monkeypatch.setenv("GRAIL_ROLLOUTS_PER_PROBLEM", "4")
     # Ensure project root is on path when running from different CWDs
     root = str(pathlib.Path(__file__).resolve().parents[1])
     if root not in sys.path:
