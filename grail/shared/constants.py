@@ -25,7 +25,7 @@ BLOCK_TIME_VARIANCE = 3
 NETWORK_UPLOAD_LATENCY = 30
 
 # Upload timeout for object storage operations (seconds)
-UPLOAD_TIMEOUT = float(os.getenv("UPLOAD_TIMEOUT", "180"))
+UPLOAD_TIMEOUT = float(os.getenv("UPLOAD_TIMEOUT", "90"))
 
 # Grace period for upload deadline validation
 # = block variance + upload latency
