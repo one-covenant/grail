@@ -468,7 +468,7 @@ async def upload_file_chunked(
         upload_id = response["UploadId"]
 
         # Upload chunks concurrently with limited concurrency (fewer for larger chunks)
-        semaphore = asyncio.Semaphore(5 if chunk_size >= 200 * 1024 * 1024 else 15)
+        semaphore = asyncio.Semaphore(3 if chunk_size >= 200 * 1024 * 1024 else 15)
         tasks = []
 
         for i in range(0, total_size, chunk_size):
@@ -541,6 +541,51 @@ async def upload_file_chunked(
         return False
 
 
+def _is_throttling_error(error: Exception) -> bool:
+    """Detect if error is R2/S3 throttling (SlowDown, 429, RequestLimitExceeded)."""
+    error_str = str(error).lower()
+    return any(
+        code in error_str
+        for code in ["slowdown", "429", "requestlimitexceeded", "throttl"]
+    )
+
+
+async def _exponential_backoff(
+    attempt: int,
+    max_retries: int,
+    base_delay: float = 1.0,
+    max_delay: float = 32.0,
+    is_throttle: bool = False,
+) -> float:
+    """Calculate exponential backoff with jitter for retries.
+    
+    Args:
+        attempt: Current attempt number (0-indexed)
+        max_retries: Total retry attempts
+        base_delay: Base delay in seconds (default 1s)
+        max_delay: Maximum delay in seconds (default 32s)
+        is_throttle: If True, use longer delays for throttling
+    
+    Returns:
+        Delay in seconds before next retry
+    """
+    import random
+    
+    # For throttling, use longer base delay and cap
+    if is_throttle:
+        base_delay = 2.0
+        max_delay = 60.0
+    
+    # Exponential backoff: 2^attempt * base_delay
+    delay = min(base_delay * (2 ** attempt), max_delay)
+    
+    # Add jitter: ±25% of delay to avoid thundering herd
+    jitter = delay * 0.25 * (2 * random.random() - 1)
+    final_delay = max(0.1, delay + jitter)
+    
+    return final_delay
+
+
 async def _upload_single_chunk(
     key: str,
     data: bytes,
@@ -566,10 +611,10 @@ async def _upload_single_chunk(
             return True
         except asyncio.TimeoutError:
             if attempt < max_retries - 1:
-                wait_time = 2**attempt  # Exponential backoff
+                wait_time = await _exponential_backoff(attempt, max_retries)
                 logger.warning(
                     f"Upload attempt {attempt + 1} timeout for {key} (waited {upload_timeout}s), "
-                    f"retrying in {wait_time}s"
+                    f"retrying in {wait_time:.1f}s"
                 )
                 await asyncio.sleep(wait_time)
             else:
@@ -580,9 +625,11 @@ async def _upload_single_chunk(
                 return False
         except Exception as e:
             if attempt < max_retries - 1:
-                wait_time = 2**attempt  # Exponential backoff
+                is_throttle = _is_throttling_error(e)
+                wait_time = await _exponential_backoff(attempt, max_retries, is_throttle=is_throttle)
                 logger.warning(
-                    f"Upload attempt {attempt + 1} failed for {key}, retrying in {wait_time}s: {e}"
+                    f"Upload attempt {attempt + 1} failed for {key}, retrying in {wait_time:.1f}s "
+                    f"({'throttled' if is_throttle else 'error'}): {e}"
                 )
                 await asyncio.sleep(wait_time)
             else:
@@ -625,10 +672,10 @@ async def _upload_chunk_with_semaphore(
                 return {"PartNumber": part_number, "ETag": response["ETag"]}
             except asyncio.TimeoutError:
                 if attempt < max_retries - 1:
-                    wait_time = 2**attempt  # Exponential backoff
+                    wait_time = await _exponential_backoff(attempt, max_retries)
                     logger.warning(
                         f"Chunk {part_number} attempt {attempt + 1} timeout "
-                        f"(waited {upload_timeout}s), retrying in {wait_time}s"
+                        f"(waited {upload_timeout}s), retrying in {wait_time:.1f}s"
                     )
                     await asyncio.sleep(wait_time)
                 else:
@@ -641,10 +688,11 @@ async def _upload_chunk_with_semaphore(
                     ) from None
             except Exception as e:
                 if attempt < max_retries - 1:
-                    wait_time = 2**attempt  # Exponential backoff
+                    is_throttle = _is_throttling_error(e)
+                    wait_time = await _exponential_backoff(attempt, max_retries, is_throttle=is_throttle)
                     logger.warning(
-                        f"Chunk {part_number} attempt {attempt + 1} failed, "
-                        f"retrying in {wait_time}s: {e}"
+                        f"Chunk {part_number} attempt {attempt + 1} failed, retrying in {wait_time:.1f}s "
+                        f"({'throttled' if is_throttle else 'error'}): {e}"
                     )
                     await asyncio.sleep(wait_time)
                 else:
