@@ -293,6 +293,12 @@ class TrainerService:
                 tags={"window_number": str(window_num)},
             )
 
+        # Log timing context for checkpoint publishing
+        logger.info(
+            "Checkpoint publishing took %.1fs (includes uploads, verification, and metadata)",
+            publish_duration,
+        )
+
         # Verify checkpoint was published before deadline
         try:
             final_block = await subtensor.get_current_block()
