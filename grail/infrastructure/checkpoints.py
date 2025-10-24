@@ -180,6 +180,7 @@ class CheckpointManager:
                         raise CheckpointDownloadError(f"Integrity check failed for window {window}")
 
                     # Persist manifest locally for later offline verification
+                    # TODO: make this meta_data handling more neat and apply DRY later
                     manifest_path = tmp_dir / "metadata.json"
                     manifest_path.write_text(
                         json.dumps(
@@ -190,6 +191,7 @@ class CheckpointManager:
                                 "training_config": metadata.training_config,
                                 "git_commit": metadata.git_commit,
                                 "created_at": metadata.created_at,
+                                "model_name": metadata.model_name,
                             },
                             ensure_ascii=False,
                             indent=2,
