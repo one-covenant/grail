@@ -65,7 +65,7 @@ class CheckpointMetadata:
     training_config: dict[str, Any] = field(default_factory=dict)
     git_commit: str = "unknown"
     created_at: float = 0.0
-    model_name: str | None = None
+    model_name: str = "no_name"
 
     def remote_prefix(self) -> str:
         return f"{CHECKPOINT_PREFIX}checkpoint-{self.window}"
@@ -353,6 +353,7 @@ class CheckpointManager:
             training_config=payload.get("training_config", {}),
             git_commit=payload.get("git_commit", "unknown"),
             created_at=float(payload.get("created_at", 0.0)),
+            model_name=payload.get("model_name", "no_name"),
         )
         self._metadata_cache[window] = metadata
         return metadata

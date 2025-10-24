@@ -159,7 +159,7 @@ async def publish_checkpoint(
         ).hexdigest()
 
         # Extract model name for checkpoint metadata
-        model_name: str | None = getattr(model, "name_or_path", None)
+        model_name: str = getattr(model, "name_or_path", "no_name")
 
         metadata = CheckpointMetadata(
             window=target_window,
