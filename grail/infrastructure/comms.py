@@ -544,10 +544,7 @@ async def upload_file_chunked(
 def _is_throttling_error(error: Exception) -> bool:
     """Detect if error is R2/S3 throttling (SlowDown, 429, RequestLimitExceeded)."""
     error_str = str(error).lower()
-    return any(
-        code in error_str
-        for code in ["slowdown", "429", "requestlimitexceeded", "throttl"]
-    )
+    return any(code in error_str for code in ["slowdown", "429", "requestlimitexceeded", "throttl"])
 
 
 async def _exponential_backoff(
@@ -558,31 +555,31 @@ async def _exponential_backoff(
     is_throttle: bool = False,
 ) -> float:
     """Calculate exponential backoff with jitter for retries.
-    
+
     Args:
         attempt: Current attempt number (0-indexed)
         max_retries: Total retry attempts
         base_delay: Base delay in seconds (default 1s)
         max_delay: Maximum delay in seconds (default 32s)
         is_throttle: If True, use longer delays for throttling
-    
+
     Returns:
         Delay in seconds before next retry
     """
     import random
-    
+
     # For throttling, use longer base delay and cap
     if is_throttle:
         base_delay = 2.0
         max_delay = 60.0
-    
+
     # Exponential backoff: 2^attempt * base_delay
-    delay = min(base_delay * (2 ** attempt), max_delay)
-    
+    delay = min(base_delay * (2**attempt), max_delay)
+
     # Add jitter: ±25% of delay to avoid thundering herd
     jitter = delay * 0.25 * (2 * random.random() - 1)
     final_delay = max(0.1, delay + jitter)
-    
+
     return final_delay
 
 
@@ -626,7 +623,9 @@ async def _upload_single_chunk(
         except Exception as e:
             if attempt < max_retries - 1:
                 is_throttle = _is_throttling_error(e)
-                wait_time = await _exponential_backoff(attempt, max_retries, is_throttle=is_throttle)
+                wait_time = await _exponential_backoff(
+                    attempt, max_retries, is_throttle=is_throttle
+                )
                 logger.warning(
                     f"Upload attempt {attempt + 1} failed for {key}, retrying in {wait_time:.1f}s "
                     f"({'throttled' if is_throttle else 'error'}): {e}"
@@ -689,7 +688,9 @@ async def _upload_chunk_with_semaphore(
             except Exception as e:
                 if attempt < max_retries - 1:
                     is_throttle = _is_throttling_error(e)
-                    wait_time = await _exponential_backoff(attempt, max_retries, is_throttle=is_throttle)
+                    wait_time = await _exponential_backoff(
+                        attempt, max_retries, is_throttle=is_throttle
+                    )
                     logger.warning(
                         f"Chunk {part_number} attempt {attempt + 1} failed, retrying in {wait_time:.1f}s "
                         f"({'throttled' if is_throttle else 'error'}): {e}"
