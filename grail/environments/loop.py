@@ -14,8 +14,8 @@ import hashlib
 import json
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import Any, Protocol, cast
 
 import bittensor as bt
 import torch
@@ -25,6 +25,192 @@ from ..shared.hf_compat import resolve_hidden_size
 from .core import ChatMessage, MultiTurnEnv
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class GenerationParams:
+    """Text generation parameters passed to backends.
+
+    Supports per-sample deterministic generation via seeds when the backend
+    implementation allows it (HF via torch.Generator list; vLLM via seed field).
+    """
+
+    max_new_tokens: int = MAX_NEW_TOKENS
+    temperature: float = 0.7
+    do_sample: bool = True
+    top_p: float = 0.95
+    top_k: int | None = 50
+    repetition_penalty: float | None = 1.1
+    trim_right_padding: bool = False
+
+
+class TextGenBackend(Protocol):
+    """Abstract interface for batched text generation backends."""
+
+    def generate(
+        self,
+        prompt_ids_batch: list[list[int]],
+        *,
+        params: GenerationParams,
+        seeds: list[int] | None = None,
+    ) -> list[list[int]]:
+        """Return full sequences (prompt + completion) for each prompt in batch.
+
+        Backends must left-pad internally and remove left padding before
+        returning, so returned sequences are aligned as [prompt + completion].
+        If params.trim_right_padding is True, they should trim any trailing pad
+        tokens in the completion region as appropriate for the tokenizer.
+        """
+        ...
+
+
+class HFBackend:
+    """HuggingFace generation backend using a provided model/tokenizer instance.
+
+    This backend does not own the model; it reuses the instance passed in to
+    maintain a single copy in memory when used for both generation and proofs.
+    """
+
+    def __init__(self, model: Any, tokenizer: Any, device: str) -> None:
+        self._model = model
+        self._tokenizer = tokenizer
+        self._device = device
+
+    def generate(
+        self,
+        prompt_ids_batch: list[list[int]],
+        *,
+        params: GenerationParams,
+        seeds: list[int] | None = None,
+    ) -> list[list[int]]:
+        batch_size = len(prompt_ids_batch)
+        if batch_size == 0:
+            return []
+
+        pad_id = self._tokenizer.pad_token_id or self._tokenizer.eos_token_id
+        eos_id = self._tokenizer.eos_token_id
+
+        # Left-pad inputs to max length
+        max_len = max(len(p) for p in prompt_ids_batch)
+        padded_inputs: list[list[int]] = []
+        attention_masks: list[list[int]] = []
+        left_pads: list[int] = []
+        for p in prompt_ids_batch:
+            pad_len = max_len - len(p)
+            padded_inputs.append([pad_id] * pad_len + p)
+            attention_masks.append([0] * pad_len + [1] * len(p))
+            left_pads.append(pad_len)
+
+        input_ids = torch.tensor(padded_inputs, dtype=torch.long, device=self._device)
+        attention_mask = torch.tensor(attention_masks, dtype=torch.long, device=self._device)
+
+        gen_kwargs: dict[str, Any] = {
+            "max_new_tokens": int(params.max_new_tokens),
+            "temperature": float(params.temperature),
+            "do_sample": bool(params.do_sample),
+            "top_p": float(params.top_p),
+            "return_dict_in_generate": True,
+            "pad_token_id": pad_id,
+            "eos_token_id": eos_id,
+        }
+        if params.top_k is not None:
+            gen_kwargs["top_k"] = int(params.top_k)
+        if params.repetition_penalty is not None:
+            gen_kwargs["repetition_penalty"] = float(params.repetition_penalty)
+
+        if seeds is not None and len(seeds) == batch_size:
+            generators: list[torch.Generator] = []
+            for s in seeds:
+                g = torch.Generator(device=self._device)
+                g.manual_seed(int(s))
+                generators.append(g)
+            gen_kwargs["generator"] = generators
+
+        with torch.inference_mode():
+            outputs = self._model.generate(
+                input_ids,
+                attention_mask=attention_mask,
+                **gen_kwargs,
+            )
+
+        results: list[list[int]] = []
+        for b in range(batch_size):
+            seq = outputs.sequences[b]
+            # Remove left padding
+            seq_wo_left = seq[left_pads[b] :]
+            all_ids = seq_wo_left.tolist()
+
+            if params.trim_right_padding:
+                # Trim trailing padding conservatively
+                if pad_id is not None and pad_id != eos_id:
+                    # Find last non-pad index
+                    last_non_pad = len(all_ids) - 1
+                    while last_non_pad >= 0 and all_ids[last_non_pad] == pad_id:
+                        last_non_pad -= 1
+                    all_ids = all_ids[: max(0, last_non_pad + 1)]
+            results.append(all_ids)
+
+        return results
+
+
+class VLLMBackend:
+    """vLLM generation backend.
+
+    Expects an engine object with a `generate(prompts, **kwargs)` API that
+    returns results per prompt, each with an `.outputs[0]` containing either
+    `token_ids` (preferred) or `text`. We reconstruct full sequences by
+    concatenating prompt token IDs with completion token IDs if available.
+    """
+
+    def __init__(self, engine: Any, tokenizer: Any) -> None:
+        self._engine = engine
+        self._tokenizer = tokenizer
+
+    def generate(
+        self,
+        prompt_ids_batch: list[list[int]],
+        *,
+        params: GenerationParams,
+        seeds: list[int] | None = None,
+    ) -> list[list[int]]:
+        prompts: list[str] = [
+            self._tokenizer.decode(p, skip_special_tokens=False) for p in prompt_ids_batch
+        ]
+
+        kwargs: dict[str, Any] = {
+            "max_tokens": int(params.max_new_tokens),
+            "temperature": float(params.temperature),
+            "top_p": float(params.top_p),
+        }
+        # Best-effort seeds support (depends on engine)
+        if seeds is not None:
+            kwargs["seeds"] = [int(s) for s in seeds]
+
+        results_raw = self._engine.generate(prompts, **kwargs)
+
+        results: list[list[int]] = []
+        for p_ids, out in zip(prompt_ids_batch, results_raw, strict=False):
+            try:
+                # Common vLLM shape: out.outputs[0].token_ids are completion IDs
+                completion_ids = cast(list[int], out.outputs[0].token_ids)
+                results.append(p_ids + completion_ids)
+            except Exception:
+                # Fallback to text-based reconstruction
+                try:
+                    text = cast(str, out.outputs[0].text)
+                    # Re-tokenize full text (prompt + completion)
+                    full_ids = self._tokenizer(
+                        text, return_tensors=None, return_attention_mask=False
+                    )["input_ids"]
+                    # Ensure list[int]
+                    if isinstance(full_ids[0], list):
+                        full_ids = full_ids[0]
+                    results.append(cast(list[int], full_ids))
+                except Exception:
+                    # As a last resort, return prompt only
+                    results.append(list(p_ids))
+
+        return results
 
 
 @dataclass
@@ -61,6 +247,12 @@ class AgentEnvLoop:
         max_new_tokens: int = MAX_NEW_TOKENS,
         temperature: float = 0.7,
         batch_size: int = 1,
+        *,
+        do_sample: bool = True,
+        top_p: float = 0.95,
+        top_k: int | None = 50,
+        repetition_penalty: float | None = 1.1,
+        gen_backend: TextGenBackend | None = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -68,6 +260,20 @@ class AgentEnvLoop:
         self.max_new_tokens = int(max_new_tokens)
         self.temperature = float(temperature)
         self.batch_size = int(batch_size)
+
+        self._gen_params = GenerationParams(
+            max_new_tokens=self.max_new_tokens,
+            temperature=self.temperature,
+            do_sample=do_sample,
+            top_p=top_p,
+            top_k=top_k,
+            repetition_penalty=repetition_penalty,
+            trim_right_padding=False,
+        )
+
+        # Default backend: reuse the same HF model instance for generation
+        # to avoid increasing memory usage when also computing proofs.
+        self._backend: TextGenBackend = gen_backend or HFBackend(model, tokenizer, device)
 
         self._hidden_dim = resolve_hidden_size(self.model)
 
@@ -286,6 +492,33 @@ class AgentEnvLoop:
 
         return rollouts
 
+    # ---------------------- Shared eval helpers ----------------------
+    def render_prompt_ids_batch(self, messages_list: list[list[dict[str, str]]]) -> list[list[int]]:
+        """Render a batch of chat messages to token IDs using the tokenizer's template."""
+        results: list[list[int]] = []
+        for messages in messages_list:
+            _rendered, prompt_ids = self._render_chat(messages)
+            results.append(prompt_ids)
+        return results
+
+    def generate_from_prompt_ids_batch(
+        self,
+        prompt_ids_batch: list[list[int]],
+        *,
+        seeds: list[int] | None = None,
+        trim_right_padding: bool = False,
+    ) -> list[tuple[list[int], int]]:
+        """Generate sequences for a batch of tokenized prompts.
+
+        Returns list of (all_token_ids, prompt_len) pairs.
+        """
+        params = replace(self._gen_params, trim_right_padding=trim_right_padding)
+        sequences = self._backend.generate(prompt_ids_batch, params=params, seeds=seeds)
+        results: list[tuple[list[int], int]] = []
+        for p_ids, seq in zip(prompt_ids_batch, sequences, strict=False):
+            results.append((seq, len(p_ids)))
+        return results
+
     def _render_chat(
         self,
         messages: list[dict[str, str]],
@@ -317,34 +550,11 @@ class AgentEnvLoop:
         Logprobs will be computed in a single forward pass with commitments.
         Returns tokens trimmed of right padding.
         """
-        input_ids = torch.tensor([prompt_ids], dtype=torch.long).to(self.device)
-        attention_mask = torch.ones_like(input_ids).to(self.device)
-        prompt_len = int(input_ids.shape[1])
-
-        # Use proper pad_token_id; only fallback to eos if no pad token exists
-        pad_id = self.tokenizer.pad_token_id
-        if pad_id is None:
-            pad_id = self.tokenizer.eos_token_id
-            logger.debug("Using eos_token_id as pad_token_id fallback")
-
-        with torch.inference_mode():
-            outputs = self.model.generate(
-                input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=self.max_new_tokens,
-                temperature=self.temperature,
-                do_sample=True,
-                top_p=0.95,
-                top_k=50,
-                repetition_penalty=1.1,
-                return_dict_in_generate=True,
-                pad_token_id=pad_id,
-                eos_token_id=self.tokenizer.eos_token_id,
-            )
-
-        # Trim right padding before returning
-        all_token_ids, _ = self._trim_right_padding(outputs.sequences[0], prompt_len)
-        return all_token_ids, prompt_len
+        batch = [prompt_ids]
+        params = replace(self._gen_params, trim_right_padding=True)
+        sequences = self._backend.generate(batch, params=params, seeds=None)
+        # Left padding is removed by backend, so prompt_len is original length
+        return sequences[0], len(prompt_ids)
 
     def _batch_generate_tokens(
         self,
@@ -360,66 +570,21 @@ class AgentEnvLoop:
         # Fast path for single prompt
         if batch_size == 1:
             _, prompt_ids = self._render_chat(prompts_list[0])
-            return [self._generate_tokens(prompt_ids)]
+            seq, prompt_len = self._generate_tokens(prompt_ids)
+            return [(seq, prompt_len)]
 
         # Render all prompts and collect token IDs
-        prompt_ids_list = []
+        prompt_ids_list: list[list[int]] = []
         for prompts in prompts_list:
-            _, prompt_ids = self._render_chat(prompts)
+            _rendered, prompt_ids = self._render_chat(prompts)
             prompt_ids_list.append(prompt_ids)
 
-        # Store original prompt lengths (before padding)
-        original_prompt_lens = [len(p) for p in prompt_ids_list]
-        max_prompt_len = max(original_prompt_lens)
+        params = replace(self._gen_params, trim_right_padding=True)
+        sequences = self._backend.generate(prompt_ids_list, params=params, seeds=None)
 
-        # Left-pad all prompts to same length (standard for causal LM)
-        pad_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
-        padded_inputs = []
-        attention_masks = []
-
-        for prompt_ids in prompt_ids_list:
-            pad_len = max_prompt_len - len(prompt_ids)
-            padded = [pad_id] * pad_len + prompt_ids
-            mask = [0] * pad_len + [1] * len(prompt_ids)
-            padded_inputs.append(padded)
-            attention_masks.append(mask)
-
-        input_ids = torch.tensor(padded_inputs, dtype=torch.long).to(self.device)
-        attention_mask = torch.tensor(attention_masks, dtype=torch.long).to(self.device)
-
-        # Batch generate (no logits output for efficiency)
-        with torch.inference_mode():
-            outputs = self.model.generate(
-                input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=self.max_new_tokens,
-                temperature=self.temperature,
-                do_sample=True,
-                top_p=0.95,
-                top_k=50,
-                repetition_penalty=1.1,
-                return_dict_in_generate=True,
-                pad_token_id=pad_id,
-                eos_token_id=self.tokenizer.eos_token_id,
-            )
-
-        # Extract results for each sequence
-        results = []
-        for batch_idx in range(batch_size):
-            original_prompt_len = original_prompt_lens[batch_idx]
-            pad_len = max_prompt_len - original_prompt_len
-
-            # Get full generated sequence (includes: padding + original_prompt + completion)
-            full_seq = outputs.sequences[batch_idx]
-
-            # Strip left padding to recover [original_prompt + completion]
-            seq_without_left_pad = full_seq[pad_len:]
-
-            # Trim right padding before returning
-            all_token_ids, _ = self._trim_right_padding(seq_without_left_pad, original_prompt_len)
-
-            results.append((all_token_ids, original_prompt_len))
-
+        results: list[tuple[list[int], int]] = []
+        for p_ids, seq in zip(prompt_ids_list, sequences, strict=False):
+            results.append((seq, len(p_ids)))
         return results
 
     def _trim_right_padding(
