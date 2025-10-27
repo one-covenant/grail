@@ -13,9 +13,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-import torch
-
 from grail.environments.core import ChatMessage, MultiTurnEnv
+from grail.environments.loop import AgentEnvLoop
 from grail.environments.vector import EnvVector
 from grail.trainer.config import EvalConfig
 from grail.trainer.eval_aggregator import EvalAggregator, TaskReplicateResult
@@ -52,74 +51,20 @@ class EvaluatorService:
 
         self._vector = EnvVector(env_factory, batch_size=self._cfg.batch_size)
 
+        # Reuse AgentEnvLoop for rendering and generation to avoid duplication
+        self._loop = AgentEnvLoop(
+            model=self._model,
+            tokenizer=self._tokenizer,
+            device=self._device,
+            max_new_tokens=self._cfg.max_new_tokens,
+            temperature=self._cfg.temperature,
+            batch_size=self._cfg.batch_size,
+            do_sample=self._cfg.do_sample,
+            top_p=self._cfg.top_p,
+        )
+
     def _render_prompts(self, prompts_list: list[list[dict[str, str]]]) -> list[list[int]]:
-        # Reuse AgentEnvLoop logic for chat rendering and tokenization
-        input_ids: list[list[int]] = []
-        for msgs in prompts_list:
-            rendered = self._tokenizer.apply_chat_template(
-                msgs,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-            toks = self._tokenizer(rendered, return_tensors="pt", return_attention_mask=False)
-            input_ids.append(toks.input_ids[0].tolist())
-        return input_ids
-
-    def _generate_batch(
-        self,
-        batch_prompt_ids: list[list[int]],
-        generators: list[torch.Generator] | None,
-    ) -> list[list[int]]:
-        # Similar to AgentEnvLoop._batch_generate_tokens but returns trimmed sequences
-        pad_id = self._tokenizer.pad_token_id or self._tokenizer.eos_token_id
-        max_len = max(len(p) for p in batch_prompt_ids)
-        padded_inputs = []
-        attention_masks = []
-        for p in batch_prompt_ids:
-            pad_len = max_len - len(p)
-            padded_inputs.append([pad_id] * pad_len + p)
-            attention_masks.append([0] * pad_len + [1] * len(p))
-
-        input_ids = torch.tensor(padded_inputs, dtype=torch.long, device=self._device)
-        attention_mask = torch.tensor(attention_masks, dtype=torch.long, device=self._device)
-
-        gen_kwargs: dict[str, Any] = {
-            "max_new_tokens": self._cfg.max_new_tokens,
-            "temperature": self._cfg.temperature,
-            "do_sample": self._cfg.do_sample,
-            "top_p": self._cfg.top_p,
-            "return_dict_in_generate": True,
-            "pad_token_id": pad_id,
-            "eos_token_id": self._tokenizer.eos_token_id,
-        }
-        if generators is not None and len(generators) == input_ids.size(0):
-            gen_kwargs["generator"] = generators
-
-        with torch.inference_mode():
-            outputs = self._model.generate(
-                input_ids,
-                attention_mask=attention_mask,
-                **gen_kwargs,
-            )
-
-        results: list[list[int]] = []
-        for b in range(input_ids.size(0)):
-            # Remove left padding and trim right padding similar to existing helper
-            seq = outputs.sequences[b]
-            left_pad = max_len - len(batch_prompt_ids[b])
-            seq_wo_left = seq[left_pad:]
-            # Trim right padding
-            all_ids = seq_wo_left.tolist()
-            results.append(all_ids)
-        return results
-
-    def _build_generators(self, seeds: list[int]) -> list[torch.Generator]:
-        gens: list[torch.Generator] = []
-        for s in seeds:
-            g = torch.Generator(device=self._device)
-            g.manual_seed(int(s))
-            gens.append(g)
-        return gens
+        return self._loop.render_prompt_ids_batch(prompts_list)
 
     async def run_cycle(
         self,
@@ -165,14 +110,17 @@ class EvaluatorService:
                     expanded_seeds.append(plan.seed_for(task_id, r_idx))
 
             prompt_ids = self._render_prompts(expanded_msgs)
-            generators = self._build_generators(expanded_seeds)
-            sequences = self._generate_batch(prompt_ids, generators)
+            # Generate sequences deterministically per replicate using seeds
+            seq_with_prompt_lens = self._loop.generate_from_prompt_ids_batch(
+                prompt_ids,
+                seeds=expanded_seeds,
+                trim_right_padding=True,
+            )
 
             # Decode and step per replicate in groups matching each original task
-            decoded: list[str] = [
-                self._tokenizer.decode(seq[len(p_ids) :], skip_special_tokens=False)
-                for seq, p_ids in zip(sequences, prompt_ids, strict=False)
-            ]
+            decoded: list[str] = []
+            for seq, prompt_len in seq_with_prompt_lens:
+                decoded.append(self._tokenizer.decode(seq[prompt_len:], skip_special_tokens=False))
 
             # Step envs per replicate, accumulate results
             # We step using the same env index for a task; since SingleTurnEnv terminates
