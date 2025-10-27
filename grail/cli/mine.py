@@ -17,6 +17,7 @@ import typer
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..environments.gsm8k_env import GSM8KEnv
+from ..environments.providers import GSM8KTaskSource
 from ..environments.loop import AgentEnvLoop
 from ..environments.sat_env import SATEnv
 from ..grail import derive_env_seed
@@ -644,9 +645,12 @@ async def generate_rollouts_for_window(
             )
 
             # Generate GRPO rollouts using AgentEnvLoop
+            # Create dataset-backed task source once per window to avoid repeated loads
+            gsm8k_source = GSM8KTaskSource() if CURRENT_ENV_ID == "gsm8k" else None
+
             def _env_factory():
                 if CURRENT_ENV_ID == "gsm8k":
-                    return GSM8KEnv()
+                    return GSM8KEnv(task_source=gsm8k_source)
                 return SATEnv()
 
             # Time the rollout generation for both logging and monitoring
