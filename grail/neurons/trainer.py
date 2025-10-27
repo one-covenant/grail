@@ -11,6 +11,8 @@ from typing import Any
 import bittensor as bt
 import torch
 
+from grail.environments.gsm8k_env import GSM8KEnv
+from grail.environments.providers import GSM8KTaskSource
 from grail.infrastructure.chain import GrailChainManager
 from grail.shared.constants import NETUID, READY_MARKER_UPLOAD_BLOCKS, WINDOW_LENGTH
 from grail.shared.window_utils import (
@@ -20,6 +22,9 @@ from grail.shared.window_utils import (
     log_window_wait_periodic,
 )
 from grail.trainer.checkpointing import finalize_checkpoint_ready
+from grail.trainer.config import EvalConfig
+from grail.trainer.eval_planner import EvaluationPlanner
+from grail.trainer.evaluator import EvaluatorService
 from grail.trainer.service import TrainerService
 
 from .base import BaseNeuron
@@ -52,6 +57,10 @@ class TrainerNeuron(BaseNeuron):
         self._window_wait_tracker = WindowWaitTracker(log_interval_secs=120)
         self._wait_start_time: float | None = None
         self._last_wait_log: float = 0.0
+        # Evaluation state
+        self._eval_cfg = EvalConfig()
+        self._eval_in_progress: bool = False
+        self._eval_last_run_window_number: int | None = None
 
     async def run(self) -> None:
         # Start the built-in watchdog (15 minute timeout)
@@ -86,6 +95,12 @@ class TrainerNeuron(BaseNeuron):
 
                 # Window is available - reset wait tracker for next time
                 self._window_wait_tracker.reset()
+
+                # Periodic evaluation at startup and every configured interval
+                if await self._maybe_run_evaluation(current_window):
+                    # Skip training when evaluation runs (may span multiple windows)
+                    last_processed_window = target_window
+                    continue
 
                 logger.info("🎓 Training window %s", target_window)
                 # Train on target window (past window), not current window
@@ -127,6 +142,75 @@ class TrainerNeuron(BaseNeuron):
                 # Force reconnect on next iteration
                 self.reset_subtensor()
                 await asyncio.sleep(30)
+
+    async def _maybe_run_evaluation(self, current_window: int) -> bool:
+        """Run evaluation if due; return True if evaluation executed."""
+        if not self._eval_cfg.enabled:
+            return False
+
+        window_number = current_window // WINDOW_LENGTH
+
+        should_start = (
+            self._eval_in_progress
+            or self._eval_last_run_window_number is None
+            or (
+                window_number % max(1, self._eval_cfg.window_interval) == 0
+                and self._eval_last_run_window_number != window_number
+            )
+        )
+
+        if not should_start:
+            return False
+
+        # Mark progress
+        self._eval_in_progress = True
+        try:
+            # Build dataset-backed evaluation (GSM8K by default)
+            source = GSM8KTaskSource(split=self._eval_cfg.split)
+
+            def env_factory() -> GSM8KEnv:
+                return GSM8KEnv(task_source=source)
+
+            planner = EvaluationPlanner(
+                replicates=self._eval_cfg.replicates,
+                seed_base=self._eval_cfg.seed_base,
+                enumerate_ids=source.iter_ids,
+            )
+            plan = planner.for_cycle(cycle_index=window_number)
+
+            evaluator = EvaluatorService(
+                model=self._context.train_model,
+                tokenizer=self._context.tokenizer,
+                env_factory=env_factory,
+                config=self._eval_cfg,
+                monitor=self._context.monitor,
+                device="cuda",
+            )
+
+            logger.info(
+                "🧪 Starting evaluation: window_number=%s ids=%s replicates=%s split=%s",
+                window_number,
+                len(plan.ids),
+                plan.replicates,
+                self._eval_cfg.split,
+            )
+
+            metrics = await evaluator.run_cycle(plan, start_offset=0, heartbeat=self.heartbeat)
+
+            if self._context.monitor:
+                await self._context.monitor.log_counter("eval/cycle_completed")
+                for key, val in metrics.items():
+                    await self._context.monitor.log_gauge(f"eval/{key}", float(val))
+
+            logger.info("🧪 Evaluation metrics: %s", metrics)
+
+            self._eval_last_run_window_number = window_number
+            return True
+        except Exception:
+            logger.exception("Evaluation failed", exc_info=True)
+            return False
+        finally:
+            self._eval_in_progress = False
 
     async def _handle_wait_for_window(
         self, target_window: int, current_block: int, last_processed_window: int

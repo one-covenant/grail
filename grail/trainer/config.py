@@ -28,3 +28,31 @@ class TrainingConfig:
     group_adv_sum_tolerance: float = constants.TRAINER_GROUP_ADV_SUM_TOL
     min_aggregate_weight: float = constants.TRAINER_MIN_AGGREGATE_WEIGHT
     min_trusted_miners: int = constants.TRAINER_MIN_TRUSTED_MINERS
+
+
+@dataclass
+class EvalConfig:
+    """Configuration for periodic evaluation cycles.
+
+    Defaults chosen to be safe and reasonably fast for initial integration.
+    """
+
+    enabled: bool = True
+    window_interval: int = 8
+    split: str = "validation"  # dataset-backed envs (e.g., GSM8K)
+    subset_size: int | None = None  # generative envs or capped dataset eval
+    seed_base: int = 2025
+    batch_size: int = 8
+    replicates: int = 10  # for pass@k / mean@k curves
+    # Decoding configuration for evaluation (separate from training)
+    max_new_tokens: int = 512
+    temperature: float = 0.7
+    top_p: float = 0.95
+    do_sample: bool = True
+    # Backend control: "hf" or "vllm" (vLLM used only if remote endpoint available)
+    backend: str = "hf"
+    use_num_return_sequences: bool = False  # HF-only optimization
+    # Metrics aggregation: which k to report (subset of 1..replicates)
+    report_ks: tuple[int, ...] = (1, 5, 10)
+    # Optional: path to store JSONL predictions (None disables)
+    store_predictions_path: str | None = None
