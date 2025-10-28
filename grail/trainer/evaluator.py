@@ -13,8 +13,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import torch
+from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeRemainingColumn
+
 from grail.environments.core import ChatMessage, MultiTurnEnv
-from grail.environments.loop import AgentEnvLoop
+from grail.environments.loop import AgentEnvLoop, VLLMBackend
 from grail.environments.vector import EnvVector
 from grail.trainer.config import EvalConfig
 from grail.trainer.eval_aggregator import EvalAggregator, TaskReplicateResult
@@ -52,6 +55,61 @@ class EvaluatorService:
         self._vector = EnvVector(env_factory, batch_size=self._cfg.batch_size)
 
         # Reuse AgentEnvLoop for rendering and generation to avoid duplication
+        gen_backend = None
+        backend_name = (self._cfg.backend or "hf").lower()
+
+        if backend_name == "sglang":
+            try:
+                from grail.environments.loop import SGLangAsyncBackend
+
+                # Use offline async engine (no HTTP server needed)
+                model_path = getattr(self._model, "name_or_path", None)
+                if not model_path:
+                    raise RuntimeError(
+                        "SGLang async backend requires model.name_or_path to initialize engine"
+                    )
+
+                # Initialize offline engine with same settings as server would have
+                gen_backend = SGLangAsyncBackend(
+                    model_path=model_path,
+                    tokenizer=self._tokenizer,
+                    dtype="bfloat16",
+                    tp_size=1,
+                    mem_fraction_static=0.85,
+                    max_running_requests=8,
+                    log_level="error",
+                )
+                logger.info("Evaluator using sgLang ASYNC (offline) backend (model=%s)", model_path)
+            except Exception:
+                logger.exception(
+                    "Failed to initialize sgLang async backend; falling back to HF backend"
+                )
+                gen_backend = None
+        elif backend_name == "vllm":
+            try:
+                # Lazy import to keep HF-only environments clean
+                from vllm import LLM  # type: ignore
+
+                model_id = getattr(self._model, "name_or_path", None)
+                if not model_id:
+                    raise RuntimeError(
+                        "vLLM backend requires model.name_or_path to initialize engine"
+                    )
+
+                # H200 (141 GB) tuned defaults: high utilization, BF16, single-GPU
+                llm = LLM(
+                    model=model_id,
+                    dtype="bfloat16",
+                    tensor_parallel_size=1,
+                    gpu_memory_utilization=0.95,
+                )
+
+                gen_backend = VLLMBackend(llm, self._tokenizer)
+                logger.info("Evaluator using vLLM backend for generation (model=%s)", model_id)
+            except Exception:
+                logger.exception("Failed to initialize vLLM backend; falling back to HF backend")
+                gen_backend = None
+
         self._loop = AgentEnvLoop(
             model=self._model,
             tokenizer=self._tokenizer,
@@ -61,7 +119,50 @@ class EvaluatorService:
             batch_size=self._cfg.batch_size,
             do_sample=self._cfg.do_sample,
             top_p=self._cfg.top_p,
+            gen_backend=gen_backend,
         )
+
+        # Store backend reference for cleanup
+        self._gen_backend = gen_backend
+
+    def shutdown(self) -> None:
+        """Release evaluation backend resources and model references.
+
+        Critical for freeing GPU memory before reloading training models.
+        Must be called after evaluation completes.
+        """
+        import gc
+
+        # Shutdown specialized backends (vLLM/SGLang engines)
+        if self._gen_backend is not None and hasattr(self._gen_backend, "shutdown"):
+            try:
+                logger.info("Shutting down evaluation backend...")
+                self._gen_backend.shutdown()
+                self._gen_backend = None
+            except Exception as e:
+                logger.warning(f"Error shutting down evaluation backend: {e}")
+
+        # Release all model references (important for HF backend)
+        # The evaluator holds references to the model in multiple places:
+        # - self._model (direct reference)
+        # - self._loop.model (AgentEnvLoop reference)
+        # - self._loop._backend (HFBackend if gen_backend is None)
+        try:
+            self._model = None
+            self._loop = None
+            self._vector = None
+
+            # Force garbage collection to release references immediately
+            gc.collect()
+
+            # Clear CUDA cache to free GPU memory
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+
+            logger.info("Evaluator resources released")
+        except Exception as e:
+            logger.warning(f"Error releasing evaluator resources: {e}")
 
     def _render_prompts(self, prompts_list: list[list[dict[str, str]]]) -> list[list[int]]:
         return self._loop.render_prompt_ids_batch(prompts_list)
@@ -81,74 +182,100 @@ class EvaluatorService:
         batch_size = self._cfg.batch_size
         t0 = time.monotonic()
 
-        # Iterate over task IDs, expanding to replicates via per-replicate seeds
-        for offset in range(start_offset, total_ids, batch_size):
-            if heartbeat is not None:
-                heartbeat()
-            batch_ids = plan.ids[offset : min(offset + batch_size, total_ids)]
-
-            # For pass@k, we generate up to plan.replicates completions per task
-            # using batch expansion: duplicate each task id k times and use distinct seeds.
-            expanded_ids: list[str] = []
-            expanded_msgs: list[list[dict[str, str]]] = []
-            expanded_seeds: list[int] = []
-
-            # Reset envs once per task (not per replicate) for correct info context
-            self._vector.reset_ids(batch_ids)
-
-            # Build prompts per replicate
-            for task_id in batch_ids:
-                # Use the reset obs from the corresponding env
-                # Grab initial observation messages directly from envs
-                env_idx = batch_ids.index(task_id)
-                # Re-reset to fetch observation deterministically for clarity
-                obs = self._vector.envs[env_idx].reset(task_id=task_id)
-                prompts = [{"role": m.role, "content": m.content} for m in obs.messages]
-                for r_idx in range(plan.replicates):
-                    expanded_ids.append(task_id)
-                    expanded_msgs.append(prompts)
-                    expanded_seeds.append(plan.seed_for(task_id, r_idx))
-
-            prompt_ids = self._render_prompts(expanded_msgs)
-            # Generate sequences deterministically per replicate using seeds
-            seq_with_prompt_lens = self._loop.generate_from_prompt_ids_batch(
-                prompt_ids,
-                seeds=expanded_seeds,
-                trim_right_padding=True,
+        # Progress bar for evaluation
+        with Progress(
+            TextColumn("[cyan]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeRemainingColumn(),
+        ) as progress:
+            prog_task = progress.add_task(
+                f"Eval {total_ids} tasks × {plan.replicates} reps",
+                total=total_ids,
             )
 
-            # Decode and step per replicate in groups matching each original task
-            decoded: list[str] = []
-            for seq, prompt_len in seq_with_prompt_lens:
-                decoded.append(self._tokenizer.decode(seq[prompt_len:], skip_special_tokens=False))
+            # Iterate over task IDs, expanding to replicates via per-replicate seeds
+            for offset in range(start_offset, total_ids, batch_size):
+                batch_start = time.monotonic()
+                if heartbeat is not None:
+                    heartbeat()
+                batch_ids = plan.ids[offset : min(offset + batch_size, total_ids)]
 
-            # Step envs per replicate, accumulate results
-            # We step using the same env index for a task; since SingleTurnEnv terminates
-            # after one step, we re-reset before each replicate to keep context identical.
-            cursor = 0
-            for env_idx, task_id in enumerate(batch_ids):
-                for r_idx in range(plan.replicates):
-                    text = decoded[cursor]
-                    _ = self._vector.envs[env_idx].reset(task_id=task_id)
-                    _obs, reward, _terminated, _truncated, info = self._vector.envs[env_idx].step(
-                        ChatMessage(role="assistant", content=text)
+                # For pass@k, we generate up to plan.replicates completions per task
+                # using batch expansion: duplicate each task id k times and use distinct seeds.
+                expanded_ids: list[str] = []
+                expanded_msgs: list[list[dict[str, str]]] = []
+                expanded_seeds: list[int] = []
+
+                # Reset envs once per task (not per replicate) for correct info context
+                self._vector.reset_ids(batch_ids)
+
+                # Build prompts per replicate
+                for task_id in batch_ids:
+                    # Use the reset obs from the corresponding env
+                    # Grab initial observation messages directly from envs
+                    env_idx = batch_ids.index(task_id)
+                    # Re-reset to fetch observation deterministically for clarity
+                    obs = self._vector.envs[env_idx].reset(task_id=task_id)
+                    prompts = [{"role": m.role, "content": m.content} for m in obs.messages]
+                    for r_idx in range(plan.replicates):
+                        expanded_ids.append(task_id)
+                        expanded_msgs.append(prompts)
+                        expanded_seeds.append(plan.seed_for(task_id, r_idx))
+
+                prompt_ids = self._render_prompts(expanded_msgs)
+                # Generate sequences deterministically per replicate using seeds
+                seq_with_prompt_lens = self._loop.generate_from_prompt_ids_batch(
+                    prompt_ids,
+                    seeds=expanded_seeds,
+                    trim_right_padding=True,
+                )
+
+                # Decode and step per replicate in groups matching each original task
+                decoded: list[str] = []
+                for seq, prompt_len in seq_with_prompt_lens:
+                    decoded.append(
+                        self._tokenizer.decode(seq[prompt_len:], skip_special_tokens=False)
                     )
-                    success = bool(info.get("success", False))
-                    aggregator.add(
-                        TaskReplicateResult(
-                            task_id=task_id,
-                            replicate_idx=r_idx,
-                            reward=float(reward),
-                            success=success,
-                            components=info.get("reward_components"),
+
+                # Step envs per replicate, accumulate results
+                # We step using the same env index for a task; since SingleTurnEnv terminates
+                # after one step, we re-reset before each replicate to keep context identical.
+                cursor = 0
+                for env_idx, task_id in enumerate(batch_ids):
+                    for r_idx in range(plan.replicates):
+                        text = decoded[cursor]
+                        _ = self._vector.envs[env_idx].reset(task_id=task_id)
+                        _obs, reward, _terminated, _truncated, info = self._vector.envs[
+                            env_idx
+                        ].step(ChatMessage(role="assistant", content=text))
+                        success = bool(info.get("success", False))
+                        aggregator.add(
+                            TaskReplicateResult(
+                                task_id=task_id,
+                                replicate_idx=r_idx,
+                                reward=float(reward),
+                                success=success,
+                                components=info.get("reward_components"),
+                            )
                         )
-                    )
-                    cursor += 1
+                        cursor += 1
 
-            if heartbeat is not None:
-                heartbeat()
-            if self._monitor:
-                await self._monitor.log_counter("eval/batches_completed")
+                # Update progress
+                progress.update(prog_task, advance=len(batch_ids))
+
+                batch_elapsed = time.monotonic() - batch_start
+                batch_prompts = len(batch_ids) * plan.replicates
+                throughput = batch_prompts / batch_elapsed if batch_elapsed > 0 else 0
+                logger.info(
+                    f"Batch {offset // batch_size + 1}: {len(batch_ids)} tasks × {plan.replicates} reps "
+                    f"({batch_prompts} prompts) in {batch_elapsed:.2f}s ({throughput:.1f} prompts/sec)"
+                )
+
+                if heartbeat is not None:
+                    heartbeat()
+                if self._monitor:
+                    await self._monitor.log_counter("eval/batches_completed")
 
         metrics = aggregator.summarize()
 
