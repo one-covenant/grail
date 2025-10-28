@@ -13,11 +13,15 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import random
+import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, cast
 
 import bittensor as bt
+import numpy as np
 import torch
 
 from ..shared.constants import GRAIL_PROOF_VERSION, LAYER_INDEX, MAX_NEW_TOKENS
@@ -25,6 +29,89 @@ from ..shared.hf_compat import resolve_hidden_size
 from .core import ChatMessage, MultiTurnEnv
 
 logger = logging.getLogger(__name__)
+
+
+def _shutdown_engine_and_free_gpu(engine_ref: Any | None, engine_name: str = "engine") -> None:
+    """Shared GPU cleanup logic for inference engines (vLLM, SGLang, etc).
+
+    Args:
+        engine_ref: Engine instance to shutdown (will be set to None by caller)
+        engine_name: Name for logging (e.g., "vLLM", "SGLang async")
+    """
+    import gc
+
+    if engine_ref is None:
+        return
+
+    try:
+        logger.info("Shutting down %s engine...", engine_name)
+
+        # Try graceful shutdown if available
+        if hasattr(engine_ref, "shutdown"):
+            engine_ref.shutdown()
+
+        # Force garbage collection to release resources
+        gc.collect()
+
+        # Synchronize GPU and clear CUDA cache
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
+        logger.info("%s engine shutdown complete", engine_name)
+    except Exception as e:
+        logger.warning("Error during %s shutdown: %s", engine_name, e)
+
+
+def _decode_prompts(tokenizer: Any, prompt_ids_batch: list[list[int]]) -> list[str]:
+    """Decode batch of token IDs to text prompts.
+
+    Args:
+        tokenizer: HuggingFace tokenizer instance
+        prompt_ids_batch: List of tokenized prompts
+
+    Returns:
+        List of decoded text prompts
+    """
+    return [tokenizer.decode(p, skip_special_tokens=False) for p in prompt_ids_batch]
+
+
+def _tokenize_completion(tokenizer: Any, completion_text: str, fallback: list[int]) -> list[int]:
+    """Tokenize completion text with error handling.
+
+    Args:
+        tokenizer: HuggingFace tokenizer instance
+        completion_text: Generated completion text
+        fallback: Token IDs to return on error (typically prompt IDs)
+
+    Returns:
+        List of completion token IDs
+    """
+    try:
+        comp_ids = tokenizer(completion_text, return_tensors=None, return_attention_mask=False)[
+            "input_ids"
+        ]
+
+        # Handle nested list structure
+        if isinstance(comp_ids, list) and len(comp_ids) > 0 and isinstance(comp_ids[0], list):
+            comp_ids = comp_ids[0]
+
+        return cast(list[int], comp_ids if isinstance(comp_ids, list) else [])
+    except (AttributeError, IndexError, TypeError, KeyError) as e:
+        logger.debug("Failed to tokenize completion: %s", e)
+        return fallback
+
+
+def _set_global_seed(seed: int) -> None:
+    """Seed all relevant RNGs for deterministic generation."""
+    seed_int = int(seed)
+    random.seed(seed_int)
+    np.random.seed(seed_int)
+    torch.manual_seed(seed_int)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed_int)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 @dataclass
@@ -118,13 +205,9 @@ class HFBackend:
         if params.repetition_penalty is not None:
             gen_kwargs["repetition_penalty"] = float(params.repetition_penalty)
 
-        if seeds is not None and len(seeds) == batch_size:
-            generators: list[torch.Generator] = []
-            for s in seeds:
-                g = torch.Generator(device=self._device)
-                g.manual_seed(int(s))
-                generators.append(g)
-            gen_kwargs["generator"] = generators
+        # Seeds are currently ignored to favor batched generation efficiency
+        if seeds is not None and seeds:
+            logger.debug("HFBackend: ignoring seeds for batched generation")
 
         with torch.inference_mode():
             outputs = self._model.generate(
@@ -166,6 +249,11 @@ class VLLMBackend:
         self._engine = engine
         self._tokenizer = tokenizer
 
+    def shutdown(self) -> None:
+        """Release vLLM engine resources and free GPU memory."""
+        _shutdown_engine_and_free_gpu(self._engine, "vLLM")
+        self._engine = None
+
     def generate(
         self,
         prompt_ids_batch: list[list[int]],
@@ -173,42 +261,420 @@ class VLLMBackend:
         params: GenerationParams,
         seeds: list[int] | None = None,
     ) -> list[list[int]]:
-        prompts: list[str] = [
-            self._tokenizer.decode(p, skip_special_tokens=False) for p in prompt_ids_batch
-        ]
+        from vllm import SamplingParams  # type: ignore
 
-        kwargs: dict[str, Any] = {
+        prompts = _decode_prompts(self._tokenizer, prompt_ids_batch)
+
+        # Map shared params to vLLM SamplingParams
+        sp_kwargs: dict[str, Any] = {
             "max_tokens": int(params.max_new_tokens),
             "temperature": float(params.temperature),
             "top_p": float(params.top_p),
         }
-        # Best-effort seeds support (depends on engine)
-        if seeds is not None:
-            kwargs["seeds"] = [int(s) for s in seeds]
+        if params.top_k is not None:
+            sp_kwargs["top_k"] = int(params.top_k)
+        if params.repetition_penalty is not None:
+            sp_kwargs["repetition_penalty"] = float(params.repetition_penalty)
 
-        results_raw = self._engine.generate(prompts, **kwargs)
+        # Create per-prompt or shared SamplingParams depending on seeds
+        if seeds is not None and len(seeds) == len(prompts):
+            params_list = [SamplingParams(**sp_kwargs, seed=int(s)) for s in seeds]
+            results_raw = self._engine.generate(prompts, params_list)
+        else:
+            sp = SamplingParams(**sp_kwargs, seed=int(seeds[0]) if seeds else None)
+            results_raw = self._engine.generate(prompts, sp)
 
         results: list[list[int]] = []
         for p_ids, out in zip(prompt_ids_batch, results_raw, strict=False):
             try:
-                # Common vLLM shape: out.outputs[0].token_ids are completion IDs
+                # vLLM returns completion token IDs directly
                 completion_ids = cast(list[int], out.outputs[0].token_ids)
                 results.append(p_ids + completion_ids)
-            except Exception:
-                # Fallback to text-based reconstruction
+            except (AttributeError, IndexError, TypeError):
+                # Fallback: re-tokenize text output
                 try:
                     text = cast(str, out.outputs[0].text)
-                    # Re-tokenize full text (prompt + completion)
-                    full_ids = self._tokenizer(
-                        text, return_tensors=None, return_attention_mask=False
-                    )["input_ids"]
-                    # Ensure list[int]
-                    if isinstance(full_ids[0], list):
-                        full_ids = full_ids[0]
-                    results.append(cast(list[int], full_ids))
-                except Exception:
-                    # As a last resort, return prompt only
+                    comp_ids = _tokenize_completion(self._tokenizer, text, [])
+                    results.append(p_ids + comp_ids)
+                except (AttributeError, IndexError, TypeError, KeyError) as e:
+                    logger.debug("Failed to extract vLLM completion: %s", e)
                     results.append(list(p_ids))
+
+        return results
+
+
+class SGLangBackend:
+    """sgLang generation backend for high-throughput inference.
+
+    Expects an engine object with a `generate` API compatible with sgLang's LLM.
+    Constructs SamplingParams and generates completions efficiently.
+    """
+
+    def __init__(self, engine: Any, tokenizer: Any) -> None:
+        self._engine = engine
+        self._tokenizer = tokenizer
+
+    def generate(
+        self,
+        prompt_ids_batch: list[list[int]],
+        *,
+        params: GenerationParams,
+        seeds: list[int] | None = None,
+    ) -> list[list[int]]:
+        prompts = _decode_prompts(self._tokenizer, prompt_ids_batch)
+
+        # Map shared params to sgLang sampling_params
+        sp_kwargs: dict[str, Any] = {
+            "max_new_tokens": int(params.max_new_tokens),
+            "temperature": float(params.temperature),
+            "top_p": float(params.top_p),
+        }
+        if params.top_k is not None:
+            sp_kwargs["top_k"] = int(params.top_k)
+        if params.repetition_penalty is not None:
+            sp_kwargs["frequency_penalty"] = float(params.repetition_penalty)
+
+        # Generate with per-prompt seeds if provided
+        if seeds is not None and len(seeds) == len(prompts):
+            results_raw = []
+            for prompt, seed in zip(prompts, seeds, strict=True):
+                sp = {**sp_kwargs, "random_seed": int(seed)}
+                out = self._engine.generate([prompt], sampling_params=sp)
+                results_raw.extend(out)
+        else:
+            sp = {**sp_kwargs, "random_seed": int(seeds[0])} if seeds else sp_kwargs
+            results_raw = self._engine.generate(prompts, sampling_params=sp)
+
+        results: list[list[int]] = []
+        for p_ids, out in zip(prompt_ids_batch, results_raw, strict=False):
+            # Extract completion text from SGLang output
+            comp_text = out.text if hasattr(out, "text") and isinstance(out.text, str) else str(out)
+            comp_ids = _tokenize_completion(self._tokenizer, comp_text, [])
+            results.append(p_ids + comp_ids)
+
+        return results
+
+
+class SGLangAsyncBackend:
+    """SGLang offline async engine backend (no HTTP server required).
+
+    Uses SGLang's async Engine API for direct, in-process generation.
+    This eliminates server process management complexity and timeouts.
+    Reference: https://docs.sglang.ai/basic_usage/offline_engine_api.html
+    """
+
+    def __init__(self, *, model_path: str, tokenizer: Any, **engine_kwargs: Any) -> None:
+        """Initialize async backend with SGLang engine.
+
+        Args:
+            model_path: Path to model (local or HuggingFace model ID)
+            tokenizer: HuggingFace tokenizer for decoding completions
+            **engine_kwargs: Additional args passed to sgl.Engine (e.g., dtype, tp_size)
+        """
+        import sglang as sgl
+
+        self._tokenizer = tokenizer
+
+        # Initialize SGLang offline engine
+        logger.info(f"Initializing SGLang offline engine: {model_path}")
+        self._engine = sgl.Engine(model_path=model_path, **engine_kwargs)
+        logger.info("SGLang offline engine ready")
+
+        # Create a dedicated background asyncio loop to avoid nested-loop deadlocks
+        import asyncio as _asyncio
+        import threading as _threading
+
+        self._io_loop: _asyncio.AbstractEventLoop = _asyncio.new_event_loop()
+
+        def _run_loop() -> None:
+            _asyncio.set_event_loop(self._io_loop)
+            self._io_loop.run_forever()
+
+        self._io_thread: _threading.Thread = _threading.Thread(
+            target=_run_loop,
+            name="sglang-async-loop",
+            daemon=True,
+        )
+        self._io_thread.start()
+
+        # Submission semaphore to cap concurrent async_generate calls
+        self._submit_sem: _threading.Semaphore = _threading.Semaphore(value=2)
+
+    def shutdown(self) -> None:
+        """Shutdown async backend, release memory, and stop private loop.
+
+        Attempts a best-effort engine shutdown in a short-lived thread.
+        Always drops references, runs GC, and clears CUDA cache. Finally,
+        stops the private asyncio loop and joins its thread.
+        """
+        import threading as _threading
+
+        try:
+            # Attempt engine shutdown in a guarded thread (best effort)
+            engine_ref = getattr(self, "_engine", None)
+            self._engine = None
+
+            def _do_shutdown() -> None:
+                try:
+                    if engine_ref is not None and hasattr(engine_ref, "shutdown"):
+                        engine_ref.shutdown()
+                except Exception:
+                    pass
+
+            t = _threading.Thread(target=_do_shutdown, name="sglang-engine-shutdown", daemon=True)
+            t.start()
+            t.join(timeout=10.0)
+
+            # Force Python GC to reclaim any reachable objects
+            import gc
+
+            gc.collect()
+
+            # Free CUDA cache to release unused GPU memory
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as e:
+            logger.debug("SGLangAsyncBackend.shutdown cleanup issue: %s", e)
+
+        # Stop background event loop thread
+        try:
+            if hasattr(self, "_io_loop") and self._io_loop.is_running():
+                self._io_loop.call_soon_threadsafe(self._io_loop.stop)
+            if hasattr(self, "_io_thread"):
+                self._io_thread.join(timeout=2.0)
+        except Exception as e:
+            logger.debug("SGLangAsync backend loop stop issue: %s", e)
+
+    def generate(
+        self,
+        prompt_ids_batch: list[list[int]],
+        *,
+        params: GenerationParams,
+        seeds: list[int] | None = None,
+    ) -> list[list[int]]:
+        """Generate via private loop to avoid nested event-loop deadlocks.
+
+        Submits coroutine to a background event loop using a submission
+        semaphore to bound concurrency, and enforces a generous timeout
+        to fail fast on hangs.
+        """
+        import asyncio as _asyncio
+
+        # Bounded submission to avoid overloading the engine
+        acquired = self._submit_sem.acquire(timeout=60.0)
+        if not acquired:
+            logger.warning("SGLangAsync: submission semaphore acquire timed out; dropping request")
+            return list(prompt_ids_batch)
+        try:
+
+            async def _with_timeout() -> list[list[int]]:
+                return await _asyncio.wait_for(
+                    self._async_generate(prompt_ids_batch, params, seeds),
+                    timeout=300.0,
+                )
+
+            future = _asyncio.run_coroutine_threadsafe(_with_timeout(), self._io_loop)
+            return future.result()
+        finally:
+            self._submit_sem.release()
+
+    async def _async_generate(
+        self,
+        prompt_ids_batch: list[list[int]],
+        params: GenerationParams,
+        seeds: list[int] | None = None,
+    ) -> list[list[int]]:
+        """Async generation implementation using SGLang engine."""
+        batch_size = len(prompt_ids_batch)
+        batch_start = time.time()
+        logger.info("SGLangAsync: Starting batch of %d prompts", batch_size)
+
+        prompts = _decode_prompts(self._tokenizer, prompt_ids_batch)
+
+        # Map sampling params to SGLang format
+        sampling_params: dict[str, Any] = {
+            "temperature": float(params.temperature),
+            "top_p": float(params.top_p),
+            "max_new_tokens": int(params.max_new_tokens),
+        }
+        if params.top_k is not None:
+            sampling_params["top_k"] = int(params.top_k)
+
+        # Generate completions
+        try:
+            outputs = await self._engine.async_generate(prompts, sampling_params)
+        except Exception as e:
+            logger.error("SGLang async generation failed: %s", e, exc_info=True)
+            return prompt_ids_batch
+
+        # Reconstruct full sequences
+        results: list[list[int]] = []
+        for p_ids, output in zip(prompt_ids_batch, outputs, strict=False):
+            # Extract completion text
+            if isinstance(output, dict) and "text" in output:
+                comp_text = output["text"]
+            elif hasattr(output, "text"):
+                comp_text = output.text
+            else:
+                comp_text = str(output)
+
+            comp_ids = _tokenize_completion(self._tokenizer, comp_text, [])
+            results.append(p_ids + comp_ids if comp_ids else p_ids)
+
+        batch_time = time.time() - batch_start
+        throughput = batch_size / batch_time if batch_time > 0 else 0
+        logger.info(
+            "SGLangAsync: Batch complete in %.2fs (%d prompts, %.1f prompts/sec)",
+            batch_time,
+            batch_size,
+            throughput,
+        )
+
+        return results
+
+
+class SGLangServerBackend:
+    """sgLang server (OpenAI-compatible) backend over HTTP.
+
+    Sends prompts to a running sgLang server and reconstructs full sequences
+    by concatenating prompt token IDs with completion token IDs derived from
+    the returned text.
+
+    Uses the official OpenAI client library for robust communication.
+    """
+
+    def __init__(
+        self, *, base_url: str, model_name: str, tokenizer: Any, timeout: float = 120.0
+    ) -> None:
+        import openai
+
+        self._base_url = base_url.rstrip("/")
+        self._model_name = model_name
+        self._tokenizer = tokenizer
+        self._timeout = float(timeout)
+
+        # Initialize OpenAI client pointing to SGLang server
+        self._client = openai.Client(
+            base_url=f"{self._base_url}/v1",
+            api_key="EMPTY",  # SGLang doesn't require authentication
+            timeout=self._timeout,
+        )
+
+    def generate(
+        self,
+        prompt_ids_batch: list[list[int]],
+        *,
+        params: GenerationParams,
+        seeds: list[int] | None = None,
+    ) -> list[list[int]]:
+        batch_start = time.time()
+        batch_size = len(prompt_ids_batch)
+        logger.info("SGLangServer: Starting PARALLEL batch of %d prompts", batch_size)
+
+        prompts = _decode_prompts(self._tokenizer, prompt_ids_batch)
+
+        def _call_one(idx: int, prompt: str, random_seed: int | None) -> tuple[int, str]:
+            """Make OpenAI API request with retries and exponential backoff."""
+            req_start = time.time()
+            max_retries: int = 3
+            base_backoff: float = 1.0
+
+            for attempt in range(max_retries):
+                try:
+                    # Build completion kwargs
+                    completion_kwargs: dict[str, Any] = {
+                        "model": self._model_name,
+                        "prompt": prompt,
+                        "max_tokens": int(params.max_new_tokens),
+                        "temperature": float(params.temperature),
+                        "top_p": float(params.top_p),
+                    }
+
+                    # Map repetition_penalty to frequency_penalty if provided
+                    if params.repetition_penalty is not None:
+                        completion_kwargs["frequency_penalty"] = float(params.repetition_penalty)
+
+                    # Add seed (SGLang supports this parameter)
+                    if random_seed is not None:
+                        completion_kwargs["seed"] = int(random_seed)
+
+                    # Call OpenAI client (points to SGLang server)
+                    response = self._client.completions.create(**completion_kwargs)
+
+                    req_time = time.time() - req_start
+                    text = response.choices[0].text if response.choices else ""
+                    logger.debug(
+                        "  Request %d/%d took %.2fs, output_len=%d",
+                        idx + 1,
+                        batch_size,
+                        req_time,
+                        len(text),
+                    )
+                    return (idx, text)
+
+                except Exception as e:
+                    req_time = time.time() - req_start
+                    if attempt < max_retries - 1:
+                        backoff: float = base_backoff * (2**attempt)
+                        logger.warning(
+                            "  Request %d/%d failed (attempt %d/%d), retrying in %.1fs: %s: %s",
+                            idx + 1,
+                            batch_size,
+                            attempt + 1,
+                            max_retries,
+                            backoff,
+                            type(e).__name__,
+                            str(e)[:100],
+                        )
+                        time.sleep(backoff)
+                    else:
+                        logger.warning(
+                            "  Request %d/%d failed after %d attempts (%.2fs total): %s",
+                            idx + 1,
+                            batch_size,
+                            max_retries,
+                            req_time,
+                            type(e).__name__,
+                        )
+                        return (idx, "")
+
+            return (idx, "")
+
+        # Parallel execution with ThreadPoolExecutor
+        # Use conservative worker count to avoid overwhelming server
+        max_workers: int = min(batch_size, 4)
+        completions: dict[int, str] = {}
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all requests concurrently
+            futures = []
+            for idx, prompt in enumerate(prompts):
+                seed_val = None
+                if seeds is not None and idx < len(seeds):
+                    seed_val = int(seeds[idx])
+                future = executor.submit(_call_one, idx, prompt, seed_val)
+                futures.append(future)
+
+            # Collect results as they complete
+            for future in as_completed(futures):
+                idx, completion_text = future.result()
+                completions[idx] = completion_text
+
+        # Reconstruct results in original order
+        results: list[list[int]] = []
+        for idx, p_ids in enumerate(prompt_ids_batch):
+            completion_text = completions.get(idx, "")
+            comp_ids = _tokenize_completion(self._tokenizer, completion_text, [])
+            results.append(p_ids + comp_ids)
+
+        batch_time = time.time() - batch_start
+        throughput = batch_size / batch_time if batch_time > 0 else 0
+        logger.info(
+            "SGLangServer: PARALLEL batch complete in %.2fs (%d prompts, %.1f prompts/sec)",
+            batch_time,
+            batch_size,
+            throughput,
+        )
 
         return results
 
@@ -275,7 +741,11 @@ class AgentEnvLoop:
         # to avoid increasing memory usage when also computing proofs.
         self._backend: TextGenBackend = gen_backend or HFBackend(model, tokenizer, device)
 
-        self._hidden_dim = resolve_hidden_size(self.model)
+        # Hidden dim is only needed for GRAIL proof computation (not for evaluation)
+        # Lazy-resolve when needed; server backends don't require it
+        self._hidden_dim: int | None = None
+        if gen_backend is None and model is not None:
+            self._hidden_dim = resolve_hidden_size(model)
 
         # Log tokenizer version information for debugging
         try:
@@ -531,14 +1001,6 @@ class AgentEnvLoop:
         toks = self.tokenizer(rendered, return_tensors="pt", return_attention_mask=False)
         prompt_ids = toks.input_ids[0].tolist()
 
-        # Debug: log rendered prompt text for comparison
-        logger.debug(
-            "MINER RENDERED PROMPT: length=%d chars, tokens=%d\n%s",
-            len(rendered),
-            len(prompt_ids),
-            rendered,
-        )
-
         return rendered, prompt_ids
 
     def _generate_tokens(
@@ -636,6 +1098,12 @@ class AgentEnvLoop:
         This is more efficient than computing them separately, as it requires
         only one forward pass through the model.
         """
+        if self._hidden_dim is None:
+            raise RuntimeError(
+                "Cannot compute GRAIL proofs: hidden_dim not initialized. "
+                "This likely means AgentEnvLoop was created with a server backend for evaluation only."
+            )
+
         from ..protocol.grail_verifier import GRAILVerifier
 
         verifier = GRAILVerifier(hidden_dim=self._hidden_dim)
