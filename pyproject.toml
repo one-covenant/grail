@@ -26,14 +26,14 @@ requires-python = ">=3.10"
 dependencies = [
     "torch>=2.4.1",
     "numpy>=1.20.0",
-    "transformers==4.57.0",
+    "transformers==4.57.1",
     "tokenizers==0.22.1",
     "matplotlib>=3.5.0",
     "safetensors>=0.3.0",
     "python-dotenv>=0.19.0",
     "aiobotocore>=2.0.0",
     "botocore>=1.24.0",
-    "bittensor==9.12.0",
+    "bittensor==9.12.1",
     "trl>=0.7.0",
     "accelerate>=0.20.0",
     "pydantic>=2.3,<3.0.0",
@@ -44,6 +44,7 @@ dependencies = [
     "rich==14.1.0",
     "wandb>=0.21.3",
     "scipy>=1.7.0",
+    "sglang==0.5.4",
 ]
 
 [project.optional-dependencies]
@@ -142,9 +143,10 @@ module = [
     "requests",
     "trl.*",
     "accelerate.*",
-    "vllm.*",
     "scipy",
     "scipy.*",
+    "sglang",
+    "sglang.*",
 ]
 ignore_missing_imports = true
 
