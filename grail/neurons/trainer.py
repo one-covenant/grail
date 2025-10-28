@@ -111,8 +111,6 @@ class TrainerNeuron(BaseNeuron):
                     last_processed_window = target_window
                     continue
 
-                return False #TODO: remove this
-
                 logger.info("🎓 Training window %s", target_window)
                 # Train on target window (past window), not current window
                 success = await self._train_window(target_window)
