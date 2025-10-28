@@ -279,9 +279,20 @@ class EvaluatorService:
 
         metrics = aggregator.summarize()
 
+        # Calculate and log duration
+        duration = time.monotonic() - t0
+        logger.info(
+            "✅ Evaluation complete: %d tasks × %d reps in %.2fs (%.2f tasks/sec)",
+            total_ids,
+            plan.replicates,
+            duration,
+            total_ids / duration if duration > 0 else 0,
+        )
+
         if self._monitor:
-            duration = time.monotonic() - t0
             await self._monitor.log_gauge("profiling/eval_duration", duration)
+            throughput = total_ids / duration if duration > 0 else 0
+            await self._monitor.log_gauge("profiling/eval_tasks_per_sec", throughput)
             for key, val in metrics.items():
                 await self._monitor.log_gauge(f"eval/{key}", float(val))
 

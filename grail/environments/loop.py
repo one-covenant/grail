@@ -1101,7 +1101,8 @@ class AgentEnvLoop:
         if self._hidden_dim is None:
             raise RuntimeError(
                 "Cannot compute GRAIL proofs: hidden_dim not initialized. "
-                "This likely means AgentEnvLoop was created with a server backend for evaluation only."
+                "This likely means AgentEnvLoop was created with a "
+                "server backend for evaluation only."
             )
 
         from ..protocol.grail_verifier import GRAILVerifier
