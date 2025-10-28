@@ -39,18 +39,26 @@ class EvalConfig:
 
     enabled: bool = True
     window_interval: int = 8
-    split: str = "validation"  # dataset-backed envs (e.g., GSM8K)
-    subset_size: int | None = None  # generative envs or capped dataset eval
+    split: str = "test"  # dataset-backed envs (e.g., GSM8K) #TODO: should be specified per env
+    subset_size: int | None = 100  # generative envs or capped dataset eval
     seed_base: int = 2025
-    batch_size: int = 8
-    replicates: int = 10  # for pass@k / mean@k curves
+    batch_size: int = (
+        32  # Increased for parallel server-based backends (8 tasks × 5 reps = 80 prompts/batch)
+    )
+    replicates: int = 5  # for pass@k / mean@k curves
     # Decoding configuration for evaluation (separate from training)
     max_new_tokens: int = 512
     temperature: float = 0.7
     top_p: float = 0.95
     do_sample: bool = True
-    # Backend control: "hf" or "vllm" (vLLM used only if remote endpoint available)
+    # Backend control: "hf" | "vllm" | "sglang"
     backend: str = "hf"
+    # sgLang server options (used when backend == "sglang")
+    sglang_host: str = "127.0.0.1"
+    sglang_port: int = 30000
+    sglang_start_server: bool = False  # Disabled: using offline async engine instead
+    sglang_server_timeout_s: float = 120.0
+    sglang_trust_remote_code: bool = False
     use_num_return_sequences: bool = False  # HF-only optimization
     # Metrics aggregation: which k to report (subset of 1..replicates)
     report_ks: tuple[int, ...] = (1, 5, 10)
