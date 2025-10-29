@@ -38,9 +38,9 @@ class EvalConfig:
     """
 
     enabled: bool = True
-    window_interval: int = 8
+    window_interval: int = 16
     split: str = "test"  # dataset-backed envs (e.g., GSM8K) #TODO: should be specified per env
-    subset_size: int | None = 100  # generative envs or capped dataset eval
+    subset_size: int | None = 400  # generative envs or capped dataset eval
     seed_base: int = 2025
     batch_size: int = (
         32  # Increased for parallel server-based backends (8 tasks × 5 reps = 80 prompts/batch)
