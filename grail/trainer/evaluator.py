@@ -60,29 +60,25 @@ class EvaluatorService:
 
         if backend_name == "sglang":
             try:
-                from grail.environments.loop import SGLangAsyncBackend
+                from grail.environments.loop import SGLangServerBackend
 
-                # Use offline async engine (no HTTP server needed)
-                model_path = getattr(self._model, "name_or_path", None)
-                if not model_path:
-                    raise RuntimeError(
-                        "SGLang async backend requires model.name_or_path to initialize engine"
-                    )
-
-                # Initialize offline engine with same settings as server would have
-                gen_backend = SGLangAsyncBackend(
-                    model_path=model_path,
+                # Use HTTP server backend (runs in separate subprocess, avoids Gloo issues)
+                base_url = f"http://{self._cfg.sglang_host}:{self._cfg.sglang_port}"
+                model_id = getattr(self._model, "name_or_path", "model")
+                gen_backend = SGLangServerBackend(
+                    base_url=base_url,
+                    model_name=str(model_id),
                     tokenizer=self._tokenizer,
-                    dtype="bfloat16",
-                    tp_size=1,
-                    mem_fraction_static=0.85,
-                    max_running_requests=8,
-                    log_level="error",
+                    timeout=300.0,
                 )
-                logger.info("Evaluator using sgLang ASYNC (offline) backend (model=%s)", model_path)
+                logger.info(
+                    "Evaluator using sgLang SERVER backend with ASYNC API (url=%s, model=%s)",
+                    base_url,
+                    model_id,
+                )
             except Exception:
                 logger.exception(
-                    "Failed to initialize sgLang async backend; falling back to HF backend"
+                    "Failed to initialize sgLang server backend; falling back to HF backend"
                 )
                 gen_backend = None
         elif backend_name == "vllm":

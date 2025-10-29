@@ -233,6 +233,11 @@ class TrainerNeuron(BaseNeuron):
         evaluator: EvaluatorService | None = None
         original_backend = self._eval_cfg.backend
 
+        # Track total evaluation time (including setup/cleanup)
+        import time as _time
+
+        eval_start = _time.time()
+
         try:
             # Optionally start sgLang server with saved checkpoint
             if self._eval_cfg.backend == "sglang" and self._eval_cfg.sglang_start_server:
@@ -272,9 +277,27 @@ class TrainerNeuron(BaseNeuron):
             logger.info("🧪 Evaluation metrics: %s", metrics)
 
             self._eval_last_run_window_number = window_number
+
+            # Log total evaluation time (including setup/cleanup)
+            eval_total = _time.time() - eval_start
+            logger.info(
+                "🧪 Total evaluation orchestration time: %.2fs (setup + run + cleanup)",
+                eval_total,
+            )
+            if self._context.monitor:
+                await self._context.monitor.log_gauge("profiling/eval_total_time", eval_total)
+
             return True
         except Exception:
             logger.exception("Evaluation failed", exc_info=True)
+
+            # Log time even on failure
+            eval_total = _time.time() - eval_start
+            logger.info("🧪 Evaluation failed after %.2fs", eval_total)
+            if self._context.monitor:
+                gauge_name = "profiling/eval_total_time_failed"
+                await self._context.monitor.log_gauge(gauge_name, eval_total)
+
             return False
         finally:
             # Cleanup order is critical for GPU memory management:

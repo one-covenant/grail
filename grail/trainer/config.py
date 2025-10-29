@@ -52,11 +52,11 @@ class EvalConfig:
     top_p: float = 0.95
     do_sample: bool = True
     # Backend control: "hf" | "vllm" | "sglang"
-    backend: str = "hf"
+    backend: str = "sglang"  # Server mode with async API avoids Gloo socket issues
     # sgLang server options (used when backend == "sglang")
     sglang_host: str = "127.0.0.1"
     sglang_port: int = 30000
-    sglang_start_server: bool = False  # Disabled: using offline async engine instead
+    sglang_start_server: bool = True  # Server runs in subprocess (avoids Gloo socket issues)
     sglang_server_timeout_s: float = 120.0
     sglang_trust_remote_code: bool = False
     use_num_return_sequences: bool = False  # HF-only optimization

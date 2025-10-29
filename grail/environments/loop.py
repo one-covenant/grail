@@ -16,7 +16,6 @@ import logging
 import random
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, cast
 
@@ -534,27 +533,26 @@ class SGLangAsyncBackend:
 
 
 class SGLangServerBackend:
-    """sgLang server (OpenAI-compatible) backend over HTTP.
+    """sgLang server (OpenAI-compatible) backend over HTTP with async API.
 
-    Sends prompts to a running sgLang server and reconstructs full sequences
-    by concatenating prompt token IDs with completion token IDs derived from
-    the returned text.
+    Uses AsyncOpenAI client for concurrent, non-blocking requests to a running
+    SGLang server. Runs in a separate subprocess, avoiding Gloo socket corruption.
 
-    Uses the official OpenAI client library for robust communication.
+    Reference: https://docs.sglang.ai/basic_usage/openai_api.html
     """
 
     def __init__(
-        self, *, base_url: str, model_name: str, tokenizer: Any, timeout: float = 120.0
+        self, *, base_url: str, model_name: str, tokenizer: Any, timeout: float = 300.0
     ) -> None:
-        import openai
+        from openai import AsyncOpenAI
 
         self._base_url = base_url.rstrip("/")
         self._model_name = model_name
         self._tokenizer = tokenizer
         self._timeout = float(timeout)
 
-        # Initialize OpenAI client pointing to SGLang server
-        self._client = openai.Client(
+        # Initialize AsyncOpenAI client pointing to SGLang server
+        self._client = AsyncOpenAI(
             base_url=f"{self._base_url}/v1",
             api_key="EMPTY",  # SGLang doesn't require authentication
             timeout=self._timeout,
@@ -567,98 +565,139 @@ class SGLangServerBackend:
         params: GenerationParams,
         seeds: list[int] | None = None,
     ) -> list[list[int]]:
+        """Generate using async OpenAI API to SGLang server.
+
+        Runs async requests concurrently with semaphore-based rate limiting.
+        Uses run_coroutine_threadsafe to avoid nested loop issues.
+        """
+        import asyncio
+        import concurrent.futures
+
+        # Check if we're in an async context
+        try:
+            asyncio.get_running_loop()
+            # We're in async context - use run_coroutine_threadsafe with new loop
+            new_loop = asyncio.new_event_loop()
+
+            def _run_in_thread() -> list[list[int]]:
+                asyncio.set_event_loop(new_loop)
+                try:
+                    return new_loop.run_until_complete(
+                        self._async_generate_batch(prompt_ids_batch, params, seeds)
+                    )
+                finally:
+                    new_loop.close()
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_run_in_thread)
+                return future.result()
+
+        except RuntimeError:
+            # No event loop running - safe to use asyncio.run()
+            return asyncio.run(self._async_generate_batch(prompt_ids_batch, params, seeds))
+
+    async def _async_generate_batch(
+        self,
+        prompt_ids_batch: list[list[int]],
+        params: GenerationParams,
+        seeds: list[int] | None = None,
+    ) -> list[list[int]]:
+        """Async batch generation with concurrent requests and retry logic."""
+        import asyncio
+
         batch_start = time.time()
         batch_size = len(prompt_ids_batch)
-        logger.info("SGLangServer: Starting PARALLEL batch of %d prompts", batch_size)
+        logger.info("SGLangServer: Starting ASYNC batch of %d prompts", batch_size)
 
         prompts = _decode_prompts(self._tokenizer, prompt_ids_batch)
 
-        def _call_one(idx: int, prompt: str, random_seed: int | None) -> tuple[int, str]:
-            """Make OpenAI API request with retries and exponential backoff."""
-            req_start = time.time()
+        # Semaphore to limit concurrent requests (avoid overwhelming server)
+        sem = asyncio.Semaphore(8)
+
+        async def _call_one_async(
+            idx: int, prompt: str, random_seed: int | None
+        ) -> tuple[int, str]:
+            """Make async OpenAI API request with retries and backoff."""
             max_retries: int = 3
             base_backoff: float = 1.0
 
-            for attempt in range(max_retries):
-                try:
-                    # Build completion kwargs
-                    completion_kwargs: dict[str, Any] = {
-                        "model": self._model_name,
-                        "prompt": prompt,
-                        "max_tokens": int(params.max_new_tokens),
-                        "temperature": float(params.temperature),
-                        "top_p": float(params.top_p),
-                    }
+            async with sem:  # Limit concurrency
+                for attempt in range(max_retries):
+                    req_start = time.time()
+                    try:
+                        # Build completion kwargs
+                        completion_kwargs: dict[str, Any] = {
+                            "model": self._model_name,
+                            "prompt": prompt,
+                            "max_tokens": int(params.max_new_tokens),
+                            "temperature": float(params.temperature),
+                            "top_p": float(params.top_p),
+                        }
 
-                    # Map repetition_penalty to frequency_penalty if provided
-                    if params.repetition_penalty is not None:
-                        completion_kwargs["frequency_penalty"] = float(params.repetition_penalty)
+                        # Map repetition_penalty to frequency_penalty if provided
+                        if params.repetition_penalty is not None:
+                            completion_kwargs["frequency_penalty"] = float(
+                                params.repetition_penalty
+                            )
 
-                    # Add seed (SGLang supports this parameter)
-                    if random_seed is not None:
-                        completion_kwargs["seed"] = int(random_seed)
+                        # Add seed (SGLang supports this parameter)
+                        if random_seed is not None:
+                            completion_kwargs["seed"] = int(random_seed)
 
-                    # Call OpenAI client (points to SGLang server)
-                    response = self._client.completions.create(**completion_kwargs)
+                        # Async call to server
+                        response = await self._client.completions.create(**completion_kwargs)
 
-                    req_time = time.time() - req_start
-                    text = response.choices[0].text if response.choices else ""
-                    logger.debug(
-                        "  Request %d/%d took %.2fs, output_len=%d",
-                        idx + 1,
-                        batch_size,
-                        req_time,
-                        len(text),
-                    )
-                    return (idx, text)
-
-                except Exception as e:
-                    req_time = time.time() - req_start
-                    if attempt < max_retries - 1:
-                        backoff: float = base_backoff * (2**attempt)
-                        logger.warning(
-                            "  Request %d/%d failed (attempt %d/%d), retrying in %.1fs: %s: %s",
+                        req_time = time.time() - req_start
+                        text = response.choices[0].text if response.choices else ""
+                        logger.debug(
+                            "  Request %d/%d took %.2fs, output_len=%d",
                             idx + 1,
                             batch_size,
-                            attempt + 1,
-                            max_retries,
-                            backoff,
-                            type(e).__name__,
-                            str(e)[:100],
-                        )
-                        time.sleep(backoff)
-                    else:
-                        logger.warning(
-                            "  Request %d/%d failed after %d attempts (%.2fs total): %s",
-                            idx + 1,
-                            batch_size,
-                            max_retries,
                             req_time,
-                            type(e).__name__,
+                            len(text),
                         )
-                        return (idx, "")
+                        return (idx, text)
 
-            return (idx, "")
+                    except Exception as e:
+                        req_time = time.time() - req_start
+                        if attempt < max_retries - 1:
+                            backoff = base_backoff * (2**attempt)
+                            logger.warning(
+                                "  Request %d/%d failed (attempt %d/%d), retrying in %.1fs: %s",
+                                idx + 1,
+                                batch_size,
+                                attempt + 1,
+                                max_retries,
+                                backoff,
+                                type(e).__name__,
+                            )
+                            await asyncio.sleep(backoff)
+                        else:
+                            logger.warning(
+                                "  Request %d/%d failed after %d attempts (%.2fs): %s",
+                                idx + 1,
+                                batch_size,
+                                max_retries,
+                                req_time,
+                                type(e).__name__,
+                            )
+                            return (idx, "")
 
-        # Parallel execution with ThreadPoolExecutor
-        # Use conservative worker count to avoid overwhelming server
-        max_workers: int = min(batch_size, 4)
+                return (idx, "")
+
+        # Execute all requests concurrently with gather
+        tasks = []
+        for idx, prompt in enumerate(prompts):
+            seed_val = seeds[idx] if seeds and idx < len(seeds) else None
+            tasks.append(_call_one_async(idx, prompt, seed_val))
+
+        # Wait for all completions
+        results_tuples = await asyncio.gather(*tasks, return_exceptions=False)
+
+        # Build completion dict from results
         completions: dict[int, str] = {}
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all requests concurrently
-            futures = []
-            for idx, prompt in enumerate(prompts):
-                seed_val = None
-                if seeds is not None and idx < len(seeds):
-                    seed_val = int(seeds[idx])
-                future = executor.submit(_call_one, idx, prompt, seed_val)
-                futures.append(future)
-
-            # Collect results as they complete
-            for future in as_completed(futures):
-                idx, completion_text = future.result()
-                completions[idx] = completion_text
+        for idx, text in results_tuples:
+            completions[idx] = text
 
         # Reconstruct results in original order
         results: list[list[int]] = []
@@ -670,7 +709,7 @@ class SGLangServerBackend:
         batch_time = time.time() - batch_start
         throughput = batch_size / batch_time if batch_time > 0 else 0
         logger.info(
-            "SGLangServer: PARALLEL batch complete in %.2fs (%d prompts, %.1f prompts/sec)",
+            "SGLangServer: ASYNC batch complete in %.2fs (%d prompts, %.1f prompts/sec)",
             batch_time,
             batch_size,
             throughput,
