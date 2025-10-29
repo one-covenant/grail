@@ -1,0 +1,85 @@
+# Git
+.git
+.gitignore
+.gitattributes
+.github
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info
+dist
+build
+eggs
+.eggs
+*.egg
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# Virtual environments
+.venv
+venv
+env
+ENV
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.cursor
+
+# Documentation
+docs/
+*.md
+!README.md
+CONTRIBUTING.md
+
+# Tests
+tests/
+test_*.py
+*_test.py
+
+# CI/CD
+.github/
+
+# Docker
+# Keep Dockerfile in context; do not ignore docker directory
+docker-compose*.yml
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+.tmp
+tmp/
+*.tmp
+
+# macOS
+.DS_Store
+__MACOSX
+
+# Environment
+.env
+.env.*
+*.envrc
+
+# Scripts (not needed in container)
+scripts/
+
+# Monitoring
+monitor_storage.sh
+
+# Misc
+setup.txt
+ENV_UPDATE_SUMMARY.txt
+compute.min.yaml
+
