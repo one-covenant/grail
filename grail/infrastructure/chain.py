@@ -236,6 +236,120 @@ class GrailChainManager:
             logger.warning(f"Hotkey {hotkey} not found in metagraph")
             return None
 
+    async def get_block_timestamp(self, block_number: int) -> float | None:
+        """Return the unix timestamp (seconds) for a given block if available.
+
+        Queries the Timestamp pallet's Now storage at the specific block via
+        substrate.query. This is the canonical on-chain timestamp set by the
+        block author (in milliseconds since UNIX epoch).
+
+        Returns:
+            Timestamp in seconds (float) if available, None otherwise
+
+        Reference:
+            Bittensor uses pallet_timestamp::Now which stores block time in ms.
+            See: https://docs.bittensor.com and substrate documentation.
+        """
+        try:
+            block_hash = await self.subtensor.get_block_hash(block_number)
+        except Exception:
+            logger.debug("Failed to get block hash for block %d", block_number, exc_info=True)
+            return None
+
+        if not block_hash:
+            logger.debug("No block hash returned for block %d", block_number)
+            return None
+
+        substrate = getattr(self.subtensor, "substrate", None)
+        if substrate is None:
+            logger.debug("Substrate interface not available on subtensor")
+            return None
+
+        # Query pallet_timestamp::Now at the target block
+        try:
+            # substrate.query is async in AsyncSubstrateInterface
+            res = await substrate.query(
+                module="Timestamp",
+                storage_function="Now",
+                block_hash=block_hash,
+            )
+            moment = getattr(res, "value", None)
+            if isinstance(moment, (int, float)):
+                # Substrate stores moment in milliseconds; convert to seconds
+                timestamp_seconds = float(moment) / 1000.0 if moment > 1e12 else float(moment)
+                logger.debug(
+                    "Got timestamp for block %d: %.2f (%s ms)",
+                    block_number,
+                    timestamp_seconds,
+                    moment,
+                )
+                return timestamp_seconds
+        except Exception:
+            logger.debug(
+                "Failed to query Timestamp.Now for block %d",
+                block_number,
+                exc_info=True,
+            )
+
+        # Fallback: parse block extrinsics for timestamp.set (legacy)
+        try:
+            # substrate.get_block is async in AsyncSubstrateInterface
+            block = await substrate.get_block(block_hash=block_hash)
+            extrinsics = (block or {}).get("extrinsics", [])
+            for ext in extrinsics:
+                call = ext.get("call") or {}
+                if call.get("call_module") == "Timestamp" and call.get("call_function") == "set":
+                    params = call.get("params") or []
+                    for p in params:
+                        if p.get("name") == "now":
+                            val = p.get("value")
+                            if isinstance(val, (int, float)):
+                                timestamp_seconds = (
+                                    float(val) / 1000.0 if val > 1e12 else float(val)
+                                )
+                                logger.debug(
+                                    "Got timestamp from extrinsics for block %d: %.2f",
+                                    block_number,
+                                    timestamp_seconds,
+                                )
+                                return timestamp_seconds
+        except Exception:
+            logger.debug(
+                "Failed to parse extrinsics for block %d",
+                block_number,
+                exc_info=True,
+            )
+
+        logger.debug("Could not retrieve timestamp for block %d", block_number)
+        return None
+
+    async def estimate_block_timestamp(
+        self, target_block: int, anchor_distance: int = 100
+    ) -> float | None:
+        """Estimate a block's timestamp using recent on-chain timestamps.
+
+        Uses two measured timestamps (current and an anchor in the past) to
+        compute an empirical seconds-per-block, then extrapolates to the target.
+        Returns None if timestamps cannot be read.
+        """
+        try:
+            current_block = await self.subtensor.get_current_block()
+        except Exception:
+            return None
+
+        # Read current and anchor timestamps
+        t_current = await self.get_block_timestamp(current_block)
+        if t_current is None:
+            return None
+
+        anchor_block = max(0, int(current_block) - int(anchor_distance))
+        t_anchor = await self.get_block_timestamp(anchor_block)
+        if t_anchor is None or current_block == anchor_block:
+            return None
+
+        secs_per_block = (t_current - t_anchor) / float(current_block - anchor_block)
+        return t_current + (float(target_block - current_block) * secs_per_block)
+
     def stop(self) -> None:
         """Stop the background fetcher task and worker process"""
         if self._fetch_task:
