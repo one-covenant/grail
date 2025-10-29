@@ -18,7 +18,7 @@ import bittensor as bt
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..infrastructure.chain import GrailChainManager
-from ..infrastructure.comms import file_exists, get_file
+from ..infrastructure.comms import get_file
 from ..shared.constants import ROLLOUTS_PER_PROBLEM
 from ..shared.digest import compute_completion_digest
 from .context import ValidationContext
@@ -127,6 +127,7 @@ class MinerValidator:
         uid_by_hotkey: dict[str, int],
         text_logs_emitted: dict[str, int],
         heartbeat_callback: Any = None,
+        deadline_ts: float | None = None,
     ) -> MinerResults:
         """Validate a single miner's window submission.
 
@@ -144,6 +145,7 @@ class MinerValidator:
             uid_by_hotkey: Mapping of hotkey to UID
             text_logs_emitted: Counter of text logs per miner
             heartbeat_callback: Optional callback to update watchdog
+            deadline_ts: Upload deadline timestamp (unix seconds)
 
         Returns:
             MinerResults with validation outcome and metrics
@@ -152,7 +154,7 @@ class MinerValidator:
 
         # Step 1: Fetch window file
         file_data = await self._fetch_window_file(
-            miner_hotkey, window, credentials, chain_manager, uid
+            miner_hotkey, window, credentials, chain_manager, uid, deadline_ts
         )
 
         if file_data is None:
@@ -225,25 +227,47 @@ class MinerValidator:
         credentials: Any,
         chain_manager: GrailChainManager,
         uid: int | None,
+        deadline_ts: float | None,
     ) -> dict | None:
-        """Fetch and download miner's window file.
+        """Fetch and download miner's window file, verifying deadline.
 
         Returns:
-            Window data dict or None if not found/error
+            Window data dict or None if not found/late/error
         """
+        from ..infrastructure.comms import file_exists_with_deadline
+
         filename = f"grail/windows/{miner_hotkey}-window-{window}.json"
         miner_bucket = chain_manager.get_bucket_for_hotkey(miner_hotkey)
         bucket_to_use = miner_bucket if miner_bucket else credentials
+        uid_str = str(uid) if uid is not None else f"{miner_hotkey[:12]}..."
 
-        # Check existence
-        exists = await file_exists(filename, credentials=bucket_to_use, use_write=False)
+        # Check existence with deadline validation
+        exists, was_late, upload_time = await file_exists_with_deadline(
+            key=filename,
+            credentials=bucket_to_use,
+            use_write=False,
+            max_upload_time=deadline_ts,
+        )
 
         if not exists:
             logger.debug(f"No file found at {filename}")
             return None
 
-        uid_str = str(uid) if uid is not None else f"{miner_hotkey[:12]}..."
-        logger.info(f"📁 Found file for miner {uid_str}")
+        if was_late:
+            logger.warning(
+                f"🚫 LATE UPLOAD: uid={uid_str} uploaded at {upload_time:.0f}, "
+                f"deadline was {deadline_ts:.0f} (late by {upload_time - deadline_ts:.0f}s)"
+            )
+            return None
+
+        if deadline_ts and upload_time:
+            time_before_deadline = deadline_ts - upload_time
+            logger.info(
+                f"📁 Found valid file for miner {uid_str} "
+                f"(uploaded {time_before_deadline:.0f}s before deadline)"
+            )
+        else:
+            logger.info(f"📁 Found file for miner {uid_str}")
 
         # Download file
         window_data = await get_file(filename, credentials=bucket_to_use, use_write=False)

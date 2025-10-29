@@ -554,6 +554,7 @@ class ValidationService:
                 uid_by_hotkey=uid_by_hotkey,
                 subtensor=self._subtensor,
                 heartbeat_callback=heartbeat_callback,
+                deadline_ts=deadline_ts,
             )
 
         # Update inference counts for weight computation
