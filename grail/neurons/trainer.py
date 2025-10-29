@@ -149,7 +149,7 @@ class TrainerNeuron(BaseNeuron):
                 last_processed_window = target_window
                 self._wait_start_time = None
                 self._last_wait_log = 0.0
-                
+
                 # Increment window counter for evaluation scheduling
                 self._windows_since_last_eval += 1
 
@@ -171,7 +171,7 @@ class TrainerNeuron(BaseNeuron):
         # Use counter-based approach: evaluate on startup and every window_interval windows
         # This ensures consistent intervals regardless of startup window_number
         is_first_eval = self._eval_last_run_window_number is None
-        
+
         should_start = (
             self._eval_in_progress
             or is_first_eval  # Always evaluate on startup
@@ -262,7 +262,9 @@ class TrainerNeuron(BaseNeuron):
             )
 
             is_startup_eval = self._eval_last_run_window_number is None
-            eval_reason = "startup" if is_startup_eval else f"after {self._windows_since_last_eval} windows"
+            eval_reason = (
+                "startup" if is_startup_eval else f"after {self._windows_since_last_eval} windows"
+            )
             logger.info(
                 "🧪 Starting evaluation: window_number=%s ids=%s replicates=%s split=%s backend=%s (%s)",
                 window_number,
