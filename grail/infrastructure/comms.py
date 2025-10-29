@@ -610,7 +610,7 @@ async def download_file_chunked(
                 is_compressed = key.endswith(".gz")
             total_size = head_response["ContentLength"]
 
-            logger.info(
+            logger.debug(
                 f"📥 Downloading {actual_key} ({total_size} bytes){' (compressed)' if is_compressed else ''}"
             )
             progress = TransferProgress(total_size, f"Download {actual_key}")
