@@ -203,7 +203,7 @@ class CheckpointManager:
                     await self._download_all_in_prefix(window, tmp_dir)
 
                 logger.info("Checkpoint download completed for window %s, finalizing...", window)
-                tmp_dir.rename(local_dir)
+                shutil.move(str(tmp_dir), str(local_dir))
                 logger.info("✅ Checkpoint for window %s ready at %s", window, local_dir)
                 return local_dir
             except Exception as exc:
@@ -238,8 +238,16 @@ class CheckpointManager:
                 continue
 
             if window not in keep_windows:
-                logger.debug("Removing local checkpoint %s", candidate)
-                shutil.rmtree(candidate, ignore_errors=True)
+                logger.debug("Removing local checkpoint %s (window %s)", candidate, window)
+                try:
+                    shutil.rmtree(candidate)
+                except Exception as e:
+                    logger.error(
+                        "Failed to delete checkpoint %s: %s",
+                        candidate,
+                        e,
+                        exc_info=True,
+                    )
 
     async def cleanup_remote(self, current_window: int) -> None:
         """Delete remote checkpoints outside retention policy (trainer role)."""
