@@ -70,6 +70,7 @@ class TrainerNeuron(BaseNeuron):
         self._eval_cfg = EvalConfig()
         self._eval_in_progress: bool = False
         self._eval_last_run_window_number: int | None = None
+        self._windows_since_last_eval: int = 0  # Counter for windows processed since last eval
 
     async def run(self) -> None:
         # Start the built-in watchdog (15 minute timeout)
@@ -106,6 +107,11 @@ class TrainerNeuron(BaseNeuron):
                 self._window_wait_tracker.reset()
 
                 # Periodic evaluation at startup and every configured interval
+                logger.debug(
+                    "Evaluation check: windows_since_last_eval=%d, interval=%d",
+                    self._windows_since_last_eval,
+                    self._eval_cfg.window_interval,
+                )
                 if await self._maybe_run_evaluation(current_window):
                     # Skip training when evaluation runs (may span multiple windows)
                     last_processed_window = target_window
@@ -144,6 +150,9 @@ class TrainerNeuron(BaseNeuron):
                 self._wait_start_time = None
                 self._last_wait_log = 0.0
 
+                # Increment window counter for evaluation scheduling
+                self._windows_since_last_eval += 1
+
             except asyncio.CancelledError:  # pragma: no cover - coop shutdown
                 break
             except Exception:
@@ -159,11 +168,15 @@ class TrainerNeuron(BaseNeuron):
 
         window_number = current_window // WINDOW_LENGTH
 
+        # Use counter-based approach: evaluate on startup and every window_interval windows
+        # This ensures consistent intervals regardless of startup window_number
+        is_first_eval = self._eval_last_run_window_number is None
+
         should_start = (
             self._eval_in_progress
-            or self._eval_last_run_window_number is None
+            or is_first_eval  # Always evaluate on startup
             or (
-                window_number % max(1, self._eval_cfg.window_interval) == 0
+                self._windows_since_last_eval >= self._eval_cfg.window_interval
                 and self._eval_last_run_window_number != window_number
             )
         )
@@ -253,13 +266,18 @@ class TrainerNeuron(BaseNeuron):
                 device="cuda",
             )
 
+            is_startup_eval = self._eval_last_run_window_number is None
+            eval_reason = (
+                "startup" if is_startup_eval else f"after {self._windows_since_last_eval} windows"
+            )
             logger.info(
-                "🧪 Starting evaluation: window_number=%s ids=%s replicates=%s split=%s backend=%s",
+                "🧪 Starting evaluation: window_number=%s ids=%s replicates=%s split=%s backend=%s (%s)",
                 window_number,
                 len(plan.ids),
                 plan.replicates,
                 self._eval_cfg.split,
                 self._eval_cfg.backend,
+                eval_reason,
             )
 
             logger.info("📊 Calling evaluator.run_cycle...")
@@ -287,6 +305,7 @@ class TrainerNeuron(BaseNeuron):
             if self._context.monitor:
                 await self._context.monitor.log_gauge("profiling/eval_total_time", eval_total)
 
+            self._windows_since_last_eval = 0  # Reset counter after successful evaluation
             return True
         except Exception:
             logger.exception("Evaluation failed", exc_info=True)
