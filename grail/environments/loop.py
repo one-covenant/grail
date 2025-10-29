@@ -1182,15 +1182,6 @@ class AgentEnvLoop:
                     )
                     logprobs.append(float("-inf"))
 
-            # Debug: log first few logprobs to verify they're non-zero
-            if logprobs:
-                first_5_logprobs = logprobs[: min(5, len(logprobs))]
-                logger.debug(
-                    "MINER LOGPROBS: completion_len=%d first_5=%s",
-                    len(logprobs),
-                    [f"{lp:.6f}" for lp in first_5_logprobs],
-                )
-
         commitment_data = json.dumps(commitments, sort_keys=True)
         commitment_hash = hashlib.sha256(commitment_data.encode()).digest()
         signature = wallet.hotkey.sign(commitment_hash)
