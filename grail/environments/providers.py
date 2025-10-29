@@ -90,3 +90,14 @@ class GSM8KTaskSource(TaskSource):
             payload={"question": sample["question"], "answer": sample["answer"]},
             metadata={"split": self._split, "index": int(idx)},
         )
+
+    # --- Evaluation helpers ---
+    def size(self) -> int:
+        self._ensure_dataset()
+        assert self._ds is not None
+        return len(self._ds)
+
+    def iter_ids(self) -> list[str]:
+        self._ensure_dataset()
+        assert self._ds is not None
+        return [f"{self._split}_{i}" for i in range(len(self._ds))]

@@ -94,6 +94,10 @@ def train() -> None:
                 train_spec, ref_spec, checkpoint_manager
             )
             logger.info("✅ Successfully loaded training artifacts")
+
+            # Store model paths for potential reloading after evaluation
+            train_model_path = getattr(train_model, "name_or_path", None)
+            ref_model_path = getattr(ref_model, "name_or_path", None)
         except Exception as exc:
             logger.error("Trainer startup configuration error: %s", exc)
             raise typer.Exit(code=1) from exc
@@ -107,6 +111,8 @@ def train() -> None:
             train_model=train_model,
             ref_model=ref_model,
             tokenizer=tokenizer,
+            train_model_path=train_model_path,
+            ref_model_path=ref_model_path,
         )
 
         # Run neuron (watchdog is managed by BaseNeuron)

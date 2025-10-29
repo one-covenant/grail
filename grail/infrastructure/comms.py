@@ -20,7 +20,7 @@ from safetensors.torch import load_file, save_file
 from tqdm import tqdm  # type: ignore[import-untyped]
 from transformers import AutoModelForCausalLM
 
-from ..shared.constants import WINDOW_LENGTH
+from ..shared.constants import UPLOAD_TIMEOUT, WINDOW_LENGTH
 from ..shared.schemas import Bucket, BucketCredentials
 
 logger = logging.getLogger(__name__)
@@ -250,7 +250,7 @@ def get_client_ctx(
         s3_config["addressing_style"] = "path"
 
     # Configure transport-level timeouts and modest retries to avoid
-    # indefinite hangs. Set these higher than our asyncio timeout (6s)
+    # indefinite hangs. Set these higher than our asyncio timeout (30s)
     # to let asyncio.wait_for handle the timeout cleanly.
     # Root cause: botocore and asyncio timeouts conflict when stacked.
     config = Config(
@@ -407,8 +407,24 @@ async def upload_file_chunked(
     compress: bool = True,
     credentials: BucketCredentials | None = None,
     use_write: bool = False,
+    upload_timeout: float = UPLOAD_TIMEOUT,
 ) -> bool:
-    """Upload file in chunks optimized for H100 high-bandwidth - 100MB chunks with compression"""
+    """Upload file in chunks optimized for H100 high-bandwidth - 100MB chunks with compression
+
+    Args:
+        key: S3 object key
+        data: File data to upload
+        chunk_size: Size of each chunk (adaptive if None)
+        max_retries: Max retry attempts per chunk (default: 3)
+        compress: Whether to compress JSON files (default: True)
+        credentials: R2 credentials
+        use_write: Whether to use write credentials
+        upload_timeout: Timeout in seconds per chunk upload (default: 600s/10min)
+
+    Returns:
+        True if upload succeeded, False otherwise
+    """
+
     # Compress small JSON only; skip binaries/large files
     if compress and key.endswith(".json") and len(data) < 10 * 1024 * 1024:
         original_size = len(data)
@@ -426,7 +442,7 @@ async def upload_file_chunked(
         elif total_size < 500 * 1024 * 1024:
             chunk_size = 50 * 1024 * 1024
         elif total_size < 5 * 1024 * 1024 * 1024:
-            chunk_size = 200 * 1024 * 1024
+            chunk_size = 500 * 1024 * 1024
         else:
             chunk_size = 500 * 1024 * 1024
     progress = TransferProgress(total_size, f"Upload {key}")
@@ -434,7 +450,9 @@ async def upload_file_chunked(
     # For small files, use single upload
     if total_size <= chunk_size:
         logger.info(f"📤 Uploading {key} ({total_size} bytes)")
-        return await _upload_single_chunk(key, data, progress, max_retries, credentials, use_write)
+        return await _upload_single_chunk(
+            key, data, progress, max_retries, credentials, use_write, upload_timeout
+        )
 
     # For large files, use multipart upload
     logger.info(
@@ -450,7 +468,7 @@ async def upload_file_chunked(
         upload_id = response["UploadId"]
 
         # Upload chunks concurrently with limited concurrency (fewer for larger chunks)
-        semaphore = asyncio.Semaphore(10 if chunk_size >= 200 * 1024 * 1024 else 30)
+        semaphore = asyncio.Semaphore(3 if chunk_size >= 200 * 1024 * 1024 else 15)
         tasks = []
 
         for i in range(0, total_size, chunk_size):
@@ -467,6 +485,7 @@ async def upload_file_chunked(
                 max_retries,
                 credentials,
                 use_write,
+                upload_timeout,
             )
             tasks.append(task)
 
@@ -479,7 +498,12 @@ async def upload_file_chunked(
             if isinstance(result, Exception):
                 logger.error(f"Chunk {i + 1} failed: {result}")
                 bucket_id = get_bucket_id(credentials, use_write)
-                await client.abort_multipart_upload(Bucket=bucket_id, Key=key, UploadId=upload_id)
+                try:
+                    await client.abort_multipart_upload(
+                        Bucket=bucket_id, Key=key, UploadId=upload_id
+                    )
+                except Exception as e:
+                    logger.debug(f"Failed to abort upload: {e}")
                 return False
             parts.append(result)
 
@@ -499,9 +523,64 @@ async def upload_file_chunked(
         )
         return True
 
+    except asyncio.TimeoutError as e:
+        logger.error(f"❌ Upload timeout for {key} after {upload_timeout}s: {e}")
+        try:
+            bucket_id = get_bucket_id(credentials, use_write)
+            await client.abort_multipart_upload(Bucket=bucket_id, Key=key, UploadId=upload_id)
+        except Exception as cleanup_err:
+            logger.debug(f"Failed to cleanup after timeout: {cleanup_err}")
+        return False
     except Exception as e:
         logger.error(f"❌ Upload failed for {key}: {e}")
+        try:
+            bucket_id = get_bucket_id(credentials, use_write)
+            await client.abort_multipart_upload(Bucket=bucket_id, Key=key, UploadId=upload_id)
+        except Exception as cleanup_err:
+            logger.debug(f"Failed to cleanup after error: {cleanup_err}")
         return False
+
+
+def _is_throttling_error(error: Exception) -> bool:
+    """Detect if error is R2/S3 throttling (SlowDown, 429, RequestLimitExceeded)."""
+    error_str = str(error).lower()
+    return any(code in error_str for code in ["slowdown", "429", "requestlimitexceeded", "throttl"])
+
+
+async def _exponential_backoff(
+    attempt: int,
+    max_retries: int,
+    base_delay: float = 1.0,
+    max_delay: float = 32.0,
+    is_throttle: bool = False,
+) -> float:
+    """Calculate exponential backoff with jitter for retries.
+
+    Args:
+        attempt: Current attempt number (0-indexed)
+        max_retries: Total retry attempts
+        base_delay: Base delay in seconds (default 1s)
+        max_delay: Maximum delay in seconds (default 32s)
+        is_throttle: If True, use longer delays for throttling
+
+    Returns:
+        Delay in seconds before next retry
+    """
+    import random
+
+    # For throttling, use longer base delay and cap
+    if is_throttle:
+        base_delay = 2.0
+        max_delay = 60.0
+
+    # Exponential backoff: 2^attempt * base_delay
+    delay = min(base_delay * (2**attempt), max_delay)
+
+    # Add jitter: ±25% of delay to avoid thundering herd
+    jitter = delay * 0.25 * (2 * random.random() - 1)
+    final_delay = max(0.1, delay + jitter)
+
+    return final_delay
 
 
 async def _upload_single_chunk(
@@ -511,24 +590,50 @@ async def _upload_single_chunk(
     max_retries: int,
     credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = True,
+    upload_timeout: float = UPLOAD_TIMEOUT,
 ) -> bool:
-    """Upload single chunk with retry logic"""
+    """Upload single chunk with retry logic and timeout protection"""
+
     for attempt in range(max_retries):
         try:
             client = await _get_cached_client(credentials, use_write)
             bucket_id = get_bucket_id(credentials, use_write)
-            await client.put_object(Bucket=bucket_id, Key=key, Body=data)
+
+            # Wrap upload with timeout
+            await asyncio.wait_for(
+                client.put_object(Bucket=bucket_id, Key=key, Body=data),
+                timeout=upload_timeout,
+            )
             progress.update(len(data))
             return True
+        except asyncio.TimeoutError:
+            if attempt < max_retries - 1:
+                wait_time = await _exponential_backoff(attempt, max_retries)
+                logger.warning(
+                    f"Upload attempt {attempt + 1} timeout for {key} (waited {upload_timeout}s), "
+                    f"retrying in {wait_time:.1f}s"
+                )
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error(
+                    f"Upload timeout for {key} after {max_retries} attempts "
+                    f"({upload_timeout}s per attempt)"
+                )
+                return False
         except Exception as e:
             if attempt < max_retries - 1:
-                wait_time = 2**attempt  # Exponential backoff
+                is_throttle = _is_throttling_error(e)
+                wait_time = await _exponential_backoff(
+                    attempt, max_retries, is_throttle=is_throttle
+                )
                 logger.warning(
-                    f"Upload attempt {attempt + 1} failed for {key}, retrying in {wait_time}s: {e}"
+                    f"Upload attempt {attempt + 1} failed for {key}, retrying in {wait_time:.1f}s "
+                    f"({'throttled' if is_throttle else 'error'}): {e}"
                 )
                 await asyncio.sleep(wait_time)
             else:
                 logger.error(f"Upload failed after {max_retries} attempts for {key}: {e}")
+                return False
     return False
 
 
@@ -543,26 +648,52 @@ async def _upload_chunk_with_semaphore(
     max_retries: int,
     credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = True,
+    upload_timeout: float = UPLOAD_TIMEOUT,
 ) -> dict[str, Any] | None:
-    """Upload a single chunk with concurrency control and retry logic"""
+    """Upload a single chunk with concurrency control, retry logic, and timeout protection"""
     async with semaphore:
         for attempt in range(max_retries):
             try:
                 bucket_id = get_bucket_id(credentials, use_write)
-                response = await client.upload_part(
-                    Bucket=bucket_id,
-                    Key=key,
-                    PartNumber=part_number,
-                    UploadId=upload_id,
-                    Body=data,
+
+                # Wrap upload_part with timeout to catch stalled transfers
+                response = await asyncio.wait_for(
+                    client.upload_part(
+                        Bucket=bucket_id,
+                        Key=key,
+                        PartNumber=part_number,
+                        UploadId=upload_id,
+                        Body=data,
+                    ),
+                    timeout=upload_timeout,
                 )
                 progress.update(len(data))
                 return {"PartNumber": part_number, "ETag": response["ETag"]}
+            except asyncio.TimeoutError:
+                if attempt < max_retries - 1:
+                    wait_time = await _exponential_backoff(attempt, max_retries)
+                    logger.warning(
+                        f"Chunk {part_number} attempt {attempt + 1} timeout "
+                        f"(waited {upload_timeout}s), retrying in {wait_time:.1f}s"
+                    )
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(
+                        f"Chunk {part_number} timeout after {max_retries} attempts "
+                        f"({upload_timeout}s per attempt)"
+                    )
+                    raise TimeoutError(
+                        f"Chunk {part_number} upload timeout after {upload_timeout}s"
+                    ) from None
             except Exception as e:
                 if attempt < max_retries - 1:
-                    wait_time = 2**attempt  # Exponential backoff
+                    is_throttle = _is_throttling_error(e)
+                    wait_time = await _exponential_backoff(
+                        attempt, max_retries, is_throttle=is_throttle
+                    )
                     logger.warning(
-                        f"Chunk {part_number} attempt {attempt + 1} failed, retrying in {wait_time}s: {e}"
+                        f"Chunk {part_number} attempt {attempt + 1} failed, retrying in {wait_time:.1f}s "
+                        f"({'throttled' if is_throttle else 'error'}): {e}"
                     )
                     await asyncio.sleep(wait_time)
                 else:

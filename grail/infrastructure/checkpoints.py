@@ -65,6 +65,7 @@ class CheckpointMetadata:
     training_config: dict[str, Any] = field(default_factory=dict)
     git_commit: str = "unknown"
     created_at: float = 0.0
+    model_name: str = "no_name"
 
     def remote_prefix(self) -> str:
         return f"{CHECKPOINT_PREFIX}checkpoint-{self.window}"
@@ -179,6 +180,7 @@ class CheckpointManager:
                         raise CheckpointDownloadError(f"Integrity check failed for window {window}")
 
                     # Persist manifest locally for later offline verification
+                    # TODO: make this meta_data handling more neat and apply DRY later
                     manifest_path = tmp_dir / "metadata.json"
                     manifest_path.write_text(
                         json.dumps(
@@ -189,6 +191,7 @@ class CheckpointManager:
                                 "training_config": metadata.training_config,
                                 "git_commit": metadata.git_commit,
                                 "created_at": metadata.created_at,
+                                "model_name": metadata.model_name,
                             },
                             ensure_ascii=False,
                             indent=2,
@@ -358,6 +361,7 @@ class CheckpointManager:
             training_config=payload.get("training_config", {}),
             git_commit=payload.get("git_commit", "unknown"),
             created_at=float(payload.get("created_at", 0.0)),
+            model_name=payload.get("model_name", "no_name"),
         )
         self._metadata_cache[window] = metadata
         return metadata
