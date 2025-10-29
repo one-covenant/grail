@@ -3,14 +3,26 @@
 import asyncio
 import logging
 import multiprocessing
+import os
 from typing import Any
 
 import bittensor as bt
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from ..shared.schemas import Bucket, BucketCredentials
 from .chain_worker import chain_commitment_worker
 
 logger = logging.getLogger(__name__)
+
+# Substrate query timeout and retry configuration
+# These are lower-level queries than subtensor calls, so use tighter timeouts
+SUBSTRATE_QUERY_TIMEOUT = float(os.getenv("SUBSTRATE_QUERY_TIMEOUT", "20.0"))
+SUBSTRATE_QUERY_RETRIES = int(os.getenv("SUBSTRATE_QUERY_RETRIES", "3"))
 
 
 class GrailChainManager:
@@ -236,12 +248,85 @@ class GrailChainManager:
             logger.warning(f"Hotkey {hotkey} not found in metagraph")
             return None
 
+    @retry(
+        stop=stop_after_attempt(SUBSTRATE_QUERY_RETRIES),
+        wait=wait_exponential(multiplier=1, min=1, max=4),
+        retry=retry_if_exception_type(asyncio.TimeoutError),
+        reraise=True,
+    )
+    async def _query_timestamp_pallet(self, substrate: Any, block_hash: str) -> float | None:
+        """Query Timestamp.Now pallet with timeout and retry (via tenacity).
+
+        Args:
+            substrate: Substrate interface instance
+            block_hash: Block hash to query at
+
+        Returns:
+            Timestamp in seconds if found, None otherwise
+
+        Raises:
+            asyncio.TimeoutError: If query times out after retries
+        """
+        res = await asyncio.wait_for(
+            substrate.query(
+                module="Timestamp",
+                storage_function="Now",
+                block_hash=block_hash,
+            ),
+            timeout=SUBSTRATE_QUERY_TIMEOUT,
+        )
+        moment = getattr(res, "value", None)
+        if isinstance(moment, (int, float)):
+            # Substrate stores moment in milliseconds; convert to seconds
+            return float(moment) / 1000.0 if moment > 1e12 else float(moment)
+        return None
+
+    @retry(
+        stop=stop_after_attempt(SUBSTRATE_QUERY_RETRIES),
+        wait=wait_exponential(multiplier=1, min=1, max=4),
+        retry=retry_if_exception_type(asyncio.TimeoutError),
+        reraise=True,
+    )
+    async def _query_timestamp_extrinsics(self, substrate: Any, block_hash: str) -> float | None:
+        """Parse block extrinsics for timestamp.set with timeout and retry.
+
+        Args:
+            substrate: Substrate interface instance
+            block_hash: Block hash to query at
+
+        Returns:
+            Timestamp in seconds if found, None otherwise
+
+        Raises:
+            asyncio.TimeoutError: If query times out after retries
+        """
+        block = await asyncio.wait_for(
+            substrate.get_block(block_hash=block_hash),
+            timeout=SUBSTRATE_QUERY_TIMEOUT,
+        )
+        extrinsics = (block or {}).get("extrinsics", [])
+        for ext in extrinsics:
+            call = ext.get("call") or {}
+            if call.get("call_module") == "Timestamp" and call.get("call_function") == "set":
+                params = call.get("params") or []
+                for p in params:
+                    if p.get("name") == "now":
+                        val = p.get("value")
+                        if isinstance(val, (int, float)):
+                            return float(val) / 1000.0 if val > 1e12 else float(val)
+        return None
+
     async def get_block_timestamp(self, block_number: int) -> float | None:
         """Return the unix timestamp (seconds) for a given block if available.
 
         Queries the Timestamp pallet's Now storage at the specific block via
         substrate.query. This is the canonical on-chain timestamp set by the
         block author (in milliseconds since UNIX epoch).
+
+        Uses timeout and retry logic (via tenacity) to prevent indefinite hangs.
+
+        Args:
+            block_number: Block number to query timestamp for
 
         Returns:
             Timestamp in seconds (float) if available, None otherwise
@@ -265,60 +350,37 @@ class GrailChainManager:
             logger.debug("Substrate interface not available on subtensor")
             return None
 
-        # Query pallet_timestamp::Now at the target block
+        # Try primary method: query Timestamp.Now pallet
         try:
-            # substrate.query is async in AsyncSubstrateInterface
-            res = await substrate.query(
-                module="Timestamp",
-                storage_function="Now",
-                block_hash=block_hash,
-            )
-            moment = getattr(res, "value", None)
-            if isinstance(moment, (int, float)):
-                # Substrate stores moment in milliseconds; convert to seconds
-                timestamp_seconds = float(moment) / 1000.0 if moment > 1e12 else float(moment)
-                logger.debug(
-                    "Got timestamp for block %d: %.2f (%s ms)",
-                    block_number,
-                    timestamp_seconds,
-                    moment,
-                )
-                return timestamp_seconds
-        except Exception:
-            logger.debug(
-                "Failed to query Timestamp.Now for block %d",
+            timestamp = await self._query_timestamp_pallet(substrate, block_hash)
+            if timestamp is not None:
+                logger.debug("Got timestamp for block %d: %.2f", block_number, timestamp)
+                return timestamp
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timeout querying Timestamp.Now for block %d after %d attempts",
                 block_number,
-                exc_info=True,
+                SUBSTRATE_QUERY_RETRIES,
             )
+        except Exception:
+            logger.debug("Failed to query Timestamp.Now for block %d", block_number, exc_info=True)
 
         # Fallback: parse block extrinsics for timestamp.set (legacy)
         try:
-            # substrate.get_block is async in AsyncSubstrateInterface
-            block = await substrate.get_block(block_hash=block_hash)
-            extrinsics = (block or {}).get("extrinsics", [])
-            for ext in extrinsics:
-                call = ext.get("call") or {}
-                if call.get("call_module") == "Timestamp" and call.get("call_function") == "set":
-                    params = call.get("params") or []
-                    for p in params:
-                        if p.get("name") == "now":
-                            val = p.get("value")
-                            if isinstance(val, (int, float)):
-                                timestamp_seconds = (
-                                    float(val) / 1000.0 if val > 1e12 else float(val)
-                                )
-                                logger.debug(
-                                    "Got timestamp from extrinsics for block %d: %.2f",
-                                    block_number,
-                                    timestamp_seconds,
-                                )
-                                return timestamp_seconds
-        except Exception:
-            logger.debug(
-                "Failed to parse extrinsics for block %d",
+            timestamp = await self._query_timestamp_extrinsics(substrate, block_hash)
+            if timestamp is not None:
+                logger.debug(
+                    "Got timestamp from extrinsics for block %d: %.2f", block_number, timestamp
+                )
+                return timestamp
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timeout parsing extrinsics for block %d after %d attempts",
                 block_number,
-                exc_info=True,
+                SUBSTRATE_QUERY_RETRIES,
             )
+        except Exception:
+            logger.debug("Failed to parse extrinsics for block %d", block_number, exc_info=True)
 
         logger.debug("Could not retrieve timestamp for block %d", block_number)
         return None

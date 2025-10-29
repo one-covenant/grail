@@ -45,6 +45,7 @@ dependencies = [
     "wandb>=0.21.3",
     "scipy>=1.7.0",
     "sglang==0.5.4",
+    "tenacity>=8.0.0",
 ]
 
 [project.optional-dependencies]
