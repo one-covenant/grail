@@ -250,6 +250,42 @@ def indices_from_root(tokens: list[int], rand_hex: str, seq_len: int, k: int) ->
     return idxs
 
 
+def indices_from_root_in_range(
+    tokens: list[int], rand_hex: str, start: int, end: int, k: int
+) -> list[int]:
+    """Generate deterministic indices restricted to a half-open range [start, end).
+
+    This reuses the same PRF/seeding as indices_from_root but constrains the
+    sampling domain to a subrange. Indices are returned as absolute positions.
+
+    Args:
+        tokens: Full token sequence used for PRF binding
+        rand_hex: Randomness hex string (from beacon/chain)
+        start: Inclusive start of the range
+        end: Exclusive end of the range
+        k: Desired number of indices to select
+
+    Returns:
+        Sorted list of indices within [start, end). May return fewer than k if
+        the range length is smaller than k. Returns an empty list for empty ranges.
+
+    Raises:
+        ValueError: If start/end are invalid
+    """
+    if start < 0:
+        raise ValueError(f"start must be non-negative, got {start}")
+    if end < start:
+        raise ValueError(f"end must be >= start, got start={start}, end={end}")
+
+    length = end - start
+    if length <= 0:
+        return []
+
+    k_eff = min(k, length)
+    rel = indices_from_root(tokens, rand_hex, length, k_eff)
+    return [start + i for i in rel]
+
+
 def dot_mod_q(hidden: torch.Tensor, r_vec: torch.Tensor) -> int:  # type: ignore[misc]
     """Compute modular inner product of hidden state and random projection vector.
 
