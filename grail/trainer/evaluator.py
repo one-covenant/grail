@@ -17,11 +17,12 @@ import torch
 from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeRemainingColumn
 
 from grail.environments.core import ChatMessage, MultiTurnEnv
-from grail.environments.loop import AgentEnvLoop, VLLMBackend
+from grail.environments.loop import AgentEnvLoop
 from grail.environments.vector import EnvVector
 from grail.trainer.config import EvalConfig
-from grail.trainer.eval_aggregator import EvalAggregator, TaskReplicateResult
 from grail.trainer.eval_planner import EvaluationPlan
+from grail.trainer.metrics import KMetricsAggregator as EvalAggregator
+from grail.trainer.metrics import TaskReplicateResult
 
 logger = logging.getLogger(__name__)
 
@@ -83,27 +84,25 @@ class EvaluatorService:
                 gen_backend = None
         elif backend_name == "vllm":
             try:
-                # Lazy import to keep HF-only environments clean
-                from vllm import LLM  # type: ignore
+                from grail.environments.loop import VLLMServerBackend
 
-                model_id = getattr(self._model, "name_or_path", None)
-                if not model_id:
-                    raise RuntimeError(
-                        "vLLM backend requires model.name_or_path to initialize engine"
-                    )
-
-                # H200 (141 GB) tuned defaults: high utilization, BF16, single-GPU
-                llm = LLM(
-                    model=model_id,
-                    dtype="bfloat16",
-                    tensor_parallel_size=1,
-                    gpu_memory_utilization=0.95,
+                base_url = f"http://{self._cfg.sglang_host}:{self._cfg.sglang_port}"
+                model_id = getattr(self._model, "name_or_path", "model")
+                gen_backend = VLLMServerBackend(
+                    base_url=base_url,
+                    model_name=str(model_id),
+                    tokenizer=self._tokenizer,
+                    timeout=300.0,
                 )
-
-                gen_backend = VLLMBackend(llm, self._tokenizer)
-                logger.info("Evaluator using vLLM backend for generation (model=%s)", model_id)
+                logger.info(
+                    "Evaluator using vLLM SERVER backend with ASYNC API (url=%s, model=%s)",
+                    base_url,
+                    model_id,
+                )
             except Exception:
-                logger.exception("Failed to initialize vLLM backend; falling back to HF backend")
+                logger.exception(
+                    "Failed to initialize vLLM server backend; falling back to HF backend"
+                )
                 gen_backend = None
 
         self._loop = AgentEnvLoop(

@@ -19,7 +19,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, cast
 
-import bittensor as bt
+try:
+    import bittensor as bt
+except Exception:  # pragma: no cover - optional in offline mode
+    bt = None  # type: ignore[assignment]
 import numpy as np
 import torch
 
@@ -232,6 +235,148 @@ class HFBackend:
                     all_ids = all_ids[: max(0, last_non_pad + 1)]
             results.append(all_ids)
 
+        return results
+
+
+class VLLMServerBackend:
+    """vLLM server (OpenAI-compatible) backend over HTTP with async API.
+
+    Uses AsyncOpenAI client to interact with a running vLLM server. Deterministic
+    generation is achieved by passing a per-request seed when provided.
+    """
+
+    def __init__(
+        self, *, base_url: str, model_name: str, tokenizer: Any, timeout: float = 300.0
+    ) -> None:
+        from openai import AsyncOpenAI
+
+        self._base_url = base_url.rstrip("/")
+        self._model_name = model_name
+        self._tokenizer = tokenizer
+        self._timeout = float(timeout)
+
+        self._client = AsyncOpenAI(
+            base_url=f"{self._base_url}/v1",
+            api_key="EMPTY",
+            timeout=self._timeout,
+        )
+
+    def generate(
+        self,
+        prompt_ids_batch: list[list[int]],
+        *,
+        params: GenerationParams,
+        seeds: list[int] | None = None,
+    ) -> list[list[int]]:
+        import asyncio
+        import concurrent.futures
+
+        try:
+            asyncio.get_running_loop()
+
+            new_loop = asyncio.new_event_loop()
+
+            def _run_in_thread() -> list[list[int]]:
+                asyncio.set_event_loop(new_loop)
+                try:
+                    return new_loop.run_until_complete(
+                        self._async_generate_batch(prompt_ids_batch, params, seeds)
+                    )
+                finally:
+                    new_loop.close()
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_run_in_thread)
+                return future.result()
+        except RuntimeError:
+            return asyncio.run(self._async_generate_batch(prompt_ids_batch, params, seeds))
+
+    async def _async_generate_batch(
+        self,
+        prompt_ids_batch: list[list[int]],
+        params: GenerationParams,
+        seeds: list[int] | None = None,
+    ) -> list[list[int]]:
+        import asyncio
+        import time
+
+        batch_start = time.time()
+        batch_size = len(prompt_ids_batch)
+        logger.info("vLLMServer: Starting ASYNC batch of %d prompts", batch_size)
+
+        prompts = _decode_prompts(self._tokenizer, prompt_ids_batch)
+
+        sem = asyncio.Semaphore(8)
+
+        async def _call_one_async(idx: int, prompt: str, rnd_seed: int | None) -> tuple[int, str]:
+            max_retries = 3
+            base_backoff = 1.0
+            async with sem:
+                for attempt in range(max_retries):
+                    req_start = time.time()
+                    try:
+                        completion_kwargs: dict[str, Any] = {
+                            "model": self._model_name,
+                            "prompt": prompt,
+                            "max_tokens": int(params.max_new_tokens),
+                            "temperature": float(params.temperature),
+                            "top_p": float(params.top_p),
+                        }
+                        if params.repetition_penalty is not None:
+                            completion_kwargs["frequency_penalty"] = float(
+                                params.repetition_penalty
+                            )
+                        if rnd_seed is not None:
+                            completion_kwargs["seed"] = int(rnd_seed)
+
+                        response = await self._client.completions.create(**completion_kwargs)
+                        text = response.choices[0].text if response.choices else ""
+                        _ = time.time() - req_start
+                        return (idx, text)
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            backoff = base_backoff * (2**attempt)
+                            logger.warning(
+                                "  vLLMServer req %d failed (attempt %d/%d), retrying in %.1fs: %s",
+                                idx + 1,
+                                attempt + 1,
+                                max_retries,
+                                backoff,
+                                type(e).__name__,
+                            )
+                            await asyncio.sleep(backoff)
+                        else:
+                            logger.warning(
+                                "  vLLMServer req %d failed after %d attempts: %s",
+                                idx + 1,
+                                max_retries,
+                                type(e).__name__,
+                            )
+                            return (idx, "")
+            return (idx, "")
+
+        tasks = []
+        for idx, prompt in enumerate(prompts):
+            seed_val = seeds[idx] if seeds and idx < len(seeds) else None
+            tasks.append(_call_one_async(idx, prompt, seed_val))
+
+        results_tuples = await asyncio.gather(*tasks, return_exceptions=False)
+        completions: dict[int, str] = dict(results_tuples)
+
+        results: list[list[int]] = []
+        for idx, p_ids in enumerate(prompt_ids_batch):
+            completion_text = completions.get(idx, "")
+            comp_ids = _tokenize_completion(self._tokenizer, completion_text, [])
+            results.append(p_ids + comp_ids)
+
+        batch_time = time.time() - batch_start
+        throughput = batch_size / batch_time if batch_time > 0 else 0
+        logger.info(
+            "vLLMServer: ASYNC batch complete in %.2fs (%d prompts, %.1f prompts/sec)",
+            batch_time,
+            batch_size,
+            throughput,
+        )
         return results
 
 
@@ -804,7 +949,7 @@ class AgentEnvLoop:
         self,
         env: MultiTurnEnv,
         randomness_hex: str,
-        wallet: bt.wallet,
+        wallet: Any,  # bt.wallet, but optional in offline mode
         *,
         task_id: str | None = None,
         seed: int | None = None,
@@ -909,7 +1054,7 @@ class AgentEnvLoop:
         env_factory: Callable[[], MultiTurnEnv],
         count: int,
         randomness_hex: str,
-        wallet: bt.wallet,
+        wallet: Any,  # bt.wallet, but optional in offline mode
         *,
         seed: int | None = None,
     ) -> list[GRPORollout]:
@@ -983,7 +1128,7 @@ class AgentEnvLoop:
         self,
         envs: list[MultiTurnEnv],
         randomness_hex: str,
-        wallet: bt.wallet,
+        wallet: Any,  # bt.wallet, but optional in offline mode
     ) -> list[GRPORollout]:
         """Vectorized GRPO group generation (batched prompts and generation).
 
@@ -1130,7 +1275,7 @@ class AgentEnvLoop:
         all_token_ids: list[int],
         prompt_len: int,
         randomness_hex: str,
-        wallet: bt.wallet,
+        wallet: Any,  # bt.wallet, but optional in offline mode
     ) -> tuple[list[dict], list[float], bytes, dict, str]:
         """Compute GRAIL commitments and token logprobs in a single forward pass.
 
@@ -1184,6 +1329,10 @@ class AgentEnvLoop:
 
         commitment_data = json.dumps(commitments, sort_keys=True)
         commitment_hash = hashlib.sha256(commitment_data.encode()).digest()
+        if bt is None or wallet is None:
+            raise RuntimeError(
+                "GRAIL proof generation requires bittensor wallet (unavailable in offline mode)"
+            )
         signature = wallet.hotkey.sign(commitment_hash)
 
         beacon = {"randomness": randomness_hex}

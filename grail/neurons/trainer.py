@@ -256,6 +256,10 @@ class TrainerNeuron(BaseNeuron):
             if self._eval_cfg.backend == "sglang" and self._eval_cfg.sglang_start_server:
                 tmp_dir, server_proc = await self._prepare_sglang_server()
 
+            # Optionally start vLLM server with saved checkpoint
+            if self._eval_cfg.backend == "vllm" and self._eval_cfg.sglang_start_server:
+                tmp_dir, server_proc = await self._prepare_vllm_server()
+
             # Create evaluator with appropriate backend
             evaluator = EvaluatorService(
                 model=self._context.train_model,
@@ -370,6 +374,39 @@ class TrainerNeuron(BaseNeuron):
 
         # Server failed; fall back to HF
         logger.warning("sgLang server not ready; using HF backend for this evaluation.")
+        self._eval_cfg.backend = "hf"
+        return tmp_dir, None
+
+    async def _prepare_vllm_server(self) -> tuple[str | None, subprocess.Popen[bytes] | None]:
+        """Save checkpoint, free VRAM, and launch vLLM server.
+
+        Returns (tmp_checkpoint_dir, server_process) tuple.
+        Falls back to HF backend if any step fails.
+        """
+        tmp_dir = self._save_eval_checkpoint()
+        if tmp_dir is None:
+            logger.warning("Checkpoint save failed; falling back to HF backend for eval.")
+            self._eval_cfg.backend = "hf"
+            return None, None
+
+        self._free_vram()
+
+        # Choose model path for server: use saved checkpoint
+        server_proc, bound_port = await self._launch_and_wait_vllm_server(
+            model_path=tmp_dir,
+            host=self._eval_cfg.sglang_host,  # vLLM uses the same host/port as SGLang for now
+            port=self._eval_cfg.sglang_port,
+            timeout_s=self._eval_cfg.sglang_server_timeout_s,
+            trust_remote_code=self._eval_cfg.sglang_trust_remote_code,
+        )
+
+        # Check if server launched successfully
+        if server_proc is not None and bound_port is not None:
+            self._eval_cfg.sglang_port = bound_port
+            return tmp_dir, server_proc
+
+        # Server failed; fall back to HF
+        logger.warning("vLLM server not ready; using HF backend for this evaluation.")
         self._eval_cfg.backend = "hf"
         return tmp_dir, None
 
@@ -534,6 +571,143 @@ class TrainerNeuron(BaseNeuron):
 
         logger.warning(
             "sgLang server readiness check failed after %.1fs: %s",
+            timeout_s,
+            last_err,
+        )
+        # If not ready, terminate and signal failure
+        self._terminate_process(proc)
+        return None, None
+
+    async def _launch_and_wait_vllm_server(
+        self,
+        *,
+        model_path: str | None,
+        host: str,
+        port: int,
+        timeout_s: float,
+        trust_remote_code: bool,
+    ) -> tuple[subprocess.Popen[bytes] | None, int | None]:
+        """Launch vLLM server subprocess and wait until HTTP endpoint is ready.
+
+        Configures server with vLLM best practices:
+        - Memory-optimized settings for large models
+        - Request rate limiting to prevent overload
+        - Extended startup timeouts
+        - Post-launch warmup to verify stability
+        """
+        bound_port = int(port)
+        if bound_port <= 0:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind((host, 0))
+                bound_port = s.getsockname()[1]
+
+        # vLLM server launch with optimized parameters
+        cmd = [
+            "python",
+            "-m",
+            "vllm.entrypoints.api_server",
+            "--model-path",
+            model_path or "",
+            "--host",
+            host,
+            "--port",
+            str(bound_port),
+            "--dtype",
+            "bfloat16",
+            "--tp-size",
+            "1",
+            # vLLM performance tuning per docs
+            "--mem-fraction-static",
+            "0.85",  # Reserve 85% VRAM for KV cache
+            "--max-running-requests",
+            "8",  # Limit concurrent batch processing
+            "--schedule-policy",
+            "fcfs",  # Fair scheduling
+        ]
+        if trust_remote_code:
+            cmd.append("--trust-remote-code")
+
+        proc: subprocess.Popen[bytes] | None = None
+        try:
+            # Launch with combined stdout/stderr to monitor for errors
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=False,  # Keep as bytes
+            )
+            logger.info(
+                "Launched vLLM server (pid=%s) on %s:%s with optimized config",
+                proc.pid if proc else None,
+                host,
+                bound_port,
+            )
+        except Exception as exc:
+            logger.warning("Failed to launch vLLM server: %s", exc)
+            return None, None
+
+        # Poll readiness with extended timeout for model loading
+        import time as _time
+
+        import requests
+
+        ready_url = f"http://{host}:{bound_port}/v1/models"
+        t_deadline = _time.time() + float(timeout_s)
+        last_err: str | None = None
+        poll_count: int = 0
+
+        while _time.time() < t_deadline:
+            # Check if process is still alive
+            if proc.poll() is not None:
+                # Process exited unexpectedly
+                logger.error(
+                    "vLLM server process exited unexpectedly (return code: %s)",
+                    proc.returncode,
+                )
+                return None, None
+
+            try:
+                r = requests.get(ready_url, timeout=3.0)
+                if r.status_code == 200:
+                    logger.info("vLLM server ready at %s:%s", host, bound_port)
+
+                    # Optional: send warmup request to force KV cache initialization
+                    try:
+                        warmup_start = _time.time()
+                        warmup_payload = {
+                            "model": model_path or "model",
+                            "prompt": "OK",
+                            "max_tokens": 1,
+                        }
+                        requests.post(
+                            f"{ready_url.replace('/v1/models', '')}/v1/completions",
+                            json=warmup_payload,
+                            timeout=30.0,
+                        )
+                        warmup_time = _time.time() - warmup_start
+                        logger.info("Server warmup completed in %.2fs", warmup_time)
+                    except Exception as warmup_err:
+                        logger.warning("Warmup request failed (non-fatal): %s", warmup_err)
+
+                    return proc, bound_port
+
+                last_err = f"HTTP {r.status_code}"
+            except Exception as exc:
+                last_err = str(exc)
+
+            poll_count += 1
+            if poll_count % 6 == 0:  # Log every 3 seconds (0.5s * 6)
+                elapsed = _time.time() - (t_deadline - timeout_s)
+                logger.debug(
+                    "Waiting for vLLM server (%.1fs elapsed): %s",
+                    elapsed,
+                    last_err,
+                )
+
+            await asyncio.sleep(0.5)
+
+        logger.warning(
+            "vLLM server readiness check failed after %.1fs: %s",
             timeout_s,
             last_err,
         )
