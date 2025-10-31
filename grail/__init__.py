@@ -24,23 +24,27 @@ from .environments import (  # noqa: F401, E402, E501, F403, F405
 
 # Stage 3c: Verifier class deleted
 # Use grail.validation.create_sat_validation_pipeline() instead
-from .infrastructure.comms import (  # noqa: F401, E402, E501, F403, F405
-    PROTOCOL_VERSION,
-    download_file_chunked,
-    download_from_huggingface,
-    file_exists,
-    get_file,
-    get_valid_rollouts,
-    list_bucket_files,
-    login_huggingface,
-    sink_window_inferences,
-    upload_file_chunked,
-    # NEW: Hugging Face dataset upload
-    upload_to_huggingface,
-    # TODO(v2): Re-enable model state management for training
-    # save_model_state, load_model_state, model_state_exists,
-    upload_valid_rollouts,
-)
+try:
+    from .infrastructure.comms import (  # noqa: F401, E402, E501, F403, F405
+        PROTOCOL_VERSION,
+        download_file_chunked,
+        download_from_huggingface,
+        file_exists,
+        get_file,
+        get_valid_rollouts,
+        list_bucket_files,
+        login_huggingface,
+        sink_window_inferences,
+        upload_file_chunked,
+        # NEW: Hugging Face dataset upload
+        upload_to_huggingface,
+        # TODO(v2): Re-enable model state management for training
+        # save_model_state, load_model_state, model_state_exists,
+        upload_valid_rollouts,
+    )
+except Exception:  # pragma: no cover - optional in offline mode
+    # Allow importing grail package without comms/bittensor installed
+    pass
 from .infrastructure.drand import (
     get_drand_beacon,
     get_round_at_time,
@@ -66,5 +70,9 @@ __all__ = [
     # Entry points
     "main",
 ]
-
-from .cli import main  # noqa: E402,F401
+try:
+    from .cli import main  # noqa: E402,F401
+except Exception:  # pragma: no cover - optional in offline mode
+    # CLI includes bittensor-dependent trainer; keep import optional offline
+    def main() -> None:  # type: ignore[override]
+        raise RuntimeError("grail CLI unavailable in offline mode without bittensor")
