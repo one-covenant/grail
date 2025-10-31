@@ -68,6 +68,7 @@ class WindowProcessor:
         uid_by_hotkey: dict[str, int],
         subtensor: Any,  # bt.subtensor
         heartbeat_callback: Any = None,
+        deadline_ts: float | None = None,
     ) -> WindowResults:
         """Process a complete validation window.
 
@@ -85,6 +86,7 @@ class WindowProcessor:
             uid_by_hotkey: Mapping of hotkey to UID
             subtensor: Subtensor instance for block queries
             heartbeat_callback: Optional watchdog heartbeat callback
+            deadline_ts: Upload deadline timestamp (unix seconds)
 
         Returns:
             WindowResults with all aggregated metrics and rollouts
@@ -147,6 +149,7 @@ class WindowProcessor:
                         uid_by_hotkey=uid_by_hotkey,
                         text_logs_emitted=text_logs_emitted,
                         heartbeat_callback=heartbeat_callback,
+                        deadline_ts=deadline_ts,
                     )
 
                 # Record timing

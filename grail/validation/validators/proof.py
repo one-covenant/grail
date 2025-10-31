@@ -12,6 +12,7 @@ import logging
 
 import torch
 
+from ...protocol.crypto import indices_from_root_in_range
 from ...protocol.grail_verifier import GRAILVerifier
 from ...protocol.signatures import verify_commit_signature
 from ...shared.constants import CHALLENGE_K, GRAIL_PROOF_VERSION, LAYER_INDEX
@@ -53,14 +54,20 @@ class GRAILProofValidator(Validator):
                     f"Expected: {GRAIL_PROOF_VERSION} | "
                     f"Got: {proof_version}"
                 )
+                ctx.checks[self.check_name] = False
+                return False
 
             if not commitments:
                 logger.debug(
                     f"[proof_valid] Commitments missing or empty | commitments={commitments}"
                 )
+                ctx.checks[self.check_name] = False
+                return False
 
         except KeyError as e:
             logger.debug(f"[proof_valid] Required field missing in commit | Missing field: {e}")
+            ctx.checks[self.check_name] = False
+            return False
 
         # Validate structure
         if not isinstance(commitments, list) or len(tokens) != len(commitments):
@@ -70,13 +77,26 @@ class GRAILProofValidator(Validator):
                 f"commitments_len={len(commitments)} | "
                 f"commitments_type={type(commitments).__name__}"
             )
+            ctx.checks[self.check_name] = False
+            return False
 
-        # Minimum sequence length check
-        seq_len = len(tokens)
-        if seq_len < CHALLENGE_K:
+        # Determine effective domain: prefer completion region
+        rollout = ctx.commit.get("rollout", {})
+        prompt_len = int(rollout.get("prompt_length", 0))
+        completion_len = int(rollout.get("completion_length", 0))
+
+        # Enforce minimum completion length
+        if completion_len < CHALLENGE_K:
             logger.debug(
-                f"[proof_valid] Sequence too short | Expected: >={CHALLENGE_K} | Got: {seq_len}"
+                f"[proof_valid] Completion too short | required>={CHALLENGE_K} got={completion_len} | "
+                f"prompt_len={prompt_len} seq_len={len(tokens)}"
             )
+            ctx.checks[self.check_name] = False
+            return False
+
+        seq_len = len(tokens)
+        start_idx = prompt_len
+        end_idx = prompt_len + completion_len
 
         # Verify commit signature binding
         if not verify_commit_signature(ctx.commit, ctx.prover_address):
@@ -86,6 +106,8 @@ class GRAILProofValidator(Validator):
                 f"tokens_hash={hash(tuple(tokens))} | "
                 f"Possible causes: invalid signature, tampered data, wrong prover"
             )
+            ctx.checks[self.check_name] = False
+            return False
 
         # Verify model/layer binding
         model_info = ctx.commit.get("model", {})
@@ -96,6 +118,8 @@ class GRAILProofValidator(Validator):
                 f"Expected: {expected_model} | "
                 f"Got: {model_info.get('name')}"
             )
+            ctx.checks[self.check_name] = False
+            return False
 
         try:
             layer_claim = int(model_info.get("layer_index"))
@@ -105,11 +129,15 @@ class GRAILProofValidator(Validator):
                 f"layer_index_value={model_info.get('layer_index')} | "
                 f"layer_index_type={type(model_info.get('layer_index')).__name__}"
             )
+            ctx.checks[self.check_name] = False
+            return False
 
         if layer_claim != LAYER_INDEX:
             logger.debug(
                 f"[proof_valid] Layer mismatch | Expected: {LAYER_INDEX} | Got: {layer_claim}"
             )
+            ctx.checks[self.check_name] = False
+            return False
 
         # Get beacon randomness
         beacon = ctx.commit.get("beacon", {})
@@ -119,6 +147,8 @@ class GRAILProofValidator(Validator):
                 f"beacon_present={bool(beacon)} | "
                 f"beacon_keys={list(beacon.keys()) if beacon else []}"
             )
+            ctx.checks[self.check_name] = False
+            return False
 
         randomness_hex = beacon["randomness"]
 
@@ -129,10 +159,14 @@ class GRAILProofValidator(Validator):
         # Generate coefficient vector from randomness
         r_vec = verifier.generate_r_vec(randomness_hex)
 
-        # Derive challenge indices deterministically
-        from ...protocol.crypto import indices_from_root
-
-        idxs = indices_from_root(tokens, ctx.challenge_randomness, seq_len, CHALLENGE_K)
+        # Derive challenge indices deterministically within selected domain
+        idxs = indices_from_root_in_range(
+            tokens,
+            ctx.challenge_randomness,
+            start_idx,
+            end_idx,
+            CHALLENGE_K,
+        )
 
         # Run model inference with hidden states
         full_ids = torch.tensor(tokens, dtype=torch.long, device=ctx.device).unsqueeze(0)
@@ -167,6 +201,8 @@ class GRAILProofValidator(Validator):
                     f"commitments_len={len(commitments)} | "
                     f"sequence_length={seq_len}"
                 )
+                ctx.checks[self.check_name] = False
+                return False
 
             is_valid, diagnostics = verifier.verify_commitment(
                 h_layer[i], commitments[i], r_vec, seq_len
@@ -188,7 +224,7 @@ class GRAILProofValidator(Validator):
             failure_details = "; ".join(f"pos={i}" for i, _ in failed_checks)
             logger.debug(
                 f"[proof_valid] FAILED | "
-                f"failed_positions={len(failed_checks)}/{CHALLENGE_K} | "
+                f"failed_positions={len(failed_checks)}/{len(idxs)} | "
                 f"positions=[{failure_details}] | "
                 f"seq_len={seq_len} | "
                 f"model={model_info.get('name')} | "
@@ -200,7 +236,7 @@ class GRAILProofValidator(Validator):
         logger.debug(
             f"[proof_valid] SUCCESS | "
             f"seq_len={seq_len} | "
-            f"verified_positions={CHALLENGE_K} | "
+            f"verified_positions={len(idxs)} | "
             f"model={model_info.get('name')} | "
             f"layer={layer_claim}"
         )

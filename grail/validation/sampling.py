@@ -64,6 +64,7 @@ class MinerSampler:
         chain_manager: Any,
         uid_by_hotkey: dict[str, int] | None = None,
         heartbeat_callback: Any = None,
+        deadline_ts: float | None = None,
     ) -> list[str]:
         """Find miners with window files for the given window.
 
@@ -79,11 +80,13 @@ class MinerSampler:
             chain_manager: Chain manager for bucket credentials
             uid_by_hotkey: Optional mapping for logging
             heartbeat_callback: Optional callback to update watchdog heartbeat
+            deadline_ts: If set, require LastModified <= this deadline (unix seconds)
 
         Returns:
             List of hotkeys with available window files
         """
         semaphore = asyncio.Semaphore(self._concurrency)
+        late_counter: dict[str, int] = {"count": 0}
 
         async def _check(hotkey: str) -> tuple[str, bool]:
             filename = f"grail/windows/{hotkey}-window-{window}.json"
@@ -107,17 +110,40 @@ class MinerSampler:
 
                 start_time = time.time()
                 try:
-                    from ..infrastructure.comms import file_exists
+                    if deadline_ts is not None:
+                        from ..infrastructure.comms import file_exists_with_deadline
 
-                    exists = await asyncio.wait_for(
-                        file_exists(
-                            filename,
-                            credentials=bucket,
-                            use_write=False,
-                        ),
-                        timeout=6.0,
-                    )
-                    return hotkey, bool(exists)
+                        exists, was_late, upload_time = await asyncio.wait_for(
+                            file_exists_with_deadline(
+                                key=filename,
+                                credentials=bucket,
+                                use_write=False,
+                                max_upload_time=deadline_ts,
+                            ),
+                            timeout=6.0,
+                        )
+                        if was_late:
+                            late_counter["count"] = int(late_counter.get("count", 0)) + 1
+                            logger.info(
+                                "Late upload ignored for %s window=%s uploaded_at=%.0f deadline=%.0f",
+                                miner_id,
+                                window,
+                                upload_time or -1,
+                                deadline_ts,
+                            )
+                        return hotkey, bool(exists)
+                    else:
+                        from ..infrastructure.comms import file_exists
+
+                        exists = await asyncio.wait_for(
+                            file_exists(
+                                filename,
+                                credentials=bucket,
+                                use_write=False,
+                            ),
+                            timeout=6.0,
+                        )
+                        return hotkey, bool(exists)
                 except asyncio.TimeoutError:
                     elapsed = time.time() - start_time
                     logger.debug(
@@ -137,6 +163,12 @@ class MinerSampler:
         logger.info(
             "Discovered %d/%d active miners for window %d", len(active), len(meta_hotkeys), window
         )
+        if deadline_ts is not None and late_counter.get("count", 0) > 0:
+            logger.info(
+                "Ignored %d late miners for window %d",
+                int(late_counter.get("count", 0)),
+                window,
+            )
 
         return active
 

@@ -10,17 +10,20 @@ Provides AgentEnvLoop class that:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import random
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, cast
 
-import bittensor as bt
+try:
+    import bittensor as bt
+except Exception:  # pragma: no cover - optional in offline mode
+    bt = None  # type: ignore[assignment]
 import numpy as np
 import torch
 
@@ -134,7 +137,7 @@ class GenerationParams:
 class TextGenBackend(Protocol):
     """Abstract interface for batched text generation backends."""
 
-    def generate(
+    async def generate(
         self,
         prompt_ids_batch: list[list[int]],
         *,
@@ -163,7 +166,7 @@ class HFBackend:
         self._tokenizer = tokenizer
         self._device = device
 
-    def generate(
+    async def generate(
         self,
         prompt_ids_batch: list[list[int]],
         *,
@@ -236,429 +239,287 @@ class HFBackend:
         return results
 
 
-class VLLMBackend:
-    """vLLM generation backend.
+class VLLMServerBackend:
+    """vLLM server (OpenAI-compatible) backend over HTTP with async API.
 
-    Expects an engine object with a `generate(prompts, **kwargs)` API that
-    returns results per prompt, each with an `.outputs[0]` containing either
-    `token_ids` (preferred) or `text`. We reconstruct full sequences by
-    concatenating prompt token IDs with completion token IDs if available.
-    """
-
-    def __init__(self, engine: Any, tokenizer: Any) -> None:
-        self._engine = engine
-        self._tokenizer = tokenizer
-
-    def shutdown(self) -> None:
-        """Release vLLM engine resources and free GPU memory."""
-        _shutdown_engine_and_free_gpu(self._engine, "vLLM")
-        self._engine = None
-
-    def generate(
-        self,
-        prompt_ids_batch: list[list[int]],
-        *,
-        params: GenerationParams,
-        seeds: list[int] | None = None,
-    ) -> list[list[int]]:
-        from vllm import SamplingParams  # type: ignore
-
-        prompts = _decode_prompts(self._tokenizer, prompt_ids_batch)
-
-        # Map shared params to vLLM SamplingParams
-        sp_kwargs: dict[str, Any] = {
-            "max_tokens": int(params.max_new_tokens),
-            "temperature": float(params.temperature),
-            "top_p": float(params.top_p),
-        }
-        if params.top_k is not None:
-            sp_kwargs["top_k"] = int(params.top_k)
-        if params.repetition_penalty is not None:
-            sp_kwargs["repetition_penalty"] = float(params.repetition_penalty)
-
-        # Create per-prompt or shared SamplingParams depending on seeds
-        if seeds is not None and len(seeds) == len(prompts):
-            params_list = [SamplingParams(**sp_kwargs, seed=int(s)) for s in seeds]
-            results_raw = self._engine.generate(prompts, params_list)
-        else:
-            sp = SamplingParams(**sp_kwargs, seed=int(seeds[0]) if seeds else None)
-            results_raw = self._engine.generate(prompts, sp)
-
-        results: list[list[int]] = []
-        for p_ids, out in zip(prompt_ids_batch, results_raw, strict=False):
-            try:
-                # vLLM returns completion token IDs directly
-                completion_ids = cast(list[int], out.outputs[0].token_ids)
-                results.append(p_ids + completion_ids)
-            except (AttributeError, IndexError, TypeError):
-                # Fallback: re-tokenize text output
-                try:
-                    text = cast(str, out.outputs[0].text)
-                    comp_ids = _tokenize_completion(self._tokenizer, text, [])
-                    results.append(p_ids + comp_ids)
-                except (AttributeError, IndexError, TypeError, KeyError) as e:
-                    logger.debug("Failed to extract vLLM completion: %s", e)
-                    results.append(list(p_ids))
-
-        return results
-
-
-class SGLangBackend:
-    """sgLang generation backend for high-throughput inference.
-
-    Expects an engine object with a `generate` API compatible with sgLang's LLM.
-    Constructs SamplingParams and generates completions efficiently.
-    """
-
-    def __init__(self, engine: Any, tokenizer: Any) -> None:
-        self._engine = engine
-        self._tokenizer = tokenizer
-
-    def generate(
-        self,
-        prompt_ids_batch: list[list[int]],
-        *,
-        params: GenerationParams,
-        seeds: list[int] | None = None,
-    ) -> list[list[int]]:
-        prompts = _decode_prompts(self._tokenizer, prompt_ids_batch)
-
-        # Map shared params to sgLang sampling_params
-        sp_kwargs: dict[str, Any] = {
-            "max_new_tokens": int(params.max_new_tokens),
-            "temperature": float(params.temperature),
-            "top_p": float(params.top_p),
-        }
-        if params.top_k is not None:
-            sp_kwargs["top_k"] = int(params.top_k)
-        if params.repetition_penalty is not None:
-            sp_kwargs["frequency_penalty"] = float(params.repetition_penalty)
-
-        # Generate with per-prompt seeds if provided
-        if seeds is not None and len(seeds) == len(prompts):
-            results_raw = []
-            for prompt, seed in zip(prompts, seeds, strict=True):
-                sp = {**sp_kwargs, "random_seed": int(seed)}
-                out = self._engine.generate([prompt], sampling_params=sp)
-                results_raw.extend(out)
-        else:
-            sp = {**sp_kwargs, "random_seed": int(seeds[0])} if seeds else sp_kwargs
-            results_raw = self._engine.generate(prompts, sampling_params=sp)
-
-        results: list[list[int]] = []
-        for p_ids, out in zip(prompt_ids_batch, results_raw, strict=False):
-            # Extract completion text from SGLang output
-            comp_text = out.text if hasattr(out, "text") and isinstance(out.text, str) else str(out)
-            comp_ids = _tokenize_completion(self._tokenizer, comp_text, [])
-            results.append(p_ids + comp_ids)
-
-        return results
-
-
-class SGLangAsyncBackend:
-    """SGLang offline async engine backend (no HTTP server required).
-
-    Uses SGLang's async Engine API for direct, in-process generation.
-    This eliminates server process management complexity and timeouts.
-    Reference: https://docs.sglang.ai/basic_usage/offline_engine_api.html
-    """
-
-    def __init__(self, *, model_path: str, tokenizer: Any, **engine_kwargs: Any) -> None:
-        """Initialize async backend with SGLang engine.
-
-        Args:
-            model_path: Path to model (local or HuggingFace model ID)
-            tokenizer: HuggingFace tokenizer for decoding completions
-            **engine_kwargs: Additional args passed to sgl.Engine (e.g., dtype, tp_size)
-        """
-        import sglang as sgl
-
-        self._tokenizer = tokenizer
-
-        # Initialize SGLang offline engine
-        logger.info(f"Initializing SGLang offline engine: {model_path}")
-        self._engine = sgl.Engine(model_path=model_path, **engine_kwargs)
-        logger.info("SGLang offline engine ready")
-
-        # Create a dedicated background asyncio loop to avoid nested-loop deadlocks
-        import asyncio as _asyncio
-        import threading as _threading
-
-        self._io_loop: _asyncio.AbstractEventLoop = _asyncio.new_event_loop()
-
-        def _run_loop() -> None:
-            _asyncio.set_event_loop(self._io_loop)
-            self._io_loop.run_forever()
-
-        self._io_thread: _threading.Thread = _threading.Thread(
-            target=_run_loop,
-            name="sglang-async-loop",
-            daemon=True,
-        )
-        self._io_thread.start()
-
-        # Submission semaphore to cap concurrent async_generate calls
-        self._submit_sem: _threading.Semaphore = _threading.Semaphore(value=2)
-
-    def shutdown(self) -> None:
-        """Shutdown async backend, release memory, and stop private loop.
-
-        Attempts a best-effort engine shutdown in a short-lived thread.
-        Always drops references, runs GC, and clears CUDA cache. Finally,
-        stops the private asyncio loop and joins its thread.
-        """
-        import threading as _threading
-
-        try:
-            # Attempt engine shutdown in a guarded thread (best effort)
-            engine_ref = getattr(self, "_engine", None)
-            self._engine = None
-
-            def _do_shutdown() -> None:
-                try:
-                    if engine_ref is not None and hasattr(engine_ref, "shutdown"):
-                        engine_ref.shutdown()
-                except Exception:
-                    pass
-
-            t = _threading.Thread(target=_do_shutdown, name="sglang-engine-shutdown", daemon=True)
-            t.start()
-            t.join(timeout=10.0)
-
-            # Force Python GC to reclaim any reachable objects
-            import gc
-
-            gc.collect()
-
-            # Free CUDA cache to release unused GPU memory
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception as e:
-            logger.debug("SGLangAsyncBackend.shutdown cleanup issue: %s", e)
-
-        # Stop background event loop thread
-        try:
-            if hasattr(self, "_io_loop") and self._io_loop.is_running():
-                self._io_loop.call_soon_threadsafe(self._io_loop.stop)
-            if hasattr(self, "_io_thread"):
-                self._io_thread.join(timeout=2.0)
-        except Exception as e:
-            logger.debug("SGLangAsync backend loop stop issue: %s", e)
-
-    def generate(
-        self,
-        prompt_ids_batch: list[list[int]],
-        *,
-        params: GenerationParams,
-        seeds: list[int] | None = None,
-    ) -> list[list[int]]:
-        """Generate via private loop to avoid nested event-loop deadlocks.
-
-        Submits coroutine to a background event loop using a submission
-        semaphore to bound concurrency, and enforces a generous timeout
-        to fail fast on hangs.
-        """
-        import asyncio as _asyncio
-
-        # Bounded submission to avoid overloading the engine
-        acquired = self._submit_sem.acquire(timeout=60.0)
-        if not acquired:
-            logger.warning("SGLangAsync: submission semaphore acquire timed out; dropping request")
-            return list(prompt_ids_batch)
-        try:
-
-            async def _with_timeout() -> list[list[int]]:
-                return await _asyncio.wait_for(
-                    self._async_generate(prompt_ids_batch, params, seeds),
-                    timeout=300.0,
-                )
-
-            future = _asyncio.run_coroutine_threadsafe(_with_timeout(), self._io_loop)
-            return future.result()
-        finally:
-            self._submit_sem.release()
-
-    async def _async_generate(
-        self,
-        prompt_ids_batch: list[list[int]],
-        params: GenerationParams,
-        seeds: list[int] | None = None,
-    ) -> list[list[int]]:
-        """Async generation implementation using SGLang engine."""
-        batch_size = len(prompt_ids_batch)
-        batch_start = time.time()
-        logger.info("SGLangAsync: Starting batch of %d prompts", batch_size)
-
-        prompts = _decode_prompts(self._tokenizer, prompt_ids_batch)
-
-        # Map sampling params to SGLang format
-        sampling_params: dict[str, Any] = {
-            "temperature": float(params.temperature),
-            "top_p": float(params.top_p),
-            "max_new_tokens": int(params.max_new_tokens),
-        }
-        if params.top_k is not None:
-            sampling_params["top_k"] = int(params.top_k)
-
-        # Generate completions
-        try:
-            outputs = await self._engine.async_generate(prompts, sampling_params)
-        except Exception as e:
-            logger.error("SGLang async generation failed: %s", e, exc_info=True)
-            return prompt_ids_batch
-
-        # Reconstruct full sequences
-        results: list[list[int]] = []
-        for p_ids, output in zip(prompt_ids_batch, outputs, strict=False):
-            # Extract completion text
-            if isinstance(output, dict) and "text" in output:
-                comp_text = output["text"]
-            elif hasattr(output, "text"):
-                comp_text = output.text
-            else:
-                comp_text = str(output)
-
-            comp_ids = _tokenize_completion(self._tokenizer, comp_text, [])
-            results.append(p_ids + comp_ids if comp_ids else p_ids)
-
-        batch_time = time.time() - batch_start
-        throughput = batch_size / batch_time if batch_time > 0 else 0
-        logger.info(
-            "SGLangAsync: Batch complete in %.2fs (%d prompts, %.1f prompts/sec)",
-            batch_time,
-            batch_size,
-            throughput,
-        )
-
-        return results
-
-
-class SGLangServerBackend:
-    """sgLang server (OpenAI-compatible) backend over HTTP.
-
-    Sends prompts to a running sgLang server and reconstructs full sequences
-    by concatenating prompt token IDs with completion token IDs derived from
-    the returned text.
-
-    Uses the official OpenAI client library for robust communication.
+    Uses AsyncOpenAI client to interact with a running vLLM server. Deterministic
+    generation is achieved by passing a per-request seed when provided.
     """
 
     def __init__(
-        self, *, base_url: str, model_name: str, tokenizer: Any, timeout: float = 120.0
+        self,
+        *,
+        base_url: str,
+        model_name: str,
+        tokenizer: Any,
+        timeout: float = 300.0,
+        max_concurrent_requests: int = 32,
     ) -> None:
-        import openai
+        from openai import AsyncOpenAI
 
         self._base_url = base_url.rstrip("/")
         self._model_name = model_name
         self._tokenizer = tokenizer
         self._timeout = float(timeout)
+        self._max_concurrent_requests = max_concurrent_requests
 
-        # Initialize OpenAI client pointing to SGLang server
-        self._client = openai.Client(
+        self._client = AsyncOpenAI(
             base_url=f"{self._base_url}/v1",
-            api_key="EMPTY",  # SGLang doesn't require authentication
+            api_key="EMPTY",
             timeout=self._timeout,
         )
 
-    def generate(
+    async def generate(
         self,
         prompt_ids_batch: list[list[int]],
         *,
         params: GenerationParams,
         seeds: list[int] | None = None,
     ) -> list[list[int]]:
+        """Generate completions using vLLM server async API.
+
+        Now properly async - called directly from async context without nested event loops.
+        """
+        return await self._async_generate_batch(prompt_ids_batch, params, seeds)
+
+    async def _async_generate_batch(
+        self,
+        prompt_ids_batch: list[list[int]],
+        params: GenerationParams,
+        seeds: list[int] | None = None,
+    ) -> list[list[int]]:
+        import asyncio
+        import time
+
         batch_start = time.time()
         batch_size = len(prompt_ids_batch)
-        logger.info("SGLangServer: Starting PARALLEL batch of %d prompts", batch_size)
+        logger.info("vLLMServer: Starting ASYNC batch of %d prompts", batch_size)
 
         prompts = _decode_prompts(self._tokenizer, prompt_ids_batch)
 
-        def _call_one(idx: int, prompt: str, random_seed: int | None) -> tuple[int, str]:
-            """Make OpenAI API request with retries and exponential backoff."""
-            req_start = time.time()
+        # Use configurable semaphore to control client-side concurrency
+        sem = asyncio.Semaphore(self._max_concurrent_requests)
+
+        async def _call_one_async(idx: int, prompt: str, rnd_seed: int | None) -> tuple[int, str]:
+            max_retries = 3
+            base_backoff = 1.0
+            async with sem:
+                for attempt in range(max_retries):
+                    req_start = time.time()
+                    try:
+                        completion_kwargs: dict[str, Any] = {
+                            "model": self._model_name,
+                            "prompt": prompt,
+                            "max_tokens": int(params.max_new_tokens),
+                            "temperature": float(params.temperature),
+                            "top_p": float(params.top_p),
+                        }
+                        if params.repetition_penalty is not None:
+                            completion_kwargs["frequency_penalty"] = float(
+                                params.repetition_penalty
+                            )
+                        if rnd_seed is not None:
+                            completion_kwargs["seed"] = int(rnd_seed)
+
+                        response = await self._client.completions.create(**completion_kwargs)
+                        text = response.choices[0].text if response.choices else ""
+                        _ = time.time() - req_start
+                        return (idx, text)
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            backoff = base_backoff * (2**attempt)
+                            logger.warning(
+                                "  vLLMServer req %d failed (attempt %d/%d), retrying in %.1fs: %s",
+                                idx + 1,
+                                attempt + 1,
+                                max_retries,
+                                backoff,
+                                type(e).__name__,
+                            )
+                            await asyncio.sleep(backoff)
+                        else:
+                            logger.warning(
+                                "  vLLMServer req %d failed after %d attempts: %s",
+                                idx + 1,
+                                max_retries,
+                                type(e).__name__,
+                            )
+                            return (idx, "")
+            return (idx, "")
+
+        tasks = []
+        for idx, prompt in enumerate(prompts):
+            seed_val = seeds[idx] if seeds and idx < len(seeds) else None
+            tasks.append(_call_one_async(idx, prompt, seed_val))
+
+        results_tuples = await asyncio.gather(*tasks, return_exceptions=False)
+        completions: dict[int, str] = dict(results_tuples)
+
+        results: list[list[int]] = []
+        for idx, p_ids in enumerate(prompt_ids_batch):
+            completion_text = completions.get(idx, "")
+            comp_ids = _tokenize_completion(self._tokenizer, completion_text, [])
+            results.append(p_ids + comp_ids)
+
+        batch_time = time.time() - batch_start
+        throughput = batch_size / batch_time if batch_time > 0 else 0
+        logger.info(
+            "vLLMServer: ASYNC batch complete in %.2fs (%d prompts, %.1f prompts/sec)",
+            batch_time,
+            batch_size,
+            throughput,
+        )
+        return results
+
+
+class SGLangServerBackend:
+    """sgLang server (OpenAI-compatible) backend over HTTP with async API.
+
+    Uses AsyncOpenAI client for concurrent, non-blocking requests to a running
+    SGLang server. Runs in a separate subprocess, avoiding Gloo socket corruption.
+
+    Reference: https://docs.sglang.ai/basic_usage/openai_api.html
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        model_name: str,
+        tokenizer: Any,
+        timeout: float = 300.0,
+        max_concurrent_requests: int = 4,
+    ) -> None:
+        from openai import AsyncOpenAI
+
+        self._base_url = base_url.rstrip("/")
+        self._model_name = model_name
+        self._tokenizer = tokenizer
+        self._timeout = float(timeout)
+        self._max_concurrent_requests = max_concurrent_requests
+
+        # Initialize AsyncOpenAI client pointing to SGLang server
+        self._client = AsyncOpenAI(
+            base_url=f"{self._base_url}/v1",
+            api_key="EMPTY",  # SGLang doesn't require authentication
+            timeout=self._timeout,
+        )
+
+    async def generate(
+        self,
+        prompt_ids_batch: list[list[int]],
+        *,
+        params: GenerationParams,
+        seeds: list[int] | None = None,
+    ) -> list[list[int]]:
+        """Generate using async OpenAI API to SGLang server.
+
+        Now properly async - called directly from async context without nested event loops.
+        """
+        return await self._async_generate_batch(prompt_ids_batch, params, seeds)
+
+    async def _async_generate_batch(
+        self,
+        prompt_ids_batch: list[list[int]],
+        params: GenerationParams,
+        seeds: list[int] | None = None,
+    ) -> list[list[int]]:
+        """Async batch generation with concurrent requests and retry logic."""
+        import asyncio
+
+        batch_start = time.time()
+        batch_size = len(prompt_ids_batch)
+        logger.info("SGLangServer: Starting ASYNC batch of %d prompts", batch_size)
+
+        prompts = _decode_prompts(self._tokenizer, prompt_ids_batch)
+
+        # Use configurable semaphore to control client-side concurrency
+        sem = asyncio.Semaphore(self._max_concurrent_requests)
+
+        async def _call_one_async(
+            idx: int, prompt: str, random_seed: int | None
+        ) -> tuple[int, str]:
+            """Make async OpenAI API request with retries and backoff."""
             max_retries: int = 3
             base_backoff: float = 1.0
 
-            for attempt in range(max_retries):
-                try:
-                    # Build completion kwargs
-                    completion_kwargs: dict[str, Any] = {
-                        "model": self._model_name,
-                        "prompt": prompt,
-                        "max_tokens": int(params.max_new_tokens),
-                        "temperature": float(params.temperature),
-                        "top_p": float(params.top_p),
-                    }
+            async with sem:  # Limit concurrency
+                for attempt in range(max_retries):
+                    req_start = time.time()
+                    try:
+                        # Build completion kwargs
+                        completion_kwargs: dict[str, Any] = {
+                            "model": self._model_name,
+                            "prompt": prompt,
+                            "max_tokens": int(params.max_new_tokens),
+                            "temperature": float(params.temperature),
+                            "top_p": float(params.top_p),
+                        }
 
-                    # Map repetition_penalty to frequency_penalty if provided
-                    if params.repetition_penalty is not None:
-                        completion_kwargs["frequency_penalty"] = float(params.repetition_penalty)
+                        # Map repetition_penalty to frequency_penalty if provided
+                        if params.repetition_penalty is not None:
+                            completion_kwargs["frequency_penalty"] = float(
+                                params.repetition_penalty
+                            )
 
-                    # Add seed (SGLang supports this parameter)
-                    if random_seed is not None:
-                        completion_kwargs["seed"] = int(random_seed)
+                        # Add seed (SGLang supports this parameter)
+                        if random_seed is not None:
+                            completion_kwargs["seed"] = int(random_seed)
 
-                    # Call OpenAI client (points to SGLang server)
-                    response = self._client.completions.create(**completion_kwargs)
+                        # Async call to server
+                        response = await self._client.completions.create(**completion_kwargs)
 
-                    req_time = time.time() - req_start
-                    text = response.choices[0].text if response.choices else ""
-                    logger.debug(
-                        "  Request %d/%d took %.2fs, output_len=%d",
-                        idx + 1,
-                        batch_size,
-                        req_time,
-                        len(text),
-                    )
-                    return (idx, text)
-
-                except Exception as e:
-                    req_time = time.time() - req_start
-                    if attempt < max_retries - 1:
-                        backoff: float = base_backoff * (2**attempt)
-                        logger.warning(
-                            "  Request %d/%d failed (attempt %d/%d), retrying in %.1fs: %s: %s",
+                        req_time = time.time() - req_start
+                        text = response.choices[0].text if response.choices else ""
+                        logger.debug(
+                            "  Request %d/%d took %.2fs, output_len=%d",
                             idx + 1,
                             batch_size,
-                            attempt + 1,
-                            max_retries,
-                            backoff,
-                            type(e).__name__,
-                            str(e)[:100],
-                        )
-                        time.sleep(backoff)
-                    else:
-                        logger.warning(
-                            "  Request %d/%d failed after %d attempts (%.2fs total): %s",
-                            idx + 1,
-                            batch_size,
-                            max_retries,
                             req_time,
-                            type(e).__name__,
+                            len(text),
                         )
-                        return (idx, "")
+                        return (idx, text)
 
-            return (idx, "")
+                    except Exception as e:
+                        req_time = time.time() - req_start
+                        if attempt < max_retries - 1:
+                            backoff = base_backoff * (2**attempt)
+                            logger.warning(
+                                "  Request %d/%d failed (attempt %d/%d), retrying in %.1fs: %s",
+                                idx + 1,
+                                batch_size,
+                                attempt + 1,
+                                max_retries,
+                                backoff,
+                                type(e).__name__,
+                            )
+                            await asyncio.sleep(backoff)
+                        else:
+                            logger.warning(
+                                "  Request %d/%d failed after %d attempts (%.2fs): %s",
+                                idx + 1,
+                                batch_size,
+                                max_retries,
+                                req_time,
+                                type(e).__name__,
+                            )
+                            return (idx, "")
 
-        # Parallel execution with ThreadPoolExecutor
-        # Use conservative worker count to avoid overwhelming server
-        max_workers: int = min(batch_size, 4)
+                return (idx, "")
+
+        # Execute all requests concurrently with gather
+        tasks = []
+        for idx, prompt in enumerate(prompts):
+            seed_val = seeds[idx] if seeds and idx < len(seeds) else None
+            tasks.append(_call_one_async(idx, prompt, seed_val))
+
+        # Wait for all completions
+        results_tuples = await asyncio.gather(*tasks, return_exceptions=False)
+
+        # Build completion dict from results
         completions: dict[int, str] = {}
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all requests concurrently
-            futures = []
-            for idx, prompt in enumerate(prompts):
-                seed_val = None
-                if seeds is not None and idx < len(seeds):
-                    seed_val = int(seeds[idx])
-                future = executor.submit(_call_one, idx, prompt, seed_val)
-                futures.append(future)
-
-            # Collect results as they complete
-            for future in as_completed(futures):
-                idx, completion_text = future.result()
-                completions[idx] = completion_text
+        for idx, text in results_tuples:
+            completions[idx] = text
 
         # Reconstruct results in original order
         results: list[list[int]] = []
@@ -670,7 +531,7 @@ class SGLangServerBackend:
         batch_time = time.time() - batch_start
         throughput = batch_size / batch_time if batch_time > 0 else 0
         logger.info(
-            "SGLangServer: PARALLEL batch complete in %.2fs (%d prompts, %.1f prompts/sec)",
+            "SGLangServer: ASYNC batch complete in %.2fs (%d prompts, %.1f prompts/sec)",
             batch_time,
             batch_size,
             throughput,
@@ -765,7 +626,7 @@ class AgentEnvLoop:
         self,
         env: MultiTurnEnv,
         randomness_hex: str,
-        wallet: bt.wallet,
+        wallet: Any,  # bt.wallet, but optional in offline mode,
         *,
         task_id: str | None = None,
         seed: int | None = None,
@@ -775,7 +636,7 @@ class AgentEnvLoop:
         rendered, prompt_ids = self._render_chat(
             [{"role": m.role, "content": m.content} for m in obs.messages]
         )
-        all_ids, prompt_len = self._generate_tokens(prompt_ids)
+        all_ids, prompt_len = asyncio.run(self._generate_tokens(prompt_ids))
         completion_ids = all_ids[prompt_len:]
         completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=False)
 
@@ -849,7 +710,7 @@ class AgentEnvLoop:
             ]
 
             # Batch generate tokens (no logprobs/commitments needed for eval)
-            batch_results = self._batch_generate_tokens(prompts_list)
+            batch_results = asyncio.run(self._batch_generate_tokens(prompts_list))
 
             # Process each rollout in the batch
             for env, (all_ids, prompt_len) in zip(envs, batch_results, strict=False):
@@ -870,7 +731,7 @@ class AgentEnvLoop:
         env_factory: Callable[[], MultiTurnEnv],
         count: int,
         randomness_hex: str,
-        wallet: bt.wallet,
+        wallet: Any,  # bt.wallet, but optional in offline mode
         *,
         seed: int | None = None,
     ) -> list[GRPORollout]:
@@ -892,7 +753,7 @@ class AgentEnvLoop:
             ]
 
             # Batch generate tokens (logprobs computed later with commitments)
-            batch_results = self._batch_generate_tokens(prompts_list)
+            batch_results = asyncio.run(self._batch_generate_tokens(prompts_list))
 
             # Process each rollout in the batch
             for env, _obs, (all_ids, prompt_len) in zip(
@@ -944,7 +805,7 @@ class AgentEnvLoop:
         self,
         envs: list[MultiTurnEnv],
         randomness_hex: str,
-        wallet: bt.wallet,
+        wallet: Any,  # bt.wallet, but optional in offline mode
     ) -> list[GRPORollout]:
         """Vectorized GRPO group generation (batched prompts and generation).
 
@@ -971,7 +832,7 @@ class AgentEnvLoop:
             results.append(prompt_ids)
         return results
 
-    def generate_from_prompt_ids_batch(
+    async def generate_from_prompt_ids_batch(
         self,
         prompt_ids_batch: list[list[int]],
         *,
@@ -983,7 +844,7 @@ class AgentEnvLoop:
         Returns list of (all_token_ids, prompt_len) pairs.
         """
         params = replace(self._gen_params, trim_right_padding=trim_right_padding)
-        sequences = self._backend.generate(prompt_ids_batch, params=params, seeds=seeds)
+        sequences = await self._backend.generate(prompt_ids_batch, params=params, seeds=seeds)
         results: list[tuple[list[int], int]] = []
         for p_ids, seq in zip(prompt_ids_batch, sequences, strict=False):
             results.append((seq, len(p_ids)))
@@ -1003,7 +864,7 @@ class AgentEnvLoop:
 
         return rendered, prompt_ids
 
-    def _generate_tokens(
+    async def _generate_tokens(
         self,
         prompt_ids: list[int],
     ) -> tuple[list[int], int]:
@@ -1014,11 +875,11 @@ class AgentEnvLoop:
         """
         batch = [prompt_ids]
         params = replace(self._gen_params, trim_right_padding=True)
-        sequences = self._backend.generate(batch, params=params, seeds=None)
+        sequences = await self._backend.generate(batch, params=params, seeds=None)
         # Left padding is removed by backend, so prompt_len is original length
         return sequences[0], len(prompt_ids)
 
-    def _batch_generate_tokens(
+    async def _batch_generate_tokens(
         self,
         prompts_list: list[list[dict[str, str]]],
     ) -> list[tuple[list[int], int]]:
@@ -1032,7 +893,7 @@ class AgentEnvLoop:
         # Fast path for single prompt
         if batch_size == 1:
             _, prompt_ids = self._render_chat(prompts_list[0])
-            seq, prompt_len = self._generate_tokens(prompt_ids)
+            seq, prompt_len = await self._generate_tokens(prompt_ids)
             return [(seq, prompt_len)]
 
         # Render all prompts and collect token IDs
@@ -1042,7 +903,7 @@ class AgentEnvLoop:
             prompt_ids_list.append(prompt_ids)
 
         params = replace(self._gen_params, trim_right_padding=True)
-        sequences = self._backend.generate(prompt_ids_list, params=params, seeds=None)
+        sequences = await self._backend.generate(prompt_ids_list, params=params, seeds=None)
 
         results: list[tuple[list[int], int]] = []
         for p_ids, seq in zip(prompt_ids_list, sequences, strict=False):
@@ -1091,7 +952,7 @@ class AgentEnvLoop:
         all_token_ids: list[int],
         prompt_len: int,
         randomness_hex: str,
-        wallet: bt.wallet,
+        wallet: Any,  # bt.wallet, but optional in offline mode
     ) -> tuple[list[dict], list[float], bytes, dict, str]:
         """Compute GRAIL commitments and token logprobs in a single forward pass.
 
@@ -1143,17 +1004,12 @@ class AgentEnvLoop:
                     )
                     logprobs.append(float("-inf"))
 
-            # Debug: log first few logprobs to verify they're non-zero
-            if logprobs:
-                first_5_logprobs = logprobs[: min(5, len(logprobs))]
-                logger.debug(
-                    "MINER LOGPROBS: completion_len=%d first_5=%s",
-                    len(logprobs),
-                    [f"{lp:.6f}" for lp in first_5_logprobs],
-                )
-
         commitment_data = json.dumps(commitments, sort_keys=True)
         commitment_hash = hashlib.sha256(commitment_data.encode()).digest()
+        if bt is None or wallet is None:
+            raise RuntimeError(
+                "GRAIL proof generation requires bittensor wallet (unavailable in offline mode)"
+            )
         signature = wallet.hotkey.sign(commitment_hash)
 
         beacon = {"randomness": randomness_hex}

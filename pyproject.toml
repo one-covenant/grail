@@ -12,6 +12,10 @@ authors = [
     {name = "unconst"},
     {name = "distriburedstatemachine"},
 ]
+# NOTE: vLLM evaluation backend runs in a separate isolated environment to avoid
+# dependency conflicts with bittensor. See tools/vllm-server/ and run:
+#   bash scripts/setup_vllm_env.sh
+# to set up the vLLM server environment before using backend="vllm" in evaluation.
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Developers",
@@ -45,6 +49,7 @@ dependencies = [
     "wandb>=0.21.3",
     "scipy>=1.7.0",
     "sglang==0.5.4",
+    "tenacity>=8.0.0"
 ]
 
 [project.optional-dependencies]
@@ -211,7 +216,7 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-extend-exclude = []
+extend-exclude = ["scripts"]
 
 [tool.ruff.lint]
 select = [

@@ -138,9 +138,7 @@ The docker-compose file uses environment variables from your `.env` file. Key va
 - `NETUID`: Subnet ID (default: 2 for newly created subnet)
 - `BT_WALLET_COLD`: Coldkey name for each service
 - `BT_WALLET_HOT`: Hotkey name for each service
-- `GRAIL_MODEL_NAME`: Model to use (default: Qwen/Qwen2-0.5B-Instruct)
 - `GRAIL_WINDOW_LENGTH`: Window length for testing (default: 3 blocks)
-- `GRAIL_ROLLOUTS_PER_PROBLEM`: Keep at 4 (fixed in this release)
 
 ### GPU Allocation
 

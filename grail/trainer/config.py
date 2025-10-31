@@ -5,7 +5,8 @@ Keeps a single source of truth while enabling injection and testing.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 
 from grail.shared import constants
 
@@ -48,9 +49,7 @@ class EvalConfig:
     split: str = "test"  # dataset-backed envs (e.g., GSM8K) #TODO: should be specified per env
     subset_size: int | None = 400  # generative envs or capped dataset eval
     seed_base: int = 2025
-    batch_size: int = (
-        32  # Increased for parallel server-based backends (8 tasks × 5 reps = 80 prompts/batch)
-    )
+    batch_size: int = 16  # Conservative for vLLM server: 8 tasks × 5 reps = 40 prompts/batch (prevent queue timeout)
     replicates: int = 5  # for pass@k / mean@k curves
     # Decoding configuration for evaluation (separate from training)
     max_new_tokens: int = 512
@@ -58,13 +57,38 @@ class EvalConfig:
     top_p: float = 0.95
     do_sample: bool = True
     # Backend control: "hf" | "vllm" | "sglang"
-    backend: str = "hf"
+    backend: str = "vllm"  # Server mode with async API avoids Gloo socket issues
     # sgLang server options (used when backend == "sglang")
     sglang_host: str = "127.0.0.1"
     sglang_port: int = 30000
-    sglang_start_server: bool = False  # Disabled: using offline async engine instead
+    sglang_start_server: bool = True  # Server runs in subprocess (avoids Gloo socket issues)
     sglang_server_timeout_s: float = 120.0
     sglang_trust_remote_code: bool = False
+    # vLLM server options (used when backend == "vllm")
+    # Path to isolated vLLM environment Python executable
+    # Override via GRAIL_VLLM_PYTHON env var for custom deployments
+    vllm_python_executable: str = field(
+        default_factory=lambda: os.getenv("GRAIL_VLLM_PYTHON", "tools/vllm-server/.venv/bin/python")
+    )
+    # vLLM module entrypoint (version-specific, may change across vLLM releases)
+    vllm_module_entrypoint: str = "vllm.entrypoints.openai.api_server"
+    # vLLM server memory and concurrency tuning (optimized for single A100)
+    # Best practices per vLLM docs: leave headroom for CUDA graph capture and KV cache
+    # See: https://docs.vllm.ai/en/v0.10.2/configuration/optimization.html
+    # - Lower gpu_memory_utilization (0.7–0.8) to leave room for graph allocation
+    # - Set max_num_seqs low enough to fit in available KV cache (target ~24 for safety)
+    # - Client concurrency at 50–70% of server max_num_seqs (avoid burst deadlock)
+    vllm_gpu_memory_utilization: float = 0.75  # Conservative for graph capture safety
+    vllm_max_model_len: int = (
+        1024  # Sufficient: ~512 token prompt + 512 token completion (MAX_NEW_TOKENS)
+    )
+    vllm_max_num_seqs: int = 128  # Optimized for H200 with 141GB mem
+    vllm_max_concurrent_requests: int = 96  # 75% of max_num_seqs for stability
+    # SGLang server memory and concurrency tuning
+    sglang_mem_fraction_static: float = 0.75  # Fraction of GPU memory for SGLang
+    sglang_context_length: int = 1024  # Maximum sequence length
+    sglang_max_running_requests: int = 4  # Server-side: max concurrent requests
+    sglang_max_concurrent_requests: int = 4  # Client-side: max parallel HTTP requests
     use_num_return_sequences: bool = False  # HF-only optimization
     # Metrics aggregation: which k to report (subset of 1..replicates)
     report_ks: tuple[int, ...] = (1, 5, 10)

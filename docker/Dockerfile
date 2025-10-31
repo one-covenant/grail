@@ -24,13 +24,18 @@ ENV NVIDIA_VISIBLE_DEVICES=all \
     TRANSFORMERS_NO_ADVISORY_WARNINGS=1 \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# Copy project files
+# Copy dependency files first (better layer caching)
 COPY pyproject.toml uv.lock /app/
+
+# Sync runtime dependencies only and clean up in same layer to reduce size
+RUN uv sync && \
+    uv cache clean && \
+    rm -rf /root/.cache/pip /root/.cache/uv && \
+    find /root/.local -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+# Copy application code (separate layer for better caching)
 COPY grail /app/grail
 COPY README.md /app/README.md
-
-# Sync runtime dependencies only
-RUN uv sync
 
 # # Default environment suitable for containers
 # ENV WANDB_MODE=online \

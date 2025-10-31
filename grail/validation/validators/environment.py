@@ -8,8 +8,14 @@ import math
 import torch
 
 from ...environments.registry import get_adapter
+from ...protocol.crypto import indices_from_root_in_range
 from ...protocol.signatures import derive_env_seed
-from ...shared.constants import CURRENT_ENV_ID, REWARD_ABS_TOL, REWARD_REL_TOL
+from ...shared.constants import (
+    CHALLENGE_K,
+    CURRENT_ENV_ID,
+    REWARD_ABS_TOL,
+    REWARD_REL_TOL,
+)
 from ..base import Validator
 from ..context import ValidationContext
 
@@ -185,11 +191,24 @@ class LogprobValidator(Validator):
             prompt_len = int(rollout.get("prompt_length", 0))
             completion_len = int(rollout.get("completion_length", 0))
 
-            if logits is None or completion_len <= 0:
-                ctx.checks[self.check_name] = True
-                return True
+            # Enforce minimum completion length
+            if completion_len < CHALLENGE_K:
+                logger.debug(
+                    "[logprobs_valid] Completion too short | required>=%d got=%d | prompt_len=%d seq_len=%d",
+                    CHALLENGE_K,
+                    completion_len,
+                    prompt_len,
+                    len(tokens),
+                )
+                ctx.checks[self.check_name] = False
+                return False
 
-            comp_ids = tokens[prompt_len : prompt_len + completion_len]
+            if logits is None:
+                logger.debug(
+                    "[logprobs_valid] No cached logits available so we set the checks to False for now. (Investigate why this is happening.)"
+                )
+                ctx.checks[self.check_name] = False
+                return False
 
             # Miner expect to generate token_logprobs as: [0.0] * prompt_len + logprobs
             # So len(claimed) should equal len(tokens) = prompt_len + completion_len
@@ -200,47 +219,46 @@ class LogprobValidator(Validator):
                 ctx.checks[self.check_name] = False
                 return False
 
-            # Extract completion logprobs (skip prompt region)
-            claimed_comp = claimed[prompt_len : prompt_len + completion_len]
-
-            # Debug: log alignment and first few claimed logprobs
-            logger.debug(
-                (
-                    "VALIDATOR LOGPROB ALIGNMENT: claimed_len=%d completion_len=%d "
-                    "prompt_len=%d tokens_len=%d claimed_comp_len=%d"
-                ),
-                len(claimed),
-                completion_len,
+            # Choose deterministic challenge indices restricted to completion slice
+            challenged_idxs = indices_from_root_in_range(
+                tokens,
+                ctx.challenge_randomness,
                 prompt_len,
-                len(tokens),
-                len(claimed_comp),
+                prompt_len + completion_len,
+                CHALLENGE_K,
             )
-            if claimed_comp:
-                first_5_claimed = claimed_comp[: min(5, len(claimed_comp))]
-                logger.debug(
-                    "VALIDATOR CLAIMED LOGPROBS: first_5=%s",
-                    [f"{lp:.6f}" for lp in first_5_claimed],
-                )
+
+            # Debug: challenge selection overview
+            logger.debug(
+                ("VALIDATOR LOGPROB CHALLENGE: completion_len=%d selected=%d"),
+                completion_len,
+                len(challenged_idxs),
+            )
+            if challenged_idxs:
+                preview = challenged_idxs[: min(5, len(challenged_idxs))]
+                logger.debug("Challenged completion indices (abs): %s", preview)
 
             # logits correspond to next-token scores; align per-generation index
             mismatches = 0
-            total = min(len(claimed_comp), len(comp_ids))
+            total = len(challenged_idxs)
             first_mismatch_details = None
 
-            for i in range(total):
-                pos = prompt_len + i - 1
+            for abs_idx in challenged_idxs:
+                # Next-token distribution is at previous position
+                pos = abs_idx - 1
                 if pos < 0 or pos >= logits.size(0):
                     continue
                 dist = torch.log_softmax(logits[pos], dim=-1)
-                model_lp = float(dist[comp_ids[i]].item())
-                miner_lp = float(claimed_comp[i])
+                model_lp = float(dist[tokens[abs_idx]].item())
+                miner_lp = float(claimed[abs_idx])
                 if not self._close_lp(model_lp, miner_lp):
                     mismatches += 1
                     # Capture first mismatch for debugging
                     if first_mismatch_details is None:
                         first_mismatch_details = {
-                            "pos": i,
-                            "token_id": comp_ids[i],
+                            "abs_index": abs_idx,
+                            "rel_index": abs_idx - prompt_len,
+                            "token_id": tokens[abs_idx],
                             "model_lp": model_lp,
                             "miner_lp": miner_lp,
                             "diff": abs(model_lp - miner_lp),
@@ -253,11 +271,12 @@ class LogprobValidator(Validator):
 
             if not ok and first_mismatch_details:
                 logger.debug(
-                    "Logprob validation failed: %d/%d mismatches. First mismatch at pos %d: "
+                    "Logprob validation failed: %d/%d mismatches. First mismatch at abs %d (rel %d): "
                     "token=%d, model_lp=%.6f, miner_lp=%.6f, diff=%.6f",
                     mismatches,
                     total,
-                    first_mismatch_details["pos"],
+                    first_mismatch_details["abs_index"],
+                    first_mismatch_details["rel_index"],
                     first_mismatch_details["token_id"],
                     first_mismatch_details["model_lp"],
                     first_mismatch_details["miner_lp"],

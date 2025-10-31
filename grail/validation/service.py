@@ -55,6 +55,7 @@ logger = logging.getLogger(__name__)
 # Weight submission constants
 WEIGHT_SUBMISSION_INTERVAL_BLOCKS = 360
 WEIGHT_ROLLING_WINDOWS = int(WEIGHT_SUBMISSION_INTERVAL_BLOCKS / WINDOW_LENGTH)
+DEADLINE_SLACK_SECONDS = 0.5
 
 
 class ValidationService:
@@ -449,6 +450,19 @@ class ValidationService:
         target_window_hash = await self._subtensor.get_block_hash(target_window)
         window_rand = await self._compute_window_randomness(target_window_hash, use_drand)
 
+        # Compute upload deadline timestamp (start of the validator window)
+        deadline_ts: float | None = None
+        try:
+            if self._chain_manager is not None:
+                deadline_block = target_window + WINDOW_LENGTH
+                deadline_ts = await self._chain_manager.get_block_timestamp(deadline_block)
+                if deadline_ts is None:
+                    deadline_ts = await self._chain_manager.estimate_block_timestamp(deadline_block)
+                if deadline_ts is not None:
+                    deadline_ts += DEADLINE_SLACK_SECONDS
+        except Exception:
+            logger.debug("Failed to compute deadline timestamp", exc_info=True)
+
         # Discover active miners
         timer_ctx = (
             self._monitor.timer("profiling/hotkeys_discovery")
@@ -464,6 +478,7 @@ class ValidationService:
                 chain_manager=self._chain_manager,
                 uid_by_hotkey=uid_by_hotkey,
                 heartbeat_callback=heartbeat_callback,
+                deadline_ts=deadline_ts,
             )
 
         logger.info(
@@ -539,6 +554,7 @@ class ValidationService:
                 uid_by_hotkey=uid_by_hotkey,
                 subtensor=self._subtensor,
                 heartbeat_callback=heartbeat_callback,
+                deadline_ts=deadline_ts,
             )
 
         # Update inference counts for weight computation
