@@ -221,7 +221,7 @@ class InferenceServerManager(ABC):
                 try:
                     text = line.decode("utf-8", errors="replace").rstrip()
                     if text:
-                        logger.info("[%s] %s", name, text)
+                        logger.debug("[%s] %s", name, text)
                 except Exception:
                     # Best-effort logging; never raise from logger path
                     pass
@@ -383,6 +383,10 @@ class HuggingFaceServerManager(InferenceServerManager):
     async def _stop_server(self) -> None:
         """No server to stop for HF backend."""
 
+    async def _reload_models(self) -> None:
+        """No-op for HuggingFace backend."""
+        pass
+
 
 class VLLMServerManager(InferenceServerManager):
     """vLLM server manager with isolated environment support."""
@@ -469,6 +473,10 @@ class VLLMServerManager(InferenceServerManager):
         self._process = None
         self._bound_port = None
         logger.info("VLLMServerManager._stop_server: cleanup complete")
+
+    async def _reload_models(self) -> None:
+        """No-op for vLLM backend (models remain in external process)."""
+        pass
 
     def _resolve_executable(self) -> str | None:
         """Resolve Python executable to absolute path and validate existence."""
@@ -584,6 +592,10 @@ class SGLangServerManager(InferenceServerManager):
         await self._terminate_process(self._process, wait_for_gpu=True)
         self._process = None
         self._bound_port = None
+
+    async def _reload_models(self) -> None:
+        """No-op for SGLang backend (models remain in external process)."""
+        pass
 
     def _build_command(self) -> list[str]:
         """Build SGLang server launch command with optimized parameters."""
