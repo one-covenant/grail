@@ -62,6 +62,12 @@ def configure_logging(verbosity: int) -> None:
         "botocore",
         "datasets",
         "filelock",
+        "vllm",
+        "httpcore",
+        "httpx",
+        "urllib3",
+        "uvicorn",
+        "uvicorn.access",
     ]:
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
