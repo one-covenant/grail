@@ -15,6 +15,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
@@ -35,6 +36,7 @@ from grail.shared.constants import (
     TRAINER_ENTROPY_COEF,
     TRAINER_GRAD_ACCUM_STEPS,
     TRAINER_GRAD_CLIP,
+    TRAINER_IS_RATIO_MAX,
     TRAINER_KL_ADAPT_RATE,
     TRAINER_KL_COEF,
     TRAINER_KL_MAX,
@@ -43,6 +45,7 @@ from grail.shared.constants import (
     TRAINER_LOGRATIO_CLAMP,
     TRAINER_MAX_LENGTH,
     TRAINER_PPO_CLIP_EPS,
+    TRAINER_PPO_CLIP_EPS_UPPER,
     TRAINER_USE_IS,
 )
 from grail.trainer.metrics import (
@@ -113,16 +116,44 @@ def _has_advantage_variance(group: GRPOGroup) -> bool:
 
     # Check if all advantages are the same
     return any(adv != first_advantage for adv in advantages)
+
+
+def _is_valid_logprobs(logprobs: list[float] | None) -> bool:
+    """Validate that logprobs list contains only finite numeric values.
+
+    Args:
+        logprobs: List of logprob values to validate
+
+    Returns:
+        True if logprobs is a non-empty list of numeric values with all finite floats, False otherwise
+    """
+    if not isinstance(logprobs, list) or not logprobs:
+        return False
+    try:
+        arr = np.asarray(logprobs, dtype=np.float64)
+    except (TypeError, ValueError):
+        return False
+    if arr.ndim != 1:
+        return False
+    return bool(np.isfinite(arr).all())
+
+
 def _group_rollouts(raw_rollouts: list[dict[str, Any]]) -> dict[str, list[GRPORollout]]:
     """Group raw rollout dicts into rollout objects by group_id.
+
+    Entire groups are filtered if any rollout has invalid logprobs to ensure
+    data consistency and training stability.
 
     Args:
         raw_rollouts: List of raw rollout dictionaries from miners
 
     Returns:
-        Dict mapping group_id to list of GRPORollout objects
+        Dict mapping group_id to list of GRPORollout objects (only valid groups)
     """
-    grouped: dict[str, list[GRPORollout]] = {}
+    # First pass: collect all rollouts, tracking groups with invalid logprobs
+    ungrouped: dict[str, list[GRPORollout]] = {}
+    invalid_logprobs_groups: set[str] = set()
+
     for rollout_dict in raw_rollouts:
         group_id = str(rollout_dict.get("rollout_group", ""))
         if not group_id:
@@ -131,47 +162,92 @@ def _group_rollouts(raw_rollouts: list[dict[str, Any]]) -> dict[str, list[GRPORo
         commit = rollout_dict.get("commit", {})
         rollout_meta = commit.get("rollout", {})
 
-        # Log non-finite or obviously invalid token logprobs arrays
+        # Extract and validate token logprobs during loading
         tlp = rollout_meta.get("token_logprobs", None)
-        if isinstance(tlp, list) and tlp:
-            # Cheap checks without importing torch here
-            any_non_finite = any(
-                (x is None)
-                or (isinstance(x, float) and (x != x or x == float("inf") or x == float("-inf")))
-                for x in tlp
+        # Require behavior logprobs to exist and be well-formed
+        if tlp is None:
+            logger.warning(
+                "Missing token_logprobs; marking group for filter",
+                extra={"group_id": group_id},
             )
-            if any_non_finite:
-                logger.debug(
-                    "Non-finite token_logprobs detected; ignored during training",
+            invalid_logprobs_groups.add(group_id)
+        elif not isinstance(tlp, list):
+            logger.warning(
+                "Invalid token_logprobs type; marking group for filter",
+                extra={
+                    "group_id": group_id,
+                    "logprobs_type": type(tlp).__name__,
+                },
+            )
+            invalid_logprobs_groups.add(group_id)
+        elif not _is_valid_logprobs(tlp):
+            logger.warning(
+                "Non-finite token_logprobs detected; marking group for filter",
+                extra={
+                    "group_id": group_id,
+                    "logprobs_len": len(tlp),
+                },
+            )
+            invalid_logprobs_groups.add(group_id)
+        else:
+            # Validate length consistency with provided lengths
+            orig_prompt_len = int(rollout_meta.get("prompt_length", 0))
+            orig_comp_len = int(rollout_meta.get("completion_length", 0) or 0)
+            expected_total = max(0, orig_prompt_len) + max(0, orig_comp_len)
+            tlp_len = len(tlp)
+            if not (tlp_len >= expected_total or tlp_len == orig_comp_len):
+                logger.warning(
+                    "token_logprobs length inconsistent with prompt/completion; marking group for filter",
+                    extra={
+                        "group_id": group_id,
+                        "logprobs_len": tlp_len,
+                        "expected_total": expected_total,
+                        "prompt_len": orig_prompt_len,
+                        "completion_len": orig_comp_len,
+                    },
                 )
+                invalid_logprobs_groups.add(group_id)
 
         try:
-            grouped.setdefault(group_id, []).append(
-                GRPORollout(
-                    tokens=list(commit.get("tokens", [])),
-                    prompt_length=int(rollout_meta.get("prompt_length", 0)),
-                    completion_length=int(rollout_meta.get("completion_length", 0) or 0),
-                    advantage=float(rollout_meta.get("advantage", 0.0)),
-                    reward=float(rollout_meta.get("total_reward", 0.0)),
-                    success=bool(rollout_meta.get("success", False)),
-                    nonce=int(rollout_dict.get("nonce", 0)),
-                    rollout_group=group_id,
-                    token_logprobs=(
-                        list(rollout_meta.get("token_logprobs", []))
-                        if isinstance(
-                            rollout_meta.get("token_logprobs", None),
-                            list,
-                        )
-                        else None
-                    ),
-                )
+            rollout = GRPORollout(
+                tokens=list(commit.get("tokens", [])),
+                prompt_length=int(rollout_meta.get("prompt_length", 0)),
+                completion_length=int(rollout_meta.get("completion_length", 0) or 0),
+                advantage=float(rollout_meta.get("advantage", 0.0)),
+                reward=float(rollout_meta.get("total_reward", 0.0)),
+                success=bool(rollout_meta.get("success", False)),
+                nonce=int(rollout_dict.get("nonce", 0)),
+                rollout_group=group_id,
+                token_logprobs=(list(tlp) if _is_valid_logprobs(tlp) else None),
             )
+            ungrouped.setdefault(group_id, []).append(rollout)
         except Exception as exc:  # noqa: BLE001
             logger.debug(
                 "Failed to parse rollout for group %s: %s",
                 group_id,
                 exc,
             )
+            invalid_logprobs_groups.add(group_id)
+
+    # Second pass: keep only groups with all valid logprobs
+    grouped: dict[str, list[GRPORollout]] = {}
+    for group_id, rollouts in ungrouped.items():
+        if group_id in invalid_logprobs_groups:
+            logger.info(
+                "Filtering entire group due to invalid logprobs in any rollout",
+                extra={
+                    "group_id": group_id,
+                    "num_rollouts": len(rollouts),
+                },
+            )
+        else:
+            grouped[group_id] = rollouts
+
+    if invalid_logprobs_groups:
+        logger.info(
+            "Filtered %d groups with invalid logprobs during loading",
+            len(invalid_logprobs_groups),
+        )
 
     return grouped
 
@@ -309,10 +385,7 @@ def _filter_valid_groups(
         groups_with_variance = [
             group
             for group in groups_with_variance
-            if all(
-                0 <= rollout.completion_length <= max_completion
-                for rollout in group.rollouts
-            )
+            if all(0 <= rollout.completion_length <= max_completion for rollout in group.rollouts)
         ]
         if len(groups_with_variance) < before:
             logger.warning(
@@ -349,9 +422,7 @@ def _filter_valid_groups(
                 )
 
         # Reward per token threshold
-        min_reward_per_token: float = float(
-            getattr(config, "grpo_min_reward_per_token", 0.0)
-        )
+        min_reward_per_token: float = float(getattr(config, "grpo_min_reward_per_token", 0.0))
         if min_reward_per_token > 0.0:
             before = len(refined_groups)
             refined_groups = [
@@ -368,9 +439,7 @@ def _filter_valid_groups(
                 )
 
         # Drop lowest quantile by reward/token if configured
-        quantile_drop: float = float(
-            getattr(config, "grpo_reward_per_token_drop_quantile", 0.0)
-        )
+        quantile_drop: float = float(getattr(config, "grpo_reward_per_token_drop_quantile", 0.0))
         if 0.0 < quantile_drop < 1.0 and refined_groups:
             scored: list[tuple[GRPOGroup, float]] = [
                 (group, _group_reward_per_token(group)) for group in refined_groups
@@ -390,9 +459,7 @@ def _filter_valid_groups(
         # Stage 5: Cap groups by score (descending reward/token) to max_groups limit
         max_groups: int = int(getattr(config, "grpo_max_groups", 8))
         if len(refined_groups) > max_groups:
-            scored = [
-                (group, _group_reward_per_token(group)) for group in refined_groups
-            ]
+            scored = [(group, _group_reward_per_token(group)) for group in refined_groups]
             scored.sort(key=lambda item: item[1], reverse=True)
             refined_groups = [group for group, _ in scored[:max_groups]]
             logger.warning(
@@ -718,7 +785,8 @@ async def train_grpo_epoch(
         batch_prompt_lens: list[int] = []
         batch_comp_lens: list[int] = []
         batch_advantages: list[float] = []
-        batch_behavior_seq_logprobs: list[float | None] = []
+        batch_behavior_seq_logprobs: list[float] = []
+        # Store miner-provided behavior per-token logprobs over completion for prompt-average PG
         batch_rewards: list[float] = []
 
         for rollout in batch_rollouts:
@@ -738,41 +806,20 @@ async def train_grpo_epoch(
             batch_advantages.append(rollout.advantage)
             batch_rewards.append(rollout.reward)
 
-            # If miner provided per-token logprobs, aggregate over completion
-            provided = None
-            if getattr(rollout, "token_logprobs", None):
-                # CRITICAL FIX: Truncate token_logprobs to match truncated tokens
-                tlp: list[float] = list((rollout.token_logprobs or [])[:TRAINER_MAX_LENGTH])
-                prompt_len = actual_prompt_len
-                comp_len = actual_comp_len
-                expected_len = prompt_len + comp_len
+            # Miner-provided per-token logprobs must exist; aggregate over truncated completion
+            tlp: list[float] = list((rollout.token_logprobs or [])[:TRAINER_MAX_LENGTH])
+            prompt_len = actual_prompt_len
+            comp_len = actual_comp_len
+            expected_len = prompt_len + comp_len
 
-                if len(tlp) >= expected_len:
-                    # Extract completion logprobs: indices [prompt_len:prompt_len+comp_len]
-                    completion_logprobs = tlp[prompt_len : prompt_len + comp_len]
-                    provided = float(sum(completion_logprobs))
-                elif len(tlp) == comp_len:
-                    # Legacy: miner provided only completion logprobs
-                    provided = float(sum(tlp))
-                else:
-                    # Shape mismatch; log and discard
-                    logger.debug(
-                        "Token logprobs shape mismatch after truncation",
-                        extra={
-                            "provided_len": len(tlp),
-                            "expected_len": expected_len,
-                            "prompt_len": prompt_len,
-                            "comp_len": comp_len,
-                            "max_length": TRAINER_MAX_LENGTH,
-                        },
-                    )
+            if len(tlp) >= expected_len:
+                # Extract completion logprobs: indices [prompt_len:prompt_len+comp_len]
+                completion_logprobs = tlp[prompt_len : prompt_len + comp_len]
+                provided = float(np.sum(completion_logprobs))
+            else:
+                # Legacy: miner provided only completion logprobs; respect truncation
+                provided = float(np.sum(tlp[:comp_len]))
 
-            # Sanitize non-finite behavior logprob sums
-            if provided is not None and (math.isnan(provided) or math.isinf(provided)):
-                logger.debug(
-                    "Dropping non-finite miner logprob sum; using ref model",
-                )
-                provided = None
             batch_behavior_seq_logprobs.append(provided)
 
         # Basic structural sanity checks (length mismatches can cause degenerate grads)
@@ -840,24 +887,12 @@ async def train_grpo_epoch(
             continue
 
         # OLD/BEHAVIOR policy logprobs for importance sampling
-        # CRITICAL FIX: Use miner-provided behavior logprobs if available,
-        # otherwise use CURRENT policy detached (on-policy, no IS correction needed)
-        # NEVER use ref_model as behavior policy - ref is only for KL regularization
-        all_have_behavior = all(x is not None for x in batch_behavior_seq_logprobs)
-        if all_have_behavior:
-            logprobs_old = torch.tensor(
-                list(batch_behavior_seq_logprobs),
-                dtype=torch.float32,
-                device=accelerator.device,
-            )
-        else:
-            # On-policy: no importance sampling needed, use current policy (detached)
-            logprobs_old = logprobs_current_sum.detach()
-            if any(x is not None for x in batch_behavior_seq_logprobs):
-                logger.debug(
-                    "Mixed behavior logprobs (some provided, some missing); "
-                    "falling back to on-policy (no IS) for all samples in batch"
-                )
+        # At this point, behavior logprobs are guaranteed to be present and valid
+        logprobs_old = torch.tensor(
+            list(batch_behavior_seq_logprobs),
+            dtype=torch.float32,
+            device=accelerator.device,
+        )
 
         if not _is_finite_tensor(logprobs_old):
             old_min = torch.nan_to_num(logprobs_old).min().item()
@@ -906,32 +941,39 @@ async def train_grpo_epoch(
         # IMPORTANT: Normalize advantages to have unit variance while preserving zero-sum
         # This prevents gradient explosion when advantages have large magnitude
         # Clip extreme outliers first, then standardize
-        try:
-            perc_val = float(TRAINER_ADV_CLIP_PERCENTILE)
-            q = max(0.0, min(100.0, perc_val)) / 100.0
-        except Exception:  # noqa: BLE001
-            q = 0.99
+        perc_val = float(TRAINER_ADV_CLIP_PERCENTILE)
+        q = max(0.0, min(100.0, perc_val)) / 100.0
         if 0.0 < q < 1.0:
             clip_val = torch.quantile(advantages_tensor.abs(), q)
             if torch.isfinite(clip_val):
                 advantages_tensor = advantages_tensor.clamp(-clip_val, clip_val)
 
-        # Z-score normalization: (adv - mean) / std
-        # This preserves zero-sum property and stabilizes gradients
-        if advantages_tensor.std() > 1e-8:
-            advantages_normalized = (advantages_tensor - advantages_tensor.mean()) / (
-                advantages_tensor.std() + 1e-8
-            )
-        else:
-            # If all advantages are identical, no gradient signal
-            advantages_normalized = advantages_tensor
+        # We don't normalize advantages since they are already normalized
+        advantages_normalized = advantages_tensor
 
         # Policy gradient loss with importance sampling and PPO-style clipping
+        ratio_clip_frac_val: float = 0.0
+        ratio_ceiling_frac_val: float = 0.0
+        ratios_pre_ceiling = torch.exp(log_ratio_clamped)
         if TRAINER_USE_IS:
-            ratios = torch.exp(log_ratio_clamped)
-            ratios_clipped = torch.clamp(
-                ratios, 1.0 - TRAINER_PPO_CLIP_EPS, 1.0 + TRAINER_PPO_CLIP_EPS
-            )
+            # Importance sampling ratio with numerical stability clamp, then hard ceiling
+            if TRAINER_IS_RATIO_MAX > 0.0:
+                ceiling_mask = ratios_pre_ceiling > TRAINER_IS_RATIO_MAX
+                ratios = torch.clamp(ratios_pre_ceiling, max=TRAINER_IS_RATIO_MAX)
+            else:
+                ceiling_mask = torch.zeros_like(ratios_pre_ceiling, dtype=torch.bool)
+                ratios = ratios_pre_ceiling
+
+            # Asymmetric PPO-style clipping (DAPO-style): tighter lower bound, relaxed upper bound
+            lower = 1.0 - TRAINER_PPO_CLIP_EPS
+            upper = 1.0 + TRAINER_PPO_CLIP_EPS_UPPER
+            ratios_clipped = torch.clamp(ratios, lower, upper)
+
+            # Track clipping statistics for monitoring
+            clip_mask = (ratios < lower) | (ratios > upper)
+            ratio_clip_frac_val = clip_mask.float().mean().item()
+            ratio_ceiling_frac_val = ceiling_mask.float().mean().item()
+
             pg_unclipped = ratios * advantages_normalized
             pg_clipped = ratios_clipped * advantages_normalized
             loss_pg = -torch.min(pg_unclipped, pg_clipped).mean()
@@ -943,12 +985,12 @@ async def train_grpo_epoch(
         # Proper per-token KL with completion masks
         max_comp_len = logprobs_current_per_token.shape[1]
         # Build completion mask: [batch_size, max_comp_len]
-        completion_mask = torch.zeros(
-            len(batch_comp_lens), max_comp_len, dtype=torch.float32, device=accelerator.device
+        # Vectorized construction of completion mask: [batch_size, max_comp_len]
+        comp_lens_tensor = torch.as_tensor(batch_comp_lens, device=accelerator.device)
+        token_positions = torch.arange(max_comp_len, device=accelerator.device)
+        completion_mask = (token_positions.unsqueeze(0) < comp_lens_tensor.unsqueeze(1)).to(
+            torch.float32
         )
-        for idx, comp_len in enumerate(batch_comp_lens):
-            if comp_len > 0:
-                completion_mask[idx, :comp_len] = 1.0
 
         # Per-token log-ratio for KL: log(π/π_ref)
         per_token_log_ratio = logprobs_current_per_token - logprobs_ref_per_token
@@ -1052,14 +1094,15 @@ async def train_grpo_epoch(
         epoch_metrics["advantage_std_normalized"].append(advantages_normalized.std().item())
         # Track divergence metrics (use clamped log_ratio for safe exponentiation)
         epoch_metrics["kl_divergence"].append(kl_value)
-        epoch_metrics["ratio_mean"].append(torch.exp(log_ratio_clamped).mean().item())
-        epoch_metrics["ratio_std"].append(torch.exp(log_ratio_clamped).std().item())
+        # Pre-ceiling ratio stats (consistent with historical logging)
+        epoch_metrics["ratio_mean"].append(ratios_pre_ceiling.mean().item())
+        epoch_metrics["ratio_std"].append(ratios_pre_ceiling.std().item())
+        # Clipping diagnostics (0 when importance sampling disabled)
+        epoch_metrics["ratio_clip_frac"].append(ratio_clip_frac_val)
+        epoch_metrics["ratio_ceiling_frac"].append(ratio_ceiling_frac_val)
         epoch_metrics["kl_coef"].append(current_kl_coef)
         # Track how many samples have miner-provided behavior logprobs
-        num_have_behavior = float(sum(1 for x in batch_behavior_seq_logprobs if x is not None))
-        epoch_metrics["behavior_logprobs_frac"].append(
-            num_have_behavior / max(1, len(batch_behavior_seq_logprobs))
-        )
+        epoch_metrics["behavior_logprobs_frac"].append(1.0)
         # Track reward curve
         epoch_metrics["reward_mean"].append(torch.tensor(batch_rewards).mean().item())
         epoch_metrics["reward_std"].append(torch.tensor(batch_rewards).std().item())
@@ -1078,6 +1121,8 @@ async def train_grpo_epoch(
                 "reward_mean": torch.tensor(batch_rewards).mean().item(),
                 "kl_divergence": kl_value,
                 "entropy_mean": entropies.mean().item(),
+                "ratio_clip_frac": ratio_clip_frac_val,
+                "ratio_ceiling_frac": ratio_ceiling_frac_val,
             }
             for key, value in batch_log_metrics.items():
                 try:

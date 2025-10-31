@@ -47,8 +47,8 @@ LAYER_INDEX = -1
 
 # Trainer hyperparameters (env configurable)
 TRAINER_LR = float(os.getenv("GRAIL_TRAINER_LR", "1e-6"))
-TRAINER_EPOCHS = int(os.getenv("GRAIL_TRAINER_EPOCHS", "2"))
-TRAINER_BATCH_SIZE = int(os.getenv("GRAIL_TRAINER_BATCH_SIZE", "4"))
+TRAINER_EPOCHS = int(os.getenv("GRAIL_TRAINER_EPOCHS", "1"))
+TRAINER_BATCH_SIZE = int(os.getenv("GRAIL_TRAINER_BATCH_SIZE", "16"))
 TRAINER_MAX_LENGTH = int(os.getenv("GRAIL_TRAINER_MAX_LENGTH", "1024"))
 TRAINER_GRAD_CLIP = float(os.getenv("GRAIL_TRAINER_GRAD_CLIP", "0.5"))
 TRAINER_WARMUP_STEPS = int(os.getenv("GRAIL_TRAINER_WARMUP_STEPS", "10"))
@@ -56,11 +56,15 @@ TRAINER_KL_COEF = float(os.getenv("GRAIL_TRAINER_KL_COEF", "0.02"))
 TRAINER_ENTROPY_COEF = float(os.getenv("GRAIL_TRAINER_ENTROPY_COEF", "0.001"))
 TRAINER_ADV_CLIP_PERCENTILE = float(os.getenv("GRAIL_TRAINER_ADV_CLIP_PERCENTILE", "99.0"))
 TRAINER_GROUP_ADV_SUM_TOL = float(os.getenv("GRAIL_TRAINER_GROUP_ADV_SUM_TOL", "0.01"))
-TRAINER_GRAD_ACCUM_STEPS = int(os.getenv("GRAIL_TRAINER_GRAD_ACCUM_STEPS", "2"))
+TRAINER_GRAD_ACCUM_STEPS = int(os.getenv("GRAIL_TRAINER_GRAD_ACCUM_STEPS", "8"))
 
 # Importance sampling and PPO-style clipping
 TRAINER_USE_IS = os.getenv("GRAIL_TRAINER_USE_IS", "1") == "1"
 TRAINER_PPO_CLIP_EPS = float(os.getenv("GRAIL_TRAINER_PPO_CLIP_EPS", "0.2"))
+# Asymmetric upper bound for PPO clipping (DAPO-style). If unset, defaults to 0.28.
+TRAINER_PPO_CLIP_EPS_UPPER = float(os.getenv("GRAIL_TRAINER_PPO_CLIP_EPS_UPPER", "0.28"))
+# Hard ceiling for importance sampling ratios to prevent instability (DCPO-style safety)
+TRAINER_IS_RATIO_MAX = float(os.getenv("GRAIL_TRAINER_IS_RATIO_MAX", "10.0"))
 
 # Log-ratio clamp for numerical stability when exponentiating to ratios
 TRAINER_LOGRATIO_CLAMP = float(os.getenv("GRAIL_TRAINER_LOGRATIO_CLAMP", "5.0"))
@@ -79,7 +83,7 @@ TRAINER_MIN_TRUSTED_MINERS = int(os.getenv("GRAIL_TRAINER_MIN_TRUSTED_MINERS", "
 # ────────────────  GRPO DATA FILTERING (TWO-STAGE)  ────────────────
 # Stage 1 (fast structural/cheap filters) happens before Stage 2.
 # Defaults are conservative so behavior is unchanged unless configured.
-GRPO_MAX_GROUPS = int(os.getenv("GRAIL_GRPO_MAX_GROUPS", "8"))
+GRPO_MAX_GROUPS = int(os.getenv("GRAIL_GRPO_MAX_GROUPS", "32"))
 GRPO_MAX_COMPLETION_TOKENS = int(os.getenv("GRAIL_GRPO_MAX_COMPLETION_TOKENS", "512"))
 
 # Stage 2 (refinement): quality/efficiency-oriented filters
