@@ -84,7 +84,7 @@ class FakeBackend(TextGenBackend):
     tokenizer: DummyTokenizer
     completion_len: int = 4
 
-    def generate(
+    async def generate(
         self,
         prompt_ids_batch: list[list[int]],
         *,

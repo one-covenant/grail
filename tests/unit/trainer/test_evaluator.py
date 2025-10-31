@@ -31,7 +31,7 @@ async def test_evaluator_calls_loop_render_and_generate(monkeypatch: pytest.Monk
         # Two prompts corresponding to two task ids
         return [[10], [20]]
 
-    def spy_generate(
+    async def spy_generate(
         prompt_ids_batch: list[list[int]],
         *,
         seeds: list[int] | None = None,
@@ -76,7 +76,7 @@ async def test_evaluator_expands_per_replicate_seeds(monkeypatch: pytest.MonkeyP
         # Mirror number of inputs
         return [[42] for _ in batch]
 
-    def spy_generate(
+    async def spy_generate(
         prompt_ids_batch: list[list[int]],
         *,
         seeds: list[int] | None = None,
