@@ -76,6 +76,22 @@ TRAINER_KL_MAX = float(os.getenv("GRAIL_TRAINER_KL_MAX", "0.2"))
 TRAINER_MIN_AGGREGATE_WEIGHT = float(os.getenv("GRAIL_TRAINER_MIN_AGGREGATE_WEIGHT", "0.01"))
 TRAINER_MIN_TRUSTED_MINERS = int(os.getenv("GRAIL_TRAINER_MIN_TRUSTED_MINERS", "1"))
 
+# ────────────────  GRPO DATA FILTERING (TWO-STAGE)  ────────────────
+# Stage 1 (fast structural/cheap filters) happens before Stage 2.
+# Defaults are conservative so behavior is unchanged unless configured.
+GRPO_MAX_GROUPS = int(os.getenv("GRAIL_GRPO_MAX_GROUPS", "8"))
+GRPO_MAX_COMPLETION_TOKENS = int(os.getenv("GRAIL_GRPO_MAX_COMPLETION_TOKENS", "512"))
+
+# Stage 2 (refinement): quality/efficiency-oriented filters
+# Require at least this fraction of successes within a group (0 disables)
+GRPO_MIN_SUCCESS_FRACTION = float(os.getenv("GRAIL_GRPO_MIN_SUCCESS_FRACTION", "0.0"))
+# Minimum mean reward/token across a group's rollouts (<=0 disables)
+GRPO_MIN_REWARD_PER_TOKEN = float(os.getenv("GRAIL_GRPO_MIN_REWARD_PER_TOKEN", "0.0"))
+# Drop lowest X quantile of groups by reward/token (0 disables)
+GRPO_REWARD_PER_TOKEN_DROP_QUANTILE = float(
+    os.getenv("GRAIL_GRPO_REWARD_PER_TOKEN_DROP_QUANTILE", "0.0")
+)
+
 # Checkpoint retention controls
 CHECKPOINT_RETENTION_LIMIT = int(os.getenv("GRAIL_CHECKPOINT_RETENTION_LIMIT", "3"))
 CHECKPOINT_MILESTONE_INTERVAL = int(os.getenv("GRAIL_CHECKPOINT_MILESTONE_INTERVAL", "100"))

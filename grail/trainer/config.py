@@ -28,6 +28,12 @@ class TrainingConfig:
     group_adv_sum_tolerance: float = constants.TRAINER_GROUP_ADV_SUM_TOL
     min_aggregate_weight: float = constants.TRAINER_MIN_AGGREGATE_WEIGHT
     min_trusted_miners: int = constants.TRAINER_MIN_TRUSTED_MINERS
+    # GRPO two-stage filtering controls
+    grpo_max_groups: int = constants.GRPO_MAX_GROUPS
+    grpo_max_completion_tokens: int = constants.GRPO_MAX_COMPLETION_TOKENS
+    grpo_min_success_fraction: float = constants.GRPO_MIN_SUCCESS_FRACTION
+    grpo_min_reward_per_token: float = constants.GRPO_MIN_REWARD_PER_TOKEN
+    grpo_reward_per_token_drop_quantile: float = constants.GRPO_REWARD_PER_TOKEN_DROP_QUANTILE
 
 
 @dataclass

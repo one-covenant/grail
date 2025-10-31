@@ -81,6 +81,28 @@ class GRPOGroup:
         return abs(advantage_sum) < advantage_tolerance
 
 
+def _has_advantage_variance(group: GRPOGroup) -> bool:
+    """Check if a GRPO group has variance in advantage values.
+
+    Groups with zero advantage variance (all rollouts have identical advantage)
+    are filtered out as they provide no learning signal.
+
+    Args:
+        group: The GRPO group to check
+
+    Returns:
+        True if the group has advantage variance, False if all advantages are identical
+    """
+    if not group.rollouts:
+        return False
+
+    advantages = [r.advantage for r in group.rollouts]
+    first_advantage = advantages[0]
+
+    # Check if all advantages are the same
+    return any(adv != first_advantage for adv in advantages)
+
+
 async def load_grpo_groups(
     window: int,
     advantage_tolerance: float,
@@ -88,6 +110,7 @@ async def load_grpo_groups(
     credentials: BucketCredentials | Any = None,
     chain_manager: GrailChainManager | None = None,
     uid_by_hotkey: dict[str, int] | None = None,
+    config: TrainingConfig | None = None,
 ) -> list[GRPOGroup]:
     """Load and validate GRPO groups directly from trusted miners.
 
@@ -227,6 +250,7 @@ async def load_grpo_groups(
         GRPOGroup(group_id, rollouts) for group_id, rollouts in grouped.items()
     ]
 
+    # Stage 1: fast structural filters
     valid_groups = [group for group in groups if group.is_valid(advantage_tolerance)]
     invalid_count = len(groups) - len(valid_groups)
     if invalid_count > 0:
@@ -236,12 +260,121 @@ async def load_grpo_groups(
             window,
         )
 
+    # Cheap variance check to ensure learning signal
+    groups_with_variance = [group for group in valid_groups if _has_advantage_variance(group)]
+    zero_variance_count = len(valid_groups) - len(groups_with_variance)
+    if zero_variance_count > 0:
+        logger.warning(
+            "Filtered out %s GRPO groups with zero advantage variance for window %s",
+            zero_variance_count,
+            window,
+        )
+
+    # Optional structural cap on completion tokens (fast check)
+    if config is not None and getattr(config, "grpo_max_completion_tokens", None):
+        max_comp = int(config.grpo_max_completion_tokens)
+        before = len(groups_with_variance)
+        groups_with_variance = [
+            g
+            for g in groups_with_variance
+            if all(r.completion_length <= max_comp and r.completion_length >= 0 for r in g.rollouts)
+        ]
+        if len(groups_with_variance) < before:
+            logger.warning(
+                "Filtered out %s groups exceeding max completion tokens (%s) for window %s",
+                before - len(groups_with_variance),
+                max_comp,
+                window,
+            )
+
+    # Stage 2: refinement filters (quality/efficiency)
+    refined_groups = groups_with_variance
+    if config is not None:
+        # Success fraction gate
+        min_success_frac = max(0.0, float(getattr(config, "grpo_min_success_fraction", 0.0)))
+        if min_success_frac > 0.0:
+            before = len(refined_groups)
+            refined_groups = [
+                g
+                for g in refined_groups
+                if (sum(1 for r in g.rollouts if r.success) / max(1, len(g.rollouts)))
+                >= min_success_frac
+            ]
+            if len(refined_groups) < before:
+                logger.warning(
+                    "Filtered out %s groups below min success fraction=%.2f for window %s",
+                    before - len(refined_groups),
+                    min_success_frac,
+                    window,
+                )
+
+        # Reward per token threshold
+        def _group_reward_per_token(g: GRPOGroup) -> float:
+            totals = []
+            for r in g.rollouts:
+                denom = max(1, int(r.completion_length))
+                totals.append(float(r.reward) / float(denom))
+            return float(sum(totals) / max(1, len(totals)))
+
+        min_rpt = float(getattr(config, "grpo_min_reward_per_token", 0.0))
+        if min_rpt > 0.0:
+            before = len(refined_groups)
+            refined_groups = [g for g in refined_groups if _group_reward_per_token(g) >= min_rpt]
+            if len(refined_groups) < before:
+                logger.warning(
+                    "Filtered out %s groups below min reward/token=%.4f for window %s",
+                    before - len(refined_groups),
+                    min_rpt,
+                    window,
+                )
+
+        # Drop lowest quantile by reward/token if configured
+        drop_q = float(getattr(config, "grpo_reward_per_token_drop_quantile", 0.0))
+        if 0.0 < drop_q < 1.0 and refined_groups:
+            scored = [(g, _group_reward_per_token(g)) for g in refined_groups]
+            # Sort ascending by score and drop lowest quantile
+            scored.sort(key=lambda x: x[1])
+            k = int(len(scored) * drop_q)
+            if k > 0:
+                dropped = scored[:k]
+                refined_groups = [g for g, _ in scored[k:]]
+                logger.warning(
+                    "Dropped %s groups (lowest %.0f%% by reward/token) for window %s",
+                    len(dropped),
+                    drop_q * 100.0,
+                    window,
+                )
+
+        # Cap groups by score (descending reward/token) to grpo_max_groups
+        max_groups = int(getattr(config, "grpo_max_groups", 8))
+        if len(refined_groups) > max_groups:
+            scored = [(g, _group_reward_per_token(g)) for g in refined_groups]
+            scored.sort(key=lambda x: x[1], reverse=True)
+            refined_groups = [g for g, _ in scored[:max_groups]]
+            logger.warning(
+                "Limiting GRPO groups from %s to %s for window %s",
+                len(scored),
+                max_groups,
+                window,
+            )
+    else:
+        # Backward-compatible cap when no config provided
+        max_groups = 8
+        if len(refined_groups) > max_groups:
+            refined_groups = refined_groups[:max_groups]
+            logger.warning(
+                "Limiting GRPO groups from %s to %s for window %s",
+                len(groups_with_variance),
+                max_groups,
+                window,
+            )
+
     logger.info(
         "Loaded %s valid GRPO groups for window %s",
-        len(valid_groups),
+        len(refined_groups),
         window,
     )
-    return valid_groups
+    return refined_groups
 
 
 def _is_finite_tensor(tensor: torch.Tensor) -> bool:
