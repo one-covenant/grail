@@ -4,11 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import shutil
-import socket
-import subprocess
-import tempfile
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -31,6 +26,7 @@ from grail.trainer.checkpointing import finalize_checkpoint_ready
 from grail.trainer.config import EvalConfig
 from grail.trainer.eval_planner import EvaluationPlanner
 from grail.trainer.evaluator import EvaluatorService
+from grail.trainer.inference_server import create_inference_server
 from grail.trainer.service import TrainerService
 
 from .base import BaseNeuron
@@ -96,7 +92,20 @@ class TrainerNeuron(BaseNeuron):
                 current_window = self.calculate_window(current_block)
                 target_window = current_window - WINDOW_LENGTH
 
+                logger.debug(
+                    "Loop iteration: current_block=%d current_window=%d target_window=%d last_processed=%d",
+                    current_block,
+                    current_window,
+                    target_window,
+                    last_processed_window,
+                )
+
                 if target_window <= last_processed_window or target_window < 0:
+                    logger.debug(
+                        "Window not ready: target_window=%d <= last_processed=%d",
+                        target_window,
+                        last_processed_window,
+                    )
                     await self._handle_wait_for_window(
                         target_window, current_block, last_processed_window
                     )
@@ -112,9 +121,20 @@ class TrainerNeuron(BaseNeuron):
                     self._windows_since_last_eval,
                     self._eval_cfg.window_interval,
                 )
-                if await self._maybe_run_evaluation(current_window):
+                logger.debug(
+                    "About to call _maybe_run_evaluation with current_window=%d",
+                    current_window,
+                )
+                eval_result = await self._maybe_run_evaluation(current_window)
+                logger.debug("_maybe_run_evaluation returned: %s", eval_result)
+
+                if eval_result:
                     # Skip training when evaluation runs (may span multiple windows)
                     last_processed_window = target_window
+                    logger.info(
+                        "Evaluation executed, updated last_processed_window=%d, about to continue",
+                        last_processed_window,
+                    )
                     continue
 
                 logger.info("🎓 Training window %s", target_window)
@@ -152,8 +172,14 @@ class TrainerNeuron(BaseNeuron):
 
                 # Increment window counter for evaluation scheduling
                 self._windows_since_last_eval += 1
+                logger.debug(
+                    "Training cycle complete: window=%d, windows_since_eval=%d",
+                    target_window,
+                    self._windows_since_last_eval,
+                )
 
             except asyncio.CancelledError:  # pragma: no cover - coop shutdown
+                logger.info("Trainer loop received CancelledError, breaking")
                 break
             except Exception:
                 logger.exception("Trainer loop error", exc_info=True)
@@ -161,9 +187,14 @@ class TrainerNeuron(BaseNeuron):
                 self.reset_subtensor()
                 await asyncio.sleep(30)
 
+        logger.info("Trainer loop exited (stop_event=%s)", self.stop_event.is_set())
+
     async def _maybe_run_evaluation(self, current_window: int) -> bool:
         """Run evaluation if due; return True if evaluation executed."""
+        logger.debug("_maybe_run_evaluation: enabled=%s", self._eval_cfg.enabled)
+
         if not self._eval_cfg.enabled:
+            logger.debug("Evaluation disabled, returning False")
             return False
 
         window_number = current_window // WINDOW_LENGTH
@@ -181,11 +212,20 @@ class TrainerNeuron(BaseNeuron):
             )
         )
 
+        logger.debug(
+            "_maybe_run_evaluation: is_first_eval=%s should_start=%s eval_in_progress=%s",
+            is_first_eval,
+            should_start,
+            self._eval_in_progress,
+        )
+
         if not should_start:
+            logger.debug("Evaluation not due yet, returning False")
             return False
 
         # Mark progress
         self._eval_in_progress = True
+        logger.info("📊 Starting evaluation cycle (window_number=%d)", window_number)
 
         # Build dataset-backed evaluation (GSM8K by default)
         source = GSM8KTaskSource(split=self._eval_cfg.split)
@@ -240,27 +280,181 @@ class TrainerNeuron(BaseNeuron):
             )
             plan = planner.for_cycle(cycle_index=window_number)
 
-        # Prepare backend resources (checkpoint, server, etc.)
-        tmp_dir: str | None = None
-        server_proc: subprocess.Popen[bytes] | None = None
-        evaluator: EvaluatorService | None = None
-        original_backend = self._eval_cfg.backend
-
         # Track total evaluation time (including setup/cleanup)
         import time as _time
 
         eval_start = _time.time()
 
+        # Determine if we need to start a server
+        should_start_server = self._eval_cfg.sglang_start_server and self._eval_cfg.backend in (
+            "sglang",
+            "vllm",
+        )
+        logger.info(
+            "Evaluation config: backend=%s should_start_server=%s",
+            self._eval_cfg.backend,
+            should_start_server,
+        )
+
         try:
-            # Optionally start sgLang server with saved checkpoint
-            if self._eval_cfg.backend == "sglang" and self._eval_cfg.sglang_start_server:
-                tmp_dir, server_proc = await self._prepare_sglang_server()
+            # Use context manager for clean server lifecycle management
+            if should_start_server:
+                logger.info("Starting inference server for evaluation...")
+                # Create server manager (will save checkpoint + free its model ref in __aenter__)
+                server_manager = create_inference_server(
+                    backend=self._eval_cfg.backend,
+                    model=self._context.train_model,
+                    tokenizer=self._context.tokenizer,
+                    eval_config=self._eval_cfg,
+                )
 
-            # Optionally start vLLM server with saved checkpoint
-            if self._eval_cfg.backend == "vllm" and self._eval_cfg.sglang_start_server:
-                tmp_dir, server_proc = await self._prepare_vllm_server()
+                async with server_manager as server:
+                    logger.info("Server context entered, freeing training VRAM...")
+                    # At this point: checkpoint is saved, server_manager._model is freed
+                    # But trainer models are still loaded - free them now
+                    self._free_training_vram_for_eval()
 
-            # Create evaluator with appropriate backend
+                    # Update heartbeat before expensive server startup
+                    logger.debug("Heartbeat before server startup")
+                    self.heartbeat()
+
+                    # Now start the server with maximum available GPU memory
+                    logger.info("Starting server process...")
+                    await server.start_server()
+                    logger.info("Server started successfully at %s", server.base_url)
+
+                    # Update heartbeat after server is ready
+                    logger.debug("Heartbeat after server startup")
+                    self.heartbeat()
+
+                    # Server is running with clean GPU memory; create evaluator
+                    logger.info("Running evaluation cycle with server backend...")
+                    metrics = await self._run_evaluation_cycle(
+                        plan=plan,
+                        window_number=window_number,
+                        env_factory=env_factory,
+                        server_base_url=server.base_url,
+                        server_model_name=server.model_name,
+                    )
+                # Context manager handles cleanup automatically
+                logger.info("Server context exited, subprocess terminated and GPU memory freed")
+
+                # Verify GPU memory is available before reload
+                if torch.cuda.is_available():
+                    try:
+                        free_gb, total_gb = torch.cuda.mem_get_info()
+                        logger.info(
+                            "GPU memory after server shutdown: %.2f GB free / %.2f GB total",
+                            free_gb / (1024**3),
+                            total_gb / (1024**3),
+                        )
+                    except Exception:
+                        pass
+
+                # Reload training artifacts after server shutdown
+                logger.info("About to reload training models after server cleanup...")
+                self._reload_training_models()
+                logger.info("Training models reloaded successfully")
+            else:
+                # Direct evaluation without server (HF backend or server already running)
+                logger.info("Running evaluation cycle with HF backend...")
+                metrics = await self._run_evaluation_cycle(
+                    plan=plan,
+                    window_number=window_number,
+                    env_factory=env_factory,
+                    server_base_url=None,
+                    server_model_name=None,
+                )
+
+            # Log metrics
+            logger.info("🧪 Evaluation metrics: %s", metrics)
+
+            if self._context.monitor:
+                await self._context.monitor.log_counter("eval/cycle_completed")
+                for key, val in metrics.items():
+                    await self._context.monitor.log_gauge(f"eval/{key}", float(val))
+
+            self._eval_last_run_window_number = window_number
+            self._windows_since_last_eval = 0  # Reset counter after successful evaluation
+
+            # Log total evaluation time
+            eval_total = _time.time() - eval_start
+            logger.info(
+                "🧪 Total evaluation time: %.2fs (setup + run + cleanup)",
+                eval_total,
+            )
+            if self._context.monitor:
+                await self._context.monitor.log_gauge("profiling/eval_total_time", eval_total)
+
+            # Update heartbeat after evaluation completes
+            logger.debug("Heartbeat after evaluation completes")
+            self.heartbeat()
+
+            logger.info("✅ Evaluation cycle complete, returning True")
+            return True
+
+        except Exception:
+            logger.exception("Evaluation failed", exc_info=True)
+
+            # Log time even on failure
+            eval_total = _time.time() - eval_start
+            logger.info("🧪 Evaluation failed after %.2fs", eval_total)
+            if self._context.monitor:
+                await self._context.monitor.log_gauge(
+                    "profiling/eval_total_time_failed", eval_total
+                )
+
+            logger.warning("Evaluation failed, returning False")
+            return False
+        finally:
+            logger.debug("_maybe_run_evaluation finally block: setting eval_in_progress=False")
+            self._eval_in_progress = False
+
+    # -------------- Eval orchestration helpers --------------
+    def _free_training_vram_for_eval(self) -> None:
+        """Drop references to training and ref models and clear CUDA cache.
+
+        This must be called AFTER the server manager has saved the checkpoint
+        but BEFORE creating the evaluator for server-backed generation.
+        """
+        try:
+            self._context.train_model = None  # type: ignore[assignment]
+            self._context.ref_model = None  # type: ignore[assignment]
+            import gc
+
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+            logger.debug("Freed training VRAM for server-backed evaluation")
+        except Exception as exc:
+            logger.debug("Issue freeing training VRAM: %s", exc)
+
+    async def _run_evaluation_cycle(
+        self,
+        *,
+        plan: Any,
+        window_number: int,
+        env_factory: Any,
+        server_base_url: str | None,
+        server_model_name: str | None,
+    ) -> dict[str, float]:
+        """Run evaluation cycle with given plan and optional server configuration.
+
+        Args:
+            plan: Evaluation plan with task IDs and seeds
+            window_number: Current window number for logging
+            env_factory: Factory function to create evaluation environments
+            server_base_url: Optional server URL (for vLLM/SGLang)
+            server_model_name: Optional model name for server API calls
+
+        Returns:
+            Dictionary of evaluation metrics
+        """
+        evaluator: EvaluatorService | None = None
+
+        try:
+            # Create evaluator with server configuration
             evaluator = EvaluatorService(
                 model=self._context.train_model,
                 tokenizer=self._context.tokenizer,
@@ -268,6 +462,8 @@ class TrainerNeuron(BaseNeuron):
                 config=self._eval_cfg,
                 monitor=self._context.monitor,
                 device="cuda",
+                server_base_url=server_base_url,
+                server_model_name=server_model_name,
             )
 
             is_startup_eval = self._eval_last_run_window_number is None
@@ -275,7 +471,7 @@ class TrainerNeuron(BaseNeuron):
                 "startup" if is_startup_eval else f"after {self._windows_since_last_eval} windows"
             )
             logger.info(
-                "🧪 Starting evaluation: window_number=%s ids=%s replicates=%s split=%s backend=%s (%s)",
+                "🧪 Starting evaluation: window=%s tasks=%s replicates=%s split=%s backend=%s (%s)",
                 window_number,
                 len(plan.ids),
                 plan.replicates,
@@ -284,501 +480,36 @@ class TrainerNeuron(BaseNeuron):
                 eval_reason,
             )
 
-            logger.info("📊 Calling evaluator.run_cycle...")
             metrics = await evaluator.run_cycle(plan, start_offset=0, heartbeat=self.heartbeat)
-            logger.info("📊 run_cycle completed, got metrics: %s", metrics)
+            return metrics
 
-            if self._context.monitor:
-                logger.info("📊 Logging to monitor...")
-                await self._context.monitor.log_counter("eval/cycle_completed")
-                logger.info("📊 Logged counter, now logging gauges...")
-                for key, val in metrics.items():
-                    await self._context.monitor.log_gauge(f"eval/{key}", float(val))
-                logger.info("📊 Monitor logging complete")
-
-            logger.info("🧪 Evaluation metrics: %s", metrics)
-
-            self._eval_last_run_window_number = window_number
-
-            # Log total evaluation time (including setup/cleanup)
-            eval_total = _time.time() - eval_start
-            logger.info(
-                "🧪 Total evaluation orchestration time: %.2fs (setup + run + cleanup)",
-                eval_total,
-            )
-            if self._context.monitor:
-                await self._context.monitor.log_gauge("profiling/eval_total_time", eval_total)
-
-            self._windows_since_last_eval = 0  # Reset counter after successful evaluation
-            return True
-        except Exception:
-            logger.exception("Evaluation failed", exc_info=True)
-
-            # Log time even on failure
-            eval_total = _time.time() - eval_start
-            logger.info("🧪 Evaluation failed after %.2fs", eval_total)
-            if self._context.monitor:
-                gauge_name = "profiling/eval_total_time_failed"
-                await self._context.monitor.log_gauge(gauge_name, eval_total)
-
-            return False
         finally:
-            # Cleanup order is critical for GPU memory management:
-            # 1. Shutdown evaluation backend engines (SGLang/vLLM) to free GPU
-            logger.info("🧹 Starting evaluator cleanup...")
+            # Always cleanup evaluator to free GPU memory
             if evaluator is not None:
-                logger.info("🧹 Calling evaluator.shutdown()...")
+                logger.info("🧹 Shutting down evaluator...")
                 evaluator.shutdown()
-                logger.info("🧹 evaluator.shutdown() completed")
+                logger.info("🧹 Evaluator shutdown complete")
 
-            # 2. Terminate server process if running (and wait for GPU memory release)
-            self._terminate_process(server_proc)
-
-            # 3. Reload training models now that GPU memory is free
-            if tmp_dir is not None:
-                self._reload_training_artifacts_if_needed(tmp_dir)
-                self._cleanup_temp_dir(tmp_dir)
-
-            # 4. Restore backend config
-            self._eval_cfg.backend = original_backend
-            self._eval_in_progress = False
-
-    # -------------- Eval orchestration helpers --------------
-    async def _prepare_sglang_server(self) -> tuple[str | None, subprocess.Popen[bytes] | None]:
-        """Save checkpoint, free VRAM, and launch sgLang server.
-
-        Returns (tmp_checkpoint_dir, server_process) tuple.
-        Falls back to HF backend if any step fails.
-        """
-        tmp_dir = self._save_eval_checkpoint()
-        if tmp_dir is None:
-            logger.warning("Checkpoint save failed; falling back to HF backend for eval.")
-            self._eval_cfg.backend = "hf"
-            return None, None
-
-        self._free_vram()
-
-        # Choose model path for server: use saved checkpoint
-        server_proc, bound_port = await self._launch_and_wait_sglang_server(
-            model_path=tmp_dir,
-            host=self._eval_cfg.sglang_host,
-            port=self._eval_cfg.sglang_port,
-            timeout_s=self._eval_cfg.sglang_server_timeout_s,
-            trust_remote_code=self._eval_cfg.sglang_trust_remote_code,
+    def _reload_training_models(self) -> None:
+        """Reload training and reference models after evaluation server shutdown."""
+        logger.info(
+            "Reloading training models: train_model=%s ref_model=%s",
+            self._context.train_model is not None,
+            self._context.ref_model is not None,
         )
 
-        # Check if server launched successfully
-        if server_proc is not None and bound_port is not None:
-            self._eval_cfg.sglang_port = bound_port
-            return tmp_dir, server_proc
-
-        # Server failed; fall back to HF
-        logger.warning("sgLang server not ready; using HF backend for this evaluation.")
-        self._eval_cfg.backend = "hf"
-        return tmp_dir, None
-
-    async def _prepare_vllm_server(self) -> tuple[str | None, subprocess.Popen[bytes] | None]:
-        """Save checkpoint, free VRAM, and launch vLLM server.
-
-        Returns (tmp_checkpoint_dir, server_process) tuple.
-        Falls back to HF backend if any step fails.
-        """
-        tmp_dir = self._save_eval_checkpoint()
-        if tmp_dir is None:
-            logger.warning("Checkpoint save failed; falling back to HF backend for eval.")
-            self._eval_cfg.backend = "hf"
-            return None, None
-
-        self._free_vram()
-
-        # Choose model path for server: use saved checkpoint
-        server_proc, bound_port = await self._launch_and_wait_vllm_server(
-            model_path=tmp_dir,
-            host=self._eval_cfg.sglang_host,  # vLLM uses the same host/port as SGLang for now
-            port=self._eval_cfg.sglang_port,
-            timeout_s=self._eval_cfg.sglang_server_timeout_s,
-            trust_remote_code=self._eval_cfg.sglang_trust_remote_code,
-        )
-
-        # Check if server launched successfully
-        if server_proc is not None and bound_port is not None:
-            self._eval_cfg.sglang_port = bound_port
-            return tmp_dir, server_proc
-
-        # Server failed; fall back to HF
-        logger.warning("vLLM server not ready; using HF backend for this evaluation.")
-        self._eval_cfg.backend = "hf"
-        return tmp_dir, None
-
-    def _save_eval_checkpoint(self) -> str | None:
-        """Save current training model/tokenizer to a temporary directory for eval.
-
-        Returns path to the saved checkpoint, or None on failure.
-        """
-        tmp_dir = None
-        try:
-            tmp_dir = tempfile.mkdtemp(prefix="grail_eval_ckpt_")
-            self._context.train_model.save_pretrained(tmp_dir, safe_serialization=True)
-            self._context.tokenizer.save_pretrained(tmp_dir)
-            logger.info("Saved eval checkpoint to %s", tmp_dir)
-            return tmp_dir
-        except Exception as exc:
-            logger.warning("Failed to save eval checkpoint: %s", exc)
-            if tmp_dir is not None:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-            return None
-
-    def _free_vram(self) -> None:
-        """Release GPU memory by dropping references and emptying CUDA cache."""
-        try:
-            self._context.train_model = None  # type: ignore[assignment]
-            self._context.ref_model = None  # type: ignore[assignment]
-            import gc
-
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception as exc:
-            logger.debug("VRAM free encountered issue: %s", exc)
-
-    async def _launch_and_wait_sglang_server(
-        self,
-        *,
-        model_path: str | None,
-        host: str,
-        port: int,
-        timeout_s: float,
-        trust_remote_code: bool,
-    ) -> tuple[subprocess.Popen[bytes] | None, int | None]:
-        """Launch sgLang server subprocess and wait until HTTP endpoint is ready.
-
-        Configures server with SGLang best practices:
-        - Memory-optimized settings for large models
-        - Request rate limiting to prevent overload
-        - Extended startup timeouts
-        - Post-launch warmup to verify stability
-        """
-        bound_port = int(port)
-        if bound_port <= 0:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind((host, 0))
-                bound_port = s.getsockname()[1]
-
-        # SGLang server launch with optimized parameters
-        cmd = [
-            "python",
-            "-m",
-            "sglang.launch_server",
-            "--model-path",
-            model_path or "",
-            "--host",
-            host,
-            "--port",
-            str(bound_port),
-            "--dtype",
-            "bfloat16",
-            "--tp-size",
-            "1",
-            # SGLang performance tuning per docs
-            "--mem-fraction-static",
-            "0.85",  # Reserve 85% VRAM for KV cache
-            "--max-running-requests",
-            "8",  # Limit concurrent batch processing
-            "--schedule-policy",
-            "fcfs",  # Fair scheduling
-        ]
-        if trust_remote_code:
-            cmd.append("--trust-remote-code")
-
-        proc: subprocess.Popen[bytes] | None = None
-        try:
-            # Launch with combined stdout/stderr to monitor for errors
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=False,  # Keep as bytes
-            )
-            logger.info(
-                "Launched sgLang server (pid=%s) on %s:%s with optimized config",
-                proc.pid if proc else None,
-                host,
-                bound_port,
-            )
-        except Exception as exc:
-            logger.warning("Failed to launch sgLang server: %s", exc)
-            return None, None
-
-        # Poll readiness with extended timeout for model loading
-        import time as _time
-
-        import requests
-
-        ready_url = f"http://{host}:{bound_port}/v1/models"
-        t_deadline = _time.time() + float(timeout_s)
-        last_err: str | None = None
-        poll_count: int = 0
-
-        while _time.time() < t_deadline:
-            # Check if process is still alive
-            if proc.poll() is not None:
-                # Process exited unexpectedly
-                logger.error(
-                    "sgLang server process exited unexpectedly (return code: %s)",
-                    proc.returncode,
-                )
-                return None, None
-
-            try:
-                r = requests.get(ready_url, timeout=3.0)
-                if r.status_code == 200:
-                    logger.info("sgLang server ready at %s:%s", host, bound_port)
-
-                    # Optional: send warmup request to force KV cache initialization
-                    try:
-                        warmup_start = _time.time()
-                        warmup_payload = {
-                            "model": model_path or "model",
-                            "prompt": "OK",
-                            "max_tokens": 1,
-                        }
-                        requests.post(
-                            f"{ready_url.replace('/v1/models', '')}/v1/completions",
-                            json=warmup_payload,
-                            timeout=30.0,
-                        )
-                        warmup_time = _time.time() - warmup_start
-                        logger.info("Server warmup completed in %.2fs", warmup_time)
-                    except Exception as warmup_err:
-                        logger.warning("Warmup request failed (non-fatal): %s", warmup_err)
-
-                    return proc, bound_port
-
-                last_err = f"HTTP {r.status_code}"
-            except Exception as exc:
-                last_err = str(exc)
-
-            poll_count += 1
-            if poll_count % 6 == 0:  # Log every 3 seconds (0.5s * 6)
-                elapsed = _time.time() - (t_deadline - timeout_s)
-                logger.debug(
-                    "Waiting for sgLang server (%.1fs elapsed): %s",
-                    elapsed,
-                    last_err,
-                )
-
-            await asyncio.sleep(0.5)
-
-        logger.warning(
-            "sgLang server readiness check failed after %.1fs: %s",
-            timeout_s,
-            last_err,
-        )
-        # If not ready, terminate and signal failure
-        self._terminate_process(proc)
-        return None, None
-
-    async def _launch_and_wait_vllm_server(
-        self,
-        *,
-        model_path: str | None,
-        host: str,
-        port: int,
-        timeout_s: float,
-        trust_remote_code: bool,
-    ) -> tuple[subprocess.Popen[bytes] | None, int | None]:
-        """Launch vLLM server subprocess and wait until HTTP endpoint is ready.
-
-        Configures server with vLLM best practices:
-        - Memory-optimized settings for large models
-        - Request rate limiting to prevent overload
-        - Extended startup timeouts
-        - Post-launch warmup to verify stability
-        """
-        bound_port = int(port)
-        if bound_port <= 0:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind((host, 0))
-                bound_port = s.getsockname()[1]
-
-        # vLLM server launch with optimized parameters
-        cmd = [
-            "python",
-            "-m",
-            "vllm.entrypoints.api_server",
-            "--model-path",
-            model_path or "",
-            "--host",
-            host,
-            "--port",
-            str(bound_port),
-            "--dtype",
-            "bfloat16",
-            "--tp-size",
-            "1",
-            # vLLM performance tuning per docs
-            "--mem-fraction-static",
-            "0.85",  # Reserve 85% VRAM for KV cache
-            "--max-running-requests",
-            "8",  # Limit concurrent batch processing
-            "--schedule-policy",
-            "fcfs",  # Fair scheduling
-        ]
-        if trust_remote_code:
-            cmd.append("--trust-remote-code")
-
-        proc: subprocess.Popen[bytes] | None = None
-        try:
-            # Launch with combined stdout/stderr to monitor for errors
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=False,  # Keep as bytes
-            )
-            logger.info(
-                "Launched vLLM server (pid=%s) on %s:%s with optimized config",
-                proc.pid if proc else None,
-                host,
-                bound_port,
-            )
-        except Exception as exc:
-            logger.warning("Failed to launch vLLM server: %s", exc)
-            return None, None
-
-        # Poll readiness with extended timeout for model loading
-        import time as _time
-
-        import requests
-
-        ready_url = f"http://{host}:{bound_port}/v1/models"
-        t_deadline = _time.time() + float(timeout_s)
-        last_err: str | None = None
-        poll_count: int = 0
-
-        while _time.time() < t_deadline:
-            # Check if process is still alive
-            if proc.poll() is not None:
-                # Process exited unexpectedly
-                logger.error(
-                    "vLLM server process exited unexpectedly (return code: %s)",
-                    proc.returncode,
-                )
-                return None, None
-
-            try:
-                r = requests.get(ready_url, timeout=3.0)
-                if r.status_code == 200:
-                    logger.info("vLLM server ready at %s:%s", host, bound_port)
-
-                    # Optional: send warmup request to force KV cache initialization
-                    try:
-                        warmup_start = _time.time()
-                        warmup_payload = {
-                            "model": model_path or "model",
-                            "prompt": "OK",
-                            "max_tokens": 1,
-                        }
-                        requests.post(
-                            f"{ready_url.replace('/v1/models', '')}/v1/completions",
-                            json=warmup_payload,
-                            timeout=30.0,
-                        )
-                        warmup_time = _time.time() - warmup_start
-                        logger.info("Server warmup completed in %.2fs", warmup_time)
-                    except Exception as warmup_err:
-                        logger.warning("Warmup request failed (non-fatal): %s", warmup_err)
-
-                    return proc, bound_port
-
-                last_err = f"HTTP {r.status_code}"
-            except Exception as exc:
-                last_err = str(exc)
-
-            poll_count += 1
-            if poll_count % 6 == 0:  # Log every 3 seconds (0.5s * 6)
-                elapsed = _time.time() - (t_deadline - timeout_s)
-                logger.debug(
-                    "Waiting for vLLM server (%.1fs elapsed): %s",
-                    elapsed,
-                    last_err,
-                )
-
-            await asyncio.sleep(0.5)
-
-        logger.warning(
-            "vLLM server readiness check failed after %.1fs: %s",
-            timeout_s,
-            last_err,
-        )
-        # If not ready, terminate and signal failure
-        self._terminate_process(proc)
-        return None, None
-
-    def _terminate_process(self, proc: subprocess.Popen[bytes] | None) -> None:
-        """Terminate a subprocess gracefully, wait for GPU memory release."""
-        if proc is None:
-            return
-
-        import time
-
-        try:
-            # Step 1: Graceful shutdown
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-                logger.info("SGLang server terminated (pid=%s)", proc.pid)
-            except Exception:
-                logger.warning("SGLang server didn't exit gracefully, force killing")
-                proc.kill()
-                proc.wait(timeout=5)
-        except Exception as e:
-            logger.warning("Error terminating SGLang process: %s", e)
-
-        # Step 2: Wait for GPU memory to actually be freed
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-            # Poll for GPU memory release (up to 30 seconds)
-            max_wait = 30.0
-            start = time.time()
-            while time.time() - start < max_wait:
-                try:
-                    # Check if we have enough free memory for training model reload
-                    free_mem = torch.cuda.mem_get_info()[0] / (1024**3)  # GB
-                    if free_mem > 25.0:  # Need at least 25 GB free for training model
-                        logger.info("GPU memory freed: %.2f GB available", free_mem)
-                        return
-                    time.sleep(1.0)
-                except Exception:
-                    break
-
-            # Log final state even if timeout
-            try:
-                free_mem = torch.cuda.mem_get_info()[0] / (1024**3)
-                logger.warning(
-                    "GPU memory may still be held after %.1fs: %.2f GB free",
-                    max_wait,
-                    free_mem,
-                )
-            except Exception:
-                pass
-
-    def _reload_training_artifacts_if_needed(self, tmp_dir: str | None) -> None:
-        """Reload training and reference models after evaluation if they were freed."""
-        # Check if models need reloading
-        needs_reload = self._context.train_model is None or self._context.ref_model is None
-        if not needs_reload:
+        if self._context.train_model is not None and self._context.ref_model is not None:
+            logger.debug("Training models still loaded, skipping reload")
             return
 
         # Log GPU memory state before reload
         if torch.cuda.is_available():
             try:
-                free_mem, total_mem = torch.cuda.mem_get_info()
+                free_gb, total_gb = torch.cuda.mem_get_info()
                 logger.info(
-                    "Reloading training artifacts: GPU memory %.2f GB free / %.2f GB total",
-                    free_mem / (1024**3),
-                    total_mem / (1024**3),
+                    "Reloading training models: GPU %.2f GB free / %.2f GB total",
+                    free_gb / (1024**3),
+                    total_gb / (1024**3),
                 )
             except Exception:
                 pass
@@ -786,39 +517,42 @@ class TrainerNeuron(BaseNeuron):
         try:
             from grail.model.provider import get_model, get_tokenizer
 
-            # Reload training model from saved checkpoint or original path
-            if self._context.train_model is None:
-                model_source = (
-                    tmp_dir
-                    if (tmp_dir and os.path.isdir(tmp_dir))
-                    else self._context.train_model_path
+            # Reload training model from original path
+            if self._context.train_model is None and self._context.train_model_path:
+                logger.info("Reloading training model from: %s", self._context.train_model_path)
+                self._context.train_model = get_model(
+                    self._context.train_model_path, eval_mode=False
                 )
-                if model_source:
-                    self._context.train_model = get_model(model_source, eval_mode=False)
-                    logger.info("Reloaded training model from %s", model_source)
+                logger.info("✅ Reloaded training model: %s", self._context.train_model_path)
+            else:
+                logger.debug(
+                    "Skipping training model reload: model_path=%s",
+                    self._context.train_model_path,
+                )
 
             # Reload reference model from original path
             if self._context.ref_model is None and self._context.ref_model_path:
+                logger.info("Reloading reference model from: %s", self._context.ref_model_path)
                 self._context.ref_model = get_model(self._context.ref_model_path, eval_mode=True)
-                logger.info("Reloaded reference model from %s", self._context.ref_model_path)
+                logger.info("✅ Reloaded reference model: %s", self._context.ref_model_path)
+            else:
+                logger.debug(
+                    "Skipping reference model reload: model_path=%s",
+                    self._context.ref_model_path,
+                )
 
-            # Reload tokenizer if needed
-            if tmp_dir and os.path.isdir(tmp_dir):
-                self._context.tokenizer = get_tokenizer(tmp_dir)
-            elif self._context.train_model_path:
+            # Reload tokenizer from training model path
+            if self._context.train_model_path:
+                logger.info("Reloading tokenizer from: %s", self._context.train_model_path)
                 self._context.tokenizer = get_tokenizer(self._context.train_model_path)
+                logger.info("✅ Reloaded tokenizer")
+            else:
+                logger.debug("Skipping tokenizer reload: no train_model_path")
+
+            logger.info("✅ All training models reloaded successfully")
 
         except Exception as exc:
-            logger.warning("Failed to reload training artifacts after eval: %s", exc)
-
-    def _cleanup_temp_dir(self, tmp_dir: str | None) -> None:
-        """Remove a temporary directory if provided."""
-        if tmp_dir is None:
-            return
-        try:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-        except Exception:
-            pass
+            logger.exception("Failed to reload training models: %s", exc)
 
     async def _handle_wait_for_window(
         self, target_window: int, current_block: int, last_processed_window: int
@@ -930,7 +664,17 @@ class TrainerNeuron(BaseNeuron):
             raise
 
     async def _train_window(self, window: int) -> bool:
+        logger.info("📖 _train_window called for window=%d", window)
         ctx = self._context
+
+        # Verify models are loaded
+        if ctx.train_model is None:
+            logger.error("❌ train_model is None at start of _train_window!")
+            return False
+        if ctx.ref_model is None:
+            logger.error("❌ ref_model is None at start of _train_window!")
+            return False
+
         # Update heartbeat before long operation
         self.heartbeat()
 
@@ -949,4 +693,7 @@ class TrainerNeuron(BaseNeuron):
             scheduler=self._scheduler,
             chain_manager=ctx.chain_manager,
         )
-        return await service.train_window(window, subtensor)
+        logger.info("TrainerService created, calling train_window")
+        result = await service.train_window(window, subtensor)
+        logger.info("TrainerService.train_window completed with result=%s", result)
+        return result

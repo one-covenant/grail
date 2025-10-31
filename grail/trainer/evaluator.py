@@ -45,6 +45,8 @@ class EvaluatorService:
         config: EvalConfig,
         monitor: Any | None = None,
         device: str = "cuda",
+        server_base_url: str | None = None,
+        server_model_name: str | None = None,
     ) -> None:
         self._model = model
         self._tokenizer = tokenizer
@@ -55,55 +57,16 @@ class EvaluatorService:
 
         self._vector = EnvVector(env_factory, batch_size=self._cfg.batch_size)
 
-        # Reuse AgentEnvLoop for rendering and generation to avoid duplication
+        # Initialize generation backend based on server configuration
         gen_backend = None
         backend_name = (self._cfg.backend or "hf").lower()
 
-        if backend_name == "sglang":
-            try:
-                from grail.environments.loop import SGLangServerBackend
-
-                # Use HTTP server backend (runs in separate subprocess, avoids Gloo issues)
-                base_url = f"http://{self._cfg.sglang_host}:{self._cfg.sglang_port}"
-                model_id = getattr(self._model, "name_or_path", "model")
-                gen_backend = SGLangServerBackend(
-                    base_url=base_url,
-                    model_name=str(model_id),
-                    tokenizer=self._tokenizer,
-                    timeout=300.0,
-                )
-                logger.info(
-                    "Evaluator using sgLang SERVER backend with ASYNC API (url=%s, model=%s)",
-                    base_url,
-                    model_id,
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to initialize sgLang server backend; falling back to HF backend"
-                )
-                gen_backend = None
-        elif backend_name == "vllm":
-            try:
-                from grail.environments.loop import VLLMServerBackend
-
-                base_url = f"http://{self._cfg.sglang_host}:{self._cfg.sglang_port}"
-                model_id = getattr(self._model, "name_or_path", "model")
-                gen_backend = VLLMServerBackend(
-                    base_url=base_url,
-                    model_name=str(model_id),
-                    tokenizer=self._tokenizer,
-                    timeout=300.0,
-                )
-                logger.info(
-                    "Evaluator using vLLM SERVER backend with ASYNC API (url=%s, model=%s)",
-                    base_url,
-                    model_id,
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to initialize vLLM server backend; falling back to HF backend"
-                )
-                gen_backend = None
+        if backend_name == "sglang" and server_base_url:
+            gen_backend = self._create_sglang_backend(server_base_url, server_model_name)
+        elif backend_name == "vllm" and server_base_url:
+            gen_backend = self._create_vllm_backend(server_base_url, server_model_name)
+        elif backend_name not in ("hf", "sglang", "vllm"):
+            logger.warning("Unknown backend '%s', falling back to HF", backend_name)
 
         self._loop = AgentEnvLoop(
             model=self._model,
@@ -119,6 +82,54 @@ class EvaluatorService:
 
         # Store backend reference for cleanup
         self._gen_backend = gen_backend
+
+    def _create_sglang_backend(self, base_url: str, model_name: str | None) -> Any | None:
+        """Create SGLang server backend with fallback handling."""
+        try:
+            from grail.environments.loop import SGLangServerBackend
+
+            model_id = model_name or getattr(self._model, "name_or_path", "model")
+            backend = SGLangServerBackend(
+                base_url=base_url,
+                model_name=str(model_id),
+                tokenizer=self._tokenizer,
+                timeout=300.0,
+                max_concurrent_requests=self._cfg.sglang_max_concurrent_requests,
+            )
+            logger.info(
+                "Evaluator using SGLang server backend: url=%s model=%s concurrency=%d",
+                base_url,
+                model_id,
+                self._cfg.sglang_max_concurrent_requests,
+            )
+            return backend
+        except Exception:
+            logger.exception("Failed to initialize SGLang backend; falling back to HF")
+            return None
+
+    def _create_vllm_backend(self, base_url: str, model_name: str | None) -> Any | None:
+        """Create vLLM server backend with fallback handling."""
+        try:
+            from grail.environments.loop import VLLMServerBackend
+
+            model_id = model_name or getattr(self._model, "name_or_path", "model")
+            backend = VLLMServerBackend(
+                base_url=base_url,
+                model_name=str(model_id),
+                tokenizer=self._tokenizer,
+                timeout=300.0,
+                max_concurrent_requests=self._cfg.vllm_max_concurrent_requests,
+            )
+            logger.info(
+                "Evaluator using vLLM server backend: url=%s model=%s concurrency=%d",
+                base_url,
+                model_id,
+                self._cfg.vllm_max_concurrent_requests,
+            )
+            return backend
+        except Exception:
+            logger.exception("Failed to initialize vLLM backend; falling back to HF")
+            return None
 
     def shutdown(self) -> None:
         """Release evaluation backend resources and model references.
@@ -220,7 +231,7 @@ class EvaluatorService:
 
                 prompt_ids = self._render_prompts(expanded_msgs)
                 # Generate sequences deterministically per replicate using seeds
-                seq_with_prompt_lens = self._loop.generate_from_prompt_ids_batch(
+                seq_with_prompt_lens = await self._loop.generate_from_prompt_ids_batch(
                     prompt_ids,
                     seeds=expanded_seeds,
                     trim_right_padding=True,
