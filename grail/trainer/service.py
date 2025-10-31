@@ -105,6 +105,7 @@ class TrainerService:
                 self.credentials,
                 self.chain_manager,
                 uid_by_hotkey,
+                self.monitor,
             )
 
             if not groups:

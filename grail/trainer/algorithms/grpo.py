@@ -19,7 +19,14 @@ import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
 
-from grail.infrastructure.miner_data import fetch_multiple_miners_data
+try:
+    from grail.infrastructure.miner_data import fetch_multiple_miners_data
+except Exception:  # pragma: no cover - optional in offline mode
+
+    async def fetch_multiple_miners_data(*args: Any, **kwargs: Any) -> dict[str, Any]:  # type: ignore[override]
+        raise RuntimeError("Miner data fetching is unavailable in offline mode.")
+
+
 from grail.shared.constants import (
     ROLLOUTS_PER_PROBLEM,
     TRAINER_ADAPTIVE_KL,
@@ -37,6 +44,11 @@ from grail.shared.constants import (
     TRAINER_MAX_LENGTH,
     TRAINER_PPO_CLIP_EPS,
     TRAINER_USE_IS,
+)
+from grail.trainer.metrics import (
+    KMetricsAggregator,
+    TaskReplicateResult,
+    derive_k_values,
 )
 
 from .base import TrainingAlgorithm
@@ -81,6 +93,163 @@ class GRPOGroup:
         return abs(advantage_sum) < advantage_tolerance
 
 
+def _group_rollouts(raw_rollouts: list[dict[str, Any]]) -> dict[str, list[GRPORollout]]:
+    """Group raw rollout dicts into rollout objects by group_id.
+
+    Args:
+        raw_rollouts: List of raw rollout dictionaries from miners
+
+    Returns:
+        Dict mapping group_id to list of GRPORollout objects
+    """
+    grouped: dict[str, list[GRPORollout]] = {}
+    for rollout_dict in raw_rollouts:
+        group_id = str(rollout_dict.get("rollout_group", ""))
+        if not group_id:
+            continue
+
+        commit = rollout_dict.get("commit", {})
+        rollout_meta = commit.get("rollout", {})
+
+        # Log non-finite or obviously invalid token logprobs arrays
+        tlp = rollout_meta.get("token_logprobs", None)
+        if isinstance(tlp, list) and tlp:
+            # Cheap checks without importing torch here
+            any_non_finite = any(
+                (x is None)
+                or (isinstance(x, float) and (x != x or x == float("inf") or x == float("-inf")))
+                for x in tlp
+            )
+            if any_non_finite:
+                logger.debug(
+                    "Non-finite token_logprobs detected; ignored during training",
+                )
+
+        try:
+            grouped.setdefault(group_id, []).append(
+                GRPORollout(
+                    tokens=list(commit.get("tokens", [])),
+                    prompt_length=int(rollout_meta.get("prompt_length", 0)),
+                    completion_length=int(rollout_meta.get("completion_length", 0) or 0),
+                    advantage=float(rollout_meta.get("advantage", 0.0)),
+                    reward=float(rollout_meta.get("total_reward", 0.0)),
+                    success=bool(rollout_meta.get("success", False)),
+                    nonce=int(rollout_dict.get("nonce", 0)),
+                    rollout_group=group_id,
+                    token_logprobs=(
+                        list(rollout_meta.get("token_logprobs", []))
+                        if isinstance(
+                            rollout_meta.get("token_logprobs", None),
+                            list,
+                        )
+                        else None
+                    ),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "Failed to parse rollout for group %s: %s",
+                group_id,
+                exc,
+            )
+
+    return grouped
+
+
+def _compute_training_metrics(groups: list[GRPOGroup], window: int) -> dict[str, Any]:
+    """Compute and log pre-training data quality metrics for GRPO groups.
+
+    Args:
+        groups: List of GRPO groups
+        window: Training window number
+
+    Returns:
+        Dictionary of computed metrics keyed by metric name (with pass@k, mean@k, etc.)
+    """
+    try:
+        report_ks = derive_k_values(ROLLOUTS_PER_PROBLEM)
+    except Exception:  # noqa: BLE001
+        report_ks = [1, 5, 10]
+        if groups:
+            report_ks.append(len(groups[0].rollouts))
+        report_ks = sorted(set(report_ks))
+
+    aggregator = KMetricsAggregator(report_ks=report_ks)
+    for group in groups:
+        # Define replicate order deterministically by nonce
+        ordered = sorted(group.rollouts, key=lambda r: r.nonce)
+        for idx, r in enumerate(ordered):
+            aggregator.add(
+                TaskReplicateResult(
+                    task_id=group.group_id,
+                    replicate_idx=idx,
+                    reward=float(r.reward),
+                    success=bool(r.success),
+                )
+            )
+
+    prefilter_metrics = aggregator.summarize()
+    if prefilter_metrics:
+        # Log a concise, stable set of key indicators
+        # Align k-values with ROLLOUTS_PER_PROBLEM for readability
+        k_keys = [k for k in report_ks if f"pass@{k}" in prefilter_metrics]
+        summary_bits = [f"pass@{k}={prefilter_metrics.get(f'pass@{k}', 0.0):.3f}" for k in k_keys]
+        # Include ordered diagnostics for transparency (ordering-sensitive)
+        summary_bits.extend(
+            [
+                f"pass_ordered@{k}={prefilter_metrics.get(f'pass_ordered@{k}', 0.0):.3f}"
+                for k in k_keys
+            ]
+        )
+        # Prefer full-group mean over first-RPP window for readability
+        full_k = max(report_ks) if report_ks else 1
+        mean_full = prefilter_metrics.get(f"mean@{full_k}", 0.0)
+        summary_bits.append(f"mean@{full_k}={mean_full:.3f}")
+        summary_bits.append(f"reward_mean={prefilter_metrics.get('reward_mean_all', 0.0):.3f}")
+        summary_bits.append(f"reward_std={prefilter_metrics.get('reward_std_all', 0.0):.3f}")
+        summary_bits.append(f"success_rate={prefilter_metrics.get('success_rate_all', 0.0):.3f}")
+        logger.info(
+            "Training data metrics (pre-filter, window %s): %s",
+            window,
+            ", ".join(summary_bits),
+        )
+
+    # Return metrics with metadata for async logging by caller
+    return prefilter_metrics
+
+
+def _filter_valid_groups(
+    groups: list[GRPOGroup],
+    advantage_tolerance: float,
+    window: int,
+) -> list[GRPOGroup]:
+    """Filter groups based on validity constraints and log results.
+
+    Args:
+        groups: List of GRPO groups to filter
+        advantage_tolerance: Maximum allowed sum of advantages in a group
+        window: Training window number (for logging)
+
+    Returns:
+        List of valid GRPO groups
+    """
+    valid_groups = [group for group in groups if group.is_valid(advantage_tolerance)]
+    invalid_count = len(groups) - len(valid_groups)
+    if invalid_count > 0:
+        logger.warning(
+            "Filtered out %s invalid GRPO groups for window %s",
+            invalid_count,
+            window,
+        )
+
+    logger.info(
+        "Loaded %s valid GRPO groups for window %s",
+        len(valid_groups),
+        window,
+    )
+    return valid_groups
+
+
 async def load_grpo_groups(
     window: int,
     advantage_tolerance: float,
@@ -88,6 +257,7 @@ async def load_grpo_groups(
     credentials: BucketCredentials | Any = None,
     chain_manager: GrailChainManager | None = None,
     uid_by_hotkey: dict[str, int] | None = None,
+    monitor: Any | None = None,
 ) -> list[GRPOGroup]:
     """Load and validate GRPO groups directly from trusted miners.
 
@@ -98,6 +268,7 @@ async def load_grpo_groups(
         credentials: R2 credentials for bucket access
         chain_manager: Chain manager for miner bucket discovery
         uid_by_hotkey: Mapping of hotkey to UID for readable logging
+        monitor: Optional monitor for logging metrics to wandb
 
     Returns:
         List of valid GRPO groups
@@ -172,75 +343,30 @@ async def load_grpo_groups(
         window,
     )
 
-    grouped: dict[str, list[GRPORollout]] = {}
-    for rollout_dict in raw_rollouts:
-        group_id = str(rollout_dict.get("rollout_group", ""))
-        if not group_id:
-            continue
+    grouped = _group_rollouts(raw_rollouts)
 
-        commit = rollout_dict.get("commit", {})
-        rollout_meta = commit.get("rollout", {})
-
-        # Log non-finite or obviously invalid token logprobs arrays
-        tlp = rollout_meta.get("token_logprobs", None)
-        if isinstance(tlp, list) and tlp:
-            # Cheap checks without importing torch here
-            any_non_finite = any(
-                (x is None)
-                or (isinstance(x, float) and (x != x or x == float("inf") or x == float("-inf")))
-                for x in tlp
-            )
-            if any_non_finite:
-                logger.debug(
-                    "Non-finite token_logprobs detected; ignored during training",
-                )
-
-        try:
-            grouped.setdefault(group_id, []).append(
-                GRPORollout(
-                    tokens=list(commit.get("tokens", [])),
-                    prompt_length=int(rollout_meta.get("prompt_length", 0)),
-                    completion_length=int(rollout_meta.get("completion_length", 0) or 0),
-                    advantage=float(rollout_meta.get("advantage", 0.0)),
-                    reward=float(rollout_meta.get("total_reward", 0.0)),
-                    success=bool(rollout_meta.get("success", False)),
-                    nonce=int(rollout_dict.get("nonce", 0)),
-                    rollout_group=group_id,
-                    token_logprobs=(
-                        list(rollout_meta.get("token_logprobs", []))
-                        if isinstance(
-                            rollout_meta.get("token_logprobs", None),
-                            list,
-                        )
-                        else None
-                    ),
-                )
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug(
-                "Failed to parse rollout for group %s: %s",
-                group_id,
-                exc,
-            )
-
+    # Construct GRPOGroup objects
     groups: list[GRPOGroup] = [
         GRPOGroup(group_id, rollouts) for group_id, rollouts in grouped.items()
     ]
 
-    valid_groups = [group for group in groups if group.is_valid(advantage_tolerance)]
-    invalid_count = len(groups) - len(valid_groups)
-    if invalid_count > 0:
-        logger.warning(
-            "Filtered out %s invalid GRPO groups for window %s",
-            invalid_count,
-            window,
-        )
+    # Compute training-set metrics BEFORE filtering invalid groups
+    prefilter_metrics = _compute_training_metrics(groups, window)
 
-    logger.info(
-        "Loaded %s valid GRPO groups for window %s",
-        len(valid_groups),
-        window,
-    )
+    # Log prefilter metrics to monitor with distinct namespace
+    if monitor is not None and prefilter_metrics:
+        for key, value in prefilter_metrics.items():
+            try:
+                await monitor.log_gauge(
+                    f"training/prefilter/{key}",
+                    float(value),
+                    tags={"window": str(window)},
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Failed to log prefilter metric %s: %s", key, exc)
+
+    valid_groups = _filter_valid_groups(groups, advantage_tolerance, window)
+
     return valid_groups
 
 
