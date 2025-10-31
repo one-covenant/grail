@@ -1,0 +1,61 @@
+defaults: []
+
+seed: 42
+
+model:
+  train_id: "Qwen/Qwen2.5-0.5B"
+  ref_id: "Qwen/Qwen2.5-0.5B"
+  device: "auto"  # auto|cuda|cpu
+
+generation:
+  backend: "vllm_server"  # sglang_server|vllm_server
+  base_url: "http://127.0.0.1:30001"  # server base URL (OpenAI-compatible /v1)
+  batch_size: 4
+  max_new_tokens: 256
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 50
+  repetition_penalty: 1.1
+
+train:
+  iterations: 5
+  batch_size: 8
+  lr: 1.0e-5
+  grad_clip: 1.0
+  kl_coef: 0.05
+  entropy_coef: 0.0
+  grad_accum_steps: 1
+
+data:
+  problems_per_iteration: 4
+  rollouts_per_problem: 4
+  train_seed_start: 1000
+  num_train_seeds: 64
+
+eval:
+  enabled: true
+  interval: 1
+  backend: "vllm_server"  # sglang_server|vllm_server
+  base_url: "http://127.0.0.1:30001"
+  batch_size: 8
+  do_sample: true
+  max_new_tokens: 256
+  temperature: 0.7
+  top_p: 0.95
+  replicates: 4
+  ids: []  # if empty, will derive from seeds
+  seed_base: 4242
+  num_ids: 16
+  id_seed_start: 5000
+
+logging:
+  wandb:
+    enabled: false
+    project: "grail-offline"
+    run_name: null
+
+checkpoint:
+  save_interval: 1  # in iterations
+  keep_last_k: 3
+
+
