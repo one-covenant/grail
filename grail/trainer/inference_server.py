@@ -86,10 +86,14 @@ class InferenceServerManager(ABC):
         await self._start_server()
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        """Cleanup server and reload models."""
+        """Cleanup server but defer checkpoint cleanup to trainer.
+
+        Trainer needs to reload from the saved checkpoint before it's deleted.
+        Call cleanup_checkpoint() after reload to remove temp directory.
+        """
         await self._stop_server()
         await self._reload_models()
-        self._cleanup_checkpoint()
+        # Checkpoint cleanup deferred to trainer for exact reload
 
     @property
     def base_url(self) -> str:
@@ -103,6 +107,11 @@ class InferenceServerManager(ABC):
         if self._config.model_name_override:
             return self._config.model_name_override
         return self._initial_model_name
+
+    @property
+    def checkpoint_dir(self) -> str | None:
+        """Path to saved checkpoint directory for trainer reload."""
+        return self._checkpoint_dir
 
     async def _prepare_checkpoint(self) -> None:
         """Save model/tokenizer to temporary directory for server loading."""
@@ -138,14 +147,20 @@ class InferenceServerManager(ABC):
     async def _reload_models(self) -> None:
         """Reload training models after server shutdown (implemented by subclasses if needed)."""
 
-    def _cleanup_checkpoint(self) -> None:
-        """Remove temporary checkpoint directory."""
+    def cleanup_checkpoint(self) -> None:
+        """Remove temporary checkpoint directory after trainer reload.
+
+        Public method called by trainer after successfully reloading from
+        the saved checkpoint to ensure exact model/tokenizer state.
+        """
         if self._checkpoint_dir:
             try:
                 shutil.rmtree(self._checkpoint_dir, ignore_errors=True)
-                logger.debug("Cleaned up checkpoint: %s", self._checkpoint_dir)
-            except Exception:
-                pass
+                logger.info("Cleaned up eval checkpoint: %s", self._checkpoint_dir)
+            except Exception as exc:
+                logger.warning("Checkpoint cleanup failed: %s", exc)
+            finally:
+                self._checkpoint_dir = None
 
     async def _wait_for_server_ready(
         self,

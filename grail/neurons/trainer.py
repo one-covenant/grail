@@ -67,6 +67,7 @@ class TrainerNeuron(BaseNeuron):
         self._eval_in_progress: bool = False
         self._eval_last_run_window_number: int | None = None
         self._windows_since_last_eval: int = 0  # Counter for windows processed since last eval
+        self._eval_checkpoint_dir: str | None = None  # Saved checkpoint path for exact reload
 
     async def run(self) -> None:
         # Start the built-in watchdog (15 minute timeout)
@@ -336,8 +337,15 @@ class TrainerNeuron(BaseNeuron):
                         server_base_url=server.base_url,
                         server_model_name=server.model_name,
                     )
-                # Context manager handles cleanup automatically
+                # Context manager handles server cleanup; checkpoint preserved for reload
                 logger.info("Server context exited, subprocess terminated and GPU memory freed")
+
+                # Capture checkpoint path for exact reload
+                self._eval_checkpoint_dir = server_manager.checkpoint_dir
+                if self._eval_checkpoint_dir:
+                    logger.info(
+                        "Eval checkpoint preserved for reload: %s", self._eval_checkpoint_dir
+                    )
 
                 # Verify GPU memory is available before reload
                 if torch.cuda.is_available():
@@ -351,10 +359,15 @@ class TrainerNeuron(BaseNeuron):
                     except Exception:
                         pass
 
-                # Reload training artifacts after server shutdown
-                logger.info("About to reload training models after server cleanup...")
+                # Reload training artifacts from exact saved checkpoint
+                logger.info("Reloading training models from eval checkpoint...")
                 self._reload_training_models()
                 logger.info("Training models reloaded successfully")
+
+                # Cleanup checkpoint after successful reload
+                if self._eval_checkpoint_dir:
+                    server_manager.cleanup_checkpoint()
+                    self._eval_checkpoint_dir = None
             else:
                 # Direct evaluation without server (HF backend or server already running)
                 logger.info("Running evaluation cycle with HF backend...")
@@ -491,7 +504,11 @@ class TrainerNeuron(BaseNeuron):
                 logger.info("🧹 Evaluator shutdown complete")
 
     def _reload_training_models(self) -> None:
-        """Reload training and reference models after evaluation server shutdown."""
+        """Reload training and reference models after evaluation server shutdown.
+
+        Prefers eval checkpoint (exact saved state) over original path to guarantee
+        bit-identical reload including weights and tokenizer chat template.
+        """
         logger.info(
             "Reloading training models: train_model=%s ref_model=%s",
             self._context.train_model is not None,
@@ -517,35 +534,50 @@ class TrainerNeuron(BaseNeuron):
         try:
             from grail.model.provider import get_model, get_tokenizer
 
-            # Reload training model from original path
-            if self._context.train_model is None and self._context.train_model_path:
-                logger.info("Reloading training model from: %s", self._context.train_model_path)
-                self._context.train_model = get_model(
-                    self._context.train_model_path, eval_mode=False
+            # Prefer eval checkpoint (exact saved state) over original path
+            train_reload_path = self._eval_checkpoint_dir or self._context.train_model_path
+
+            # Reload training model
+            if self._context.train_model is None and train_reload_path:
+                reload_source = "eval checkpoint" if self._eval_checkpoint_dir else "original path"
+                logger.info(
+                    "Reloading training model from %s: %s", reload_source, train_reload_path
                 )
-                logger.info("✅ Reloaded training model: %s", self._context.train_model_path)
+                self._context.train_model = get_model(train_reload_path, eval_mode=False)
+                logger.info("✅ Reloaded training model from %s", reload_source)
             else:
                 logger.debug(
-                    "Skipping training model reload: model_path=%s",
-                    self._context.train_model_path,
+                    "Skipping training model reload: train_reload_path=%s", train_reload_path
                 )
 
-            # Reload reference model from original path
+            # Reload reference model from original path (not affected by eval checkpoint)
             if self._context.ref_model is None and self._context.ref_model_path:
                 logger.info("Reloading reference model from: %s", self._context.ref_model_path)
                 self._context.ref_model = get_model(self._context.ref_model_path, eval_mode=True)
-                logger.info("✅ Reloaded reference model: %s", self._context.ref_model_path)
+                logger.info("✅ Reloaded reference model")
             else:
                 logger.debug(
-                    "Skipping reference model reload: model_path=%s",
+                    "Skipping reference model reload: ref_model_path=%s",
                     self._context.ref_model_path,
                 )
 
-            # Reload tokenizer from training model path
-            if self._context.train_model_path:
-                logger.info("Reloading tokenizer from: %s", self._context.train_model_path)
-                self._context.tokenizer = get_tokenizer(self._context.train_model_path)
-                logger.info("✅ Reloaded tokenizer")
+            # Reload tokenizer from same path as training model (preserves chat template)
+            if train_reload_path:
+                reload_source = "eval checkpoint" if self._eval_checkpoint_dir else "original path"
+                logger.info("Reloading tokenizer from %s: %s", reload_source, train_reload_path)
+                self._context.tokenizer = get_tokenizer(train_reload_path)
+
+                # Verify chat template is present
+                has_template = hasattr(self._context.tokenizer, "chat_template") and bool(
+                    self._context.tokenizer.chat_template
+                )
+                if has_template:
+                    logger.info("✅ Reloaded tokenizer with chat template from %s", reload_source)
+                else:
+                    logger.warning(
+                        "⚠️ Tokenizer reloaded but chat_template missing (source: %s)",
+                        reload_source,
+                    )
             else:
                 logger.debug("Skipping tokenizer reload: no train_model_path")
 

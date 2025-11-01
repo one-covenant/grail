@@ -64,6 +64,121 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _print_decoded_rollout_samples(
+    miner_data: dict[str, dict], max_samples_per_miner: int = 100, max_tokens_to_show: int = 1000
+) -> None:
+    """Decode and print sample tokens from miner rollouts for inspection.
+
+    Helpful for debugging: shows what tokens/text was sent by miners.
+
+    Args:
+        miner_data: Dict mapping hotkey -> window_data from miners
+        max_samples_per_miner: Max number of rollouts to show per miner
+        max_tokens_to_show: Max number of tokens to display from each rollout
+    """
+    try:
+        from transformers import AutoTokenizer
+    except ImportError:
+        logger.debug("transformers not available; skipping token decoding")
+        return
+
+    if not miner_data:
+        logger.info("No miner data to decode")
+        return
+
+    # Try to infer tokenizer from first rollout's model info
+    tokenizer = None
+    model_name = None
+    for _miner_hotkey, window_data in miner_data.items():
+        if isinstance(window_data, dict):
+            inferences = window_data.get("inferences", [])
+            if inferences and isinstance(inferences[0], dict):
+                commit = inferences[0].get("commit", {})
+                model_info = commit.get("model", {})
+                model_name = model_info.get("name")
+                break
+
+    if not model_name:
+        logger.debug("Could not infer model name from rollouts; skipping decoding")
+        return
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+    except Exception as e:
+        logger.debug("Failed to load tokenizer for %s: %s", model_name, e)
+        return
+
+    logger.info("=" * 100)
+    logger.info("DECODED ROLLOUT SAMPLES (Model: %s)", model_name)
+    logger.info("=" * 100)
+
+    for miner_hotkey, window_data in miner_data.items():
+        if not isinstance(window_data, dict):
+            continue
+
+        inferences = window_data.get("inferences", [])
+        if not isinstance(inferences, list):
+            continue
+
+        logger.info("\nMiner: %s | Total rollouts: %d", miner_hotkey[:16], len(inferences))
+
+        for idx, rollout in enumerate(inferences[:max_samples_per_miner]):
+            if not isinstance(rollout, dict):
+                continue
+
+            commit = rollout.get("commit", {})
+            tokens = commit.get("tokens", [])
+            rollout_data = commit.get("rollout", {})
+            prompt_length = rollout_data.get("prompt_length", 0)
+            completion_length = rollout_data.get("completion_length", 0)
+            success = rollout_data.get("success", False)
+            reward = rollout_data.get("total_reward", 0.0)
+
+            logger.info(
+                "  Rollout %d | Prompt: %d tokens | Completion: %d tokens | "
+                "Success: %s | Reward: %.3f",
+                idx,
+                prompt_length,
+                completion_length,
+                success,
+                reward,
+            )
+
+            if tokens and isinstance(tokens, list):
+                # Decode prompt
+                prompt_tokens = tokens[:prompt_length] if prompt_length <= len(tokens) else tokens
+                try:
+                    prompt_text = tokenizer.decode(
+                        prompt_tokens[:max_tokens_to_show], skip_special_tokens=False
+                    )
+                    logger.info(
+                        "    [PROMPT (first %d tokens)]:\n%s",
+                        min(max_tokens_to_show, len(prompt_tokens)),
+                        prompt_text,
+                    )
+                except Exception as e:
+                    logger.debug("Failed to decode prompt: %s", e)
+
+                # Decode completion
+                if completion_length > 0 and prompt_length < len(tokens):
+                    comp_tokens = tokens[
+                        prompt_length : min(prompt_length + max_tokens_to_show, len(tokens))
+                    ]
+                    try:
+                        comp_text = tokenizer.decode(comp_tokens, skip_special_tokens=False)
+                        logger.info(
+                            "    [COMPLETION (first %d tokens)]:\n%s",
+                            len(comp_tokens),
+                            comp_text[:500],
+                        )
+                    except Exception as e:
+                        logger.debug("Failed to decode completion: %s", e)
+            else:
+                logger.info("    [No tokens available]")
+
+    logger.info("=" * 100)
+
+
 @dataclass
 class GRPORollout:
     """Single rollout from a GRPO group."""
@@ -554,6 +669,9 @@ async def load_grpo_groups(
             window,
         )
         return []
+
+    # Debug: Decode and print sample tokens
+    _print_decoded_rollout_samples(miner_data, max_samples_per_miner=100, max_tokens_to_show=1000)
 
     # Extract all rollouts from all miners
     raw_rollouts = []
