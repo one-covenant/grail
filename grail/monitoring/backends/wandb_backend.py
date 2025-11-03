@@ -166,6 +166,9 @@ class WandBBackend(MonitoringBackend):
             self._wandb_module.define_metric("weights/*", step_metric="block_number")
             self._wandb_module.define_metric("miner_sampling/*", step_metric="block_number")
 
+            # Evaluation metrics use block_number for alignment with training progression
+            self._wandb_module.define_metric("eval/*", step_metric="block_number")
+
             # Profiling metrics for mining/validation: use block_number for consistency
             self._wandb_module.define_metric("profiling/*", step_metric="block_number")
 
@@ -198,6 +201,8 @@ class WandBBackend(MonitoringBackend):
         elif name.startswith("training/block/"):
             step_metric = "block_number"
         elif name.startswith("training/prefilter/"):
+            step_metric = "block_number"
+        elif name.startswith("eval/"):
             step_metric = "block_number"
         elif name.startswith("mining/"):
             step_metric = "block_number"
