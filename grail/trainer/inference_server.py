@@ -33,6 +33,7 @@ class ServerConfig:
     dtype: str = "bfloat16"
     model_name_override: str | None = None
     model_path: str = ""
+    chat_template_path: str | None = None  # Path to chat_template.jinja file
 
 
 class InferenceServerManager(ABC):
@@ -501,6 +502,12 @@ class VLLMServerManager(InferenceServerManager):
         if self._config.trust_remote_code:
             cmd.append("--trust-remote-code")
 
+        # Explicitly provide chat template to ensure vLLM uses the correct formatting
+        # with system prompt and reasoning tags during generation
+        if self._config.chat_template_path:
+            cmd.extend(["--chat-template", self._config.chat_template_path])
+            logger.info("vLLM server will use chat template: %s", self._config.chat_template_path)
+
         return cmd
 
 
@@ -607,6 +614,12 @@ class SGLangServerManager(InferenceServerManager):
         if self._config.trust_remote_code:
             cmd.append("--trust-remote-code")
 
+        # Explicitly provide chat template to ensure SGLang uses the correct formatting
+        # with system prompt and reasoning tags during generation
+        if self._config.chat_template_path:
+            cmd.extend(["--chat-template", self._config.chat_template_path])
+            logger.info("SGLang server will use chat template: %s", self._config.chat_template_path)
+
         return cmd
 
 
@@ -615,6 +628,7 @@ def create_inference_server(
     model_path: str,
     eval_config: EvalConfig,
     model_name_override: str | None = None,
+    chat_template_path: str | None = None,
 ) -> InferenceServerManager:
     """Factory function to create appropriate server manager.
 
@@ -623,6 +637,7 @@ def create_inference_server(
         model_path: Filesystem path for the model to serve
         eval_config: Evaluation configuration
         model_name_override: Optional served model name for API calls
+        chat_template_path: Optional path to chat_template.jinja file
 
     Returns:
         Configured server manager instance
@@ -637,6 +652,7 @@ def create_inference_server(
         trust_remote_code=eval_config.sglang_trust_remote_code,
         model_name_override=model_name_override,
         model_path=model_path,
+        chat_template_path=chat_template_path,
     )
 
     backend_lower = backend.lower()
