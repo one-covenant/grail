@@ -28,6 +28,11 @@ from grail.trainer.eval_planner import EvaluationPlanner
 from grail.trainer.evaluator import EvaluatorService
 from grail.trainer.inference_server import create_inference_server
 from grail.trainer.service import TrainerService
+from grail.trainer.training_state import (
+    apply_training_state,
+    load_training_state,
+    save_training_state,
+)
 
 from .base import BaseNeuron
 
@@ -301,20 +306,37 @@ class TrainerNeuron(BaseNeuron):
             # Use context manager for clean server lifecycle management
             if should_start_server:
                 logger.info("Starting inference server for evaluation...")
-                # Create server manager (will save checkpoint + free its model ref in __aenter__)
+
+                # Step 1: Save exact training state before freeing GPU memory
+                model_name = getattr(self._context.train_model, "name_or_path", "model")
+                logger.info("Saving checkpoint before eval (models still in GPU memory)...")
+                self._eval_checkpoint_dir = self._save_eval_checkpoint()
+                logger.info("Checkpoint saved, now freeing GPU memory...")
+
+                # Step 2: Free all GPU memory to maximize available memory for server
+                self._free_training_vram_for_eval()
+
+                # Step 3: Verify GPU memory is clean before server startup
+                if torch.cuda.is_available():
+                    try:
+                        free_gb, total_gb = torch.cuda.mem_get_info()
+                        logger.info(
+                            "GPU memory after freeing models: %.2f GB free / %.2f GB total",
+                            free_gb / (1024**3),
+                            total_gb / (1024**3),
+                        )
+                    except Exception:
+                        pass
+
+                # Step 4: Create and start server with clean GPU
                 server_manager = create_inference_server(
                     backend=self._eval_cfg.backend,
-                    model=self._context.train_model,
-                    tokenizer=self._context.tokenizer,
+                    model_path=self._eval_checkpoint_dir,
                     eval_config=self._eval_cfg,
+                    model_name_override=model_name,
                 )
 
                 async with server_manager as server:
-                    logger.info("Server context entered, freeing training VRAM...")
-                    # At this point: checkpoint is saved, server_manager._model is freed
-                    # But trainer models are still loaded - free them now
-                    self._free_training_vram_for_eval()
-
                     # Update heartbeat before expensive server startup
                     logger.debug("Heartbeat before server startup")
                     self.heartbeat()
@@ -337,17 +359,11 @@ class TrainerNeuron(BaseNeuron):
                         server_base_url=server.base_url,
                         server_model_name=server.model_name,
                     )
-                # Context manager handles server cleanup; checkpoint preserved for reload
-                logger.info("Server context exited, subprocess terminated and GPU memory freed")
 
-                # Capture checkpoint path for exact reload
-                self._eval_checkpoint_dir = server_manager.checkpoint_dir
-                if self._eval_checkpoint_dir:
-                    logger.info(
-                        "Eval checkpoint preserved for reload: %s", self._eval_checkpoint_dir
-                    )
+                # Context manager handles server cleanup and waits for GPU memory release
+                logger.info("Server context exited, subprocess terminated")
 
-                # Verify GPU memory is available before reload
+                # Verify GPU memory was released by server shutdown before reloading models
                 if torch.cuda.is_available():
                     try:
                         free_gb, total_gb = torch.cuda.mem_get_info()
@@ -358,16 +374,6 @@ class TrainerNeuron(BaseNeuron):
                         )
                     except Exception:
                         pass
-
-                # Reload training artifacts from exact saved checkpoint
-                logger.info("Reloading training models from eval checkpoint...")
-                self._reload_training_models()
-                logger.info("Training models reloaded successfully")
-
-                # Cleanup checkpoint after successful reload
-                if self._eval_checkpoint_dir:
-                    server_manager.cleanup_checkpoint()
-                    self._eval_checkpoint_dir = None
             else:
                 # Direct evaluation without server (HF backend or server already running)
                 logger.info("Running evaluation cycle with HF backend...")
@@ -420,17 +426,31 @@ class TrainerNeuron(BaseNeuron):
             logger.warning("Evaluation failed, returning False")
             return False
         finally:
-            logger.debug("_maybe_run_evaluation finally block: setting eval_in_progress=False")
-            self._eval_in_progress = False
+            # Always ensure models are reloaded and temp checkpoint cleaned up
+            try:
+                if self._eval_checkpoint_dir:
+                    logger.info("Reloading training models from eval checkpoint...")
+                    self._reload_training_models()
+                    logger.info("Training models reloaded successfully")
+
+                    self._cleanup_eval_checkpoint(self._eval_checkpoint_dir)
+                    self._eval_checkpoint_dir = None
+            finally:
+                logger.debug("_maybe_run_evaluation finally block: setting eval_in_progress=False")
+                self._eval_in_progress = False
 
     # -------------- Eval orchestration helpers --------------
     def _free_training_vram_for_eval(self) -> None:
         """Drop references to training and ref models and clear CUDA cache.
 
-        This must be called AFTER the server manager has saved the checkpoint
-        but BEFORE creating the evaluator for server-backed generation.
+        Call this after saving the evaluation checkpoint and before starting
+        any external inference server to maximize available GPU memory.
         """
         try:
+            # Detach optimizer and scheduler so they can be rebuilt and reattached later
+            self._optimizer = None
+            self._scheduler = None
+
             self._context.train_model = None  # type: ignore[assignment]
             self._context.ref_model = None  # type: ignore[assignment]
             import gc
@@ -442,6 +462,82 @@ class TrainerNeuron(BaseNeuron):
             logger.debug("Freed training VRAM for server-backed evaluation")
         except Exception as exc:
             logger.debug("Issue freeing training VRAM: %s", exc)
+
+    def _save_eval_checkpoint(self) -> str:
+        """Persist the current training model, reference model, and tokenizer to a temp directory.
+
+        Both models are saved to ensure exact weight preservation and bit-identical reload.
+        The training model is saved to the root; ref model to a 'ref_model' subdirectory.
+
+        Returns:
+            Absolute path to the saved checkpoint directory.
+        """
+        if self._context.train_model is None or self._context.tokenizer is None:
+            raise RuntimeError("Cannot save eval checkpoint: train_model/tokenizer not loaded")
+        if self._context.ref_model is None:
+            raise RuntimeError("Cannot save eval checkpoint: ref_model not loaded")
+
+        import os
+        import shutil
+        import tempfile
+
+        checkpoint_dir = tempfile.mkdtemp(prefix="grail_eval_ckpt_")
+        try:
+            # Save training model to root of checkpoint directory
+            self._context.train_model.save_pretrained(
+                checkpoint_dir,
+                safe_serialization=True,
+            )
+            self._context.tokenizer.save_pretrained(checkpoint_dir)
+            logger.info("Saved training model to eval checkpoint: %s", checkpoint_dir)
+
+            # Save reference model to subdirectory for separate reload
+            ref_model_dir = os.path.join(checkpoint_dir, "ref_model")
+            os.makedirs(ref_model_dir, exist_ok=True)
+            self._context.ref_model.save_pretrained(
+                ref_model_dir,
+                safe_serialization=True,
+            )
+            logger.info("Saved reference model to eval checkpoint: %s", ref_model_dir)
+
+            # Persist optimizer/scheduler and RNG states for seamless resume
+            try:
+                # Save state on rank 0 only in distributed settings, then barrier
+                should_save = True
+                if torch.distributed.is_available() and torch.distributed.is_initialized():
+                    should_save = torch.distributed.get_rank() == 0
+                if should_save:
+                    save_training_state(
+                        checkpoint_dir,
+                        optimizer=self._optimizer,
+                        scheduler=self._scheduler,
+                    )
+                    logger.info(
+                        "Saved training state (optimizer/scheduler/RNG) to %s", checkpoint_dir
+                    )
+                if torch.distributed.is_available() and torch.distributed.is_initialized():
+                    torch.distributed.barrier()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to save training state: %s", exc)
+
+            return checkpoint_dir
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to save evaluation checkpoint: %s", exc)
+            try:
+                shutil.rmtree(checkpoint_dir, ignore_errors=True)
+            except Exception:
+                pass
+            raise
+
+    def _cleanup_eval_checkpoint(self, path: str) -> None:
+        """Remove a temporary evaluation checkpoint directory."""
+        import shutil
+
+        try:
+            shutil.rmtree(path, ignore_errors=True)
+            logger.info("Cleaned up eval checkpoint: %s", path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Checkpoint cleanup failed: %s", exc)
 
     async def _run_evaluation_cycle(
         self,
@@ -508,6 +604,7 @@ class TrainerNeuron(BaseNeuron):
 
         Prefers eval checkpoint (exact saved state) over original path to guarantee
         bit-identical reload including weights and tokenizer chat template.
+        Both models are reloaded from the same checkpoint to ensure consistency.
         """
         logger.info(
             "Reloading training models: train_model=%s ref_model=%s",
@@ -532,10 +629,17 @@ class TrainerNeuron(BaseNeuron):
                 pass
 
         try:
+            import os
+
             from grail.model.provider import get_model, get_tokenizer
 
             # Prefer eval checkpoint (exact saved state) over original path
             train_reload_path = self._eval_checkpoint_dir or self._context.train_model_path
+            ref_reload_path = (
+                os.path.join(self._eval_checkpoint_dir, "ref_model")
+                if self._eval_checkpoint_dir
+                else self._context.ref_model_path
+            )
 
             # Reload training model
             if self._context.train_model is None and train_reload_path:
@@ -550,15 +654,16 @@ class TrainerNeuron(BaseNeuron):
                     "Skipping training model reload: train_reload_path=%s", train_reload_path
                 )
 
-            # Reload reference model from original path (not affected by eval checkpoint)
-            if self._context.ref_model is None and self._context.ref_model_path:
-                logger.info("Reloading reference model from: %s", self._context.ref_model_path)
-                self._context.ref_model = get_model(self._context.ref_model_path, eval_mode=True)
-                logger.info("✅ Reloaded reference model")
+            # Reload reference model from same checkpoint (or original path if no checkpoint)
+            if self._context.ref_model is None and ref_reload_path:
+                reload_source = "eval checkpoint" if self._eval_checkpoint_dir else "original path"
+                logger.info("Reloading reference model from %s: %s", reload_source, ref_reload_path)
+                self._context.ref_model = get_model(ref_reload_path, eval_mode=True)
+                logger.info("✅ Reloaded reference model from %s", reload_source)
             else:
                 logger.debug(
-                    "Skipping reference model reload: ref_model_path=%s",
-                    self._context.ref_model_path,
+                    "Skipping reference model reload: ref_reload_path=%s",
+                    ref_reload_path,
                 )
 
             # Reload tokenizer from same path as training model (preserves chat template)
@@ -580,6 +685,30 @@ class TrainerNeuron(BaseNeuron):
                     )
             else:
                 logger.debug("Skipping tokenizer reload: no train_model_path")
+
+            # Ensure optimizer and scheduler are attached to the reloaded model
+            if self._optimizer is None or self._scheduler is None:
+                self._initialize_training_parameters()
+
+            # Restore optimizer/scheduler/RNG state if present in eval checkpoint
+            if self._eval_checkpoint_dir:
+                try:
+                    # Ensure all ranks see the saved files
+                    if torch.distributed.is_available() and torch.distributed.is_initialized():
+                        torch.distributed.barrier()
+                    opt_state, sched_state, rng_state = load_training_state(
+                        self._eval_checkpoint_dir
+                    )
+                    apply_training_state(
+                        optimizer=self._optimizer,
+                        scheduler=self._scheduler,
+                        optimizer_state=opt_state,
+                        scheduler_state=sched_state,
+                        rng_state=rng_state,
+                    )
+                    logger.info("✅ Restored optimizer/scheduler/RNG state from eval checkpoint")
+                except Exception as exc:
+                    logger.warning("Failed to restore training state: %s", exc)
 
             logger.info("✅ All training models reloaded successfully")
 
@@ -703,6 +832,7 @@ class TrainerNeuron(BaseNeuron):
         if ctx.train_model is None:
             logger.error("❌ train_model is None at start of _train_window!")
             return False
+
         if ctx.ref_model is None:
             logger.error("❌ ref_model is None at start of _train_window!")
             return False
