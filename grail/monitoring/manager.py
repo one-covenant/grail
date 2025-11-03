@@ -117,17 +117,10 @@ class MonitoringManager:
         Returns a new dict when additions are needed, otherwise returns the
         original reference to avoid extra allocations.
         """
-        if self._current_window is None and self._current_block is None:
-            return tags
-
-        merged = dict(tags) if tags else {}
-        # Provide window_number so step_metric can bind from the first sample
-        if self._current_window is not None and "window_number" not in merged:
-            merged["window_number"] = str(self._current_window)
-        # Provide block_number as a secondary reference (not a reserved x-axis)
-        if self._current_block is not None and "block_number" not in merged:
-            merged["block_number"] = str(self._current_block)
-        return merged
+        # Context tags (block_number, window_number) are now passed directly via
+        # MetricData fields instead of tags to avoid tag processing issues.
+        # They will be added to wandb data via _add_temporal_context().
+        return tags
 
     async def log_counter(
         self,
