@@ -65,6 +65,7 @@ def configure_logging(verbosity: int) -> None:
         "vllm",
         "httpcore",
         "httpx",
+        "openai",  # Suppress OpenAI client DEBUG logs (HTTP request details)
         "urllib3",
         "uvicorn",
         "uvicorn.access",
