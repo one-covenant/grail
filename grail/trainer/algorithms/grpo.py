@@ -1188,7 +1188,7 @@ async def train_grpo_epoch(
 
             # Standard optimizer step in fp32
             optimizer.step()
-            
+
             logger.info(f"Optimizer step completed. Current KL coef: {current_kl_coef}")
 
             # Adaptive KL adjustment after each optimizer step based on observed KL

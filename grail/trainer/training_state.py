@@ -16,11 +16,10 @@ import os
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any
 
 import numpy as np
 import torch
-
 
 SCHEMA_VERSION: int = 1
 STATE_FILENAME: str = "training_state.pt"
@@ -65,14 +64,14 @@ def save_training_state(
     paths.root.mkdir(parents=True, exist_ok=True)
 
     # Collect RNG states (robust to missing CUDA)
-    rng_state: Dict[str, Any] = {
+    rng_state: dict[str, Any] = {
         "python": random.getstate(),
         "numpy": np.random.get_state(),
         "torch_cpu": torch.get_rng_state(),
         "torch_cuda_all": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
     }
 
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "optimizer": optimizer.state_dict() if optimizer is not None else None,
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
@@ -85,7 +84,7 @@ def save_training_state(
     tmp_state.replace(paths.state_file)
 
     # Minimal JSON metadata for diagnostics
-    meta: Dict[str, Any] = {
+    meta: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "files": [STATE_FILENAME],
     }
@@ -97,13 +96,13 @@ def save_training_state(
 
 def load_training_state(
     root_dir: str | os.PathLike[str],
-) -> Tuple[Dict[str, Any] | None, Dict[str, Any] | None, Dict[str, Any] | None]:
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
     """Load optimizer, scheduler, and RNG states from ``root_dir``.
 
     Returns:
         (optimizer_state, scheduler_state, rng_state) where any element
         may be None when missing.
-    
+
     Note:
         Uses weights_only=False because training state includes numpy RNG state
         which requires unpickling numpy types. This is safe since we control
@@ -116,7 +115,7 @@ def load_training_state(
     # PyTorch 2.6+ defaults to weights_only=True for security, but training state
     # includes numpy RNG state that requires unpickling numpy._core.multiarray types.
     # Since we create and consume these checkpoints ourselves, weights_only=False is safe.
-    data: Dict[str, Any] = torch.load(
+    data: dict[str, Any] = torch.load(
         paths.state_file,
         map_location="cpu",
         weights_only=False,
@@ -132,9 +131,9 @@ def apply_training_state(
     *,
     optimizer: torch.optim.Optimizer | None,
     scheduler: torch.optim.lr_scheduler._LRScheduler | None,
-    optimizer_state: Dict[str, Any] | None,
-    scheduler_state: Dict[str, Any] | None,
-    rng_state: Dict[str, Any] | None,
+    optimizer_state: dict[str, Any] | None,
+    scheduler_state: dict[str, Any] | None,
+    rng_state: dict[str, Any] | None,
 ) -> None:
     """Apply loaded states to live objects and RNGs.
 
@@ -169,5 +168,3 @@ def apply_training_state(
                 torch.cuda.set_rng_state_all(rng_state.get("torch_cuda_all", []))
             except Exception:
                 pass
-
-
