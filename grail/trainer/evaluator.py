@@ -207,99 +207,33 @@ class EvaluatorService:
                     heartbeat()
                 batch_ids = plan.ids[offset : min(offset + batch_size, total_ids)]
 
-                # For pass@k, we generate up to plan.replicates completions per task
-                # using batch expansion: duplicate each task id k times and use distinct seeds.
-                expanded_ids: list[str] = []
-                expanded_msgs: list[list[dict[str, str]]] = []
-                expanded_seeds: list[int] = []
-
-                # Reset envs once per task (not per replicate) for correct info context
-                self._vector.reset_ids(batch_ids)
-
-                # Build prompts per replicate
-                for task_id in batch_ids:
-                    # Use the reset obs from the corresponding env
-                    # Grab initial observation messages directly from envs
-                    env_idx = batch_ids.index(task_id)
-                    # Re-reset to fetch observation deterministically for clarity
-                    obs = self._vector.envs[env_idx].reset(task_id=task_id)
-                    prompts = [{"role": m.role, "content": m.content} for m in obs.messages]
-                    for r_idx in range(plan.replicates):
-                        expanded_ids.append(task_id)
-                        expanded_msgs.append(prompts)
-                        expanded_seeds.append(plan.seed_for(task_id, r_idx))
-
-                prompt_ids = self._render_prompts(expanded_msgs)
-                # Generate sequences deterministically per replicate using seeds
-                seq_with_prompt_lens = await self._loop.generate_from_prompt_ids_batch(
-                    prompt_ids,
-                    seeds=expanded_seeds,
-                    trim_right_padding=True,
+                # Prepare batch: reset envs, expand to replicates, render prompts
+                expanded_ids, expanded_msgs, prompt_ids = self._prepare_batch(
+                    batch_ids, plan
                 )
 
-                # Decode and step per replicate in groups matching each original task
-                decoded: list[str] = []
-                for seq, prompt_len in seq_with_prompt_lens:
-                    decoded.append(
-                        self._tokenizer.decode(seq[prompt_len:], skip_special_tokens=False)
-                    )
+                # Generate sequences deterministically per replicate using seeds
+                seq_with_prompt_lens = await self._generate_batch(
+                    prompt_ids, expanded_ids, plan
+                )
 
-                # Optional: log a few sample completions for visibility
-                if getattr(self._cfg, "log_completions_n", 0) > 0:
-                    try:
-                        max_chars = int(getattr(self._cfg, "log_completions_max_chars", 300))
-                        sample_count = min(int(self._cfg.log_completions_n), len(decoded))
-                        replicate_counter: dict[str, int] = {}
-                        samples: list[tuple[str, int, str]] = []
-                        for i, text in enumerate(decoded):
-                            task_id = expanded_ids[i]
-                            r_idx = replicate_counter.get(task_id, 0)
-                            replicate_counter[task_id] = r_idx + 1
-                            samples.append((task_id, r_idx, text))
-                            if len(samples) >= sample_count:
-                                break
+                # Decode completions
+                decoded = self._decode_completions(seq_with_prompt_lens)
 
-                        for task_id, r_idx, text in samples:
-                            out = text if len(text) <= max_chars else text[:max_chars] + "…"
-                            logger.info(
-                                "Eval sample completion task=%s rep=%d:\n%s", task_id, r_idx, out
-                            )
-                    except Exception:
-                        # Never let logging interfere with evaluation
-                        pass
+                # Log sample completions with full templated prompts
+                self._log_completion_samples(
+                    expanded_ids, prompt_ids, decoded, plan.replicates
+                )
 
-                # Step envs per replicate, accumulate results
-                # We step using the same env index for a task; since SingleTurnEnv terminates
-                # after one step, we re-reset before each replicate to keep context identical.
-                cursor = 0
-                for env_idx, task_id in enumerate(batch_ids):
-                    for r_idx in range(plan.replicates):
-                        text = decoded[cursor]
-                        _ = self._vector.envs[env_idx].reset(task_id=task_id)
-                        _obs, reward, _terminated, _truncated, info = self._vector.envs[
-                            env_idx
-                        ].step(ChatMessage(role="assistant", content=text))
-                        success = bool(info.get("success", False))
-                        aggregator.add(
-                            TaskReplicateResult(
-                                task_id=task_id,
-                                replicate_idx=r_idx,
-                                reward=float(reward),
-                                success=success,
-                                components=info.get("reward_components"),
-                            )
-                        )
-                        cursor += 1
+                # Step environments and accumulate results
+                self._step_and_aggregate(
+                    batch_ids, decoded, plan.replicates, aggregator
+                )
 
-                # Update progress
+                # Update progress and log metrics
                 progress.update(prog_task, advance=len(batch_ids))
-
-                batch_elapsed = time.monotonic() - batch_start
-                batch_prompts = len(batch_ids) * plan.replicates
-                throughput = batch_prompts / batch_elapsed if batch_elapsed > 0 else 0
-                logger.info(
-                    f"Batch {offset // batch_size + 1}: {len(batch_ids)} tasks × {plan.replicates} reps "
-                    f"({batch_prompts} prompts) in {batch_elapsed:.2f}s ({throughput:.1f} prompts/sec)"
+                self._log_batch_metrics(
+                    offset, batch_size, len(batch_ids), plan.replicates, batch_start
                 )
 
                 if heartbeat is not None:
@@ -328,3 +262,197 @@ class EvaluatorService:
 
         # Optionally persist metrics
         return metrics
+
+    def _prepare_batch(
+        self, batch_ids: list[str], plan: EvaluationPlan
+    ) -> tuple[list[str], list[list[dict[str, str]]], list[list[int]]]:
+        """Prepare batch: reset environments, expand to replicates, render prompts.
+
+        Args:
+            batch_ids: List of task IDs for this batch
+            plan: Evaluation plan containing replicates and seed info
+
+        Returns:
+            Tuple of (expanded_ids, expanded_msgs, prompt_ids)
+        """
+        expanded_ids: list[str] = []
+        expanded_msgs: list[list[dict[str, str]]] = []
+        expanded_seeds: list[int] = []
+
+        # Reset envs once per task (not per replicate) for correct info context
+        self._vector.reset_ids(batch_ids)
+
+        # Build prompts per replicate
+        for task_id in batch_ids:
+            # Use the reset obs from the corresponding env
+            env_idx = batch_ids.index(task_id)
+            # Re-reset to fetch observation deterministically for clarity
+            obs = self._vector.envs[env_idx].reset(task_id=task_id)
+            prompts = [{"role": m.role, "content": m.content} for m in obs.messages]
+            for r_idx in range(plan.replicates):
+                expanded_ids.append(task_id)
+                expanded_msgs.append(prompts)
+                expanded_seeds.append(plan.seed_for(task_id, r_idx))
+
+        prompt_ids = self._render_prompts(expanded_msgs)
+        return expanded_ids, expanded_msgs, prompt_ids
+
+    async def _generate_batch(
+        self,
+        prompt_ids: list[list[int]],
+        expanded_ids: list[str],
+        plan: EvaluationPlan,
+    ) -> list[tuple[list[int], int]]:
+        """Generate sequences deterministically using seeds.
+
+        Args:
+            prompt_ids: Tokenized prompts with chat template applied
+            expanded_ids: Expanded task IDs (one per replicate)
+            plan: Evaluation plan containing seed and replication info
+
+        Returns:
+            List of (sequence, prompt_length) tuples
+        """
+        # Reconstruct seeds for generation
+        expanded_seeds: list[int] = []
+        task_id_to_replicates: dict[str, int] = {}
+        for task_id in expanded_ids:
+            r_idx = task_id_to_replicates.get(task_id, 0)
+            task_id_to_replicates[task_id] = r_idx + 1
+            expanded_seeds.append(plan.seed_for(task_id, r_idx))
+
+        seq_with_prompt_lens = await self._loop.generate_from_prompt_ids_batch(
+            prompt_ids,
+            seeds=expanded_seeds,
+            trim_right_padding=True,
+        )
+        return seq_with_prompt_lens
+
+    def _decode_completions(
+        self, seq_with_prompt_lens: list[tuple[list[int], int]]
+    ) -> list[str]:
+        """Decode generated sequences to text, excluding prompt tokens.
+
+        Args:
+            seq_with_prompt_lens: List of (sequence, prompt_length) tuples
+
+        Returns:
+            List of decoded completion strings
+        """
+        decoded: list[str] = []
+        for seq, prompt_len in seq_with_prompt_lens:
+            decoded.append(
+                self._tokenizer.decode(seq[prompt_len:], skip_special_tokens=False)
+            )
+        return decoded
+
+    def _log_completion_samples(
+        self,
+        expanded_ids: list[str],
+        prompt_ids: list[list[int]],
+        decoded: list[str],
+        replicates: int,
+    ) -> None:
+        """Log sample completions with full templated prompts for visibility.
+
+        Args:
+            expanded_ids: Expanded task IDs (one per replicate)
+            prompt_ids: Tokenized prompts with chat template applied
+            decoded: Decoded completion strings
+            replicates: Number of replicates per task
+        """
+        if getattr(self._cfg, "log_completions_n", 0) <= 0:
+            return
+
+        try:
+            max_chars = int(getattr(self._cfg, "log_completions_max_chars", 300))
+            sample_count = min(int(self._cfg.log_completions_n), len(decoded))
+            replicate_counter: dict[str, int] = {}
+            samples: list[tuple[str, int, str]] = []
+
+            for i, text in enumerate(decoded):
+                task_id = expanded_ids[i]
+                r_idx = replicate_counter.get(task_id, 0)
+                replicate_counter[task_id] = r_idx + 1
+                samples.append((task_id, r_idx, text))
+                if len(samples) >= sample_count:
+                    break
+
+            for task_id, r_idx, text in samples:
+                # Find the index of this sample in decoded
+                idx = expanded_ids.index(task_id) + r_idx
+                # Decode the actual prompt with chat template applied
+                prompt_str = self._tokenizer.decode(
+                    prompt_ids[idx], skip_special_tokens=False
+                )
+                out = text if len(text) <= max_chars else text[:max_chars] + "…"
+                logger.info(
+                    "Eval sample task=%s rep=%d\nPROMPT (with chat template):\n%s\nCOMPLETION:\n%s",
+                    task_id,
+                    r_idx,
+                    prompt_str,
+                    out,
+                )
+        except Exception:
+            # Never let logging interfere with evaluation
+            pass
+
+    def _step_and_aggregate(
+        self,
+        batch_ids: list[str],
+        decoded: list[str],
+        replicates: int,
+        aggregator: EvalAggregator,
+    ) -> None:
+        """Step environments per replicate and accumulate results.
+
+        Args:
+            batch_ids: List of task IDs for this batch
+            decoded: Decoded completion strings
+            replicates: Number of replicates per task
+            aggregator: Metrics aggregator to accumulate results
+        """
+        cursor = 0
+        for env_idx, task_id in enumerate(batch_ids):
+            for r_idx in range(replicates):
+                text = decoded[cursor]
+                _ = self._vector.envs[env_idx].reset(task_id=task_id)
+                _obs, reward, _terminated, _truncated, info = self._vector.envs[
+                    env_idx
+                ].step(ChatMessage(role="assistant", content=text))
+                success = bool(info.get("success", False))
+                aggregator.add(
+                    TaskReplicateResult(
+                        task_id=task_id,
+                        replicate_idx=r_idx,
+                        reward=float(reward),
+                        success=success,
+                        components=info.get("reward_components"),
+                    )
+                )
+                cursor += 1
+
+    def _log_batch_metrics(
+        self,
+        offset: int,
+        batch_size: int,
+        num_batch_ids: int,
+        replicates: int,
+        batch_start: float,
+    ) -> None:
+        """Log batch-level performance metrics.
+
+        Args:
+            offset: Starting offset in evaluation
+            batch_size: Configured batch size
+            num_batch_ids: Actual number of task IDs in this batch
+            replicates: Number of replicates per task
+            batch_start: Start time of batch (monotonic)
+        """
+        batch_elapsed = time.monotonic() - batch_start
+        batch_prompts = num_batch_ids * replicates
+        throughput = batch_prompts / batch_elapsed if batch_elapsed > 0 else 0
+        logger.info(
+            f"Batch {offset // batch_size + 1}: {num_batch_ids} tasks × {replicates} reps "
+            f"({batch_prompts} prompts) in {batch_elapsed:.2f}s ({throughput:.1f} prompts/sec)"
+        )
