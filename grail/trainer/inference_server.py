@@ -9,10 +9,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import shutil
 import socket
 import subprocess
-import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
@@ -34,6 +32,7 @@ class ServerConfig:
     trust_remote_code: bool = False
     dtype: str = "bfloat16"
     model_name_override: str | None = None
+    model_path: str = ""
 
 
 class InferenceServerManager(ABC):
@@ -46,18 +45,11 @@ class InferenceServerManager(ABC):
     def __init__(
         self,
         *,
-        model: Any,
-        tokenizer: Any,
         config: ServerConfig,
     ) -> None:
-        self._model = model
-        self._tokenizer = tokenizer
         self._config = config
-        self._checkpoint_dir: str | None = None
         self._bound_port: int | None = None
         self._process: subprocess.Popen[bytes] | None = None
-        # Capture a stable model name before freeing references
-        self._initial_model_name: str = getattr(model, "name_or_path", "model")
         # Background task that streams server stdout to logs during startup
         self._log_task: asyncio.Task[None] | None = None
 
@@ -70,15 +62,7 @@ class InferenceServerManager(ABC):
         """Backend-specific server shutdown logic."""
 
     async def __aenter__(self) -> InferenceServerManager:
-        """Prepare resources and start server.
-
-        Note: Checkpoint is saved here, GPU memory freed here (server_manager._model),
-        but the server is NOT started yet. The caller must ensure trainer models
-        are also freed before the server starts to prevent OOM.
-        """
-        await self._prepare_checkpoint()
-        await self._free_gpu_memory()
-        # Server will be started explicitly after trainer frees its models
+        """Enter context; server will be started explicitly by caller."""
         return self
 
     async def start_server(self) -> None:
@@ -86,14 +70,8 @@ class InferenceServerManager(ABC):
         await self._start_server()
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        """Cleanup server but defer checkpoint cleanup to trainer.
-
-        Trainer needs to reload from the saved checkpoint before it's deleted.
-        Call cleanup_checkpoint() after reload to remove temp directory.
-        """
+        """Cleanup server process on context exit."""
         await self._stop_server()
-        await self._reload_models()
-        # Checkpoint cleanup deferred to trainer for exact reload
 
     @property
     def base_url(self) -> str:
@@ -106,61 +84,12 @@ class InferenceServerManager(ABC):
         """Model identifier for API requests."""
         if self._config.model_name_override:
             return self._config.model_name_override
-        return self._initial_model_name
-
-    @property
-    def checkpoint_dir(self) -> str | None:
-        """Path to saved checkpoint directory for trainer reload."""
-        return self._checkpoint_dir
-
-    async def _prepare_checkpoint(self) -> None:
-        """Save model/tokenizer to temporary directory for server loading."""
-        if self._model is None:
-            return
-
+        # Fall back to deriving a stable name from the model path
         try:
-            self._checkpoint_dir = tempfile.mkdtemp(prefix="grail_eval_ckpt_")
-            self._model.save_pretrained(self._checkpoint_dir, safe_serialization=True)
-            self._tokenizer.save_pretrained(self._checkpoint_dir)
-            logger.info("Saved evaluation checkpoint: %s", self._checkpoint_dir)
-        except Exception as exc:
-            logger.warning("Failed to save checkpoint: %s", exc)
-            if self._checkpoint_dir:
-                shutil.rmtree(self._checkpoint_dir, ignore_errors=True)
-                self._checkpoint_dir = None
-
-    async def _free_gpu_memory(self) -> None:
-        """Release GPU memory by dropping model references."""
-        try:
-            self._model = None  # type: ignore[assignment]
-            import gc
-
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
-            logger.debug("GPU memory released for server startup")
-        except Exception as exc:
-            logger.debug("GPU memory release encountered issue: %s", exc)
-
-    @abstractmethod
-    async def _reload_models(self) -> None:
-        """Reload training models after server shutdown (implemented by subclasses if needed)."""
-
-    def cleanup_checkpoint(self) -> None:
-        """Remove temporary checkpoint directory after trainer reload.
-
-        Public method called by trainer after successfully reloading from
-        the saved checkpoint to ensure exact model/tokenizer state.
-        """
-        if self._checkpoint_dir:
-            try:
-                shutil.rmtree(self._checkpoint_dir, ignore_errors=True)
-                logger.info("Cleaned up eval checkpoint: %s", self._checkpoint_dir)
-            except Exception as exc:
-                logger.warning("Checkpoint cleanup failed: %s", exc)
-            finally:
-                self._checkpoint_dir = None
+            base = os.path.basename(self._config.model_path.rstrip("/"))
+            return base or "model"
+        except Exception:
+            return "model"
 
     async def _wait_for_server_ready(
         self,
@@ -409,22 +338,24 @@ class VLLMServerManager(InferenceServerManager):
     def __init__(
         self,
         *,
-        model: Any,
-        tokenizer: Any,
         config: ServerConfig,
         eval_config: EvalConfig,
         python_executable: str = "tools/vllm-server/.venv/bin/python",
         module_entrypoint: str = "vllm.entrypoints.openai.api_server",
     ) -> None:
-        super().__init__(model=model, tokenizer=tokenizer, config=config)
+        super().__init__(config=config)
         self._python_executable = python_executable
         self._module_entrypoint = module_entrypoint
         self._eval_config = eval_config
 
     async def _start_server(self) -> None:
         """Launch vLLM server in isolated environment."""
-        if not self._checkpoint_dir:
-            logger.warning("No checkpoint available, skipping vLLM server launch")
+        if not self._config.model_path:
+            logger.warning("No model_path provided, skipping vLLM server launch")
+            return
+
+        if not os.path.exists(self._config.model_path):
+            logger.error("Model path does not exist: %s", self._config.model_path)
             return
 
         # Resolve Python executable to absolute path
@@ -438,10 +369,16 @@ class VLLMServerManager(InferenceServerManager):
 
         # Launch process
         try:
+            stdout_target = (
+                subprocess.PIPE if self._eval_config.stream_server_logs else subprocess.DEVNULL
+            )
+            stderr_target = (
+                subprocess.STDOUT if self._eval_config.stream_server_logs else subprocess.DEVNULL
+            )
             self._process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stdout=stdout_target,
+                stderr=stderr_target,
                 text=False,
             )
             logger.info(
@@ -450,8 +387,9 @@ class VLLMServerManager(InferenceServerManager):
                 self._config.host,
                 self._bound_port,
             )
-            # Start streaming server logs immediately for easier diagnosis
-            self._start_process_logger("vllm")
+            # Start streaming server logs only if enabled
+            if self._eval_config.stream_server_logs:
+                self._start_process_logger("vllm")
         except Exception as exc:
             logger.error("Failed to launch vLLM server: %s", exc)
             return
@@ -464,6 +402,24 @@ class VLLMServerManager(InferenceServerManager):
             await self._terminate_process(self._process, wait_for_gpu=False)
             self._process = None
             self._bound_port = None
+            return
+
+        # Discover model id from server to ensure correct model_name for requests
+        try:
+            import requests  # local import to avoid mandatory dependency
+
+            resp = requests.get(ready_url, timeout=10.0)
+            if resp.status_code == 200:
+                payload = resp.json()
+                data = payload.get("data", []) if isinstance(payload, dict) else []
+                if data and isinstance(data, list):
+                    first = data[0]
+                    model_id = first.get("id") if isinstance(first, dict) else None
+                    if model_id:
+                        self._config.model_name_override = str(model_id)
+                        logger.info("Discovered vLLM model id: %s", model_id)
+        except Exception as exc:
+            logger.debug("Failed to discover vLLM model id (non-fatal): %s", exc)
 
     async def _stop_server(self) -> None:
         """Terminate vLLM server and wait for GPU memory release."""
@@ -522,7 +478,7 @@ class VLLMServerManager(InferenceServerManager):
             "-m",
             self._module_entrypoint,
             "--model",
-            self._checkpoint_dir or "",
+            self._config.model_path,
             "--served-model-name",
             self.model_name,  # Match client request model name to prevent 404 errors
             "--host",
@@ -554,18 +510,20 @@ class SGLangServerManager(InferenceServerManager):
     def __init__(
         self,
         *,
-        model: Any,
-        tokenizer: Any,
         config: ServerConfig,
         eval_config: EvalConfig,
     ) -> None:
-        super().__init__(model=model, tokenizer=tokenizer, config=config)
+        super().__init__(config=config)
         self._eval_config = eval_config
 
     async def _start_server(self) -> None:
         """Launch SGLang server with optimized memory settings."""
-        if not self._checkpoint_dir:
-            logger.warning("No checkpoint available, skipping SGLang server launch")
+        if not self._config.model_path:
+            logger.warning("No model_path provided, skipping SGLang server launch")
+            return
+
+        if not os.path.exists(self._config.model_path):
+            logger.error("Model path does not exist: %s", self._config.model_path)
             return
 
         # Allocate port and build command
@@ -574,10 +532,16 @@ class SGLangServerManager(InferenceServerManager):
 
         # Launch process
         try:
+            stdout_target = (
+                subprocess.PIPE if self._eval_config.stream_server_logs else subprocess.DEVNULL
+            )
+            stderr_target = (
+                subprocess.STDOUT if self._eval_config.stream_server_logs else subprocess.DEVNULL
+            )
             self._process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stdout=stdout_target,
+                stderr=stderr_target,
                 text=False,
             )
             logger.info(
@@ -586,8 +550,9 @@ class SGLangServerManager(InferenceServerManager):
                 self._config.host,
                 self._bound_port,
             )
-            # Start streaming server logs immediately for easier diagnosis
-            self._start_process_logger("sglang")
+            # Start streaming server logs only if enabled
+            if self._eval_config.stream_server_logs:
+                self._start_process_logger("sglang")
         except Exception as exc:
             logger.error("Failed to launch SGLang server: %s", exc)
             return
@@ -619,7 +584,7 @@ class SGLangServerManager(InferenceServerManager):
             "-m",
             "sglang.launch_server",
             "--model-path",
-            self._checkpoint_dir or "",
+            self._config.model_path,
             "--host",
             self._config.host,
             "--port",
@@ -647,17 +612,17 @@ class SGLangServerManager(InferenceServerManager):
 
 def create_inference_server(
     backend: str,
-    model: Any,
-    tokenizer: Any,
+    model_path: str,
     eval_config: EvalConfig,
+    model_name_override: str | None = None,
 ) -> InferenceServerManager:
     """Factory function to create appropriate server manager.
 
     Args:
         backend: One of 'hf', 'vllm', 'sglang'
-        model: Training model to serve
-        tokenizer: Tokenizer for the model
+        model_path: Filesystem path for the model to serve
         eval_config: Evaluation configuration
+        model_name_override: Optional served model name for API calls
 
     Returns:
         Configured server manager instance
@@ -670,25 +635,23 @@ def create_inference_server(
         port=eval_config.sglang_port,
         timeout_s=eval_config.sglang_server_timeout_s,
         trust_remote_code=eval_config.sglang_trust_remote_code,
+        model_name_override=model_name_override,
+        model_path=model_path,
     )
 
     backend_lower = backend.lower()
 
     if backend_lower == "hf":
-        return HuggingFaceServerManager(model=model, tokenizer=tokenizer, config=config)
+        return HuggingFaceServerManager(config=config)
     if backend_lower == "vllm":
         return VLLMServerManager(
-            model=model,
-            tokenizer=tokenizer,
             config=config,
             eval_config=eval_config,
             python_executable=eval_config.vllm_python_executable,
             module_entrypoint=eval_config.vllm_module_entrypoint,
         )
     if backend_lower == "sglang":
-        return SGLangServerManager(
-            model=model, tokenizer=tokenizer, config=config, eval_config=eval_config
-        )
+        return SGLangServerManager(config=config, eval_config=eval_config)
 
     msg = f"Unsupported backend: {backend} (choose 'hf', 'vllm', or 'sglang')"
     raise ValueError(msg)

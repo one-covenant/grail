@@ -47,13 +47,13 @@ class EvalConfig:
     enabled: bool = True
     window_interval: int = 16
     split: str = "test"  # dataset-backed envs (e.g., GSM8K) #TODO: should be specified per env
-    subset_size: int | None = 400  # generative envs or capped dataset eval
+    subset_size: int | None = None  # generative envs or capped dataset eval
     seed_base: int = 2025
-    batch_size: int = 16  # Conservative for vLLM server: 8 tasks × 5 reps = 40 prompts/batch (prevent queue timeout)
+    batch_size: int = 32  # Conservative for vLLM server: 8 tasks × 5 reps = 40 prompts/batch (prevent queue timeout)
     replicates: int = 5  # for pass@k / mean@k curves
     # Decoding configuration for evaluation (separate from training)
     max_new_tokens: int = 512
-    temperature: float = 0.7
+    temperature: float = 0.8
     top_p: float = 0.95
     do_sample: bool = True
     # Backend control: "hf" | "vllm" | "sglang"
@@ -78,9 +78,9 @@ class EvalConfig:
     # - Lower gpu_memory_utilization (0.7–0.8) to leave room for graph allocation
     # - Set max_num_seqs low enough to fit in available KV cache (target ~24 for safety)
     # - Client concurrency at 50–70% of server max_num_seqs (avoid burst deadlock)
-    vllm_gpu_memory_utilization: float = 0.75  # Conservative for graph capture safety
+    vllm_gpu_memory_utilization: float = 0.80  # Conservative for graph capture safety
     vllm_max_model_len: int = (
-        1024  # Sufficient: ~512 token prompt + 512 token completion (MAX_NEW_TOKENS)
+        1536  # Sufficient: ~512 token prompt + 512 token completion (MAX_NEW_TOKENS)
     )
     vllm_max_num_seqs: int = 128  # Optimized for H200 with 141GB mem
     vllm_max_concurrent_requests: int = 96  # 75% of max_num_seqs for stability
@@ -94,3 +94,9 @@ class EvalConfig:
     report_ks: tuple[int, ...] = (1, 5, 10)
     # Optional: path to store JSONL predictions (None disables)
     store_predictions_path: str | None = None
+    # Logging controls
+    # - Disable noisy external server stdout (vLLM/SGLang) by default
+    # - Optionally log a few sample completions per batch for visibility
+    stream_server_logs: bool = False
+    log_completions_n: int = 2
+    log_completions_max_chars: int = 2048
