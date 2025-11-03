@@ -22,6 +22,7 @@ from grail.shared.window_utils import (
     log_window_wait_initial,
     log_window_wait_periodic,
 )
+from grail.trainer.algorithms import GRPOAlgorithm, TrainingAlgorithm
 from grail.trainer.checkpointing import finalize_checkpoint_ready
 from grail.trainer.config import EvalConfig
 from grail.trainer.eval_planner import EvaluationPlanner
@@ -64,6 +65,8 @@ class TrainerNeuron(BaseNeuron):
         self._context = context
         self._optimizer: torch.optim.Optimizer | None = None
         self._scheduler: torch.optim.lr_scheduler.LRScheduler | None = None
+        # Persistent algorithm instance across windows (for KL controller, counters, etc.)
+        self._algorithm: TrainingAlgorithm = GRPOAlgorithm()
         self._window_wait_tracker = WindowWaitTracker(log_interval_secs=120)
         self._wait_start_time: float | None = None
         self._last_wait_log: float = 0.0
@@ -131,6 +134,12 @@ class TrainerNeuron(BaseNeuron):
                     "About to call _maybe_run_evaluation with current_window=%d",
                     current_window,
                 )
+
+                # Set monitoring context for eval metrics to use block_number as x-axis in wandb
+                # This ensures eval/* metrics are plotted against block_number instead of global step
+                if self._context.monitor:
+                    self._context.monitor.set_block_context(current_block, None)
+
                 eval_result = await self._maybe_run_evaluation(current_window)
                 logger.debug("_maybe_run_evaluation returned: %s", eval_result)
 
@@ -329,11 +338,24 @@ class TrainerNeuron(BaseNeuron):
                         pass
 
                 # Step 4: Create and start server with clean GPU
+                # Construct path to chat_template.jinja saved by tokenizer.save_pretrained()
+                import os
+
+                chat_template_path = os.path.join(self._eval_checkpoint_dir, "chat_template.jinja")
+                # Verify the file exists; if not, log warning and proceed without it
+                if not os.path.isfile(chat_template_path):
+                    logger.warning(
+                        "chat_template.jinja not found at %s; server may use default template",
+                        chat_template_path,
+                    )
+                    chat_template_path = None
+
                 server_manager = create_inference_server(
                     backend=self._eval_cfg.backend,
                     model_path=self._eval_checkpoint_dir,
                     eval_config=self._eval_cfg,
                     model_name_override=model_name,
+                    chat_template_path=chat_template_path,
                 )
 
                 async with server_manager as server:
@@ -477,12 +499,39 @@ class TrainerNeuron(BaseNeuron):
         if self._context.ref_model is None:
             raise RuntimeError("Cannot save eval checkpoint: ref_model not loaded")
 
+        import json
         import os
         import shutil
         import tempfile
 
         checkpoint_dir = tempfile.mkdtemp(prefix="grail_eval_ckpt_")
         try:
+            # Ensure tokenizer has the correct Qwen chat template before saving
+            # This is critical for vLLM/SGLang to apply the correct formatting
+            try:
+                from grail.shared.chat_templates import build_qwen_chat_template
+                from grail.shared.prompt_constants import REASONING_START, SYSTEM_PROMPT
+
+                expected_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
+                current_template = getattr(self._context.tokenizer, "chat_template", None)
+
+                if not current_template:
+                    logger.warning(
+                        "Tokenizer chat_template missing before eval checkpoint save; applying Qwen template"
+                    )
+                    self._context.tokenizer.chat_template = expected_template
+                elif current_template != expected_template:
+                    logger.warning(
+                        "Tokenizer chat_template differs from expected before eval checkpoint save; applying Qwen template"
+                    )
+                    self._context.tokenizer.chat_template = expected_template
+                else:
+                    logger.debug("Tokenizer chat_template matches expected Qwen template")
+            except Exception as exc:
+                logger.warning(
+                    "Failed to verify/apply chat template before checkpoint save: %s", exc
+                )
+
             # Save training model to root of checkpoint directory
             self._context.train_model.save_pretrained(
                 checkpoint_dir,
@@ -490,6 +539,19 @@ class TrainerNeuron(BaseNeuron):
             )
             self._context.tokenizer.save_pretrained(checkpoint_dir)
             logger.info("Saved training model to eval checkpoint: %s", checkpoint_dir)
+
+            # Write metadata to preserve original model identifier for stable name_or_path
+            try:
+                train_meta = {
+                    "model_name": self._context.train_model_path
+                    or getattr(self._context.train_model, "name_or_path", "model"),
+                }
+                with open(
+                    os.path.join(checkpoint_dir, "metadata.json"), "w", encoding="utf-8"
+                ) as f:
+                    json.dump(train_meta, f)
+            except Exception as e:
+                logger.debug("Failed to write training metadata.json: %s", e)
 
             # Save reference model to subdirectory for separate reload
             ref_model_dir = os.path.join(checkpoint_dir, "ref_model")
@@ -499,6 +561,17 @@ class TrainerNeuron(BaseNeuron):
                 safe_serialization=True,
             )
             logger.info("Saved reference model to eval checkpoint: %s", ref_model_dir)
+
+            # Write metadata for reference model as well
+            try:
+                ref_meta = {
+                    "model_name": self._context.ref_model_path
+                    or getattr(self._context.ref_model, "name_or_path", "model"),
+                }
+                with open(os.path.join(ref_model_dir, "metadata.json"), "w", encoding="utf-8") as f:
+                    json.dump(ref_meta, f)
+            except Exception as e:
+                logger.debug("Failed to write reference metadata.json: %s", e)
 
             # Persist optimizer/scheduler and RNG states for seamless resume
             try:
@@ -848,6 +921,7 @@ class TrainerNeuron(BaseNeuron):
             credentials=ctx.credentials,
             checkpoint_manager=ctx.checkpoint_manager,
             monitor=ctx.monitor,
+            algorithm=self._algorithm,
             train_model=ctx.train_model,
             ref_model=ctx.ref_model,
             tokenizer=ctx.tokenizer,
