@@ -78,12 +78,12 @@ class EvalConfig:
     # - Lower gpu_memory_utilization (0.7–0.8) to leave room for graph allocation
     # - Set max_num_seqs low enough to fit in available KV cache (target ~24 for safety)
     # - Client concurrency at 50–70% of server max_num_seqs (avoid burst deadlock)
-    vllm_gpu_memory_utilization: float = 0.80  # Conservative for graph capture safety
+    vllm_gpu_memory_utilization: float = 0.82  # Conservative for graph capture safety
     vllm_max_model_len: int = (
-        1536  # Sufficient: ~512 token prompt + 512 token completion (MAX_NEW_TOKENS)
+        2048  # Sufficient: ~512 token prompt + 512 token completion (MAX_NEW_TOKENS)
     )
-    vllm_max_num_seqs: int = 128  # Optimized for H200 with 141GB mem
-    vllm_max_concurrent_requests: int = 96  # 75% of max_num_seqs for stability
+    vllm_max_num_seqs: int = 160  # Optimized for H200 with 141GB mem
+    vllm_max_concurrent_requests: int = 128  # 75% of max_num_seqs for stability
     # SGLang server memory and concurrency tuning
     sglang_mem_fraction_static: float = 0.75  # Fraction of GPU memory for SGLang
     sglang_context_length: int = 1024  # Maximum sequence length
@@ -98,5 +98,5 @@ class EvalConfig:
     # - Disable noisy external server stdout (vLLM/SGLang) by default
     # - Optionally log a few sample completions per batch for visibility
     stream_server_logs: bool = False
-    log_completions_n: int = 2
+    log_completions_n: int = 1
     log_completions_max_chars: int = 2048
