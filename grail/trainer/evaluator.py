@@ -244,6 +244,30 @@ class EvaluatorService:
                         self._tokenizer.decode(seq[prompt_len:], skip_special_tokens=False)
                     )
 
+                # Optional: log a few sample completions for visibility
+                if getattr(self._cfg, "log_completions_n", 0) > 0:
+                    try:
+                        max_chars = int(getattr(self._cfg, "log_completions_max_chars", 300))
+                        sample_count = min(int(self._cfg.log_completions_n), len(decoded))
+                        replicate_counter: dict[str, int] = {}
+                        samples: list[tuple[str, int, str]] = []
+                        for i, text in enumerate(decoded):
+                            task_id = expanded_ids[i]
+                            r_idx = replicate_counter.get(task_id, 0)
+                            replicate_counter[task_id] = r_idx + 1
+                            samples.append((task_id, r_idx, text))
+                            if len(samples) >= sample_count:
+                                break
+
+                        for task_id, r_idx, text in samples:
+                            out = text if len(text) <= max_chars else text[:max_chars] + "…"
+                            logger.info(
+                                "Eval sample completion task=%s rep=%d:\n%s", task_id, r_idx, out
+                            )
+                    except Exception:
+                        # Never let logging interfere with evaluation
+                        pass
+
                 # Step envs per replicate, accumulate results
                 # We step using the same env index for a task; since SingleTurnEnv terminates
                 # after one step, we re-reset before each replicate to keep context identical.
