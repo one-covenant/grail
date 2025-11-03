@@ -185,21 +185,6 @@ class TrainerService:
                 )
 
                 self.scheduler.step()
-                if self.monitor:
-                    # Log per-epoch metrics with global epoch counter for continuous x-axis
-                    global_epoch = self.algorithm.global_epoch_counter
-                    for key, value in metrics.items():
-                        await self.monitor.log_gauge(
-                            f"training/epoch/{key}",
-                            value,
-                            tags={"epoch": str(global_epoch)},  # Global counter for smooth curves
-                        )
-                    await self.monitor.log_gauge(
-                        "training/epoch/lr",
-                        self.scheduler.get_last_lr()[0],
-                        tags={"epoch": str(global_epoch)},  # Global counter for smooth curves
-                    )
-                    await self.monitor.log_counter("training/epochs_completed")
 
                 logger.info(
                     "Epoch %s metrics: loss=%.4f pg=%.4f kl=%.4f entropy=%.4f reward_mean=%.4f",
@@ -222,7 +207,6 @@ class TrainerService:
                 await self.monitor.log_gauge(
                     "profiling/training_duration",
                     training_duration,
-                    tags={"window_number": str(window_num)},
                 )
 
                 # Log window-level summary metrics (final epoch's metrics for this window)
@@ -235,6 +219,12 @@ class TrainerService:
                     await self.monitor.log_gauge(
                         f"training/block/{key}",
                         value,
+                    )
+                # Log learning rate at block level
+                if self.scheduler is not None:
+                    await self.monitor.log_gauge(
+                        "training/block/lr",
+                        self.scheduler.get_last_lr()[0],
                     )
 
             # Unwrap model for publishing
@@ -292,7 +282,6 @@ class TrainerService:
             await self.monitor.log_gauge(
                 "profiling/checkpoint_publish_duration",
                 publish_duration,
-                tags={"window_number": str(window_num)},
             )
 
         # Log timing context for checkpoint publishing
