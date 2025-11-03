@@ -718,7 +718,6 @@ async def load_grpo_groups(
                 await monitor.log_gauge(
                     f"training/prefilter/{key}",
                     float(value),
-                    tags={"window": str(window)},
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Failed to log prefilter metric %s: %s", key, exc)
@@ -1189,6 +1188,8 @@ async def train_grpo_epoch(
 
             # Standard optimizer step in fp32
             optimizer.step()
+            
+            logger.info(f"Optimizer step completed. Current KL coef: {current_kl_coef}")
 
             # Adaptive KL adjustment after each optimizer step based on observed KL
             if TRAINER_ADAPTIVE_KL:
