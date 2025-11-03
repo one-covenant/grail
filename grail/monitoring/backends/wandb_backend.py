@@ -148,7 +148,6 @@ class WandBBackend(MonitoringBackend):
             self._wandb_module.define_metric("block_number")
             self._wandb_module.define_metric("epoch")
             self._wandb_module.define_metric("batch_step")
-            self._wandb_module.define_metric("window_number")
             self._wandb_module.define_metric("global_step")
 
             # Define which metric families use which x-axis
@@ -158,6 +157,8 @@ class WandBBackend(MonitoringBackend):
             self._wandb_module.define_metric("training/batch/*", step_metric="batch_step")
             # Training block metrics go under their own namespace
             self._wandb_module.define_metric("training/block/*", step_metric="block_number")
+            # Prefilter metrics should step by block_number as well
+            self._wandb_module.define_metric("training/prefilter/*", step_metric="block_number")
 
             # Mining and validation use block_number (blockchain progression)
             self._wandb_module.define_metric("mining/*", step_metric="block_number")
@@ -195,6 +196,8 @@ class WandBBackend(MonitoringBackend):
         elif name.startswith("training/batch/"):
             step_metric = "batch_step"
         elif name.startswith("training/block/"):
+            step_metric = "block_number"
+        elif name.startswith("training/prefilter/"):
             step_metric = "block_number"
         elif name.startswith("mining/"):
             step_metric = "block_number"
