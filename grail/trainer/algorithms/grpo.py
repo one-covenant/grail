@@ -64,6 +64,56 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class AdaptiveKLController:
+    """Stateful controller for adaptive KL coefficient.
+
+    Maintains a persistent KL penalty coefficient and updates it after each
+    optimizer step based on observed KL relative to a target range.
+    """
+
+    def __init__(
+        self,
+        *,
+        initial: float,
+        target: float,
+        min_value: float,
+        max_value: float,
+        adapt_rate: float,
+    ) -> None:
+        self.value: float = float(initial)
+        self.target: float = float(target)
+        self.min_value: float = float(min_value)
+        self.max_value: float = float(max_value)
+        self.adapt_rate: float = float(adapt_rate)
+
+    def update(self, observed_kl: float) -> float:
+        """Update and return the current KL coefficient based on observed KL.
+
+        The update is multiplicative outside a tolerance band around the target.
+        """
+        try:
+            kl = float(observed_kl)
+        except Exception:  # noqa: BLE001
+            return self.value
+
+        upper = self.target * 1.2
+        lower = self.target * 0.8
+        if kl > upper:
+            self.value = min(self.max_value, self.value * self.adapt_rate)
+        elif kl < lower:
+            self.value = max(self.min_value, self.value / self.adapt_rate)
+        return self.value
+
+    def state_dict(self) -> dict[str, float]:
+        return {"value": float(self.value)}
+
+    def load_state_dict(self, state: dict[str, float]) -> None:
+        try:
+            self.value = float(state.get("value", self.value))
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _print_decoded_rollout_samples(
     miner_data: dict[str, dict], max_samples_per_miner: int = 100, max_tokens_to_show: int = 1000
 ) -> None:
@@ -890,8 +940,11 @@ async def train_grpo_epoch(
     epoch_metrics: dict[str, list[float]] = defaultdict(list)
     grad_accum_counter = 0
 
-    # Adaptive KL coefficient (mutable state for this epoch)
-    current_kl_coef = float(TRAINER_KL_COEF)
+    # Adaptive KL coefficient: prefer persistent controller on algorithm instance
+    if algorithm is not None and hasattr(algorithm, "kl_controller"):
+        current_kl_coef = float(getattr(algorithm.kl_controller, "value", TRAINER_KL_COEF))
+    else:
+        current_kl_coef = float(TRAINER_KL_COEF)
 
     for batch_idx in range(num_batches):
         start_idx = batch_idx * batch_size
@@ -1193,11 +1246,18 @@ async def train_grpo_epoch(
 
             # Adaptive KL adjustment after each optimizer step based on observed KL
             if TRAINER_ADAPTIVE_KL:
-                # Increase/decrease coefficient multiplicatively to target KL
-                if kl_value > TRAINER_KL_TARGET * 1.2:
-                    current_kl_coef = min(TRAINER_KL_MAX, current_kl_coef * TRAINER_KL_ADAPT_RATE)
-                elif kl_value < TRAINER_KL_TARGET * 0.8:
-                    current_kl_coef = max(TRAINER_KL_MIN, current_kl_coef / TRAINER_KL_ADAPT_RATE)
+                if algorithm is not None and hasattr(algorithm, "kl_controller"):
+                    current_kl_coef = algorithm.kl_controller.update(kl_value)
+                else:
+                    # Fallback local adaptation if no controller is provided
+                    if kl_value > TRAINER_KL_TARGET * 1.2:
+                        current_kl_coef = min(
+                            TRAINER_KL_MAX, current_kl_coef * TRAINER_KL_ADAPT_RATE
+                        )
+                    elif kl_value < TRAINER_KL_TARGET * 0.8:
+                        current_kl_coef = max(
+                            TRAINER_KL_MIN, current_kl_coef / TRAINER_KL_ADAPT_RATE
+                        )
             grad_accum_counter = 0
 
         epoch_metrics["loss_total"].append(loss_total.item())
@@ -1272,6 +1332,17 @@ class GRPOAlgorithm(TrainingAlgorithm):
     """GRPO algorithm implementation."""
 
     name: str = "grpo"
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Persistent adaptive KL controller across epochs/windows
+        self.kl_controller: AdaptiveKLController = AdaptiveKLController(
+            initial=TRAINER_KL_COEF,
+            target=TRAINER_KL_TARGET,
+            min_value=TRAINER_KL_MIN,
+            max_value=TRAINER_KL_MAX,
+            adapt_rate=TRAINER_KL_ADAPT_RATE,
+        )
 
     async def train_epoch(
         self,
