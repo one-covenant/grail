@@ -208,27 +208,19 @@ class EvaluatorService:
                 batch_ids = plan.ids[offset : min(offset + batch_size, total_ids)]
 
                 # Prepare batch: reset envs, expand to replicates, render prompts
-                expanded_ids, expanded_msgs, prompt_ids = self._prepare_batch(
-                    batch_ids, plan
-                )
+                expanded_ids, expanded_msgs, prompt_ids = self._prepare_batch(batch_ids, plan)
 
                 # Generate sequences deterministically per replicate using seeds
-                seq_with_prompt_lens = await self._generate_batch(
-                    prompt_ids, expanded_ids, plan
-                )
+                seq_with_prompt_lens = await self._generate_batch(prompt_ids, expanded_ids, plan)
 
                 # Decode completions
                 decoded = self._decode_completions(seq_with_prompt_lens)
 
                 # Log sample completions with full templated prompts
-                self._log_completion_samples(
-                    expanded_ids, prompt_ids, decoded, plan.replicates
-                )
+                self._log_completion_samples(expanded_ids, prompt_ids, decoded, plan.replicates)
 
                 # Step environments and accumulate results
-                self._step_and_aggregate(
-                    batch_ids, decoded, plan.replicates, aggregator
-                )
+                self._step_and_aggregate(batch_ids, decoded, plan.replicates, aggregator)
 
                 # Update progress and log metrics
                 progress.update(prog_task, advance=len(batch_ids))
@@ -328,9 +320,7 @@ class EvaluatorService:
         )
         return seq_with_prompt_lens
 
-    def _decode_completions(
-        self, seq_with_prompt_lens: list[tuple[list[int], int]]
-    ) -> list[str]:
+    def _decode_completions(self, seq_with_prompt_lens: list[tuple[list[int], int]]) -> list[str]:
         """Decode generated sequences to text, excluding prompt tokens.
 
         Args:
@@ -341,9 +331,7 @@ class EvaluatorService:
         """
         decoded: list[str] = []
         for seq, prompt_len in seq_with_prompt_lens:
-            decoded.append(
-                self._tokenizer.decode(seq[prompt_len:], skip_special_tokens=False)
-            )
+            decoded.append(self._tokenizer.decode(seq[prompt_len:], skip_special_tokens=False))
         return decoded
 
     def _log_completion_samples(
@@ -382,9 +370,7 @@ class EvaluatorService:
                 # Find the index of this sample in decoded
                 idx = expanded_ids.index(task_id) + r_idx
                 # Decode the actual prompt with chat template applied
-                prompt_str = self._tokenizer.decode(
-                    prompt_ids[idx], skip_special_tokens=False
-                )
+                prompt_str = self._tokenizer.decode(prompt_ids[idx], skip_special_tokens=False)
                 out = text if len(text) <= max_chars else text[:max_chars] + "…"
                 logger.info(
                     "Eval sample task=%s rep=%d\nPROMPT (with chat template):\n%s\nCOMPLETION:\n%s",
@@ -417,9 +403,9 @@ class EvaluatorService:
             for r_idx in range(replicates):
                 text = decoded[cursor]
                 _ = self._vector.envs[env_idx].reset(task_id=task_id)
-                _obs, reward, _terminated, _truncated, info = self._vector.envs[
-                    env_idx
-                ].step(ChatMessage(role="assistant", content=text))
+                _obs, reward, _terminated, _truncated, info = self._vector.envs[env_idx].step(
+                    ChatMessage(role="assistant", content=text)
+                )
                 success = bool(info.get("success", False))
                 aggregator.add(
                     TaskReplicateResult(
