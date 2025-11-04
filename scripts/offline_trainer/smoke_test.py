@@ -123,7 +123,6 @@ async def _eval_smoke() -> dict[str, float]:
         model=model,
         tokenizer=tokenizer,
         device="cpu",
-        batch_size=eval_cfg.batch_size,
         do_sample=eval_cfg.do_sample,
         max_new_tokens=eval_cfg.max_new_tokens,
         temperature=eval_cfg.temperature,

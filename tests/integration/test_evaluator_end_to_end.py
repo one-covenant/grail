@@ -28,7 +28,6 @@ async def test_evaluator_end_to_end_with_fake_backend() -> None:
         model=model,
         tokenizer=tokenizer,
         device="cpu",
-        batch_size=cfg.batch_size,
         do_sample=cfg.do_sample,
         max_new_tokens=cfg.max_new_tokens,
         temperature=cfg.temperature,

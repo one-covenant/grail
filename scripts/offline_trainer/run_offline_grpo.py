@@ -131,7 +131,10 @@ async def _run(cfg: DictConfig) -> None:
         )
 
         # Generate fresh GRPO groups from server completions
-        groups = generator.generate_groups(iter_seeds)
+        groups = await generator.generate_groups(
+            iter_seeds,
+            batch_size=cfg.data.batch_size if hasattr(cfg.data, "batch_size") else 1,
+        )
 
         # Train one epoch
         metrics = await algorithm.train_epoch(

@@ -135,7 +135,11 @@ class GenerationParams:
 
 
 class TextGenBackend(Protocol):
-    """Abstract interface for batched text generation backends."""
+    """Abstract interface for batched text generation backends.
+
+    All backends must return tuples: (tokens, chosen_logprobs_or_none).
+    The second element may be None when logprobs are not requested or unsupported.
+    """
 
     async def generate(
         self,
@@ -143,8 +147,19 @@ class TextGenBackend(Protocol):
         *,
         params: GenerationParams,
         seeds: list[int] | None = None,
-    ) -> list[list[int]]:
-        """Return full sequences (prompt + completion) for each prompt in batch.
+    ) -> list[tuple[list[int], list[float] | None]]:
+        """Generate completions for a batch of prompts.
+
+        Args:
+            prompt_ids_batch: Batch of tokenized prompts
+            params: Generation parameters (temperature, top_p, etc)
+            seeds: Optional per-sample seeds for deterministic sampling
+
+        Returns:
+            List of tuples per prompt: (full_sequence, chosen_logprobs_or_none).
+            - full_sequence: Token IDs for prompt + completion
+            - chosen_logprobs_or_none: List of logprobs for chosen completion tokens,
+              or None if not requested/supported
 
         Backends must left-pad internally and remove left padding before
         returning, so returned sequences are aligned as [prompt + completion].
@@ -161,10 +176,18 @@ class HFBackend:
     maintain a single copy in memory when used for both generation and proofs.
     """
 
-    def __init__(self, model: Any, tokenizer: Any, device: str) -> None:
+    def __init__(
+        self,
+        model: Any,
+        tokenizer: Any,
+        device: str,
+        *,
+        return_chosen_logprobs: bool = False,
+    ) -> None:
         self._model = model
         self._tokenizer = tokenizer
         self._device = device
+        self._return_chosen_logprobs = bool(return_chosen_logprobs)
 
     async def generate(
         self,
@@ -172,7 +195,7 @@ class HFBackend:
         *,
         params: GenerationParams,
         seeds: list[int] | None = None,
-    ) -> list[list[int]]:
+    ) -> list[tuple[list[int], list[float] | None]]:
         batch_size = len(prompt_ids_batch)
         if batch_size == 0:
             return []
@@ -219,7 +242,7 @@ class HFBackend:
                 **gen_kwargs,
             )
 
-        results: list[list[int]] = []
+        results: list[tuple[list[int], list[float] | None]] = []
         for b in range(batch_size):
             seq = outputs.sequences[b]
             # Remove left padding
@@ -234,7 +257,8 @@ class HFBackend:
                     while last_non_pad >= 0 and all_ids[last_non_pad] == pad_id:
                         last_non_pad -= 1
                     all_ids = all_ids[: max(0, last_non_pad + 1)]
-            results.append(all_ids)
+            # HF backend doesn't currently support logprobs extraction
+            results.append((all_ids, None))
 
         return results
 
@@ -254,6 +278,7 @@ class VLLMServerBackend:
         tokenizer: Any,
         timeout: float = 300.0,
         max_concurrent_requests: int = 32,
+        return_chosen_logprobs: bool = False,
     ) -> None:
         from openai import AsyncOpenAI
 
@@ -262,6 +287,7 @@ class VLLMServerBackend:
         self._tokenizer = tokenizer
         self._timeout = float(timeout)
         self._max_concurrent_requests = max_concurrent_requests
+        self._return_chosen_logprobs = bool(return_chosen_logprobs)
 
         self._client = AsyncOpenAI(
             base_url=f"{self._base_url}/v1",
@@ -275,7 +301,7 @@ class VLLMServerBackend:
         *,
         params: GenerationParams,
         seeds: list[int] | None = None,
-    ) -> list[list[int]]:
+    ) -> list[tuple[list[int], list[float] | None]]:
         """Generate completions using vLLM server async API.
 
         Now properly async - called directly from async context without nested event loops.
@@ -287,7 +313,7 @@ class VLLMServerBackend:
         prompt_ids_batch: list[list[int]],
         params: GenerationParams,
         seeds: list[int] | None = None,
-    ) -> list[list[int]]:
+    ) -> list[tuple[list[int], list[float] | None]]:
         import asyncio
         import time
 
@@ -300,7 +326,9 @@ class VLLMServerBackend:
         # Use configurable semaphore to control client-side concurrency
         sem = asyncio.Semaphore(self._max_concurrent_requests)
 
-        async def _call_one_async(idx: int, prompt: str, rnd_seed: int | None) -> tuple[int, str]:
+        async def _call_one_async(
+            idx: int, prompt: str, rnd_seed: int | None
+        ) -> tuple[int, str, list[float] | None]:
             max_retries = 3
             base_backoff = 1.0
             async with sem:
@@ -320,11 +348,22 @@ class VLLMServerBackend:
                             )
                         if rnd_seed is not None:
                             completion_kwargs["seed"] = int(rnd_seed)
+                        if self._return_chosen_logprobs:
+                            # Request logprobs. We only store chosen-token logprobs; top alternatives are ignored.
+                            completion_kwargs["logprobs"] = 1
 
                         response = await self._client.completions.create(**completion_kwargs)
                         text = response.choices[0].text if response.choices else ""
+                        chosen_logprobs: list[float] | None = None
+                        try:
+                            lp = getattr(response.choices[0], "logprobs", None)
+                            if lp is not None and hasattr(lp, "token_logprobs"):
+                                # OpenAI-compatible field; list of floats for chosen tokens
+                                chosen_logprobs = list(lp.token_logprobs or [])
+                        except Exception:
+                            chosen_logprobs = None
                         _ = time.time() - req_start
-                        return (idx, text)
+                        return (idx, text, chosen_logprobs)
                     except Exception as e:
                         if attempt < max_retries - 1:
                             backoff = base_backoff * (2**attempt)
@@ -344,8 +383,8 @@ class VLLMServerBackend:
                                 max_retries,
                                 type(e).__name__,
                             )
-                            return (idx, "")
-            return (idx, "")
+                            return (idx, "", None)
+            return (idx, "", None)
 
         tasks = []
         for idx, prompt in enumerate(prompts):
@@ -353,13 +392,19 @@ class VLLMServerBackend:
             tasks.append(_call_one_async(idx, prompt, seed_val))
 
         results_tuples = await asyncio.gather(*tasks, return_exceptions=False)
-        completions: dict[int, str] = dict(results_tuples)
+        completions: dict[int, str] = {}
+        chosen_lp_map: dict[int, list[float] | None] = {}
+        for idx, text, chosen_lp in results_tuples:
+            completions[idx] = text
+            chosen_lp_map[idx] = chosen_lp
 
-        results: list[list[int]] = []
+        results: list[tuple[list[int], list[float] | None]] = []
         for idx, p_ids in enumerate(prompt_ids_batch):
             completion_text = completions.get(idx, "")
             comp_ids = _tokenize_completion(self._tokenizer, completion_text, [])
-            results.append(p_ids + comp_ids)
+            all_ids = p_ids + comp_ids
+            chosen_lp = chosen_lp_map.get(idx)
+            results.append((all_ids, chosen_lp))
 
         batch_time = time.time() - batch_start
         throughput = batch_size / batch_time if batch_time > 0 else 0
@@ -389,6 +434,7 @@ class SGLangServerBackend:
         tokenizer: Any,
         timeout: float = 300.0,
         max_concurrent_requests: int = 4,
+        return_chosen_logprobs: bool = False,
     ) -> None:
         from openai import AsyncOpenAI
 
@@ -397,6 +443,7 @@ class SGLangServerBackend:
         self._tokenizer = tokenizer
         self._timeout = float(timeout)
         self._max_concurrent_requests = max_concurrent_requests
+        self._return_chosen_logprobs = bool(return_chosen_logprobs)
 
         # Initialize AsyncOpenAI client pointing to SGLang server
         self._client = AsyncOpenAI(
@@ -411,7 +458,7 @@ class SGLangServerBackend:
         *,
         params: GenerationParams,
         seeds: list[int] | None = None,
-    ) -> list[list[int]]:
+    ) -> list[tuple[list[int], list[float] | None]]:
         """Generate using async OpenAI API to SGLang server.
 
         Now properly async - called directly from async context without nested event loops.
@@ -423,7 +470,7 @@ class SGLangServerBackend:
         prompt_ids_batch: list[list[int]],
         params: GenerationParams,
         seeds: list[int] | None = None,
-    ) -> list[list[int]]:
+    ) -> list[tuple[list[int], list[float] | None]]:
         """Async batch generation with concurrent requests and retry logic."""
         import asyncio
 
@@ -522,11 +569,13 @@ class SGLangServerBackend:
             completions[idx] = text
 
         # Reconstruct results in original order
-        results: list[list[int]] = []
+        results: list[tuple[list[int], list[float] | None]] = []
         for idx, p_ids in enumerate(prompt_ids_batch):
             completion_text = completions.get(idx, "")
             comp_ids = _tokenize_completion(self._tokenizer, completion_text, [])
-            results.append(p_ids + comp_ids)
+            all_ids = p_ids + comp_ids
+            # SGLang backend doesn't currently support logprobs extraction
+            results.append((all_ids, None))
 
         batch_time = time.time() - batch_start
         throughput = batch_size / batch_time if batch_time > 0 else 0
@@ -573,7 +622,6 @@ class AgentEnvLoop:
         device: str = "cuda",
         max_new_tokens: int = MAX_NEW_TOKENS,
         temperature: float = 0.7,
-        batch_size: int = 1,
         *,
         do_sample: bool = True,
         top_p: float = 0.95,
@@ -586,7 +634,6 @@ class AgentEnvLoop:
         self.device = device
         self.max_new_tokens = int(max_new_tokens)
         self.temperature = float(temperature)
-        self.batch_size = int(batch_size)
 
         self._gen_params = GenerationParams(
             max_new_tokens=self.max_new_tokens,
@@ -622,62 +669,12 @@ class AgentEnvLoop:
         except Exception as e:
             logger.debug("Failed to log tokenizer version info: %s", e)
 
-    def run_single_turn(
-        self,
-        env: MultiTurnEnv,
-        randomness_hex: str,
-        wallet: Any,  # bt.wallet, but optional in offline mode,
-        *,
-        task_id: str | None = None,
-        seed: int | None = None,
-    ) -> GRPORollout:
-        """Run one episode and return a GRPORollout with proof."""
-        obs = env.reset(task_id=task_id, seed=seed)
-        rendered, prompt_ids = self._render_chat(
-            [{"role": m.role, "content": m.content} for m in obs.messages]
-        )
-        all_ids, prompt_len = asyncio.run(self._generate_tokens(prompt_ids))
-        completion_ids = all_ids[prompt_len:]
-        completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=False)
-
-        next_obs, reward, terminated, truncated, info = env.step(
-            ChatMessage(role="assistant", content=completion_text)
-        )
-
-        commitments, logprobs, signature, beacon, proof_version = (
-            self._compute_commitments_and_logprobs(
-                all_ids,
-                prompt_len,
-                randomness_hex,
-                wallet,
-            )
-        )
-
-        # Build trajectory for compatibility (step_idx, action, reward)
-        # For single-turn, extract assignment from info if available
-        action_val = info.get("assignment", [])
-        trajectory = [(0, action_val, float(reward))]
-
-        return GRPORollout(
-            tokens=all_ids,
-            token_logprobs=[0.0] * prompt_len + logprobs,
-            prompt_length=int(prompt_len),
-            completion_length=int(len(completion_ids)),
-            reward=float(reward),
-            advantage=0.0,
-            trajectory=trajectory,
-            success=bool(info.get("success", False)),
-            commitments=commitments,
-            signature=signature,
-            beacon=beacon,
-            proof_version=proof_version,
-        )
-
     def generate_batch_for_eval(
         self,
         env_factory: Callable[[], MultiTurnEnv],
         count: int,
         *,
+        batch_size: int = 1,
         seed: int | None = None,
     ) -> list[tuple[float, bool]]:
         """Lightweight batch generation for evaluation (no GRAIL proofs/commitments).
@@ -688,6 +685,7 @@ class AgentEnvLoop:
         Args:
             env_factory: Factory function to create environment instances
             count: Number of rollouts to generate
+            batch_size: Number of rollouts to process per batch
             seed: Optional seed for environment reset
 
         Returns:
@@ -696,8 +694,8 @@ class AgentEnvLoop:
         results: list[tuple[float, bool]] = []
 
         # Process in batches for efficient generation
-        for batch_start in range(0, count, self.batch_size):
-            batch_end = min(batch_start + self.batch_size, count)
+        for batch_start in range(0, count, batch_size):
+            batch_end = min(batch_start + batch_size, count)
             batch_count = batch_end - batch_start
 
             # Create and reset batch of environments
@@ -710,10 +708,12 @@ class AgentEnvLoop:
             ]
 
             # Batch generate tokens (no logprobs/commitments needed for eval)
-            batch_results = asyncio.run(self._batch_generate_tokens(prompts_list))
+            batch_results = asyncio.run(
+                self._batch_generate_tokens(prompts_list, include_logprobs=False)
+            )
 
             # Process each rollout in the batch
-            for env, (all_ids, prompt_len) in zip(envs, batch_results, strict=False):
+            for env, (all_ids, prompt_len, _chosen_lp) in zip(envs, batch_results, strict=False):
                 completion_ids = all_ids[prompt_len:]
                 completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=False)
 
@@ -733,14 +733,15 @@ class AgentEnvLoop:
         randomness_hex: str,
         wallet: Any,  # bt.wallet, but optional in offline mode
         *,
+        batch_size: int = 1,
         seed: int | None = None,
     ) -> list[GRPORollout]:
         """Generate multiple rollouts for GRPO with proofs and compute advantages."""
         rollouts: list[GRPORollout] = []
 
         # Process in batches for efficient generation
-        for batch_start in range(0, count, self.batch_size):
-            batch_end = min(batch_start + self.batch_size, count)
+        for batch_start in range(0, count, batch_size):
+            batch_end = min(batch_start + batch_size, count)
             batch_count = batch_end - batch_start
 
             # Create and reset batch of environments
@@ -752,38 +753,51 @@ class AgentEnvLoop:
                 [{"role": m.role, "content": m.content} for m in obs.messages] for obs in obs_list
             ]
 
-            # Batch generate tokens (logprobs computed later with commitments)
-            batch_results = asyncio.run(self._batch_generate_tokens(prompts_list))
+            # Batch generate tokens
+            batch_results = asyncio.run(
+                self._batch_generate_tokens(prompts_list, include_logprobs=False)
+            )
 
-            # Process each rollout in the batch
-            for env, _obs, (all_ids, prompt_len) in zip(
-                envs, obs_list, batch_results, strict=False
-            ):
+            # Step all environments and collect rewards/info
+            batch_data: list[tuple[list[int], int, float, dict]] = []
+            for env, (all_ids, prompt_len, _chosen_lp) in zip(envs, batch_results, strict=False):
                 completion_ids = all_ids[prompt_len:]
                 completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=False)
 
-                next_obs, reward, terminated, truncated, info = env.step(
+                _next_obs, reward, _terminated, _truncated, info = env.step(
                     ChatMessage(role="assistant", content=completion_text)
                 )
+                batch_data.append((all_ids, prompt_len, float(reward), info))
 
-                commitments, logprobs, signature, beacon, proof_version = (
-                    self._compute_commitments_and_logprobs(
-                        all_ids,
-                        prompt_len,
-                        randomness_hex,
-                        wallet,
-                    )
-                )
+            # Batch compute commitments and logprobs (single forward pass)
+            all_ids_batch = [data[0] for data in batch_data]
+            prompt_lens = [data[1] for data in batch_data]
 
+            proof_results = self._batch_compute_commitments_and_logprobs(
+                all_ids_batch,
+                prompt_lens,
+                randomness_hex,
+                wallet,
+            )
+
+            # Build rollouts from batched results
+            for (all_ids, prompt_len, reward, info), (
+                commitments,
+                logprobs,
+                signature,
+                beacon,
+                proof_version,
+            ) in zip(batch_data, proof_results, strict=False):
+                completion_ids = all_ids[prompt_len:]
                 action_val = info.get("assignment", [])
-                trajectory = [(0, action_val, float(reward))]
+                trajectory = [(0, action_val, reward)]
 
                 rollout = GRPORollout(
                     tokens=all_ids,
                     token_logprobs=[0.0] * prompt_len + logprobs,
                     prompt_length=int(prompt_len),
                     completion_length=int(len(completion_ids)),
-                    reward=float(reward),
+                    reward=reward,
                     advantage=0.0,
                     trajectory=trajectory,
                     success=bool(info.get("success", False)),
@@ -794,28 +808,6 @@ class AgentEnvLoop:
                 )
                 logger.debug("Prompt length: %d", rollout.prompt_length)
                 rollouts.append(rollout)
-
-        advantages = self._compute_advantages([r.reward for r in rollouts])
-        for rollout, adv in zip(rollouts, advantages, strict=False):
-            rollout.advantage = float(adv)
-
-        return rollouts
-
-    def run_grpo_group_vec(
-        self,
-        envs: list[MultiTurnEnv],
-        randomness_hex: str,
-        wallet: Any,  # bt.wallet, but optional in offline mode
-    ) -> list[GRPORollout]:
-        """Vectorized GRPO group generation (batched prompts and generation).
-
-        Uses sequential fallback through run_single_turn, which now efficiently
-        computes logprobs and commitments in a single forward pass.
-        """
-        rollouts: list[GRPORollout] = []
-        for env in envs:
-            rollout = self.run_single_turn(env, randomness_hex, wallet)
-            rollouts.append(rollout)
 
         advantages = self._compute_advantages([r.reward for r in rollouts])
         for rollout, adv in zip(rollouts, advantages, strict=False):
@@ -838,16 +830,34 @@ class AgentEnvLoop:
         *,
         seeds: list[int] | None = None,
         trim_right_padding: bool = False,
-    ) -> list[tuple[list[int], int]]:
+        include_logprobs: bool = False,
+    ) -> list[tuple[list[int], int, list[float] | None]]:
         """Generate sequences for a batch of tokenized prompts.
 
-        Returns list of (all_token_ids, prompt_len) pairs.
+        Args:
+            prompt_ids_batch: Batch of tokenized prompts (already templated).
+            seeds: Optional per-sample seeds for deterministic sampling.
+            trim_right_padding: If True, trims trailing right padding from completions.
+            include_logprobs: If True and supported by backend, returns chosen-token
+                log probabilities (one per completion token) as the third tuple element.
+
+        Returns:
+            List of triples per sample: (all_token_ids, prompt_len, chosen_logprobs_or_none).
+            - all_token_ids: Full prompt+completion token ids
+            - prompt_len: Length of the prompt portion
+            - chosen_logprobs_or_none: List of logprobs for chosen completion tokens, or None
+              when not requested or unavailable
         """
         params = replace(self._gen_params, trim_right_padding=trim_right_padding)
-        sequences = await self._backend.generate(prompt_ids_batch, params=params, seeds=seeds)
-        results: list[tuple[list[int], int]] = []
-        for p_ids, seq in zip(prompt_ids_batch, sequences, strict=False):
-            results.append((seq, len(p_ids)))
+        backend_results = await self._backend.generate(prompt_ids_batch, params=params, seeds=seeds)
+
+        # Backend returns tuples of (sequence, chosen_logprobs_or_none)
+        results: list[tuple[list[int], int, list[float] | None]] = []
+        for (seq, chosen_lp), p_ids in zip(backend_results, prompt_ids_batch, strict=False):
+            prompt_len = len(p_ids)
+            # If include_logprobs is False, discard any logprobs the backend may have returned
+            final_lp = chosen_lp if include_logprobs else None
+            results.append((seq, prompt_len, final_lp))
         return results
 
     def _render_chat(
@@ -867,48 +877,50 @@ class AgentEnvLoop:
     async def _generate_tokens(
         self,
         prompt_ids: list[int],
-    ) -> tuple[list[int], int]:
-        """Generate completion tokens without computing logprobs.
+        *,
+        include_logprobs: bool = False,
+    ) -> tuple[list[int], int, list[float] | None]:
+        """Generate completion tokens; optionally return chosen-token logprobs.
 
-        Logprobs will be computed in a single forward pass with commitments.
-        Returns tokens trimmed of right padding.
+        This method returns tokens trimmed of right padding. When include_logprobs
+        is True and the backend supports chosen-token logprob reporting (e.g.,
+        vLLM OpenAI server with logprobs enabled), the third element contains a
+        list of log probabilities for the chosen completion tokens; otherwise None.
         """
-        batch = [prompt_ids]
-        params = replace(self._gen_params, trim_right_padding=True)
-        sequences = await self._backend.generate(batch, params=params, seeds=None)
-        # Left padding is removed by backend, so prompt_len is original length
-        return sequences[0], len(prompt_ids)
+        # Delegate to batch method to avoid duplication
+        results = await self.generate_from_prompt_ids_batch(
+            [prompt_ids],
+            seeds=None,
+            trim_right_padding=True,
+            include_logprobs=include_logprobs,
+        )
+        return results[0]
 
     async def _batch_generate_tokens(
         self,
         prompts_list: list[list[dict[str, str]]],
-    ) -> list[tuple[list[int], int]]:
-        """Batch generate completion tokens without computing logprobs.
+        *,
+        include_logprobs: bool = False,
+    ) -> list[tuple[list[int], int, list[float] | None]]:
+        """Batch generate completion tokens; optionally include chosen-token logprobs.
 
-        Uses left-padding to handle variable-length prompts efficiently.
-        Logprobs will be computed in a single forward pass with commitments.
+        Uses left-padding to handle variable-length prompts efficiently. When
+        include_logprobs is True and supported by the backend, returns a list of
+        triples (all_ids, prompt_len, chosen_logprobs_or_none) per sample.
         """
-        batch_size = len(prompts_list)
-
-        # Fast path for single prompt
-        if batch_size == 1:
-            _, prompt_ids = self._render_chat(prompts_list[0])
-            seq, prompt_len = await self._generate_tokens(prompt_ids)
-            return [(seq, prompt_len)]
-
-        # Render all prompts and collect token IDs
+        # Render all prompts to token IDs
         prompt_ids_list: list[list[int]] = []
         for prompts in prompts_list:
             _rendered, prompt_ids = self._render_chat(prompts)
             prompt_ids_list.append(prompt_ids)
 
-        params = replace(self._gen_params, trim_right_padding=True)
-        sequences = await self._backend.generate(prompt_ids_list, params=params, seeds=None)
-
-        results: list[tuple[list[int], int]] = []
-        for p_ids, seq in zip(prompt_ids_list, sequences, strict=False):
-            results.append((seq, len(p_ids)))
-        return results
+        # Delegate to generate_from_prompt_ids_batch to avoid duplication
+        return await self.generate_from_prompt_ids_batch(
+            prompt_ids_list,
+            seeds=None,
+            trim_right_padding=True,
+            include_logprobs=include_logprobs,
+        )
 
     def _trim_right_padding(
         self,
@@ -947,17 +959,24 @@ class AgentEnvLoop:
         trimmed = seq[: prompt_len + eff_comp]
         return trimmed.tolist(), eff_comp
 
-    def _compute_commitments_and_logprobs(
+    def _batch_compute_commitments_and_logprobs(
         self,
-        all_token_ids: list[int],
-        prompt_len: int,
+        all_token_ids_batch: list[list[int]],
+        prompt_lens: list[int],
         randomness_hex: str,
         wallet: Any,  # bt.wallet, but optional in offline mode
-    ) -> tuple[list[dict], list[float], bytes, dict, str]:
-        """Compute GRAIL commitments and token logprobs in a single forward pass.
+    ) -> list[tuple[list[dict], list[float], bytes, dict, str]]:
+        """Batch compute GRAIL commitments and token logprobs in a single forward pass.
 
-        This is more efficient than computing them separately, as it requires
-        only one forward pass through the model.
+        Args:
+            all_token_ids_batch: List of full token sequences (prompt + completion)
+            prompt_lens: List of prompt lengths corresponding to each sequence
+            randomness_hex: Hex string for randomness beacon
+            wallet: Bittensor wallet for signing commitments
+
+        Returns:
+            List of tuples: (commitments, logprobs, signature, beacon, proof_version)
+            one per rollout in the batch.
         """
         if self._hidden_dim is None:
             raise RuntimeError(
@@ -966,35 +985,79 @@ class AgentEnvLoop:
                 "server backend for evaluation only."
             )
 
+        batch_size = len(all_token_ids_batch)
+        if batch_size == 0:
+            return []
+
         from ..protocol.grail_verifier import GRAILVerifier
 
         verifier = GRAILVerifier(hidden_dim=self._hidden_dim)
         r_vec = verifier.generate_r_vec(randomness_hex)
 
-        commitments: list[dict] = []
-        logprobs: list[float] = []
+        # Left-pad sequences to same length for batched forward pass
+        pad_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+        max_len = max(len(seq) for seq in all_token_ids_batch)
 
+        padded_inputs: list[list[int]] = []
+        attention_masks: list[list[int]] = []
+        position_ids_list: list[list[int]] = []
+        left_pads: list[int] = []
+        for seq in all_token_ids_batch:
+            pad_len = max_len - len(seq)
+            padded_inputs.append([pad_id] * pad_len + seq)
+            attention_masks.append([0] * pad_len + [1] * len(seq))
+            # Position IDs: padding gets position 0, real tokens get [0, 1, 2, ...]
+            # This ensures RoPE positions match the validator's unpadded forward
+            position_ids_list.append([0] * pad_len + list(range(len(seq))))
+            left_pads.append(pad_len)
+
+        # Single batched forward pass
         with torch.inference_mode():
-            token_tensor = torch.tensor([all_token_ids], dtype=torch.long).to(self.device)
-            model_outputs = self.model(token_tensor, output_hidden_states=True)
+            token_tensor = torch.tensor(padded_inputs, dtype=torch.long).to(self.device)
+            attention_mask_tensor = torch.tensor(attention_masks, dtype=torch.long).to(self.device)
+            position_ids_tensor = torch.tensor(position_ids_list, dtype=torch.long).to(self.device)
+            model_outputs = self.model(
+                token_tensor,
+                attention_mask=attention_mask_tensor,
+                position_ids=position_ids_tensor,
+                output_hidden_states=True,
+            )
 
-            # Extract hidden states for commitments
-            h_layer = model_outputs.hidden_states[LAYER_INDEX][0]
+            # Extract hidden states and logits
+            # hidden_states shape: [batch_size, seq_len, hidden_dim]
+            # logits shape: [batch_size, seq_len, vocab_size]
+            h_layer = model_outputs.hidden_states[LAYER_INDEX]
+            logits = model_outputs.logits
+
+        # Process each sequence in the batch
+        results: list[tuple[list[dict], list[float], bytes, dict, str]] = []
+
+        for b in range(batch_size):
+            all_token_ids = all_token_ids_batch[b]
+            prompt_len = prompt_lens[b]
+            left_pad = left_pads[b]
+
+            commitments: list[dict] = []
+            logprobs: list[float] = []
+
+            # Extract commitments for this sequence (account for left padding)
             for pos in range(len(all_token_ids)):
-                if pos < h_layer.size(0):
-                    commitments.append(verifier.create_commitment(h_layer[pos], r_vec, pos))
+                padded_pos = left_pad + pos
+                if padded_pos < h_layer.size(1):
+                    commitments.append(
+                        verifier.create_commitment(h_layer[b, padded_pos], r_vec, pos)
+                    )
 
-            # Extract logits for logprobs computation
-            # model_outputs.logits shape: [batch_size, seq_len, vocab_size]
-            # We need logprobs for completion tokens (positions prompt_len onwards)
-            logits = model_outputs.logits[0]  # [seq_len, vocab_size]
+            # Extract logprobs for completion tokens
             completion_ids = all_token_ids[prompt_len:]
-
             for i, token_id in enumerate(completion_ids):
-                # Position in logits is (prompt_len - 1 + i) because logits[i] predicts token[i+1]
+                # Position in original sequence
                 logit_pos = prompt_len - 1 + i
-                if logit_pos < logits.size(0):
-                    log_probs_dist = torch.log_softmax(logits[logit_pos], dim=-1)
+                # Position in padded sequence
+                padded_logit_pos = left_pad + logit_pos
+
+                if padded_logit_pos < logits.size(1):
+                    log_probs_dist = torch.log_softmax(logits[b, padded_logit_pos], dim=-1)
                     logprobs.append(log_probs_dist[token_id].item())
                 else:
                     logger.warning(
@@ -1004,18 +1067,21 @@ class AgentEnvLoop:
                     )
                     logprobs.append(float("-inf"))
 
-        commitment_data = json.dumps(commitments, sort_keys=True)
-        commitment_hash = hashlib.sha256(commitment_data.encode()).digest()
-        if bt is None or wallet is None:
-            raise RuntimeError(
-                "GRAIL proof generation requires bittensor wallet (unavailable in offline mode)"
-            )
-        signature = wallet.hotkey.sign(commitment_hash)
+            # Sign commitments
+            commitment_data = json.dumps(commitments, sort_keys=True)
+            commitment_hash = hashlib.sha256(commitment_data.encode()).digest()
+            if bt is None or wallet is None:
+                raise RuntimeError(
+                    "GRAIL proof generation requires bittensor wallet (unavailable in offline mode)"
+                )
+            signature = wallet.hotkey.sign(commitment_hash)
 
-        beacon = {"randomness": randomness_hex}
-        proof_version = GRAIL_PROOF_VERSION
+            beacon = {"randomness": randomness_hex}
+            proof_version = GRAIL_PROOF_VERSION
 
-        return commitments, logprobs, signature, beacon, proof_version
+            results.append((commitments, logprobs, signature, beacon, proof_version))
+
+        return results
 
     def _compute_advantages(self, rewards: list[float]) -> list[float]:
         """GRPO advantages: zero-mean within group, variance-normalized."""
