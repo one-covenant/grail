@@ -165,7 +165,7 @@ CURRENT_ENV_ID = "gsm8k"
 # ────────────────  EMISSION BURN MECHANISM  ────────────────
 
 GRAIL_BURN_UID = 0
-GRAIL_BURN_PERCENTAGE = 80.0
+GRAIL_BURN_PERCENTAGE = 95.0
 
 # ────────────────  MINER SAMPLING (VALIDATION COST CONTROL)  ────────────────
 
