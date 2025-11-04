@@ -41,9 +41,7 @@ TRAINER_UPLOAD_BUFFER_BLOCKS = 10  # ~60 seconds at 12s/block
 # Time needed to upload the READY marker file to object storage
 READY_MARKER_UPLOAD_BLOCKS = 1  # ~12 seconds at 12s/block
 
-# ────────────────  MODEL CONFIGURATION  ────────────────
-
-LAYER_INDEX = -1
+# ────────────────  Trainer MODEL CONFIGURATION  ────────────────
 
 # Trainer hyperparameters (env configurable)
 TRAINER_LR = float(os.getenv("GRAIL_TRAINER_LR", "1e-6"))
@@ -112,6 +110,7 @@ TRACE = 5
 PRIME_Q = 2_147_483_647
 CHALLENGE_K = 16
 RNG_LABEL = {"sketch": b"sketch", "open": b"open", "sat": b"sat"}
+LAYER_INDEX = -1
 
 # ────────────────  TERMINATION VALIDATION HPs  ────────────────
 
