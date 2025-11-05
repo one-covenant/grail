@@ -348,8 +348,7 @@ class VLLMServerBackend:
                             extra_body["top_k"] = int(params.top_k)
                         if params.repetition_penalty is not None:
                             extra_body["repetition_penalty"] = float(params.repetition_penalty)
-                        # Add stop sequence to help close out answers when emitted
-                        completion_kwargs["stop"] = ["</SOLUTION>"]
+
                         if extra_body:
                             completion_kwargs["extra_body"] = extra_body
                         if rnd_seed is not None:
@@ -514,8 +513,7 @@ class SGLangServerBackend:
                             extra_body["top_k"] = int(params.top_k)
                         if params.repetition_penalty is not None:
                             extra_body["repetition_penalty"] = float(params.repetition_penalty)
-                        # Add stop sequence to help close out answers when emitted
-                        # completion_kwargs["stop"] = ["</SOLUTION>"]
+
                         if extra_body:
                             completion_kwargs["extra_body"] = extra_body
 
