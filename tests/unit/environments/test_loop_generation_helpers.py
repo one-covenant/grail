@@ -47,7 +47,7 @@ async def test_generate_from_prompt_ids_batch_batching_and_lengths() -> None:
     )
 
     assert len(results) == len(prompt_ids_batch)
-    for (seq, prompt_len), p in zip(results, prompt_ids_batch, strict=False):
+    for (seq, prompt_len, _), p in zip(results, prompt_ids_batch, strict=False):
         assert len(seq) > prompt_len
         assert prompt_len == len(p)
         # Should not end with pad when trim_right_padding=True

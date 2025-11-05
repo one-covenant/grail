@@ -90,8 +90,8 @@ class FakeBackend(TextGenBackend):
         *,
         params: GenerationParams,
         seeds: list[int] | None = None,
-    ) -> list[list[int]]:
-        results: list[list[int]] = []
+    ) -> list[tuple[list[int], list[float] | None]]:
+        results: list[tuple[list[int], list[float] | None]] = []
         pad_id = self.tokenizer.pad_token_id
         for idx, p_ids in enumerate(prompt_ids_batch):
             if params.do_sample and seeds is not None and idx < len(seeds):
@@ -106,7 +106,7 @@ class FakeBackend(TextGenBackend):
             if not params.trim_right_padding:
                 # Append a couple of pad tokens to exercise trimming behavior
                 seq = seq + [pad_id, pad_id]
-            results.append(seq)
+            results.append((seq, None))
         return results
 
 
