@@ -74,7 +74,6 @@ class EvaluatorService:
             device=self._device,
             max_new_tokens=self._cfg.max_new_tokens,
             temperature=self._cfg.temperature,
-            batch_size=self._cfg.batch_size,
             do_sample=self._cfg.do_sample,
             top_p=self._cfg.top_p,
             gen_backend=gen_backend,
@@ -95,6 +94,9 @@ class EvaluatorService:
                 tokenizer=self._tokenizer,
                 timeout=300.0,
                 max_concurrent_requests=self._cfg.sglang_max_concurrent_requests,
+                return_chosen_logprobs=bool(
+                    getattr(self._cfg, "vllm_return_chosen_logprobs", False)
+                ),
             )
             logger.info(
                 "Evaluator using SGLang server backend: url=%s model=%s concurrency=%d",
@@ -119,6 +121,9 @@ class EvaluatorService:
                 tokenizer=self._tokenizer,
                 timeout=300.0,
                 max_concurrent_requests=self._cfg.vllm_max_concurrent_requests,
+                return_chosen_logprobs=bool(
+                    getattr(self._cfg, "vllm_return_chosen_logprobs", False)
+                ),
             )
             logger.info(
                 "Evaluator using vLLM server backend: url=%s model=%s concurrency=%d",
@@ -303,7 +308,10 @@ class EvaluatorService:
             plan: Evaluation plan containing seed and replication info
 
         Returns:
-            List of (sequence, prompt_length) tuples
+            List of tuples per sample. Each tuple contains at least
+            (sequence, prompt_length). A third element may be present with
+            chosen-token logprobs if the backend provides them and they were
+            requested upstream.
         """
         # Reconstruct seeds for generation
         expanded_seeds: list[int] = []
@@ -320,17 +328,25 @@ class EvaluatorService:
         )
         return seq_with_prompt_lens
 
-    def _decode_completions(self, seq_with_prompt_lens: list[tuple[list[int], int]]) -> list[str]:
+    def _decode_completions(
+        self,
+        seq_with_prompt_lens: list[
+            tuple[list[int], int] | tuple[list[int], int, list[float] | None]
+        ],
+    ) -> list[str]:
         """Decode generated sequences to text, excluding prompt tokens.
 
         Args:
-            seq_with_prompt_lens: List of (sequence, prompt_length) tuples
+            seq_with_prompt_lens: List of tuples: (sequence, prompt_length)
+                and optionally a third element with chosen-token logprobs.
 
         Returns:
             List of decoded completion strings
         """
         decoded: list[str] = []
-        for seq, prompt_len in seq_with_prompt_lens:
+        for item in seq_with_prompt_lens:
+            seq = item[0]
+            prompt_len = item[1]
             decoded.append(self._tokenizer.decode(seq[prompt_len:], skip_special_tokens=False))
         return decoded
 

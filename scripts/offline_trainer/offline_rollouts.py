@@ -25,6 +25,7 @@ class RolloutGenConfig:
     top_k: int | None
     repetition_penalty: float | None
     rollouts_per_problem: int = ROLLOUTS_PER_PROBLEM
+    return_logprobs: bool = True  # Enable behavior policy logprobs for IS
 
 
 class OfflineRolloutGenerator:
@@ -40,12 +41,15 @@ class OfflineRolloutGenerator:
 
         # Choose server backend
         backend_name = (self._cfg.backend or "sglang_server").lower()
+        return_logprobs = bool(getattr(self._cfg, "return_logprobs", True))
+        
         if backend_name == "sglang_server":
             gen_backend = SGLangServerBackend(
                 base_url=self._cfg.base_url,
                 model_name=getattr(tokenizer, "name_or_path", "model"),
                 tokenizer=tokenizer,
                 timeout=300.0,
+                return_chosen_logprobs=return_logprobs,
             )
         elif backend_name == "vllm_server":
             # OpenAI-compatible vLLM server
@@ -54,6 +58,7 @@ class OfflineRolloutGenerator:
                 model_name=getattr(tokenizer, "name_or_path", "model"),
                 tokenizer=tokenizer,
                 timeout=300.0,
+                return_chosen_logprobs=return_logprobs,
             )
         else:
             raise ValueError(f"Unsupported generation backend: {self._cfg.backend}")
@@ -65,7 +70,6 @@ class OfflineRolloutGenerator:
             device="cpu",
             max_new_tokens=self._cfg.max_new_tokens,
             temperature=self._cfg.temperature,
-            batch_size=self._cfg.batch_size,
             do_sample=True,
             top_p=self._cfg.top_p,
             top_k=self._cfg.top_k,
@@ -73,11 +77,20 @@ class OfflineRolloutGenerator:
             gen_backend=gen_backend,
         )
 
-    async def generate_groups(self, seeds: Iterable[int]) -> list[GRPOGroup]:
+    async def generate_groups(
+        self,
+        seeds: Iterable[int],
+        *,
+        batch_size: int = 1,
+    ) -> list[GRPOGroup]:
         """Generate GRPO groups for the provided problem seeds.
 
         Each seed yields exactly `rollouts_per_problem` rollouts with deterministic
         per-replicate random seeds passed to the server backend.
+
+        Args:
+            seeds: Iterable of problem seeds
+            batch_size: Number of rollouts to generate per batch
         """
         groups: list[GRPOGroup] = []
         rollouts_per_problem = int(self._cfg.rollouts_per_problem)
@@ -92,10 +105,12 @@ class OfflineRolloutGenerator:
             # Render and generate with per-replicate seeds
             prompt_ids = self._loop.render_prompt_ids_batch(prompts_list)
             replicate_seeds = [int(seed) * 10_000 + i for i in range(rollouts_per_problem)]
+            include_logprobs = bool(getattr(self._cfg, "return_logprobs", True))
             seq_with_prompt_lens = await self._loop.generate_from_prompt_ids_batch(
                 prompt_ids,
                 seeds=replicate_seeds,
                 trim_right_padding=True,
+                include_logprobs=include_logprobs,
             )
 
             # Decode and step environment for rewards
@@ -104,11 +119,16 @@ class OfflineRolloutGenerator:
             seqs: list[list[int]] = []
             prompt_lens: list[int] = []
             comp_lens: list[int] = []
+            all_logprobs: list[list[float] | None] = []
 
-            for seq, prompt_len in seq_with_prompt_lens:
+            for seq, prompt_len, chosen_logprobs in seq_with_prompt_lens:
                 # Enforce max training length to avoid overflow
                 if TRAINER_MAX_LENGTH and len(seq) > int(TRAINER_MAX_LENGTH):
                     seq = seq[: int(TRAINER_MAX_LENGTH)]
+                    # Also truncate logprobs if present
+                    if chosen_logprobs is not None:
+                        chosen_logprobs = chosen_logprobs[: int(TRAINER_MAX_LENGTH)]
+                
                 completion_ids = seq[prompt_len:]
                 text = self._tokenizer.decode(completion_ids, skip_special_tokens=False)
 
@@ -124,6 +144,15 @@ class OfflineRolloutGenerator:
                 seqs.append(seq)
                 prompt_lens.append(int(prompt_len))
                 comp_lens.append(int(len(completion_ids)))
+                
+                # Store behavior policy logprobs for importance sampling
+                # Format: full sequence logprobs (prompt + completion)
+                if chosen_logprobs is not None:
+                    # Pad with zeros for prompt tokens, keep completion logprobs
+                    full_logprobs = [0.0] * prompt_len + list(chosen_logprobs)
+                    all_logprobs.append(full_logprobs)
+                else:
+                    all_logprobs.append(None)
 
             # Compute GRPO advantages (zero-mean, variance-normalized)
             advantages = self._compute_advantages(rewards)
@@ -142,7 +171,7 @@ class OfflineRolloutGenerator:
                         success=bool(successes[i]),
                         nonce=int(i),
                         rollout_group=group_id,
-                        token_logprobs=None,
+                        token_logprobs=all_logprobs[i],
                     )
                 )
 

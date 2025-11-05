@@ -14,7 +14,6 @@ def make_loop(*, do_sample: bool) -> AgentEnvLoop:
         model=model,
         tokenizer=tokenizer,
         device="cpu",
-        batch_size=2,
         do_sample=do_sample,
         gen_backend=backend,
     )

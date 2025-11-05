@@ -583,7 +583,7 @@ async def generate_rollouts_for_window(
             ROLLOUTS_PER_PROBLEM,
         )
         batch_size = ROLLOUTS_PER_PROBLEM
-    loop = AgentEnvLoop(model, tokenizer, device, batch_size=batch_size)
+    loop = AgentEnvLoop(model, tokenizer, device)
     if batch_size > 1:
         logger.info("Using batch_size=%d for parallel rollout generation", batch_size)
 
@@ -663,6 +663,7 @@ async def generate_rollouts_for_window(
                         ROLLOUTS_PER_PROBLEM,
                         combined_randomness,
                         wallet,
+                        batch_size=batch_size,
                         seed=seed_int,
                     )
             else:
@@ -672,6 +673,7 @@ async def generate_rollouts_for_window(
                     ROLLOUTS_PER_PROBLEM,
                     combined_randomness,
                     wallet,
+                    batch_size=batch_size,
                     seed=seed_int,
                 )
             rollout_gen_duration = time.time() - rollout_gen_start

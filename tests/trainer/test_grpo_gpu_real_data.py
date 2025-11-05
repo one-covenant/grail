@@ -304,6 +304,7 @@ class BaselineEvaluator:
             eval_results = self.env_loop.generate_batch_for_eval(
                 env_factory=make_env,
                 count=self.config.eval_samples_per_problem,
+                batch_size=self.config.rollouts_per_problem,
                 seed=problem_seed,
             )
 
@@ -388,6 +389,7 @@ class TrainingDataGenerator:
                     count=self.config.rollouts_per_problem,
                     randomness_hex="1234567890abcdef" * 4,  # Valid hex (64 chars)
                     wallet=self.wallet,
+                    batch_size=self.config.rollouts_per_problem,
                     seed=problem_seed,
                 )
 
@@ -505,6 +507,7 @@ class EpochEvaluator:
             eval_results = self.env_loop.generate_batch_for_eval(
                 env_factory=make_env,
                 count=self.config.eval_samples_per_problem,
+                batch_size=self.config.rollouts_per_problem,
                 seed=problem_seed,
             )
 
@@ -929,7 +932,6 @@ class TestGRPOGPURealData:
             device=str(accelerator.device),
             max_new_tokens=int(C.MAX_NEW_TOKENS),
             temperature=TEST_CONFIG.temperature,
-            batch_size=TEST_CONFIG.rollouts_per_problem,
         )
 
         # Baseline evaluation

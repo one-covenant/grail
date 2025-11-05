@@ -100,3 +100,5 @@ class EvalConfig:
     stream_server_logs: bool = False
     log_completions_n: int = 1
     log_completions_max_chars: int = 2048
+    # vLLM: request chosen-token logprobs via OpenAI-compatible API (disabled by default)
+    vllm_return_chosen_logprobs: bool = False
