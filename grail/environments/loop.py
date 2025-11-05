@@ -314,10 +314,16 @@ class VLLMServerBackend:
                             "temperature": float(params.temperature),
                             "top_p": float(params.top_p),
                         }
+                        # Provide vendor extensions via extra_body for vLLM
+                        extra_body: dict[str, Any] = {}
+                        if params.top_k is not None:
+                            extra_body["top_k"] = int(params.top_k)
                         if params.repetition_penalty is not None:
-                            completion_kwargs["frequency_penalty"] = float(
-                                params.repetition_penalty
-                            )
+                            extra_body["repetition_penalty"] = float(params.repetition_penalty)
+                        # Add stop sequence to help close out answers when emitted
+                        completion_kwargs["stop"] = ["</SOLUTION>"]
+                        if extra_body:
+                            completion_kwargs["extra_body"] = extra_body
                         if rnd_seed is not None:
                             completion_kwargs["seed"] = int(rnd_seed)
 
@@ -455,12 +461,16 @@ class SGLangServerBackend:
                             "temperature": float(params.temperature),
                             "top_p": float(params.top_p),
                         }
-
-                        # Map repetition_penalty to frequency_penalty if provided
+                        # Provide vendor extensions via extra_body for SGLang
+                        extra_body: dict[str, Any] = {}
+                        if params.top_k is not None:
+                            extra_body["top_k"] = int(params.top_k)
                         if params.repetition_penalty is not None:
-                            completion_kwargs["frequency_penalty"] = float(
-                                params.repetition_penalty
-                            )
+                            extra_body["repetition_penalty"] = float(params.repetition_penalty)
+                        # Add stop sequence to help close out answers when emitted
+                        # completion_kwargs["stop"] = ["</SOLUTION>"]
+                        if extra_body:
+                            completion_kwargs["extra_body"] = extra_body
 
                         # Add seed (SGLang supports this parameter)
                         if random_seed is not None:
