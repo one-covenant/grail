@@ -13,7 +13,6 @@ Uses synthetic tensors and tiny models to ensure deterministic, fast test execut
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import math
 from typing import Any
@@ -26,7 +25,6 @@ from grail.trainer.algorithms.grpo import (
     GRPORollout,
     compute_entropy,
     compute_logprobs,
-    train_grpo_epoch,
 )
 
 
@@ -372,13 +370,15 @@ class TestGRPOGroupValidation:
 class TestNonFiniteHandling:
     """Test handling of NaN/Inf values in training loop."""
 
-    def test_skip_batch_on_nonfinite_logprobs(
+    @pytest.mark.asyncio
+    async def test_skip_batch_on_nonfinite_logprobs(
         self,
         seeded_torch_env: None,
         tiny_qwen_model_and_tokenizer: tuple[Any, Any],
         monkeypatch_trainer_constants: None,
         accelerator_cpu: Any,
         caplog: pytest.LogCaptureFixture,
+        run_grpo_epoch: Any,
     ) -> None:
         """Test that batches with non-finite current logprobs are skipped."""
         model, tokenizer = tiny_qwen_model_and_tokenizer
@@ -404,10 +404,8 @@ class TestNonFiniteHandling:
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
 
         with caplog.at_level(logging.WARNING):
-            metrics = asyncio.run(
-                train_grpo_epoch(
-                    model, ref_model, tokenizer, groups, optimizer, accelerator_cpu, None, 0
-                )
+            metrics = await run_grpo_epoch(
+                model, ref_model, tokenizer, groups, optimizer, accelerator_cpu
             )
 
         # Should complete without crashing

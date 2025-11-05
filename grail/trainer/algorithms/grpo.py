@@ -30,9 +30,7 @@ except Exception:  # pragma: no cover - optional in offline mode
 
 from grail.shared.constants import (
     ROLLOUTS_PER_PROBLEM,
-    TRAINER_ADAPTIVE_KL,
     TRAINER_ADV_CLIP_PERCENTILE,
-    TRAINER_BATCH_SIZE,
     TRAINER_ENTROPY_COEF,
     TRAINER_GRAD_ACCUM_STEPS,
     TRAINER_GRAD_CLIP,
@@ -911,429 +909,12 @@ def compute_entropy(
     return torch.stack(entropies)
 
 
-async def train_grpo_epoch(
-    model: Any,
-    ref_model: Any,
-    tokenizer: Any,
-    groups: list[GRPOGroup],
-    optimizer: torch.optim.Optimizer,
-    accelerator: Accelerator,
-    monitor: Any,
-    window: int,
-    batch_size: int = TRAINER_BATCH_SIZE,
-    algorithm: Any = None,  # TrainingAlgorithm instance for global counters
-) -> dict[str, float]:
-    """Run a single GRPO training epoch and return aggregated metrics."""
-    model.train()
-    ref_model.eval()
-
-    all_rollouts: list[tuple] = []
-    for group in groups:
-        for rollout in group.rollouts:
-            all_rollouts.append((rollout, group.group_id))
-
-    all_rollouts.sort(key=lambda item: (item[1], item[0].nonce))
-
-    # Use batch_size parameter (defaults to TRAINER_BATCH_SIZE if not provided)
-    num_batches = math.ceil(len(all_rollouts) / batch_size)
-
-    epoch_metrics: dict[str, list[float]] = defaultdict(list)
-    grad_accum_counter = 0
-
-    # Adaptive KL coefficient: prefer persistent controller on algorithm instance
-    if algorithm is not None and hasattr(algorithm, "kl_controller"):
-        current_kl_coef = float(getattr(algorithm.kl_controller, "value", TRAINER_KL_COEF))
-    else:
-        current_kl_coef = float(TRAINER_KL_COEF)
-
-    for batch_idx in range(num_batches):
-        start_idx = batch_idx * batch_size
-        end_idx = min(start_idx + batch_size, len(all_rollouts))
-        batch_rollouts = [all_rollouts[i][0] for i in range(start_idx, end_idx)]
-
-        batch_tokens: list[list[int]] = []
-        batch_prompt_lens: list[int] = []
-        batch_comp_lens: list[int] = []
-        batch_advantages: list[float] = []
-        batch_behavior_seq_logprobs: list[float] = []
-        # Store miner-provided behavior per-token logprobs over completion for prompt-average PG
-        batch_rewards: list[float] = []
-
-        for rollout in batch_rollouts:
-            tokens = rollout.tokens[:TRAINER_MAX_LENGTH]
-            batch_tokens.append(tokens)
-
-            # CRITICAL FIX: Recalculate completion_len after truncation
-            # If sequence is truncated, actual completion tokens may be fewer
-            actual_prompt_len = rollout.prompt_length
-            actual_comp_len = min(
-                rollout.completion_length,
-                TRAINER_MAX_LENGTH - rollout.prompt_length,
-            )
-            batch_prompt_lens.append(actual_prompt_len)
-            batch_comp_lens.append(actual_comp_len)
-
-            batch_advantages.append(rollout.advantage)
-            batch_rewards.append(rollout.reward)
-
-            # Miner-provided per-token logprobs must exist; aggregate over truncated completion
-            tlp: list[float] = list((rollout.token_logprobs or [])[:TRAINER_MAX_LENGTH])
-            prompt_len = actual_prompt_len
-            comp_len = actual_comp_len
-            expected_len = prompt_len + comp_len
-
-            if len(tlp) >= expected_len:
-                # Extract completion logprobs: indices [prompt_len:prompt_len+comp_len]
-                completion_logprobs = tlp[prompt_len : prompt_len + comp_len]
-                provided = float(np.sum(completion_logprobs))
-            else:
-                # Legacy: miner provided only completion logprobs; respect truncation
-                provided = float(np.sum(tlp[:comp_len]))
-
-            batch_behavior_seq_logprobs.append(provided)
-
-        # Basic structural sanity checks (length mismatches can cause degenerate grads)
-        for i, tokens in enumerate(batch_tokens):
-            expected_len = max(0, batch_prompt_lens[i]) + max(0, batch_comp_lens[i])
-            if len(tokens) < expected_len:
-                logger.warning(
-                    "Sequence shorter than expected after truncation",
-                    extra={
-                        "idx": i,
-                        "len_tokens": len(tokens),
-                        "expected_len": expected_len,
-                        "prompt_len": batch_prompt_lens[i],
-                        "completion_len": batch_comp_lens[i],
-                    },
-                )
-
-        max_len = max(len(tokens) for tokens in batch_tokens)
-        # Ensure pad_token_id is set (fallback to eos_token_id if needed)
-        pad_id = tokenizer.pad_token_id
-        if pad_id is None:
-            pad_id = tokenizer.eos_token_id
-            logger.warning("pad_token_id is None; using eos_token_id as fallback")
-
-        input_ids = []
-        attention_masks = []
-        for tokens in batch_tokens:
-            pad_length = max_len - len(tokens)
-            input_ids.append(tokens + [pad_id] * pad_length)
-            attention_masks.append([1] * len(tokens) + [0] * pad_length)
-
-        input_ids_tensor = torch.tensor(
-            input_ids,
-            dtype=torch.long,
-            device=accelerator.device,
-        )
-        attention_mask_tensor = torch.tensor(
-            attention_masks,
-            dtype=torch.long,
-            device=accelerator.device,
-        )
-        advantages_tensor = torch.tensor(
-            batch_advantages,
-            dtype=torch.float32,
-            device=accelerator.device,
-        )
-
-        # Compute current policy logprobs (with per-token for proper KL)
-        logprobs_current_sum, logprobs_current_per_token = compute_logprobs(
-            model,
-            input_ids_tensor,
-            attention_mask_tensor,
-            batch_prompt_lens,
-            batch_comp_lens,
-            return_per_token=True,
-        )
-
-        if not _is_finite_tensor(logprobs_current_sum):
-            cur_min = torch.nan_to_num(logprobs_current_sum).min().item()
-            cur_max = torch.nan_to_num(logprobs_current_sum).max().item()
-            logger.warning(
-                "Non-finite current logprobs; skipping batch",
-                extra={"min": float(cur_min), "max": float(cur_max)},
-            )
-            continue
-
-        # OLD/BEHAVIOR policy logprobs for importance sampling
-        # At this point, behavior logprobs are guaranteed to be present and valid
-        logprobs_old = torch.tensor(
-            list(batch_behavior_seq_logprobs),
-            dtype=torch.float32,
-            device=accelerator.device,
-        )
-
-        if not _is_finite_tensor(logprobs_old):
-            old_min = torch.nan_to_num(logprobs_old).min().item()
-            old_max = torch.nan_to_num(logprobs_old).max().item()
-            logger.warning(
-                "Non-finite old/behavior logprobs; skipping batch",
-                extra={"min": float(old_min), "max": float(old_max)},
-            )
-            continue
-
-        # Compute REFERENCE model logprobs for KL divergence penalty
-        # (separate from behavior policy - this is for regularization)
-        if ref_model is not None:
-            with torch.no_grad():
-                logprobs_ref_sum, logprobs_ref_per_token = compute_logprobs(
-                    ref_model,
-                    input_ids_tensor,
-                    attention_mask_tensor,
-                    batch_prompt_lens,
-                    batch_comp_lens,
-                    return_per_token=True,
-                )
-            if not _is_finite_tensor(logprobs_ref_sum):
-                ref_min = torch.nan_to_num(logprobs_ref_sum).min().item()
-                ref_max = torch.nan_to_num(logprobs_ref_sum).max().item()
-                logger.warning(
-                    "Non-finite reference logprobs; skipping batch",
-                    extra={"min": float(ref_min), "max": float(ref_max)},
-                )
-                continue
-        else:
-            # If no ref model, set ref logprobs to old logprobs (zero KL)
-            logprobs_ref_sum = logprobs_old
-            logprobs_ref_per_token = logprobs_current_per_token.detach()
-
-        # Importance sampling log-ratio: π_current / π_old (behavior)
-        log_ratio = logprobs_current_sum - logprobs_old
-        if not _is_finite_tensor(log_ratio):
-            logger.debug("Non-finite log-ratio before clamp; applying clamp")
-        # Moderate clamp for numerical stability when exponentiating to ratios
-        log_ratio_clamped = torch.clamp(
-            log_ratio, min=-TRAINER_LOGRATIO_CLAMP, max=TRAINER_LOGRATIO_CLAMP
-        )
-
-        # Advantage normalization for stable gradients
-        # IMPORTANT: Normalize advantages to have unit variance while preserving zero-sum
-        # This prevents gradient explosion when advantages have large magnitude
-        # Clip extreme outliers first, then standardize
-        perc_val = float(TRAINER_ADV_CLIP_PERCENTILE)
-        q = max(0.0, min(100.0, perc_val)) / 100.0
-        if 0.0 < q < 1.0:
-            clip_val = torch.quantile(advantages_tensor.abs(), q)
-            if torch.isfinite(clip_val):
-                advantages_tensor = advantages_tensor.clamp(-clip_val, clip_val)
-
-        # We don't normalize advantages since they are already normalized
-        advantages_normalized = advantages_tensor
-
-        # Policy gradient loss with importance sampling and PPO-style clipping
-        ratio_clip_frac_val: float = 0.0
-        ratio_ceiling_frac_val: float = 0.0
-        ratios_pre_ceiling = torch.exp(log_ratio_clamped)
-        if TRAINER_USE_IS:
-            # Importance sampling ratio with numerical stability clamp, then hard ceiling
-            if TRAINER_IS_RATIO_MAX > 0.0:
-                ceiling_mask = ratios_pre_ceiling > TRAINER_IS_RATIO_MAX
-                ratios = torch.clamp(ratios_pre_ceiling, max=TRAINER_IS_RATIO_MAX)
-            else:
-                ceiling_mask = torch.zeros_like(ratios_pre_ceiling, dtype=torch.bool)
-                ratios = ratios_pre_ceiling
-
-            # Asymmetric PPO-style clipping (DAPO-style): tighter lower bound, relaxed upper bound
-            lower = 1.0 - TRAINER_PPO_CLIP_EPS
-            upper = 1.0 + TRAINER_PPO_CLIP_EPS_UPPER
-            ratios_clipped = torch.clamp(ratios, lower, upper)
-
-            # Track clipping statistics for monitoring
-            clip_mask = (ratios < lower) | (ratios > upper)
-            ratio_clip_frac_val = clip_mask.float().mean().item()
-            ratio_ceiling_frac_val = ceiling_mask.float().mean().item()
-
-            pg_unclipped = ratios * advantages_normalized
-            pg_clipped = ratios_clipped * advantages_normalized
-            loss_pg = -torch.min(pg_unclipped, pg_clipped).mean()
-        else:
-            # On-policy: no ratio, just advantage-weighted logprobs
-            loss_pg = -(advantages_normalized * logprobs_current_sum).mean()
-
-        # KL divergence penalty: KL(π_current || π_ref)
-        # Proper per-token KL with completion masks
-        max_comp_len = logprobs_current_per_token.shape[1]
-        # Build completion mask: [batch_size, max_comp_len]
-        # Vectorized construction of completion mask: [batch_size, max_comp_len]
-        comp_lens_tensor = torch.as_tensor(batch_comp_lens, device=accelerator.device)
-        token_positions = torch.arange(max_comp_len, device=accelerator.device)
-        completion_mask = (token_positions.unsqueeze(0) < comp_lens_tensor.unsqueeze(1)).to(
-            torch.float32
-        )
-
-        # Per-token log-ratio for KL: log(π/π_ref)
-        per_token_log_ratio = logprobs_current_per_token - logprobs_ref_per_token
-        # Approximate KL via: 0.5 * E[(log π - log π_ref)²]
-        # This is a symmetric approximation that's numerically stable
-        per_token_kl = 0.5 * per_token_log_ratio.pow(2) * completion_mask
-        # Mean over valid tokens (token-weighted, not sequence-weighted)
-        kl_tensor = per_token_kl.sum() / completion_mask.sum().clamp(min=1.0)
-        loss_kl = current_kl_coef * kl_tensor
-        kl_value = float(kl_tensor.detach().item())
-
-        entropies = compute_entropy(
-            model,
-            input_ids_tensor,
-            attention_mask_tensor,
-            batch_prompt_lens,
-            batch_comp_lens,
-        )
-        if not _is_finite_tensor(entropies):
-            logger.warning("Non-finite entropies; skipping batch")
-            continue
-        loss_entropy = -TRAINER_ENTROPY_COEF * entropies.mean()
-
-        loss_total = loss_pg + loss_kl + loss_entropy
-
-        # Skip backward on non-finite loss to avoid corrupting optimizer state
-        if not torch.isfinite(loss_total):
-            loss_pg_v = torch.nan_to_num(loss_pg).item()
-            loss_kl_v = torch.nan_to_num(loss_kl).item()
-            loss_ent_v = torch.nan_to_num(loss_entropy).item()
-            logger.warning(
-                "Non-finite total loss; skipping batch",
-                extra={
-                    "loss_pg": float(loss_pg_v),
-                    "loss_kl": float(loss_kl_v),
-                    "loss_entropy": float(loss_ent_v),
-                },
-            )
-            continue
-
-        # Zero gradients before backward pass (only at start of accumulation)
-        if grad_accum_counter == 0:
-            optimizer.zero_grad(set_to_none=True)
-
-        # Scale loss by accumulation steps to keep effective LR stable
-        scaled_loss = loss_total / float(TRAINER_GRAD_ACCUM_STEPS)
-        accelerator.backward(scaled_loss)
-        grad_accum_counter += 1
-
-        grad_norm_scalar = None
-        # Only step optimizer and clip gradients every N accumulation steps
-        if grad_accum_counter >= TRAINER_GRAD_ACCUM_STEPS:
-            # Clip gradients in fp32 (no mixed precision)
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                model.parameters(),
-                TRAINER_GRAD_CLIP,
-            )
-            grad_norm_scalar = grad_norm.item()
-
-            if torch.isnan(grad_norm) or torch.isinf(grad_norm):
-                loss_tot_v = torch.nan_to_num(loss_total).item()
-                lr_mean = torch.nan_to_num(log_ratio).mean().item()
-                lr_std = torch.nan_to_num(log_ratio).std().item()
-                adv_mean = advantages_tensor.mean().item()
-                adv_std = advantages_tensor.std().item()
-                logger.warning(
-                    "NaN/Inf gradient norm detected; skipping batch",
-                    extra={
-                        "loss_total": float(loss_tot_v),
-                        "log_ratio_mean": float(lr_mean),
-                        "log_ratio_std": float(lr_std),
-                        "adv_mean": float(adv_mean),
-                        "adv_std": float(adv_std),
-                    },
-                )
-                grad_accum_counter = 0
-                continue
-
-            # Standard optimizer step in fp32
-            optimizer.step()
-
-            logger.info(f"Optimizer step completed. Current KL coef: {current_kl_coef}")
-
-            # Adaptive KL adjustment after each optimizer step based on observed KL
-            if TRAINER_ADAPTIVE_KL:
-                if algorithm is not None and hasattr(algorithm, "kl_controller"):
-                    current_kl_coef = algorithm.kl_controller.update(kl_value)
-                else:
-                    # Fallback local adaptation if no controller is provided
-                    if kl_value > TRAINER_KL_TARGET * 1.2:
-                        current_kl_coef = min(
-                            TRAINER_KL_MAX, current_kl_coef * TRAINER_KL_ADAPT_RATE
-                        )
-                    elif kl_value < TRAINER_KL_TARGET * 0.8:
-                        current_kl_coef = max(
-                            TRAINER_KL_MIN, current_kl_coef / TRAINER_KL_ADAPT_RATE
-                        )
-            grad_accum_counter = 0
-
-        epoch_metrics["loss_total"].append(loss_total.item())
-        epoch_metrics["loss_pg"].append(loss_pg.item())
-        epoch_metrics["loss_kl"].append(loss_kl.item())
-        epoch_metrics["loss_entropy"].append(loss_entropy.item())
-        epoch_metrics["grad_norm"].append(grad_norm_scalar if grad_norm_scalar is not None else 0.0)
-        epoch_metrics["advantage_mean"].append(advantages_tensor.mean().item())
-        epoch_metrics["advantage_std"].append(advantages_tensor.std().item())
-        epoch_metrics["entropy_mean"].append(entropies.mean().item())
-        # advantages_normalized is now same as advantages_tensor (no batch normalization)
-        epoch_metrics["advantage_mean_normalized"].append(advantages_normalized.mean().item())
-        epoch_metrics["advantage_std_normalized"].append(advantages_normalized.std().item())
-        # Track divergence metrics (use clamped log_ratio for safe exponentiation)
-        epoch_metrics["kl_divergence"].append(kl_value)
-        # Pre-ceiling ratio stats (consistent with historical logging)
-        epoch_metrics["ratio_mean"].append(ratios_pre_ceiling.mean().item())
-        epoch_metrics["ratio_std"].append(ratios_pre_ceiling.std().item())
-        # Clipping diagnostics (0 when importance sampling disabled)
-        epoch_metrics["ratio_clip_frac"].append(ratio_clip_frac_val)
-        epoch_metrics["ratio_ceiling_frac"].append(ratio_ceiling_frac_val)
-        epoch_metrics["kl_coef"].append(current_kl_coef)
-        # Track how many samples have miner-provided behavior logprobs
-        epoch_metrics["behavior_logprobs_frac"].append(1.0)
-        # Track reward curve
-        epoch_metrics["reward_mean"].append(torch.tensor(batch_rewards).mean().item())
-        epoch_metrics["reward_std"].append(torch.tensor(batch_rewards).std().item())
-
-        # Log per-batch metrics if monitor is available for fine-grained tracking
-        if monitor is not None and algorithm is not None:
-            # Use global batch counter for smooth, continuous x-axis across all windows
-            algorithm.global_batch_counter += 1
-            batch_log_metrics = {
-                "loss_total": loss_total.item(),
-                "loss_pg": loss_pg.item(),
-                "loss_kl": loss_kl.item(),
-                "loss_entropy": loss_entropy.item(),
-                "grad_norm": grad_norm_scalar if grad_norm_scalar is not None else 0.0,
-                "advantage_mean": advantages_tensor.mean().item(),
-                "reward_mean": torch.tensor(batch_rewards).mean().item(),
-                "kl_divergence": kl_value,
-                "entropy_mean": entropies.mean().item(),
-                "ratio_clip_frac": ratio_clip_frac_val,
-                "ratio_ceiling_frac": ratio_ceiling_frac_val,
-            }
-            for key, value in batch_log_metrics.items():
-                try:
-                    await monitor.log_gauge(
-                        f"training/batch/{key}",
-                        value,
-                        tags={"batch_step": str(algorithm.global_batch_counter)},  # Global counter
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("Failed to log batch metric %s: %s", key, exc)
-
-    # Handle remaining accumulated gradients at epoch end
-    if grad_accum_counter > 0:
-        final_grad_norm = torch.nn.utils.clip_grad_norm_(
-            model.parameters(),
-            TRAINER_GRAD_CLIP,
-        )
-        if not (torch.isnan(final_grad_norm) or torch.isinf(final_grad_norm)):
-            optimizer.step()
-
-    return {
-        metric: sum(values) / len(values) if values else 0.0
-        for metric, values in epoch_metrics.items()
-    }
-
-
 class GRPOAlgorithm(TrainingAlgorithm):
     """GRPO algorithm implementation."""
 
     name: str = "grpo"
 
-    def __init__(self) -> None:
+    def __init__(self, adaptive_kl_enabled: bool = False) -> None:
         super().__init__()
         # Persistent adaptive KL controller across epochs/windows
         self.kl_controller: AdaptiveKLController = AdaptiveKLController(
@@ -1343,6 +924,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
             max_value=TRAINER_KL_MAX,
             adapt_rate=TRAINER_KL_ADAPT_RATE,
         )
+        self.adaptive_kl_enabled: bool = bool(adaptive_kl_enabled)
 
     async def train_epoch(
         self,
@@ -1360,14 +942,398 @@ class GRPOAlgorithm(TrainingAlgorithm):
         # Increment global epoch counter for continuous tracking
         self.global_epoch_counter += 1
 
-        return await train_grpo_epoch(
-            model,
-            ref_model,
-            tokenizer,
-            groups,
-            optimizer,
-            accelerator,
-            monitor,
-            window,
-            algorithm=self,  # Pass self to access global counters
-        )
+        batch_size = config.batch_size
+
+        model.train()
+        ref_model.eval()
+
+        all_rollouts: list[tuple] = []
+        for group in groups:
+            for rollout in group.rollouts:
+                all_rollouts.append((rollout, group.group_id))
+
+        all_rollouts.sort(key=lambda item: (item[1], item[0].nonce))
+
+        # Use batch_size parameter (defaults to TRAINER_BATCH_SIZE if not provided)
+        num_batches = math.ceil(len(all_rollouts) / batch_size)
+
+        epoch_metrics: dict[str, list[float]] = defaultdict(list)
+        grad_accum_counter = 0
+
+        # Adaptive KL coefficient: prefer persistent controller on algorithm instance
+        if self.adaptive_kl_enabled and hasattr(self, "kl_controller"):
+            current_kl_coef = float(getattr(self.kl_controller, "value", TRAINER_KL_COEF))
+        else:
+            current_kl_coef = float(TRAINER_KL_COEF)
+
+        for batch_idx in range(num_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, len(all_rollouts))
+            batch_rollouts = [all_rollouts[i][0] for i in range(start_idx, end_idx)]
+
+            batch_tokens: list[list[int]] = []
+            batch_prompt_lens: list[int] = []
+            batch_comp_lens: list[int] = []
+            batch_advantages: list[float] = []
+            batch_behavior_seq_logprobs: list[float] = []
+            # Store miner-provided behavior per-token logprobs over completion for prompt-average PG
+            batch_rewards: list[float] = []
+
+            for rollout in batch_rollouts:
+                tokens = rollout.tokens[:TRAINER_MAX_LENGTH]
+                batch_tokens.append(tokens)
+
+                # CRITICAL FIX: Recalculate completion_len after truncation
+                # If sequence is truncated, actual completion tokens may be fewer
+                actual_prompt_len = rollout.prompt_length
+                actual_comp_len = min(
+                    rollout.completion_length,
+                    TRAINER_MAX_LENGTH - rollout.prompt_length,
+                )
+                batch_prompt_lens.append(actual_prompt_len)
+                batch_comp_lens.append(actual_comp_len)
+
+                batch_advantages.append(rollout.advantage)
+                batch_rewards.append(rollout.reward)
+
+                # Miner-provided per-token logprobs must exist; aggregate over truncated completion
+                tlp: list[float] = list((rollout.token_logprobs or [])[:TRAINER_MAX_LENGTH])
+                prompt_len = actual_prompt_len
+                comp_len = actual_comp_len
+                expected_len = prompt_len + comp_len
+
+                if len(tlp) >= expected_len:
+                    # Extract completion logprobs: indices [prompt_len:prompt_len+comp_len]
+                    completion_logprobs = tlp[prompt_len : prompt_len + comp_len]
+                    provided = float(np.sum(completion_logprobs))
+                else:
+                    # Legacy: miner provided only completion logprobs; respect truncation
+                    provided = float(np.sum(tlp[:comp_len]))
+
+                batch_behavior_seq_logprobs.append(provided)
+
+            # Basic structural sanity checks (length mismatches can cause degenerate grads)
+            for i, tokens in enumerate(batch_tokens):
+                expected_len = max(0, batch_prompt_lens[i]) + max(0, batch_comp_lens[i])
+                if len(tokens) < expected_len:
+                    logger.warning(
+                        "Sequence shorter than expected after truncation",
+                        extra={
+                            "idx": i,
+                            "len_tokens": len(tokens),
+                            "expected_len": expected_len,
+                            "prompt_len": batch_prompt_lens[i],
+                            "completion_len": batch_comp_lens[i],
+                        },
+                    )
+
+            max_len = max(len(tokens) for tokens in batch_tokens)
+            # Ensure pad_token_id is set (fallback to eos_token_id if needed)
+            pad_id = tokenizer.pad_token_id
+            if pad_id is None:
+                pad_id = tokenizer.eos_token_id
+                logger.warning("pad_token_id is None; using eos_token_id as fallback")
+
+            input_ids = []
+            attention_masks = []
+            for tokens in batch_tokens:
+                pad_length = max_len - len(tokens)
+                input_ids.append(tokens + [pad_id] * pad_length)
+                attention_masks.append([1] * len(tokens) + [0] * pad_length)
+
+            input_ids_tensor = torch.tensor(
+                input_ids,
+                dtype=torch.long,
+                device=accelerator.device,
+            )
+            attention_mask_tensor = torch.tensor(
+                attention_masks,
+                dtype=torch.long,
+                device=accelerator.device,
+            )
+            advantages_tensor = torch.tensor(
+                batch_advantages,
+                dtype=torch.float32,
+                device=accelerator.device,
+            )
+
+            # Compute current policy logprobs (with per-token for proper KL)
+            logprobs_current_sum, logprobs_current_per_token = compute_logprobs(
+                model,
+                input_ids_tensor,
+                attention_mask_tensor,
+                batch_prompt_lens,
+                batch_comp_lens,
+                return_per_token=True,
+            )
+
+            if not _is_finite_tensor(logprobs_current_sum):
+                cur_min = torch.nan_to_num(logprobs_current_sum).min().item()
+                cur_max = torch.nan_to_num(logprobs_current_sum).max().item()
+                logger.warning(
+                    "Non-finite current logprobs; skipping batch",
+                    extra={"min": float(cur_min), "max": float(cur_max)},
+                )
+                continue
+
+            # OLD/BEHAVIOR policy logprobs for importance sampling
+            # At this point, behavior logprobs are guaranteed to be present and valid
+            logprobs_old = torch.tensor(
+                list(batch_behavior_seq_logprobs),
+                dtype=torch.float32,
+                device=accelerator.device,
+            )
+
+            if not _is_finite_tensor(logprobs_old):
+                old_min = torch.nan_to_num(logprobs_old).min().item()
+                old_max = torch.nan_to_num(logprobs_old).max().item()
+                logger.warning(
+                    "Non-finite old/behavior logprobs; skipping batch",
+                    extra={"min": float(old_min), "max": float(old_max)},
+                )
+                continue
+
+            # Compute REFERENCE model logprobs for KL divergence penalty
+            # (separate from behavior policy - this is for regularization)
+            if ref_model is not None:
+                with torch.no_grad():
+                    logprobs_ref_sum, logprobs_ref_per_token = compute_logprobs(
+                        ref_model,
+                        input_ids_tensor,
+                        attention_mask_tensor,
+                        batch_prompt_lens,
+                        batch_comp_lens,
+                        return_per_token=True,
+                    )
+                if not _is_finite_tensor(logprobs_ref_sum):
+                    ref_min = torch.nan_to_num(logprobs_ref_sum).min().item()
+                    ref_max = torch.nan_to_num(logprobs_ref_sum).max().item()
+                    logger.warning(
+                        "Non-finite reference logprobs; skipping batch",
+                        extra={"min": float(ref_min), "max": float(ref_max)},
+                    )
+                    continue
+            else:
+                # If no ref model, set ref logprobs to old logprobs (zero KL)
+                logprobs_ref_sum = logprobs_old
+                logprobs_ref_per_token = logprobs_current_per_token.detach()
+
+            # Importance sampling log-ratio: π_current / π_old (behavior)
+            log_ratio = logprobs_current_sum - logprobs_old
+            if not _is_finite_tensor(log_ratio):
+                logger.debug("Non-finite log-ratio before clamp; applying clamp")
+            # Moderate clamp for numerical stability when exponentiating to ratios
+            log_ratio_clamped = torch.clamp(
+                log_ratio, min=-TRAINER_LOGRATIO_CLAMP, max=TRAINER_LOGRATIO_CLAMP
+            )
+
+            # Advantage normalization for stable gradients
+            # IMPORTANT: Normalize advantages to have unit variance while preserving zero-sum
+            # This prevents gradient explosion when advantages have large magnitude
+            # Clip extreme outliers first, then standardize
+            perc_val = float(TRAINER_ADV_CLIP_PERCENTILE)
+            q = max(0.0, min(100.0, perc_val)) / 100.0
+            if 0.0 < q < 1.0:
+                clip_val = torch.quantile(advantages_tensor.abs(), q)
+                if torch.isfinite(clip_val):
+                    advantages_tensor = advantages_tensor.clamp(-clip_val, clip_val)
+
+            # We don't normalize advantages since they are already normalized
+            advantages_normalized = advantages_tensor
+
+            # Policy gradient loss with importance sampling and PPO-style clipping
+            ratio_clip_frac_val: float = 0.0
+            ratio_ceiling_frac_val: float = 0.0
+            ratios_pre_ceiling = torch.exp(log_ratio_clamped)
+            if TRAINER_USE_IS:
+                # Importance sampling ratio with numerical stability clamp, then hard ceiling
+                if TRAINER_IS_RATIO_MAX > 0.0:
+                    ceiling_mask = ratios_pre_ceiling > TRAINER_IS_RATIO_MAX
+                    ratios = torch.clamp(ratios_pre_ceiling, max=TRAINER_IS_RATIO_MAX)
+                else:
+                    ceiling_mask = torch.zeros_like(ratios_pre_ceiling, dtype=torch.bool)
+                    ratios = ratios_pre_ceiling
+
+                # Asymmetric PPO-style clipping (DAPO-style): tighter lower bound, relaxed upper bound
+                lower = 1.0 - TRAINER_PPO_CLIP_EPS
+                upper = 1.0 + TRAINER_PPO_CLIP_EPS_UPPER
+                ratios_clipped = torch.clamp(ratios, lower, upper)
+
+                # Track clipping statistics for monitoring
+                clip_mask = (ratios < lower) | (ratios > upper)
+                ratio_clip_frac_val = clip_mask.float().mean().item()
+                ratio_ceiling_frac_val = ceiling_mask.float().mean().item()
+
+                pg_unclipped = ratios * advantages_normalized
+                pg_clipped = ratios_clipped * advantages_normalized
+                loss_pg = -torch.min(pg_unclipped, pg_clipped).mean()
+            else:
+                # On-policy: no ratio, just advantage-weighted logprobs
+                loss_pg = -(advantages_normalized * logprobs_current_sum).mean()
+
+            # KL divergence penalty: KL(π_current || π_ref)
+            # Proper per-token KL with completion masks
+            max_comp_len = logprobs_current_per_token.shape[1]
+            # Build completion mask: [batch_size, max_comp_len]
+            # Vectorized construction of completion mask: [batch_size, max_comp_len]
+            comp_lens_tensor = torch.as_tensor(batch_comp_lens, device=accelerator.device)
+            token_positions = torch.arange(max_comp_len, device=accelerator.device)
+            completion_mask = (token_positions.unsqueeze(0) < comp_lens_tensor.unsqueeze(1)).to(
+                torch.float32
+            )
+
+            # Per-token log-ratio for KL: log(π/π_ref)
+            per_token_log_ratio = logprobs_current_per_token - logprobs_ref_per_token
+            # Approximate KL via: 0.5 * E[(log π - log π_ref)²]
+            # This is a symmetric approximation that's numerically stable
+            per_token_kl = 0.5 * per_token_log_ratio.pow(2) * completion_mask
+            # Mean over valid tokens (token-weighted, not sequence-weighted)
+            kl_tensor = per_token_kl.sum() / completion_mask.sum().clamp(min=1.0)
+            loss_kl = current_kl_coef * kl_tensor
+            kl_value = float(kl_tensor.detach().item())
+
+            entropies = compute_entropy(
+                model,
+                input_ids_tensor,
+                attention_mask_tensor,
+                batch_prompt_lens,
+                batch_comp_lens,
+            )
+            if not _is_finite_tensor(entropies):
+                logger.warning("Non-finite entropies; skipping batch")
+                continue
+            loss_entropy = -TRAINER_ENTROPY_COEF * entropies.mean()
+
+            loss_total = loss_pg + loss_kl + loss_entropy
+
+            # Skip backward on non-finite loss to avoid corrupting optimizer state
+            if not torch.isfinite(loss_total):
+                loss_pg_v = torch.nan_to_num(loss_pg).item()
+                loss_kl_v = torch.nan_to_num(loss_kl).item()
+                loss_ent_v = torch.nan_to_num(loss_entropy).item()
+                logger.warning(
+                    "Non-finite total loss; skipping batch",
+                    extra={
+                        "loss_pg": float(loss_pg_v),
+                        "loss_kl": float(loss_kl_v),
+                        "loss_entropy": float(loss_ent_v),
+                    },
+                )
+                continue
+
+            # Zero gradients before backward pass (only at start of accumulation)
+            if grad_accum_counter == 0:
+                optimizer.zero_grad(set_to_none=True)
+
+            # Scale loss by accumulation steps to keep effective LR stable
+            scaled_loss = loss_total / float(TRAINER_GRAD_ACCUM_STEPS)
+            accelerator.backward(scaled_loss)
+            grad_accum_counter += 1
+
+            grad_norm_scalar = None
+            # Only step optimizer and clip gradients every N accumulation steps
+            if grad_accum_counter >= TRAINER_GRAD_ACCUM_STEPS:
+                # Clip gradients in fp32 (no mixed precision)
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(),
+                    TRAINER_GRAD_CLIP,
+                )
+                grad_norm_scalar = grad_norm.item()
+
+                if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                    loss_tot_v = torch.nan_to_num(loss_total).item()
+                    lr_mean = torch.nan_to_num(log_ratio).mean().item()
+                    lr_std = torch.nan_to_num(log_ratio).std().item()
+                    adv_mean = advantages_tensor.mean().item()
+                    adv_std = advantages_tensor.std().item()
+                    logger.warning(
+                        "NaN/Inf gradient norm detected; skipping batch",
+                        extra={
+                            "loss_total": float(loss_tot_v),
+                            "log_ratio_mean": float(lr_mean),
+                            "log_ratio_std": float(lr_std),
+                            "adv_mean": float(adv_mean),
+                            "adv_std": float(adv_std),
+                        },
+                    )
+                    grad_accum_counter = 0
+                    continue
+
+                # Standard optimizer step in fp32
+                optimizer.step()
+
+                logger.info(f"Optimizer step completed. Current KL coef: {current_kl_coef}")
+
+                # Adaptive KL adjustment after each optimizer step based on observed KL
+                if self.adaptive_kl_enabled and hasattr(self, "kl_controller"):
+                    current_kl_coef = self.kl_controller.update(kl_value)
+                grad_accum_counter = 0
+
+            epoch_metrics["loss_total"].append(loss_total.item())
+            epoch_metrics["loss_pg"].append(loss_pg.item())
+            epoch_metrics["loss_kl"].append(loss_kl.item())
+            epoch_metrics["loss_entropy"].append(loss_entropy.item())
+            epoch_metrics["grad_norm"].append(
+                grad_norm_scalar if grad_norm_scalar is not None else 0.0
+            )
+            epoch_metrics["advantage_mean"].append(advantages_tensor.mean().item())
+            epoch_metrics["advantage_std"].append(advantages_tensor.std().item())
+            epoch_metrics["entropy_mean"].append(entropies.mean().item())
+            # advantages_normalized is now same as advantages_tensor (no batch normalization)
+            epoch_metrics["advantage_mean_normalized"].append(advantages_normalized.mean().item())
+            epoch_metrics["advantage_std_normalized"].append(advantages_normalized.std().item())
+            # Track divergence metrics (use clamped log_ratio for safe exponentiation)
+            epoch_metrics["kl_divergence"].append(kl_value)
+            # Pre-ceiling ratio stats (consistent with historical logging)
+            epoch_metrics["ratio_mean"].append(ratios_pre_ceiling.mean().item())
+            epoch_metrics["ratio_std"].append(ratios_pre_ceiling.std().item())
+            # Clipping diagnostics (0 when importance sampling disabled)
+            epoch_metrics["ratio_clip_frac"].append(ratio_clip_frac_val)
+            epoch_metrics["ratio_ceiling_frac"].append(ratio_ceiling_frac_val)
+            epoch_metrics["kl_coef"].append(current_kl_coef)
+            # Track how many samples have miner-provided behavior logprobs
+            epoch_metrics["behavior_logprobs_frac"].append(1.0)
+            # Track reward curve
+            epoch_metrics["reward_mean"].append(torch.tensor(batch_rewards).mean().item())
+            epoch_metrics["reward_std"].append(torch.tensor(batch_rewards).std().item())
+
+            # Log per-batch metrics if monitor is available for fine-grained tracking
+            if monitor is not None:
+                # Use global batch counter for smooth, continuous x-axis across all windows
+                self.global_batch_counter += 1
+                batch_log_metrics = {
+                    "loss_total": loss_total.item(),
+                    "loss_pg": loss_pg.item(),
+                    "loss_kl": loss_kl.item(),
+                    "loss_entropy": loss_entropy.item(),
+                    "grad_norm": grad_norm_scalar if grad_norm_scalar is not None else 0.0,
+                    "advantage_mean": advantages_tensor.mean().item(),
+                    "reward_mean": torch.tensor(batch_rewards).mean().item(),
+                    "kl_divergence": kl_value,
+                    "entropy_mean": entropies.mean().item(),
+                    "ratio_clip_frac": ratio_clip_frac_val,
+                    "ratio_ceiling_frac": ratio_ceiling_frac_val,
+                }
+                for key, value in batch_log_metrics.items():
+                    try:
+                        await monitor.log_gauge(
+                            f"training/batch/{key}",
+                            value,
+                            tags={"batch_step": str(self.global_batch_counter)},  # Global counter
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("Failed to log batch metric %s: %s", key, exc)
+
+        # Handle remaining accumulated gradients at epoch end
+        if grad_accum_counter > 0:
+            final_grad_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                TRAINER_GRAD_CLIP,
+            )
+            if not (torch.isnan(final_grad_norm) or torch.isinf(final_grad_norm)):
+                optimizer.step()
+
+        return {
+            metric: sum(values) / len(values) if values else 0.0
+            for metric, values in epoch_metrics.items()
+        }

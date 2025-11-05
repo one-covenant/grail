@@ -348,13 +348,12 @@ class TrainingDataGenerator:
         self.config = config
 
     def generate_groups(
-        self, problem_seeds: list[int], grpo_module: Any, max_problems: int | None = None
+        self, problem_seeds: list[int], max_problems: int | None = None
     ) -> tuple[list[Any], list[float], dict[int, list[float]]]:
         """Generate GRPO groups from problems.
 
         Args:
             problem_seeds: List of problem seeds
-            grpo_module: GRPO module
             max_problems: Maximum number of problems to generate (default: all)
 
         Returns:
@@ -558,13 +557,40 @@ class TrainingLoopManager:
         self.config = config
         self.data_generator = data_generator
 
+    async def _run_grpo_epoch(self, groups: list[Any], window: int) -> dict[str, float]:
+        """Helper method to run GRPO training epoch.
+
+        Encapsulates GRPOAlgorithm and TrainingConfig creation to follow DRY principle.
+
+        Args:
+            groups: List of GRPO groups for training.
+            window: The training window number.
+
+        Returns:
+            Dictionary of training metrics for the epoch.
+        """
+        from grail.trainer.algorithms.grpo import GRPOAlgorithm
+        from grail.trainer.config import TrainingConfig
+
+        algorithm = GRPOAlgorithm()
+        config = TrainingConfig()
+        return await algorithm.train_epoch(
+            self.model,
+            self.ref_model,
+            self.tokenizer,
+            groups,
+            self.optimizer,
+            self.accelerator,
+            None,
+            window,
+            config,
+        )
+
     async def train_online_grpo(
         self,
         train_problem_seeds: list[int],
         eval_problem_seeds: list[int],
         baseline_eval_mean: float,
-        train_grpo_epoch: Any,
-        grpo_module: Any,
     ) -> tuple[list[float], list[float]]:
         """Run online GRPO training: generate fresh data → train on batches → evaluate.
 
@@ -609,7 +635,7 @@ class TrainingLoopManager:
                 )
 
                 training_groups, all_rewards, problem_rewards = self.data_generator.generate_groups(
-                    iteration_seeds, grpo_module, max_problems=self.config.problems_per_iteration
+                    iteration_seeds, max_problems=self.config.problems_per_iteration
                 )
 
                 if not training_groups:
@@ -647,16 +673,9 @@ class TrainingLoopManager:
                         )
 
                         try:
-                            metrics = await train_grpo_epoch(
-                                self.model,
-                                self.ref_model,
-                                self.tokenizer,
+                            metrics = await self._run_grpo_epoch(
                                 batch,
-                                self.optimizer,
-                                accelerator=self.accelerator,
-                                monitor=None,
-                                window=iteration * self.config.num_epochs_per_iteration + epoch,
-                                batch_size=self.config.batch_size,
+                                iteration * self.config.num_epochs_per_iteration + epoch,
                             )
 
                             loss = metrics.get("loss_total", 0.0)
@@ -859,10 +878,6 @@ class TestGRPOGPURealData:
         import grail.shared.constants as C
 
         C = importlib.reload(C)
-        import grail.trainer.algorithms.grpo as grpo
-
-        grpo = importlib.reload(grpo)
-        from grail.trainer.algorithms.grpo import train_grpo_epoch
 
         # Setup logging
         logging.basicConfig(
@@ -1023,7 +1038,7 @@ class TestGRPOGPURealData:
         )
 
         iteration_means, loss_curve = await trainer.train_online_grpo(
-            train_problem_seeds, eval_problem_seeds, baseline_eval_mean, train_grpo_epoch, grpo
+            train_problem_seeds, eval_problem_seeds, baseline_eval_mean
         )
 
         # Results & visualization

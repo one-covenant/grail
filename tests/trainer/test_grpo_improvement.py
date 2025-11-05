@@ -23,7 +23,6 @@ from grail.environments.core import ChatMessage, Observation, SingleTurnEnv
 from grail.trainer.algorithms.grpo import (
     GRPOGroup,
     GRPORollout,
-    train_grpo_epoch,
 )
 
 logger = logging.getLogger(__name__)
@@ -92,6 +91,7 @@ class TestGRPOImprovementOnToyEnv:
         tiny_qwen_model_and_tokenizer: tuple[Any, Any],
         monkeypatch_trainer_constants: None,
         accelerator_cpu: Any,
+        run_grpo_epoch: Any,
     ) -> None:
         """Test GRPO training improves or maintains reward on toy environment.
 
@@ -145,15 +145,8 @@ class TestGRPOImprovementOnToyEnv:
         epoch_metrics_list: list[dict[str, float]] = []
 
         for epoch in range(num_epochs):
-            metrics = await train_grpo_epoch(
-                model,
-                ref_model,
-                tokenizer,
-                [baseline_group],
-                optimizer,
-                accelerator_cpu,
-                monitor=None,
-                window=0,
+            metrics = await run_grpo_epoch(
+                model, ref_model, tokenizer, [baseline_group], optimizer, accelerator_cpu
             )
             epoch_metrics_list.append(metrics)
 
@@ -200,6 +193,7 @@ class TestGRPOImprovementOnToyEnv:
         tiny_qwen_model_and_tokenizer: tuple[Any, Any],
         monkeypatch_trainer_constants: None,
         accelerator_cpu: Any,
+        run_grpo_epoch: Any,
     ) -> None:
         """Test GRPO training never produces NaN loss."""
         model, tokenizer = tiny_qwen_model_and_tokenizer
@@ -229,15 +223,8 @@ class TestGRPOImprovementOnToyEnv:
 
         group = GRPOGroup(group_id="test", rollouts=rollouts)
 
-        metrics = await train_grpo_epoch(
-            model,
-            ref_model,
-            tokenizer,
-            [group],
-            optimizer,
-            accelerator_cpu,
-            monitor=None,
-            window=0,
+        metrics = await run_grpo_epoch(
+            model, ref_model, tokenizer, [group], optimizer, accelerator_cpu
         )
 
         # Verify all losses are finite
@@ -263,6 +250,7 @@ class TestGSM8KImprovementLong:
         monkeypatch_trainer_constants: None,
         accelerator_cpu: Any,
         gsm8k_env_factory: Any,
+        run_grpo_epoch: Any,
     ) -> None:
         """Test GRPO training on real GSM8K environment.
 
@@ -331,15 +319,8 @@ class TestGSM8KImprovementLong:
         logger.info(f"=== Starting training ({num_epochs} epochs) ===")
 
         for epoch in range(num_epochs):
-            metrics = await train_grpo_epoch(
-                model,
-                ref_model,
-                tokenizer,
-                baseline_groups,
-                optimizer,
-                accelerator_cpu,
-                monitor=None,
-                window=0,
+            metrics = await run_grpo_epoch(
+                model, ref_model, tokenizer, baseline_groups, optimizer, accelerator_cpu
             )
 
             logger.info(

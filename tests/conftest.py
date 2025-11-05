@@ -349,3 +349,63 @@ def gsm8k_env_factory() -> Callable[[], Any]:
         return GSM8KEnv()
 
     return _make_env
+
+
+@pytest.fixture
+def run_grpo_epoch() -> Callable[..., Any]:
+    """Helper fixture to run a GRPO training epoch.
+
+    Encapsulates the pattern of creating GRPOAlgorithm, TrainingConfig,
+    and calling train_epoch to reduce code duplication across tests.
+
+    Returns:
+        A callable that runs one GRPO epoch and returns metrics.
+
+    Usage:
+        metrics = await run_grpo_epoch(
+            model, ref_model, tokenizer, groups, optimizer, accelerator
+        )
+    """
+    from grail.trainer.algorithms.grpo import GRPOAlgorithm
+    from grail.trainer.config import TrainingConfig
+
+    async def _run_epoch(
+        model: Any,
+        ref_model: Any,
+        tokenizer: Any,
+        groups: list[Any],
+        optimizer: Any,
+        accelerator: Any,
+        monitor: Any | None = None,
+        window: int = 0,
+    ) -> dict[str, float]:
+        """Run one GRPO training epoch.
+
+        Args:
+            model: The training model.
+            ref_model: The reference model for KL divergence.
+            tokenizer: The tokenizer.
+            groups: List of GRPO groups for training.
+            optimizer: The optimizer.
+            accelerator: The accelerator for distributed training.
+            monitor: Optional monitor for metrics logging.
+            window: The training window number (default 0 for tests).
+
+        Returns:
+            Dictionary of training metrics for the epoch.
+        """
+        algorithm = GRPOAlgorithm()
+        config = TrainingConfig()
+        return await algorithm.train_epoch(
+            model,
+            ref_model,
+            tokenizer,
+            groups,
+            optimizer,
+            accelerator,
+            monitor,
+            window,
+            config,
+        )
+
+    return _run_epoch

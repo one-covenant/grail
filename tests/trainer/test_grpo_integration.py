@@ -20,7 +20,6 @@ import torch
 from grail.trainer.algorithms.grpo import (
     GRPOGroup,
     GRPORollout,
-    train_grpo_epoch,
 )
 
 
@@ -128,21 +127,20 @@ class TestGRPOEpochMetricsStructure:
         monkeypatch_trainer_constants: None,
         accelerator_cpu: Any,
         synthetic_grpo_groups: list[GRPOGroup],
+        run_grpo_epoch: Any,
     ) -> None:
         """Test train_grpo_epoch returns all expected metrics."""
         model, tokenizer = tiny_qwen_model_and_tokenizer
         ref_model = model
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
 
-        metrics = await train_grpo_epoch(
+        metrics = await run_grpo_epoch(
             model,
             ref_model,
             tokenizer,
             synthetic_grpo_groups,
             optimizer,
             accelerator_cpu,
-            monitor=None,
-            window=0,
         )
 
         # Check all expected metric keys are present
@@ -170,21 +168,20 @@ class TestGRPOEpochMetricsStructure:
         monkeypatch_trainer_constants: None,
         accelerator_cpu: Any,
         synthetic_grpo_groups: list[GRPOGroup],
+        run_grpo_epoch: Any,
     ) -> None:
         """Test all metrics are finite values."""
         model, tokenizer = tiny_qwen_model_and_tokenizer
         ref_model = model
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
 
-        metrics = await train_grpo_epoch(
+        metrics = await run_grpo_epoch(
             model,
             ref_model,
             tokenizer,
             synthetic_grpo_groups,
             optimizer,
             accelerator_cpu,
-            monitor=None,
-            window=0,
         )
 
         for key, value in metrics.items():
@@ -204,21 +201,20 @@ class TestGRPOEpochMetricsStructure:
         monkeypatch_trainer_constants: None,
         accelerator_cpu: Any,
         synthetic_grpo_groups_with_behavior: list[GRPOGroup],
+        run_grpo_epoch: Any,
     ) -> None:
         """Test train_grpo_epoch with partial miner-provided logprobs."""
         model, tokenizer = tiny_qwen_model_and_tokenizer
         ref_model = model
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
 
-        metrics = await train_grpo_epoch(
+        metrics = await run_grpo_epoch(
             model,
             ref_model,
             tokenizer,
             synthetic_grpo_groups_with_behavior,
             optimizer,
             accelerator_cpu,
-            monitor=None,
-            window=0,
         )
 
         # Should have behavior_frac metric when logprobs are provided
@@ -236,21 +232,20 @@ class TestGRPOEpochMetricsStructure:
         monkeypatch_trainer_constants: None,
         accelerator_cpu: Any,
         synthetic_grpo_groups: list[GRPOGroup],
+        run_grpo_epoch: Any,
     ) -> None:
         """Test grad_norm is positive if optimizer stepped."""
         model, tokenizer = tiny_qwen_model_and_tokenizer
         ref_model = model
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
 
-        metrics = await train_grpo_epoch(
+        metrics = await run_grpo_epoch(
             model,
             ref_model,
             tokenizer,
             synthetic_grpo_groups,
             optimizer,
             accelerator_cpu,
-            monitor=None,
-            window=0,
         )
 
         grad_norm = metrics.get("grad_norm", 0.0)
@@ -305,6 +300,7 @@ class TestTokenTruncation:
         tiny_qwen_model_and_tokenizer: tuple[Any, Any],
         monkeypatch_trainer_constants: None,
         accelerator_cpu: Any,
+        run_grpo_epoch: Any,
     ) -> None:
         """Test training with sequences exceeding TRAINER_MAX_LENGTH."""
         from grail.shared.constants import TRAINER_MAX_LENGTH
@@ -339,15 +335,13 @@ class TestTokenTruncation:
         groups = [group]
 
         # Should not crash
-        metrics = await train_grpo_epoch(
+        metrics = await run_grpo_epoch(
             model,
             ref_model,
             tokenizer,
             groups,
             optimizer,
             accelerator_cpu,
-            monitor=None,
-            window=0,
         )
 
         assert isinstance(metrics, dict)
@@ -365,6 +359,7 @@ class TestBatchPadding:
         tiny_qwen_model_and_tokenizer: tuple[Any, Any],
         monkeypatch_trainer_constants: None,
         accelerator_cpu: Any,
+        run_grpo_epoch: Any,
     ) -> None:
         """Test training with variable-length sequences in batch."""
         model, tokenizer = tiny_qwen_model_and_tokenizer
@@ -396,15 +391,13 @@ class TestBatchPadding:
         groups = [group]
 
         # Should handle variable lengths without crashing
-        metrics = await train_grpo_epoch(
+        metrics = await run_grpo_epoch(
             model,
             ref_model,
             tokenizer,
             groups,
             optimizer,
             accelerator_cpu,
-            monitor=None,
-            window=0,
         )
 
         assert isinstance(metrics, dict)
@@ -421,6 +414,7 @@ class TestEmptyGroupHandling:
         tiny_qwen_model_and_tokenizer: tuple[Any, Any],
         monkeypatch_trainer_constants: None,
         accelerator_cpu: Any,
+        run_grpo_epoch: Any,
     ) -> None:
         """Test train_grpo_epoch with empty groups list."""
         model, tokenizer = tiny_qwen_model_and_tokenizer
@@ -430,15 +424,13 @@ class TestEmptyGroupHandling:
         groups: list[GRPOGroup] = []
 
         # Should return empty metrics or zeros
-        metrics = await train_grpo_epoch(
+        metrics = await run_grpo_epoch(
             model,
             ref_model,
             tokenizer,
             groups,
             optimizer,
             accelerator_cpu,
-            monitor=None,
-            window=0,
         )
 
         assert isinstance(metrics, dict)
