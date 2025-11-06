@@ -157,9 +157,9 @@ def _print_decoded_rollout_samples(
         logger.debug("Failed to load tokenizer for %s: %s", model_name, e)
         return
 
-    logger.info("=" * 100)
-    logger.info("DECODED ROLLOUT SAMPLES (Model: %s)", model_name)
-    logger.info("=" * 100)
+    logger.info("=" * 100, extra={"markup": False})
+    logger.info("DECODED ROLLOUT SAMPLES (Model: %s)", model_name, extra={"markup": False})
+    logger.info("=" * 100, extra={"markup": False})
 
     for miner_hotkey, window_data in miner_data.items():
         if not isinstance(window_data, dict):
@@ -169,7 +169,12 @@ def _print_decoded_rollout_samples(
         if not isinstance(inferences, list):
             continue
 
-        logger.info("\nMiner: %s | Total rollouts: %d", miner_hotkey[:16], len(inferences))
+        logger.info(
+            "\nMiner: %s | Total rollouts: %d",
+            miner_hotkey[:16],
+            len(inferences),
+            extra={"markup": False},
+        )
 
         for idx, rollout in enumerate(inferences[:max_samples_per_miner]):
             if not isinstance(rollout, dict):
@@ -191,6 +196,7 @@ def _print_decoded_rollout_samples(
                 completion_length,
                 success,
                 reward,
+                extra={"markup": False},
             )
 
             if tokens and isinstance(tokens, list):
@@ -204,9 +210,10 @@ def _print_decoded_rollout_samples(
                         "    [PROMPT (first %d tokens)]:\n%s",
                         min(max_tokens_to_show, len(prompt_tokens)),
                         prompt_text,
+                        extra={"markup": False},
                     )
                 except Exception as e:
-                    logger.debug("Failed to decode prompt: %s", e)
+                    logger.debug("Failed to decode prompt: %s", e, extra={"markup": False})
 
                 # Decode completion
                 if completion_length > 0 and prompt_length < len(tokens):
@@ -219,13 +226,14 @@ def _print_decoded_rollout_samples(
                             "    [COMPLETION (first %d tokens)]:\n%s",
                             len(comp_tokens),
                             comp_text[:500],
+                            extra={"markup": False},
                         )
                     except Exception as e:
-                        logger.debug("Failed to decode completion: %s", e)
+                        logger.debug("Failed to decode completion: %s", e, extra={"markup": False})
             else:
-                logger.info("    [No tokens available]")
+                logger.info("    [No tokens available]", extra={"markup": False})
 
-    logger.info("=" * 100)
+    logger.info("=" * 100, extra={"markup": False})
 
 
 @dataclass
@@ -416,12 +424,15 @@ def _group_rollouts(raw_rollouts: list[dict[str, Any]]) -> dict[str, list[GRPORo
     return grouped
 
 
-def _compute_training_metrics(groups: list[GRPOGroup], window: int) -> dict[str, Any]:
+def _compute_training_metrics(
+    groups: list[GRPOGroup], window: int, eos_token_id: int | None = None
+) -> dict[str, Any]:
     """Compute and log pre-training data quality metrics for GRPO groups.
 
     Args:
         groups: List of GRPO groups
         window: Training window number
+        eos_token_id: Optional EOS token ID to determine terminated completions
 
     Returns:
         Dictionary of computed metrics keyed by metric name (with pass@k, mean@k, etc.)
@@ -435,6 +446,11 @@ def _compute_training_metrics(groups: list[GRPOGroup], window: int) -> dict[str,
         report_ks = sorted(set(report_ks))
 
     aggregator = KMetricsAggregator(report_ks=report_ks)
+
+    # Track completion lengths
+    all_completion_lengths: list[int] = []
+    terminated_completion_lengths: list[int] = []
+
     for group in groups:
         # Define replicate order deterministically by nonce
         ordered = sorted(group.rollouts, key=lambda r: r.nonce)
@@ -448,7 +464,32 @@ def _compute_training_metrics(groups: list[GRPOGroup], window: int) -> dict[str,
                 )
             )
 
+            # Track completion lengths
+            completion_len = r.completion_length
+            all_completion_lengths.append(completion_len)
+
+            # Check if completion is terminated with EOS
+            if eos_token_id is not None and completion_len > 0:
+                # Get the last token of the completion
+                prompt_len = r.prompt_length
+                if len(r.tokens) >= prompt_len + completion_len:
+                    last_completion_token = r.tokens[prompt_len + completion_len - 1]
+                    if last_completion_token == eos_token_id:
+                        terminated_completion_lengths.append(completion_len)
+
     prefilter_metrics = aggregator.summarize()
+
+    # Add length-related metrics
+    if all_completion_lengths:
+        prefilter_metrics["mean_length"] = float(np.mean(all_completion_lengths))
+        prefilter_metrics["min_length"] = float(np.min(all_completion_lengths))
+        prefilter_metrics["max_length"] = float(np.max(all_completion_lengths))
+
+    # Add terminated completion metrics if we have EOS token ID
+    if terminated_completion_lengths:
+        prefilter_metrics["mean_terminated_length"] = float(np.mean(terminated_completion_lengths))
+        prefilter_metrics["min_terminated_length"] = float(np.min(terminated_completion_lengths))
+        prefilter_metrics["max_terminated_length"] = float(np.max(terminated_completion_lengths))
     if prefilter_metrics:
         # Log a concise, stable set of key indicators
         # Align k-values with ROLLOUTS_PER_PROBLEM for readability
@@ -468,6 +509,13 @@ def _compute_training_metrics(groups: list[GRPOGroup], window: int) -> dict[str,
         summary_bits.append(f"reward_mean={prefilter_metrics.get('reward_mean_all', 0.0):.3f}")
         summary_bits.append(f"reward_std={prefilter_metrics.get('reward_std_all', 0.0):.3f}")
         summary_bits.append(f"success_rate={prefilter_metrics.get('success_rate_all', 0.0):.3f}")
+        # Add length metrics to summary
+        if "mean_length" in prefilter_metrics:
+            summary_bits.append(f"mean_length={prefilter_metrics.get('mean_length', 0.0):.1f}")
+        if "mean_terminated_length" in prefilter_metrics:
+            summary_bits.append(
+                f"mean_terminated_length={prefilter_metrics.get('mean_terminated_length', 0.0):.1f}"
+            )
         logger.info(
             "Training data metrics (pre-filter, window %s): %s",
             window,
@@ -662,6 +710,7 @@ async def load_grpo_groups(
     uid_by_hotkey: dict[str, int] | None = None,
     config: TrainingConfig | None = None,
     monitor: Any | None = None,
+    eos_token_id: int | None = None,
 ) -> list[GRPOGroup]:
     """Load and validate GRPO groups directly from trusted miners.
 
@@ -673,6 +722,7 @@ async def load_grpo_groups(
         chain_manager: Chain manager for miner bucket discovery
         uid_by_hotkey: Mapping of hotkey to UID for readable logging
         monitor: Optional monitor for logging metrics to wandb
+        eos_token_id: Optional EOS token ID to determine terminated completions
 
     Returns:
         List of valid GRPO groups
@@ -758,7 +808,7 @@ async def load_grpo_groups(
     ]
 
     # Compute training-set metrics BEFORE filtering invalid groups
-    prefilter_metrics = _compute_training_metrics(groups, window)
+    prefilter_metrics = _compute_training_metrics(groups, window, eos_token_id)
 
     # Log prefilter metrics to monitor with distinct namespace
     if monitor is not None and prefilter_metrics:
@@ -1284,15 +1334,15 @@ class GRPOAlgorithm(TrainingAlgorithm):
             epoch_metrics["advantage_std_normalized"].append(advantages_normalized.std().item())
             # Track divergence metrics (use clamped log_ratio for safe exponentiation)
             epoch_metrics["kl_divergence"].append(kl_value)
+
             # Pre-ceiling ratio stats (consistent with historical logging)
             epoch_metrics["ratio_mean"].append(ratios_pre_ceiling.mean().item())
             epoch_metrics["ratio_std"].append(ratios_pre_ceiling.std().item())
+
             # Clipping diagnostics (0 when importance sampling disabled)
             epoch_metrics["ratio_clip_frac"].append(ratio_clip_frac_val)
             epoch_metrics["ratio_ceiling_frac"].append(ratio_ceiling_frac_val)
-            epoch_metrics["kl_coef"].append(current_kl_coef)
-            # Track how many samples have miner-provided behavior logprobs
-            epoch_metrics["behavior_logprobs_frac"].append(1.0)
+
             # Track reward curve
             epoch_metrics["reward_mean"].append(torch.tensor(batch_rewards).mean().item())
             epoch_metrics["reward_std"].append(torch.tensor(batch_rewards).std().item())

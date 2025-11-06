@@ -108,6 +108,7 @@ class TrainerService:
                 uid_by_hotkey,
                 self.config,
                 self.monitor,
+                self.tokenizer.eos_token_id,
             )
 
             if not groups:
