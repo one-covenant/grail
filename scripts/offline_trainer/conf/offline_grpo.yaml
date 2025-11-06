@@ -2,60 +2,126 @@ defaults: []
 
 seed: 42
 
+# ============================================================================
+# MODEL CONFIGURATION (from .env GRAIL_TRAIN_MODEL_ID and GRAIL_REF_MODEL_ID)
+# ============================================================================
 model:
-  train_id: "Qwen/Qwen2.5-0.5B"
-  ref_id: "Qwen/Qwen2.5-0.5B"
-  device: "auto"  # auto|cuda|cpu
+  train_id: "Qwen/Qwen2.5-1.5B-Instruct"
+  ref_id: "Qwen/Qwen2.5-1.5B-Instruct"
+  device: "auto"  # auto|cuda|cpu|cuda:0|cuda:1
 
+# ============================================================================
+# MULTI-GPU CONFIGURATION
+# ============================================================================
+gpu:
+  # GPU allocation strategy: "single" or "multi"
+  # - single: Run everything on one GPU (good for small models, limited memory)
+  # - multi: Use separate GPUs for vLLM server and training (recommended for production)
+  strategy: "multi"  # single|multi
+  
+  # GPU assignments (only used when strategy="multi")
+  vllm_gpu: 1  # GPU ID for vLLM inference server
+  training_gpu: 0  # GPU ID for training model
+  
+  # vLLM memory settings (adjusted based on strategy)
+  # For multi-GPU: can use more memory since vLLM has dedicated GPU
+  # For single-GPU: must leave room for training model
+  vllm_gpu_memory_utilization: 0.85  # For multi-GPU
+  vllm_gpu_memory_utilization_single: 0.25  # For single-GPU
+
+# ============================================================================
+# GENERATION CONFIGURATION (for rollout generation)
+# ============================================================================
 generation:
-  backend: "vllm_server"  # sglang_server|vllm_server
+  backend: "vllm_server"  # vllm_server|sglang_server (for offline_rollouts.py)
   base_url: "http://127.0.0.1:30001"  # server base URL (OpenAI-compatible /v1)
-  batch_size: 4
-  max_new_tokens: 256
+  batch_size: 16  # Match GRAIL_GENERATION_BATCH_SIZE
+  max_new_tokens: 512  # Match MAX_NEW_TOKENS from constants
   temperature: 0.7
   top_p: 0.95
   top_k: 50
   repetition_penalty: 1.1
 
+# ============================================================================
+# TRAINING CONFIGURATION (matched to .env and constants.py)
+# ============================================================================
 train:
-  iterations: 5
-  batch_size: 8
-  lr: 1.0e-5
-  grad_clip: 1.0
-  kl_coef: 0.05
-  entropy_coef: 0.0
-  grad_accum_steps: 1
+  iterations: 5  # Number of training iterations to run
+  batch_size: 4  # Reduced for memory efficiency (1.5B model)
+  lr: 2.0e-6  # GRAIL_TRAINER_LR
+  grad_clip: 1.0  # GRAIL_TRAINER_GRAD_CLIP
+  grad_accum_steps: 32  # Increased to maintain effective batch size of 128
+  warmup_steps: 50  # GRAIL_TRAINER_WARMUP_STEPS
+  max_length: 1536  # GRAIL_TRAINER_MAX_LENGTH
+  
+  # Loss coefficients
+  kl_coef: 0.00  # GRAIL_TRAINER_KL_COEF (disabled)
+  entropy_coef: 0.0005  # GRAIL_TRAINER_ENTROPY_COEF
+  
+  # Advantage and clipping
+  adv_clip_percentile: 99.0  # TRAINER_ADV_CLIP_PERCENTILE
+  group_adv_sum_tol: 0.01  # TRAINER_GROUP_ADV_SUM_TOL
+  
+  # Importance sampling and PPO clipping
+  use_is: true  # TRAINER_USE_IS
+  ppo_clip_eps: 0.2  # TRAINER_PPO_CLIP_EPS
+  ppo_clip_eps_upper: 0.28  # TRAINER_PPO_CLIP_EPS_UPPER
+  is_ratio_max: 2.5  # GRAIL_TRAINER_IS_RATIO_MAX
+  logratio_clamp: 0.92  # GRAIL_TRAINER_LOGRATIO_CLAMP
+  
+  # Adaptive KL (disabled when kl_coef=0)
+  adaptive_kl: true  # TRAINER_ADAPTIVE_KL
+  kl_target: 0.04  # TRAINER_KL_TARGET
+  kl_adapt_rate: 1.2  # GRAIL_TRAINER_KL_ADAPT_RATE
+  kl_min: 0.001  # TRAINER_KL_MIN
+  kl_max: 0.2  # TRAINER_KL_MAX
 
+# ============================================================================
+# DATA CONFIGURATION (GSM8K environment)
+# ============================================================================
 data:
-  problems_per_iteration: 4
-  rollouts_per_problem: 4
-  train_seed_start: 1000
-  num_train_seeds: 64
+  environment: "gsm8k"  # Environment type: gsm8k or sat
+  problems_per_iteration: 8  # Number of problems per training iteration
+  rollouts_per_problem: 16  # ROLLOUTS_PER_PROBLEM from constants
+  train_seed_start: 1000  # Starting seed for training problems
+  num_train_seeds: 64  # Total pool of training problem seeds
 
+# ============================================================================
+# EVALUATION CONFIGURATION
+# ============================================================================
 eval:
   enabled: true
-  interval: 1
-  backend: "vllm_server"  # sglang_server|vllm_server
+  interval: 1  # Evaluate every N iterations
+  backend: "vllm"  # vllm|sglang|hf (evaluator.py expects these names)
   base_url: "http://127.0.0.1:30001"
-  batch_size: 8
+  batch_size: 16
   do_sample: true
-  max_new_tokens: 256
+  max_new_tokens: 512
   temperature: 0.7
   top_p: 0.95
-  replicates: 4
+  replicates: 8  # Number of rollouts per eval problem
   ids: []  # if empty, will derive from seeds
   seed_base: 4242
-  num_ids: 16
+  num_ids: 32  # Number of evaluation problems
   id_seed_start: 5000
 
+# ============================================================================
+# LOGGING CONFIGURATION
+# ============================================================================
 logging:
   wandb:
-    enabled: false
+    enabled: true
     project: "grail-offline"
-    run_name: null
+    entity: "tplr"
+    run_name: null  # Auto-generated if null
+    tags: ["offline", "gsm8k", "grpo", "multi-gpu"]
+    notes: "Offline GRPO training on GSM8K with multi-GPU setup"
 
+# ============================================================================
+# CHECKPOINT CONFIGURATION
+# ============================================================================
 checkpoint:
-  save_interval: 1  # in iterations
-  keep_last_k: 3
+  save_interval: 1  # Save checkpoint every N iterations
+  keep_last_k: 3  # Keep only the last K checkpoints
 
 
