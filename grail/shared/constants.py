@@ -217,6 +217,18 @@ PROOF_POSITION_IMPORTANCE_DECAY = 100.0
 GRAIL_PROOF_VERSION = "v1"
 
 
+# ────────────────  HELPER FUNCTIONS  ────────────────
+
+
+def is_kl_enabled() -> bool:
+    """Check if KL divergence is enabled based on TRAINER_KL_COEF.
+
+    Returns:
+        True if KL coefficient is greater than zero, False otherwise.
+    """
+    return float(TRAINER_KL_COEF) > 0.0
+
+
 # ────────────────  CHECKPOINT MOD10  ────────────────
 
 # Only for testing purposes; going to be removed later on

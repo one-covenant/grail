@@ -15,7 +15,7 @@ import torch
 from grail.environments.gsm8k_env import GSM8KEnv
 from grail.environments.providers import GSM8KTaskSource
 from grail.infrastructure.chain import GrailChainManager
-from grail.shared.constants import NETUID, READY_MARKER_UPLOAD_BLOCKS, WINDOW_LENGTH
+from grail.shared.constants import NETUID, READY_MARKER_UPLOAD_BLOCKS, WINDOW_LENGTH, is_kl_enabled
 from grail.shared.window_utils import (
     WindowWaitTracker,
     calculate_next_window,
@@ -496,8 +496,9 @@ class TrainerNeuron(BaseNeuron):
         """
         if self._context.train_model is None or self._context.tokenizer is None:
             raise RuntimeError("Cannot save eval checkpoint: train_model/tokenizer not loaded")
-        if self._context.ref_model is None:
-            raise RuntimeError("Cannot save eval checkpoint: ref_model not loaded")
+        kl_enabled: bool = is_kl_enabled()
+        if kl_enabled and self._context.ref_model is None:
+            raise RuntimeError("Cannot save eval checkpoint: ref_model not loaded (KL enabled)")
 
         import json
         import os
@@ -553,25 +554,28 @@ class TrainerNeuron(BaseNeuron):
             except Exception as e:
                 logger.debug("Failed to write training metadata.json: %s", e)
 
-            # Save reference model to subdirectory for separate reload
-            ref_model_dir = os.path.join(checkpoint_dir, "ref_model")
-            os.makedirs(ref_model_dir, exist_ok=True)
-            self._context.ref_model.save_pretrained(
-                ref_model_dir,
-                safe_serialization=True,
-            )
-            logger.info("Saved reference model to eval checkpoint: %s", ref_model_dir)
+            # Save reference model to subdirectory only when KL is enabled
+            if kl_enabled and self._context.ref_model is not None:
+                ref_model_dir = os.path.join(checkpoint_dir, "ref_model")
+                os.makedirs(ref_model_dir, exist_ok=True)
+                self._context.ref_model.save_pretrained(
+                    ref_model_dir,
+                    safe_serialization=True,
+                )
+                logger.info("Saved reference model to eval checkpoint: %s", ref_model_dir)
 
-            # Write metadata for reference model as well
-            try:
-                ref_meta = {
-                    "model_name": self._context.ref_model_path
-                    or getattr(self._context.ref_model, "name_or_path", "model"),
-                }
-                with open(os.path.join(ref_model_dir, "metadata.json"), "w", encoding="utf-8") as f:
-                    json.dump(ref_meta, f)
-            except Exception as e:
-                logger.debug("Failed to write reference metadata.json: %s", e)
+                # Write metadata for reference model as well
+                try:
+                    ref_meta = {
+                        "model_name": self._context.ref_model_path
+                        or getattr(self._context.ref_model, "name_or_path", "model"),
+                    }
+                    with open(
+                        os.path.join(ref_model_dir, "metadata.json"), "w", encoding="utf-8"
+                    ) as f:
+                        json.dump(ref_meta, f)
+                except Exception as e:
+                    logger.debug("Failed to write reference metadata.json: %s", e)
 
             # Persist optimizer/scheduler and RNG states for seamless resume
             try:
@@ -708,10 +712,11 @@ class TrainerNeuron(BaseNeuron):
 
             # Prefer eval checkpoint (exact saved state) over original path
             train_reload_path = self._eval_checkpoint_dir or self._context.train_model_path
+            kl_enabled: bool = is_kl_enabled()
             ref_reload_path = (
                 os.path.join(self._eval_checkpoint_dir, "ref_model")
-                if self._eval_checkpoint_dir
-                else self._context.ref_model_path
+                if kl_enabled and self._eval_checkpoint_dir
+                else (self._context.ref_model_path if kl_enabled else None)
             )
 
             # Reload training model
@@ -727,15 +732,16 @@ class TrainerNeuron(BaseNeuron):
                     "Skipping training model reload: train_reload_path=%s", train_reload_path
                 )
 
-            # Reload reference model from same checkpoint (or original path if no checkpoint)
-            if self._context.ref_model is None and ref_reload_path:
+            # Reload reference model only when KL is enabled
+            if kl_enabled and self._context.ref_model is None and ref_reload_path:
                 reload_source = "eval checkpoint" if self._eval_checkpoint_dir else "original path"
                 logger.info("Reloading reference model from %s: %s", reload_source, ref_reload_path)
                 self._context.ref_model = get_model(ref_reload_path, eval_mode=True)
                 logger.info("✅ Reloaded reference model from %s", reload_source)
             else:
                 logger.debug(
-                    "Skipping reference model reload: ref_reload_path=%s",
+                    "Skipping reference model reload (kl_enabled=%s, ref_reload_path=%s)",
+                    kl_enabled,
                     ref_reload_path,
                 )
 
@@ -906,8 +912,9 @@ class TrainerNeuron(BaseNeuron):
             logger.error("❌ train_model is None at start of _train_window!")
             return False
 
-        if ctx.ref_model is None:
-            logger.error("❌ ref_model is None at start of _train_window!")
+        # Only require reference model when KL is enabled
+        if ctx.ref_model is None and is_kl_enabled():
+            logger.error("❌ ref_model is required when KL is enabled")
             return False
 
         # Update heartbeat before long operation

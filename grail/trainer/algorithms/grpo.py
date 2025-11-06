@@ -45,6 +45,7 @@ from grail.shared.constants import (
     TRAINER_PPO_CLIP_EPS,
     TRAINER_PPO_CLIP_EPS_UPPER,
     TRAINER_USE_IS,
+    is_kl_enabled,
 )
 from grail.trainer.metrics import (
     KMetricsAggregator,
@@ -945,7 +946,10 @@ class GRPOAlgorithm(TrainingAlgorithm):
         batch_size = config.batch_size
 
         model.train()
-        ref_model.eval()
+        # KL gating: if base coefficient is zero, disable KL entirely
+        kl_enabled: bool = is_kl_enabled()
+        if ref_model is not None:
+            ref_model.eval()
 
         all_rollouts: list[tuple] = []
         for group in groups:
@@ -960,9 +964,9 @@ class GRPOAlgorithm(TrainingAlgorithm):
         epoch_metrics: dict[str, list[float]] = defaultdict(list)
         grad_accum_counter = 0
 
-        # Adaptive KL coefficient: prefer persistent controller on algorithm instance
-        if self.adaptive_kl_enabled and hasattr(self, "kl_controller"):
-            current_kl_coef = float(getattr(self.kl_controller, "value", TRAINER_KL_COEF))
+        # Adaptive KL coefficient: prefer persistent controller when KL enabled
+        if kl_enabled and self.adaptive_kl_enabled:
+            current_kl_coef = self.kl_controller.value
         else:
             current_kl_coef = float(TRAINER_KL_COEF)
 
@@ -1093,30 +1097,29 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 )
                 continue
 
-            # Compute REFERENCE model logprobs for KL divergence penalty
-            # (separate from behavior policy - this is for regularization)
-            if ref_model is not None:
-                with torch.no_grad():
-                    logprobs_ref_sum, logprobs_ref_per_token = compute_logprobs(
-                        ref_model,
-                        input_ids_tensor,
-                        attention_mask_tensor,
-                        batch_prompt_lens,
-                        batch_comp_lens,
-                        return_per_token=True,
-                    )
-                if not _is_finite_tensor(logprobs_ref_sum):
-                    ref_min = torch.nan_to_num(logprobs_ref_sum).min().item()
-                    ref_max = torch.nan_to_num(logprobs_ref_sum).max().item()
-                    logger.warning(
-                        "Non-finite reference logprobs; skipping batch",
-                        extra={"min": float(ref_min), "max": float(ref_max)},
-                    )
-                    continue
-            else:
-                # If no ref model, set ref logprobs to old logprobs (zero KL)
-                logprobs_ref_sum = logprobs_old
-                logprobs_ref_per_token = logprobs_current_per_token.detach()
+            # Compute REFERENCE model logprobs for KL divergence penalty only if enabled
+            if kl_enabled:
+                if ref_model is not None:
+                    with torch.no_grad():
+                        logprobs_ref_sum, logprobs_ref_per_token = compute_logprobs(
+                            ref_model,
+                            input_ids_tensor,
+                            attention_mask_tensor,
+                            batch_prompt_lens,
+                            batch_comp_lens,
+                            return_per_token=True,
+                        )
+                    if not _is_finite_tensor(logprobs_ref_sum):
+                        ref_min = torch.nan_to_num(logprobs_ref_sum).min().item()
+                        ref_max = torch.nan_to_num(logprobs_ref_sum).max().item()
+                        logger.warning(
+                            "Non-finite reference logprobs; skipping batch",
+                            extra={"min": float(ref_min), "max": float(ref_max)},
+                        )
+                        continue
+                else:
+                    # If no ref model, set ref per-token logprobs equal to current (zero KL)
+                    logprobs_ref_per_token = logprobs_current_per_token.detach()
 
             # Importance sampling log-ratio: π_current / π_old (behavior)
             log_ratio = logprobs_current_sum - logprobs_old
@@ -1171,26 +1174,23 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 # On-policy: no ratio, just advantage-weighted logprobs
                 loss_pg = -(advantages_normalized * logprobs_current_sum).mean()
 
-            # KL divergence penalty: KL(π_current || π_ref)
-            # Proper per-token KL with completion masks
-            max_comp_len = logprobs_current_per_token.shape[1]
-            # Build completion mask: [batch_size, max_comp_len]
-            # Vectorized construction of completion mask: [batch_size, max_comp_len]
-            comp_lens_tensor = torch.as_tensor(batch_comp_lens, device=accelerator.device)
-            token_positions = torch.arange(max_comp_len, device=accelerator.device)
-            completion_mask = (token_positions.unsqueeze(0) < comp_lens_tensor.unsqueeze(1)).to(
-                torch.float32
-            )
+            # KL divergence penalty: KL(π_current || π_ref) only when enabled
+            if kl_enabled:
+                max_comp_len = logprobs_current_per_token.shape[1]
+                comp_lens_tensor = torch.as_tensor(batch_comp_lens, device=accelerator.device)
+                token_positions = torch.arange(max_comp_len, device=accelerator.device)
+                completion_mask = (token_positions.unsqueeze(0) < comp_lens_tensor.unsqueeze(1)).to(
+                    torch.float32
+                )
 
-            # Per-token log-ratio for KL: log(π/π_ref)
-            per_token_log_ratio = logprobs_current_per_token - logprobs_ref_per_token
-            # Approximate KL via: 0.5 * E[(log π - log π_ref)²]
-            # This is a symmetric approximation that's numerically stable
-            per_token_kl = 0.5 * per_token_log_ratio.pow(2) * completion_mask
-            # Mean over valid tokens (token-weighted, not sequence-weighted)
-            kl_tensor = per_token_kl.sum() / completion_mask.sum().clamp(min=1.0)
-            loss_kl = current_kl_coef * kl_tensor
-            kl_value = float(kl_tensor.detach().item())
+                per_token_log_ratio = logprobs_current_per_token - logprobs_ref_per_token
+                per_token_kl = 0.5 * per_token_log_ratio.pow(2) * completion_mask
+                kl_tensor = per_token_kl.sum() / completion_mask.sum().clamp(min=1.0)
+                loss_kl = current_kl_coef * kl_tensor
+                kl_value = float(kl_tensor.detach().item())
+            else:
+                loss_kl = torch.tensor(0.0, device=logprobs_current_sum.device)
+                kl_value = 0.0
 
             entropies = compute_entropy(
                 model,
@@ -1265,7 +1265,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 logger.info(f"Optimizer step completed. Current KL coef: {current_kl_coef}")
 
                 # Adaptive KL adjustment after each optimizer step based on observed KL
-                if self.adaptive_kl_enabled and hasattr(self, "kl_controller"):
+                if kl_enabled and self.adaptive_kl_enabled:
                     current_kl_coef = self.kl_controller.update(kl_value)
                 grad_accum_counter = 0
 

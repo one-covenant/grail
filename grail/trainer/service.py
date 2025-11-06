@@ -13,6 +13,7 @@ from grail.shared.constants import (
     NETUID,
     TRAINER_UPLOAD_BUFFER_BLOCKS,
     WINDOW_LENGTH,
+    is_kl_enabled,
 )
 
 from .algorithms import GRPOAlgorithm, TrainingAlgorithm
@@ -137,15 +138,25 @@ class TrainerService:
                     "Optimizer and scheduler must be initialized before training windows"
                 )
 
-            # Prepare models and optimizer for distributed training
-            model, ref_model, opt = self.accelerator.prepare(
-                model,
-                ref_model,
-                self.optimizer,
-            )
+            # KL gating based on base coefficient
+            kl_enabled: bool = is_kl_enabled()
 
-            if hasattr(ref_model, "eval"):
-                ref_model.eval()
+            # Prepare models and optimizer for distributed training
+            if kl_enabled and ref_model is not None:
+                model, ref_model, opt = self.accelerator.prepare(
+                    model,
+                    ref_model,
+                    self.optimizer,
+                )
+                if hasattr(ref_model, "eval"):
+                    ref_model.eval()
+            else:
+                model, opt = self.accelerator.prepare(
+                    model,
+                    self.optimizer,
+                )
+                # Ensure ref_model remains None when KL is disabled or unavailable
+                ref_model = None
 
             training_start = time.monotonic()
 
