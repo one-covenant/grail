@@ -19,7 +19,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..infrastructure.chain import GrailChainManager
 from ..infrastructure.comms import get_file
-from ..shared.constants import ROLLOUTS_PER_PROBLEM
+from ..shared.constants import MIN_ROLLOUT_FILE_SIZE_BYTES, ROLLOUTS_PER_PROBLEM
 from ..shared.digest import compute_completion_digest
 from .context import ValidationContext
 from .pipeline import ValidationPipeline, get_hard_check_keys, get_soft_check_keys
@@ -241,12 +241,13 @@ class MinerValidator:
         bucket_to_use = miner_bucket if miner_bucket else credentials
         uid_str = str(uid) if uid is not None else f"{miner_hotkey[:12]}..."
 
-        # Check existence with deadline validation
-        exists, was_late, upload_time = await file_exists_with_deadline(
+        # Check existence with deadline validation and min size
+        exists, was_late, too_small, upload_time = await file_exists_with_deadline(
             key=filename,
             credentials=bucket_to_use,
             use_write=False,
             max_upload_time=deadline_ts,
+            min_size_bytes=MIN_ROLLOUT_FILE_SIZE_BYTES,
         )
 
         if not exists:

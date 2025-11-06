@@ -185,6 +185,11 @@ MINER_SAMPLE_MAX = 35
 # Miners with failures in the last N windows are excluded from selection.
 FAILURE_LOOKBACK_WINDOWS = 14
 
+# Minimum file size for valid rollout window files (bytes).
+# Empty window files are ~170 bytes (just JSON structure with empty array).
+# Files below this threshold are considered to have 0 rollouts and are filtered.
+MIN_ROLLOUT_FILE_SIZE_BYTES = 200
+
 # ────────────────  GRAIL PROOF VERIFICATION  ────────────────
 
 # Top-K activation selection (focus on stable, important features)

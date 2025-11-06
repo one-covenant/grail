@@ -904,7 +904,7 @@ async def file_exists(
     Returns:
         True if file exists and meets upload time constraint (if specified)
     """
-    exists, _was_late, _upload_time = await file_exists_with_deadline(
+    exists, _was_late, _too_small, _upload_time = await file_exists_with_deadline(
         key=key,
         credentials=credentials,
         use_write=use_write,
@@ -918,15 +918,24 @@ async def file_exists_with_deadline(
     credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = False,
     max_upload_time: float | None = None,
-) -> tuple[bool, bool, float | None]:
-    """Check existence and whether the object violates an upload deadline.
+    min_size_bytes: int = 0,
+) -> tuple[bool, bool, bool, float | None]:
+    """Check existence, size, and whether the object violates an upload deadline.
 
     Returns
     -------
-    (exists_and_valid, was_late, upload_time)
-        exists_and_valid: True if object exists and (upload_time <= max_upload_time when provided)
-        was_late: True if object exists but upload_time exceeded max_upload_time
+    (exists_and_valid, was_late, too_small, upload_time)
+        exists_and_valid: True if object exists, size >= min_size_bytes, and upload_time <= max_upload_time (when provided)
+        was_late: True if object exists and is large enough but upload_time exceeded max_upload_time
+        too_small: True if object exists but size < min_size_bytes
         upload_time: Float unix timestamp of LastModified if available
+
+    Args:
+        key: S3 object key to check
+        credentials: R2/S3 credentials
+        use_write: Whether to use write credentials
+        max_upload_time: If provided, reject files uploaded after this timestamp
+        min_size_bytes: Minimum file size in bytes (default: 0, no size check)
     """
     try:
         client = await _get_cached_client(credentials, use_write)
@@ -948,19 +957,28 @@ async def file_exists_with_deadline(
             except Exception:
                 continue
 
+            # Check size requirement
+            if min_size_bytes > 0:
+                size = response.get("ContentLength")
+                if size is None or size < min_size_bytes:
+                    logger.debug(
+                        f"file_exists_with_deadline: {candidate} too small ({size} < {min_size_bytes})"
+                    )
+                    return False, False, True, None
+
             last_modified = response.get("LastModified")
             upload_time = float(last_modified.timestamp()) if last_modified else None
             if max_upload_time is not None and upload_time is not None:
                 if upload_time > float(max_upload_time):
-                    return False, True, upload_time
-            return True, False, upload_time
+                    return False, True, False, upload_time
+            return True, False, False, upload_time
 
-        return False, False, None
+        return False, False, False, None
     except Exception as e:
         logger.debug(
             "file_exists_with_deadline failed for key=%s: %s %s", key, type(e).__name__, str(e)
         )
-        return False, False, None
+        return False, False, False, None
 
 
 async def list_bucket_files(

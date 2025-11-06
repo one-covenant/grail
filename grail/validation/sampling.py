@@ -13,6 +13,8 @@ import time
 from collections import deque
 from typing import Any
 
+from ..shared.constants import MIN_ROLLOUT_FILE_SIZE_BYTES
+
 logger = logging.getLogger(__name__)
 
 
@@ -87,6 +89,7 @@ class MinerSampler:
         """
         semaphore = asyncio.Semaphore(self._concurrency)
         late_counter: dict[str, int] = {"count": 0}
+        too_small_counter: dict[str, int] = {"count": 0}
 
         async def _check(hotkey: str) -> tuple[str, bool]:
             filename = f"grail/windows/{hotkey}-window-{window}.json"
@@ -110,40 +113,43 @@ class MinerSampler:
 
                 start_time = time.time()
                 try:
-                    if deadline_ts is not None:
-                        from ..infrastructure.comms import file_exists_with_deadline
+                    # Single HEAD request checks: existence, size >= 200 bytes, and deadline
+                    from ..infrastructure.comms import file_exists_with_deadline
 
-                        exists, was_late, upload_time = await asyncio.wait_for(
-                            file_exists_with_deadline(
-                                key=filename,
-                                credentials=bucket,
-                                use_write=False,
-                                max_upload_time=deadline_ts,
-                            ),
-                            timeout=6.0,
-                        )
-                        if was_late:
-                            late_counter["count"] = int(late_counter.get("count", 0)) + 1
-                            logger.info(
-                                "Late upload ignored for %s window=%s uploaded_at=%.0f deadline=%.0f",
-                                miner_id,
-                                window,
-                                upload_time or -1,
-                                deadline_ts,
-                            )
-                        return hotkey, bool(exists)
-                    else:
-                        from ..infrastructure.comms import file_exists
+                    exists, was_late, too_small, upload_time = await asyncio.wait_for(
+                        file_exists_with_deadline(
+                            key=filename,
+                            credentials=bucket,
+                            use_write=False,
+                            max_upload_time=deadline_ts,
+                            min_size_bytes=MIN_ROLLOUT_FILE_SIZE_BYTES,
+                        ),
+                        timeout=6.0,
+                    )
 
-                        exists = await asyncio.wait_for(
-                            file_exists(
-                                filename,
-                                credentials=bucket,
-                                use_write=False,
-                            ),
-                            timeout=6.0,
+                    # Check if file is too small (0 rollouts)
+                    if too_small:
+                        too_small_counter["count"] = int(too_small_counter.get("count", 0)) + 1
+                        logger.debug(
+                            "Too small window file ignored for %s window=%s (likely 0 rollouts)",
+                            miner_id,
+                            window,
                         )
-                        return hotkey, bool(exists)
+                        return hotkey, False
+
+                    # Check if file was late
+                    if was_late:
+                        late_counter["count"] = int(late_counter.get("count", 0)) + 1
+                        logger.info(
+                            "Late upload ignored for %s window=%s uploaded_at=%.0f deadline=%.0f",
+                            miner_id,
+                            window,
+                            upload_time or -1,
+                            deadline_ts,
+                        )
+                        return hotkey, False
+
+                    return hotkey, bool(exists)
                 except asyncio.TimeoutError:
                     elapsed = time.time() - start_time
                     logger.debug(
@@ -163,6 +169,12 @@ class MinerSampler:
         logger.info(
             "Discovered %d/%d active miners for window %d", len(active), len(meta_hotkeys), window
         )
+        if too_small_counter.get("count", 0) > 0:
+            logger.info(
+                "Filtered out %d miners with too-small files (0 rollouts) for window %d",
+                int(too_small_counter.get("count", 0)),
+                window,
+            )
         if deadline_ts is not None and late_counter.get("count", 0) > 0:
             logger.info(
                 "Ignored %d late miners for window %d",
