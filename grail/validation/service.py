@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 # Weight submission constants
 WEIGHT_SUBMISSION_INTERVAL_BLOCKS = 360
 WEIGHT_ROLLING_WINDOWS = int(WEIGHT_SUBMISSION_INTERVAL_BLOCKS / WINDOW_LENGTH)
-DEADLINE_SLACK_SECONDS = 0.5
+DEADLINE_SLACK_SECONDS = -4.0
 
 
 class ValidationService:
