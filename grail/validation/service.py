@@ -11,6 +11,7 @@ import contextlib
 import hashlib
 import logging
 from collections import defaultdict, deque
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -460,6 +461,12 @@ class ValidationService:
                     deadline_ts = await self._chain_manager.estimate_block_timestamp(deadline_block)
                 if deadline_ts is not None:
                     deadline_ts += DEADLINE_SLACK_SECONDS
+            readable_ts: str = (
+                datetime.fromtimestamp(deadline_ts, tz=timezone.utc).isoformat()
+                if deadline_ts is not None
+                else "None"
+            )
+            logger.info(f"Deadline timestamp: {readable_ts} and deadline block: {deadline_block}")
         except Exception:
             logger.debug("Failed to compute deadline timestamp", exc_info=True)
 
