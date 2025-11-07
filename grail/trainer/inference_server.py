@@ -34,8 +34,7 @@ class ServerConfig:
     model_name_override: str | None = None
     model_path: str = ""
     chat_template_path: str | None = None  # Path to chat_template.jinja file
-    # Optional environment to apply to the server subprocess (e.g., CUDA_VISIBLE_DEVICES)
-    env: dict[str, str] | None = None  # None -> inherit parent env unchanged
+    env: dict[str, str] | None = None  # Environment variables for subprocess
 
 
 class InferenceServerManager(ABC):
@@ -605,11 +604,19 @@ class SGLangServerManager(InferenceServerManager):
             stderr_target = (
                 subprocess.STDOUT if self._eval_config.stream_server_logs else subprocess.DEVNULL
             )
+
+            # Prepare environment for subprocess
+            popen_env = os.environ.copy()
+            if self._config.env:
+                popen_env.update(self._config.env)
+                logger.info("vLLM server using custom environment: %s", self._config.env)
+
             self._process = subprocess.Popen(
                 cmd,
                 stdout=stdout_target,
                 stderr=stderr_target,
                 text=False,
+                env=popen_env,
             )
             logger.info(
                 "Launched SGLang server: pid=%s host=%s port=%s",
