@@ -22,6 +22,7 @@ if str(_REPO_ROOT) not in os.sys.path:
 
 from grail.model.provider import get_model, get_tokenizer
 from grail.shared.chat_templates import build_qwen_chat_template
+from grail.shared.constants import TRAINER_USE_FLASH_ATTENTION
 from grail.shared.prompt_constants import REASONING_START, SYSTEM_PROMPT
 from grail.trainer.algorithms.grpo import GRPOAlgorithm
 from grail.trainer.config import EvalConfig, TrainingConfig
@@ -77,7 +78,8 @@ async def _run(cfg: DictConfig) -> None:
     actual_device = str(accelerator.device)
 
     # Load models to accelerator's device (not config device, to avoid mismatch)
-    train_model = get_model(train_id, device=actual_device, eval_mode=False)
+    # Enable Flash Attention for training model if configured
+    train_model = get_model(train_id, device=actual_device, eval_mode=False, use_flash_attention=TRAINER_USE_FLASH_ATTENTION)
     ref_model = get_model(ref_id, device=actual_device, eval_mode=True)
 
     print(f"Loaded models to {actual_device} (config requested: {device})")

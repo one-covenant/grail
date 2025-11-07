@@ -49,7 +49,8 @@ dependencies = [
     "wandb>=0.21.3",
     "scipy>=1.7.0",
     "sglang==0.5.4",
-    "tenacity>=8.0.0"
+    "tenacity>=8.0.0",
+    "flash-attn>=2.6.0",  # Flash Attention 2 for optimized training
 ]
 
 [project.optional-dependencies]
@@ -206,6 +207,9 @@ exclude_lines = [
 max-line-length = 100
 extend-ignore = ["E203", "W503"]
 max-complexity = 12
+
+[tool.uv.extra-build-dependencies]
+flash-attn = ["torch"]
 
 [dependency-groups]
 dev = [
