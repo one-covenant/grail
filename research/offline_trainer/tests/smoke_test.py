@@ -1,30 +1,40 @@
+"""Quick smoke test to verify basic functionality."""
+
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
+import sys
 from pathlib import Path
 from typing import Any
 
-# Ensure repo root on sys.path before importing grail
+# Ensure repo root and src on sys.path
 _THIS_FILE = Path(__file__).resolve()
-_REPO_ROOT = _THIS_FILE.parents[2]
-if str(_REPO_ROOT) not in os.sys.path:
-    os.sys.path.insert(0, str(_REPO_ROOT))
+_REPO_ROOT = _THIS_FILE.parents[3]
+_SRC_DIR = _THIS_FILE.parents[1] / "src"
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+if _SRC_DIR.exists() and str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
 
-import torch
+import torch  # noqa: E402, I001
+from grail.environments.core import MultiTurnEnv  # noqa: E402
+from grail.environments.loop import AgentEnvLoop  # noqa: E402
+from grail.environments.sat_env import SATEnv  # noqa: E402
+from grail.trainer.algorithms.grpo import GRPOAlgorithm  # noqa: E402
+from grail.trainer.config import EvalConfig, TrainingConfig  # noqa: E402
+from grail.trainer.eval_planner import EvaluationPlan  # noqa: E402
+from grail.trainer.evaluator import EvaluatorService  # noqa: E402
+from grail_offline.data.offline_rollouts import (  # noqa: E402
+    OfflineRolloutGenerator,
+    RolloutGenConfig,
+)
+from tests.fixtures.fakes import (  # noqa: E402
+    DummyModel,
+    DummyTokenizer,
+    FakeBackend,
+)
 
-from grail.environments.core import MultiTurnEnv
-from grail.environments.loop import AgentEnvLoop
-from grail.environments.sat_env import SATEnv
-from grail.trainer.algorithms.grpo import GRPOAlgorithm
-from grail.trainer.config import EvalConfig, TrainingConfig
-from grail.trainer.eval_planner import EvaluationPlan
-from grail.trainer.evaluator import EvaluatorService
-from scripts.offline_trainer.offline_rollouts import OfflineRolloutGenerator, RolloutGenConfig
-from tests.fixtures.fakes import DummyModel, DummyTokenizer, FakeBackend
-
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
@@ -34,6 +44,8 @@ logger = logging.getLogger(__name__)
 
 
 class ToyLM(torch.nn.Module):
+    """Minimal language model for testing."""
+
     def __init__(self, vocab_size: int = 256, hidden_size: int = 64) -> None:
         super().__init__()
         self.embed = torch.nn.Embedding(vocab_size, hidden_size)
@@ -53,12 +65,12 @@ class ToyLM(torch.nn.Module):
 
 
 def _make_generator(tokenizer: Any) -> OfflineRolloutGenerator:
-    # Monkeypatch: replace server backend with FakeBackend for offline smoke
-    import scripts.offline_trainer.offline_rollouts as orl
+    """Create rollout generator with FakeBackend."""
+    import grail_offline.data.offline_rollouts as orl
 
     class _FakeSGLServer(FakeBackend):
         def __init__(
-            self, *, base_url: str, model_name: str, tokenizer: Any, timeout: float
+            self, *, base_url: str, model_name: str, tokenizer: Any, timeout: float, **_: Any
         ) -> None:
             super().__init__(tokenizer=tokenizer)
 
@@ -79,17 +91,14 @@ def _make_generator(tokenizer: Any) -> OfflineRolloutGenerator:
 
 
 async def _train_epoch_smoke() -> dict[str, float]:
+    """Quick training epoch smoke test."""
     logger.info("Starting training epoch smoke test")
     tokenizer = DummyTokenizer()
     generator = _make_generator(tokenizer)
 
-    # Generate small set of groups
     seeds = [1001, 1002]
-    logger.info("Generating rollout groups", extra={"num_seeds": len(seeds)})
-    groups = generator.generate_groups(seeds)
-    logger.info("Groups generated", extra={"num_groups": len(groups)})
+    groups = await generator.generate_groups(seeds)
 
-    # Tiny toy models for train/ref
     model = ToyLM()
     ref_model = ToyLM()
 
@@ -99,13 +108,11 @@ async def _train_epoch_smoke() -> dict[str, float]:
     device = accelerator.device
     model = model.to(device)
     ref_model = ref_model.to(device)
-    logger.info("Models loaded to device", extra={"device": str(device)})
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-
     algo = GRPOAlgorithm()
     train_cfg = TrainingConfig(lr=1e-3, batch_size=4)
-    logger.info("Starting GRPO training epoch")
+
     metrics = await algo.train_epoch(
         model=model,
         ref_model=ref_model,
@@ -117,11 +124,11 @@ async def _train_epoch_smoke() -> dict[str, float]:
         window=0,
         config=train_cfg,
     )
-    logger.info("Training epoch complete", extra={"metrics": metrics})
     return metrics
 
 
 async def _eval_smoke() -> dict[str, float]:
+    """Quick evaluation smoke test."""
     logger.info("Starting evaluation smoke test")
     model = DummyModel()
     tokenizer = DummyTokenizer()
@@ -129,12 +136,11 @@ async def _eval_smoke() -> dict[str, float]:
     def env_factory() -> MultiTurnEnv:
         return SATEnv()
 
-    eval_cfg = EvalConfig(batch_size=2, replicates=2, do_sample=True)
+    eval_cfg = EvalConfig(batch_size=2, do_sample=True)
     svc = EvaluatorService(
         model=model, tokenizer=tokenizer, env_factory=env_factory, config=eval_cfg, device="cpu"
     )
 
-    # Replace loop with FakeBackend
     svc._loop = AgentEnvLoop(
         model=model,
         tokenizer=tokenizer,
@@ -147,25 +153,22 @@ async def _eval_smoke() -> dict[str, float]:
     )
 
     plan = EvaluationPlan(ids=["1", "2"], replicates=2, cycle_index=0, seed_base=42)
-    logger.info("Running evaluation cycle")
     metrics = await svc.run_cycle(plan)
-    logger.info("Evaluation complete", extra={"metrics": metrics})
     return metrics
 
 
 def main() -> None:
+    """Run smoke tests."""
     logger.info("=" * 80)
     logger.info("Running offline trainer smoke tests")
     logger.info("=" * 80)
-    
-    logger.info("Running training smoke test")
-    train_metrics = asyncio.run(_train_epoch_smoke())
-    logger.info("Training smoke test complete", extra={"train_metrics": {k: float(v) for k, v in train_metrics.items()}})
-    
-    logger.info("Running evaluation smoke test")
-    eval_metrics = asyncio.run(_eval_smoke())
-    logger.info("Evaluation smoke test complete", extra={"eval_metrics": {k: float(v) for k, v in eval_metrics.items()}})
-    
+
+    asyncio.run(_train_epoch_smoke())
+    logger.info("✓ Training smoke test passed")
+
+    asyncio.run(_eval_smoke())
+    logger.info("✓ Evaluation smoke test passed")
+
     logger.info("=" * 80)
     logger.info("All smoke tests passed!")
     logger.info("=" * 80)

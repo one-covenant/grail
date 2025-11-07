@@ -9,8 +9,8 @@ from typing import Any
 import numpy as np
 
 from grail.environments.core import ChatMessage, MultiTurnEnv
-from grail.environments.loop import AgentEnvLoop, SGLangServerBackend, VLLMServerBackend
 from grail.environments.gsm8k_env import GSM8KEnv
+from grail.environments.loop import AgentEnvLoop, SGLangServerBackend, VLLMServerBackend
 from grail.environments.sat_env import SATEnv
 from grail.shared.constants import ROLLOUTS_PER_PROBLEM, TRAINER_MAX_LENGTH
 from grail.trainer.algorithms.grpo import GRPOGroup, GRPORollout
@@ -28,6 +28,8 @@ class RolloutGenConfig:
     top_p: float
     top_k: int | None
     repetition_penalty: float | None
+    # Optional/defaulted fields must come after non-default fields
+    model_name: str | None = None  # Served model name for OpenAI-compatible API
     rollouts_per_problem: int = ROLLOUTS_PER_PROBLEM
     return_logprobs: bool = True  # Enable behavior policy logprobs for IS
     environment: str = "sat"  # "sat" | "gsm8k"
@@ -47,22 +49,28 @@ class OfflineRolloutGenerator:
         # Choose server backend
         backend_name = (self._cfg.backend or "sglang_server").lower()
         return_logprobs = bool(getattr(self._cfg, "return_logprobs", True))
-        
+        served_model_name = (
+            self._cfg.model_name
+            if getattr(self._cfg, "model_name", None)
+            else getattr(tokenizer, "name_or_path", "model")
+        )
+
         logger.info(
             "Initializing rollout generator",
             extra={
                 "backend": backend_name,
                 "base_url": self._cfg.base_url,
+                "model_name": served_model_name,
                 "rollouts_per_problem": self._cfg.rollouts_per_problem,
                 "environment": self._cfg.environment,
                 "return_logprobs": return_logprobs,
             },
         )
-        
+
         if backend_name == "sglang_server":
             gen_backend = SGLangServerBackend(
                 base_url=self._cfg.base_url,
-                model_name=getattr(tokenizer, "name_or_path", "model"),
+                model_name=served_model_name,
                 tokenizer=tokenizer,
                 timeout=300.0,
                 return_chosen_logprobs=return_logprobs,
@@ -71,7 +79,7 @@ class OfflineRolloutGenerator:
             # OpenAI-compatible vLLM server
             gen_backend = VLLMServerBackend(
                 base_url=self._cfg.base_url,
-                model_name=getattr(tokenizer, "name_or_path", "model"),
+                model_name=served_model_name,
                 tokenizer=tokenizer,
                 timeout=300.0,
                 return_chosen_logprobs=return_logprobs,
@@ -128,7 +136,7 @@ class OfflineRolloutGenerator:
                 "batch_size": batch_size,
             },
         )
-        
+
         groups: list[GRPOGroup] = []
         rollouts_per_problem = int(self._cfg.rollouts_per_problem)
         for idx, seed in enumerate(seeds_list):
@@ -166,7 +174,7 @@ class OfflineRolloutGenerator:
                     # Also truncate logprobs if present
                     if chosen_logprobs is not None:
                         chosen_logprobs = chosen_logprobs[: int(TRAINER_MAX_LENGTH)]
-                
+
                 completion_ids = seq[prompt_len:]
                 text = self._tokenizer.decode(completion_ids, skip_special_tokens=False)
 
@@ -182,7 +190,7 @@ class OfflineRolloutGenerator:
                 seqs.append(seq)
                 prompt_lens.append(int(prompt_len))
                 comp_lens.append(int(len(completion_ids)))
-                
+
                 # Store behavior policy logprobs for importance sampling
                 # Format: full sequence logprobs (prompt + completion)
                 if chosen_logprobs is not None:
@@ -212,9 +220,8 @@ class OfflineRolloutGenerator:
                         token_logprobs=all_logprobs[i],
                     )
                 )
-
             groups.append(GRPOGroup(group_id=group_id, rollouts=rollouts))
-            
+
             # Log stats for this group
             group_rewards = [r.reward for r in rollouts]
             group_successes = [r.success for r in rollouts]

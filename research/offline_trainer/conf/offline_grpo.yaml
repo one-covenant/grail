@@ -34,7 +34,9 @@ gpu:
 # ============================================================================
 generation:
   backend: "vllm_server"  # vllm_server|sglang_server (for offline_rollouts.py)
-  base_url: "http://127.0.0.1:30001"  # server base URL (OpenAI-compatible /v1)
+  port: 30001  # vLLM server port (managed by pipeline)
+  max_model_len: 2048  # vLLM max sequence length
+  max_num_seqs: 64  # vLLM concurrent sequences
   batch_size: 16  # Match GRAIL_GENERATION_BATCH_SIZE
   max_new_tokens: 512  # Match MAX_NEW_TOKENS from constants
   temperature: 0.7
@@ -93,7 +95,6 @@ eval:
   enabled: true
   interval: 1  # Evaluate every N iterations
   backend: "vllm"  # vllm|sglang|hf (evaluator.py expects these names)
-  base_url: "http://127.0.0.1:30001"
   batch_size: 16
   do_sample: true
   max_new_tokens: 512

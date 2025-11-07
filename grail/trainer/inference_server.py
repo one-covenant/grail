@@ -34,6 +34,8 @@ class ServerConfig:
     model_name_override: str | None = None
     model_path: str = ""
     chat_template_path: str | None = None  # Path to chat_template.jinja file
+    # Optional environment to apply to the server subprocess (e.g., CUDA_VISIBLE_DEVICES)
+    env: dict[str, str] | None = None  # None -> inherit parent env unchanged
 
 
 class InferenceServerManager(ABC):
@@ -376,11 +378,20 @@ class VLLMServerManager(InferenceServerManager):
             stderr_target = (
                 subprocess.STDOUT if self._eval_config.stream_server_logs else subprocess.DEVNULL
             )
+            # Compose environment for subprocess: inherit and then apply overrides
+            popen_env = os.environ.copy()
+            if isinstance(self._config.env, dict) and self._config.env:
+                popen_env.update({str(k): str(v) for k, v in self._config.env.items()})
+                # Log CUDA device mapping if present (avoid logging other env content)
+                cuda_env = self._config.env.get("CUDA_VISIBLE_DEVICES")
+                if cuda_env is not None:
+                    logger.info("Launching vLLM with CUDA_VISIBLE_DEVICES=%s", cuda_env)
             self._process = subprocess.Popen(
                 cmd,
                 stdout=stdout_target,
                 stderr=stderr_target,
                 text=False,
+                env=popen_env,
             )
             logger.info(
                 "Launched vLLM server: pid=%s host=%s port=%s",
@@ -449,6 +460,55 @@ class VLLMServerManager(InferenceServerManager):
     async def _reload_models(self) -> None:
         """No-op for vLLM backend (models remain in external process)."""
         pass
+
+    async def reload_with_new_checkpoint(self, new_checkpoint_path: str) -> None:
+        """Reload vLLM server with updated model checkpoint.
+
+        Stops the current server, updates the model path, and restarts the server
+        with the new weights. Waits for GPU memory cleanup between stop and start.
+
+        Args:
+            new_checkpoint_path: Path to updated model checkpoint directory
+
+        Raises:
+            FileNotFoundError: If checkpoint path doesn't exist
+            RuntimeError: If server restart fails
+        """
+        if not os.path.exists(new_checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint not found: {new_checkpoint_path}")
+
+        logger.info(
+            "Reloading vLLM server with new checkpoint",
+            extra={"path": new_checkpoint_path},
+        )
+
+        try:
+            # Stop current server and wait for GPU cleanup
+            await self._stop_server()
+
+            # Update config to point to new checkpoint
+            self._config.model_path = new_checkpoint_path
+
+            # Restart server with new weights
+            await self._start_server()
+
+            if self._process is None or self._bound_port is None:
+                raise RuntimeError("Failed to restart vLLM server after reload")
+
+            logger.info(
+                "✓ vLLM server reloaded successfully",
+                extra={
+                    "checkpoint": new_checkpoint_path,
+                    "url": self.base_url,
+                    "model": self.model_name,
+                },
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to reload vLLM server",
+                extra={"checkpoint": new_checkpoint_path, "error": str(exc)},
+            )
+            raise RuntimeError(f"Server reload failed: {exc}") from exc
 
     def _resolve_executable(self) -> str | None:
         """Resolve Python executable to absolute path and validate existence."""

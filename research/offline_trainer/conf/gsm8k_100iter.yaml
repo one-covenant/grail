@@ -1,0 +1,49 @@
+# Full-scale GSM8K GRPO training (100 iterations)
+defaults:
+  - offline_grpo
+
+# Model
+model:
+  train_id: "Qwen/Qwen2.5-1.5B-Instruct"
+  ref_id: "Qwen/Qwen2.5-1.5B-Instruct"
+
+# Training (GRPO best practices)
+train:
+  iterations: 100
+  batch_size: 4
+  lr: 1.0e6  # Conservative for stability
+  grad_accum_steps: 32  # Effective batch: 128
+  grad_clip: 1.0
+  kl_coef: 0.0  # Disabled - pure policy gradient
+  entropy_coef: 0.0005  # Exploration bonus
+  adaptive_kl: false
+
+# Data
+data:
+  environment: "gsm8k"
+  problems_per_iteration: 32  # Diverse training signal
+  rollouts_per_problem: 16  # Good advantage variance
+  train_seed_start: 0
+  num_train_seeds: 1000  # Large pool for diversity
+
+# Evaluation
+eval:
+  enabled: true
+  interval: 10  # Every 10 iterations
+  num_ids: 200  # Comprehensive coverage
+  replicates: 16  # Robust pass@k estimates
+  id_seed_start: 5000
+
+# Checkpointing
+checkpoint:
+  save_interval: 10
+  keep_last_k: 5
+
+# Logging
+logging:
+  wandb:
+    enabled: true
+    project: "grail-offline"
+    entity: "tplr"
+    tags: ["gsm8k", "grpo", "100-iter", "1.5b"]
+
