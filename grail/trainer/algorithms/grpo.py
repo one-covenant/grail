@@ -29,6 +29,7 @@ except Exception:  # pragma: no cover - optional in offline mode
 
 
 from grail.shared.constants import (
+    GRPO_VARIANT,
     ROLLOUTS_PER_PROBLEM,
     TRAINER_ADV_CLIP_PERCENTILE,
     TRAINER_ENTROPY_COEF,
@@ -961,11 +962,22 @@ def compute_entropy(
 
 
 class GRPOAlgorithm(TrainingAlgorithm):
-    """GRPO algorithm implementation."""
+    """GRPO algorithm implementation with support for multiple loss variants.
+
+    Supported variants:
+    - 'grpo': Group Relative Policy Optimization (default) - averages per-sequence, then batch
+    - 'bnpo': Batch Normalization Policy Optimization - averages over all tokens globally
+    - 'dapo': Distributed Adaptive Policy Optimization - normalizes by total completion tokens
+    - 'dr_grpo': Denominator-Reduced GRPO - normalizes by batch_size × max_completion_length
+    """
 
     name: str = "grpo"
 
-    def __init__(self, adaptive_kl_enabled: bool = False) -> None:
+    def __init__(
+        self,
+        adaptive_kl_enabled: bool = False,
+        grpo_variant: str | None = None,
+    ) -> None:
         super().__init__()
         # Persistent adaptive KL controller across epochs/windows
         self.kl_controller: AdaptiveKLController = AdaptiveKLController(
@@ -976,6 +988,462 @@ class GRPOAlgorithm(TrainingAlgorithm):
             adapt_rate=TRAINER_KL_ADAPT_RATE,
         )
         self.adaptive_kl_enabled: bool = bool(adaptive_kl_enabled)
+
+        # Validate and set loss variant (with common aliases)
+        # If not explicitly provided, use the environment-configured default
+        raw_variant = (grpo_variant or GRPO_VARIANT).strip().lower()
+        aliases = {
+            "gspo": "dr_grpo",  # common misnomer maps to denominator-reduced GRPO
+            "dr-grpo": "dr_grpo",
+        }
+        selected_variant = aliases.get(raw_variant, raw_variant)
+        valid_variants = {"grpo", "bnpo", "dapo", "dr_grpo"}
+        if selected_variant not in valid_variants:
+            raise ValueError(
+                f"Invalid grpo_variant '{grpo_variant}'. Must be one of {sorted(valid_variants)}"
+            )
+        self.grpo_variant: str = selected_variant
+        logger.info(f"Using {self.grpo_variant.upper()} loss variant")
+
+    def _prepare_batch_tensors(
+        self,
+        batch_rollouts: list[GRPORollout],
+        tokenizer: Any,
+        accelerator: Accelerator,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        list[int],
+        list[int],
+        list[float],
+        list[list[float]],
+        list[float],
+    ]:
+        """Prepare batch tensors from rollouts.
+
+        Args:
+            batch_rollouts: List of rollouts for this batch
+            tokenizer: Tokenizer for padding
+            accelerator: Accelerator for device placement
+
+        Returns:
+            Tuple of (input_ids, attention_mask, prompt_lengths, completion_lengths,
+                     advantages, behavior_per_token_logprobs, rewards)
+        """
+        batch_tokens: list[list[int]] = []
+        batch_prompt_lens: list[int] = []
+        batch_comp_lens: list[int] = []
+        batch_advantages: list[float] = []
+        batch_behavior_per_token_logprobs: list[list[float]] = []
+        batch_rewards: list[float] = []
+
+        for rollout in batch_rollouts:
+            tokens = rollout.tokens[:TRAINER_MAX_LENGTH]
+            batch_tokens.append(tokens)
+
+            # CRITICAL FIX: Recalculate completion_len after truncation
+            # If sequence is truncated, actual completion tokens may be fewer
+            actual_prompt_len = rollout.prompt_length
+            actual_comp_len = min(
+                rollout.completion_length,
+                TRAINER_MAX_LENGTH - rollout.prompt_length,
+            )
+            batch_prompt_lens.append(actual_prompt_len)
+            batch_comp_lens.append(actual_comp_len)
+
+            batch_advantages.append(rollout.advantage)
+            batch_rewards.append(rollout.reward)
+
+            # Miner-provided per-token logprobs must exist; extract completion portion
+            tlp: list[float] = list((rollout.token_logprobs or [])[:TRAINER_MAX_LENGTH])
+            prompt_len = actual_prompt_len
+            comp_len = actual_comp_len
+            expected_len = prompt_len + comp_len
+
+            if len(tlp) >= expected_len:
+                # Extract completion logprobs: indices [prompt_len:prompt_len+comp_len]
+                completion_logprobs = tlp[prompt_len : prompt_len + comp_len]
+            else:
+                # Legacy: miner provided only completion logprobs; respect truncation
+                completion_logprobs = tlp[:comp_len]
+
+            batch_behavior_per_token_logprobs.append(completion_logprobs)
+
+        # Basic structural sanity checks (length mismatches can cause degenerate grads)
+        for i, tokens in enumerate(batch_tokens):
+            expected_len = max(0, batch_prompt_lens[i]) + max(0, batch_comp_lens[i])
+            if len(tokens) < expected_len:
+                logger.warning(
+                    "Sequence shorter than expected after truncation",
+                    extra={
+                        "idx": i,
+                        "len_tokens": len(tokens),
+                        "expected_len": expected_len,
+                        "prompt_len": batch_prompt_lens[i],
+                        "completion_len": batch_comp_lens[i],
+                    },
+                )
+
+        max_len = max(len(tokens) for tokens in batch_tokens)
+        # Ensure pad_token_id is set (fallback to eos_token_id if needed)
+        pad_id = tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = tokenizer.eos_token_id
+            logger.warning("pad_token_id is None; using eos_token_id as fallback")
+
+        input_ids = []
+        attention_masks = []
+        for tokens in batch_tokens:
+            pad_length = max_len - len(tokens)
+            input_ids.append(tokens + [pad_id] * pad_length)
+            attention_masks.append([1] * len(tokens) + [0] * pad_length)
+
+        input_ids_tensor = torch.tensor(
+            input_ids,
+            dtype=torch.long,
+            device=accelerator.device,
+        )
+        attention_mask_tensor = torch.tensor(
+            attention_masks,
+            dtype=torch.long,
+            device=accelerator.device,
+        )
+
+        return (
+            input_ids_tensor,
+            attention_mask_tensor,
+            batch_prompt_lens,
+            batch_comp_lens,
+            batch_advantages,
+            batch_behavior_per_token_logprobs,
+            batch_rewards,
+        )
+
+    def _normalize_advantages(self, advantages_tensor: torch.Tensor) -> torch.Tensor:
+        """Normalize advantages with clipping and standardization.
+
+        Args:
+            advantages_tensor: Raw advantages tensor
+
+        Returns:
+            Normalized advantages tensor
+        """
+        # Advantage normalization for stable gradients
+        # IMPORTANT: Normalize advantages to have unit variance while preserving zero-sum
+        # This prevents gradient explosion when advantages have large magnitude
+        # Clip extreme outliers first, then standardize
+        perc_val = float(TRAINER_ADV_CLIP_PERCENTILE)
+        q = max(0.0, min(100.0, perc_val)) / 100.0
+        if 0.0 < q < 1.0:
+            clip_val = torch.quantile(advantages_tensor.abs(), q)
+            if torch.isfinite(clip_val):
+                advantages_tensor = advantages_tensor.clamp(-clip_val, clip_val)
+
+        # We don't normalize advantages since they are already normalized
+        return advantages_tensor
+
+    def _compute_policy_gradient_loss(
+        self,
+        logprobs_current_per_token: torch.Tensor,
+        logprobs_old_per_token: torch.Tensor,
+        advantages_normalized: torch.Tensor,
+        completion_mask: torch.Tensor,
+        batch_size: int,
+        total_completion_tokens: int | None = None,
+    ) -> tuple[torch.Tensor, float, float, torch.Tensor]:
+        """Compute policy gradient loss with importance sampling and PPO clipping.
+
+        Args:
+            logprobs_current_per_token: [batch_size, max_comp_len] current policy per-token logprobs
+            logprobs_old_per_token: [batch_size, max_comp_len] behavior policy per-token logprobs
+            advantages_normalized: [batch_size] normalized advantages
+            completion_mask: [batch_size, max_comp_len] mask (1=real token, 0=padding)
+            batch_size: Number of sequences in batch
+            total_completion_tokens: Total completion tokens across all processes (for DAPO)
+
+        Returns:
+            Tuple of (loss_pg, ratio_clip_frac, ratio_ceiling_frac, ratios_pre_ceiling)
+        """
+        # Compute sequence-level log-ratios by summing over tokens
+        logprobs_current_sum = (logprobs_current_per_token * completion_mask).sum(dim=1)
+        logprobs_old_sum = (logprobs_old_per_token * completion_mask).sum(dim=1)
+        log_ratio = logprobs_current_sum - logprobs_old_sum
+
+        if not _is_finite_tensor(log_ratio):
+            logger.debug("Non-finite log-ratio before clamp; applying clamp")
+        # Moderate clamp for numerical stability when exponentiating to ratios
+        log_ratio_clamped = torch.clamp(
+            log_ratio, min=-TRAINER_LOGRATIO_CLAMP, max=TRAINER_LOGRATIO_CLAMP
+        )
+
+        # Policy gradient loss with importance sampling and PPO-style clipping
+        ratio_clip_frac_val: float = 0.0
+        ratio_ceiling_frac_val: float = 0.0
+        ratios_pre_ceiling = torch.exp(log_ratio_clamped)
+
+        if TRAINER_USE_IS:
+            # Importance sampling ratio with numerical stability clamp, then hard ceiling
+            if TRAINER_IS_RATIO_MAX > 0.0:
+                ceiling_mask = ratios_pre_ceiling > TRAINER_IS_RATIO_MAX
+                ratios = torch.clamp(ratios_pre_ceiling, max=TRAINER_IS_RATIO_MAX)
+            else:
+                ceiling_mask = torch.zeros_like(ratios_pre_ceiling, dtype=torch.bool)
+                ratios = ratios_pre_ceiling
+
+            # Asymmetric PPO-style clipping (DAPO-style): tighter lower bound, relaxed upper bound
+            lower = 1.0 - TRAINER_PPO_CLIP_EPS
+            upper = 1.0 + TRAINER_PPO_CLIP_EPS_UPPER
+            ratios_clipped = torch.clamp(ratios, lower, upper)
+
+            # Track clipping statistics for monitoring
+            clip_mask = (ratios < lower) | (ratios > upper)
+            ratio_clip_frac_val = clip_mask.float().mean().item()
+            ratio_ceiling_frac_val = ceiling_mask.float().mean().item()
+
+            # Compute sequence-level loss: -min(ratio * adv, clipped_ratio * adv)
+            # Then broadcast to token dimension for aggregation
+            # Note: This is sequence-level IS (one ratio per sequence), not token-level IS
+            # Expand advantages to [batch_size, 1] for broadcasting
+            advantages_expanded = advantages_normalized.unsqueeze(1)  # [batch_size, 1]
+            ratios_expanded = ratios.unsqueeze(1)  # [batch_size, 1]
+            ratios_clipped_expanded = ratios_clipped.unsqueeze(1)  # [batch_size, 1]
+
+            pg_unclipped = ratios_expanded * advantages_expanded  # [batch_size, 1]
+            pg_clipped = ratios_clipped_expanded * advantages_expanded  # [batch_size, 1]
+            per_token_loss = -torch.min(pg_unclipped, pg_clipped)  # [batch_size, 1]
+
+            # Expand to [batch_size, max_comp_len] by broadcasting
+            per_token_loss = per_token_loss.expand(-1, completion_mask.size(1))
+
+            # Aggregate using variant-specific strategy
+            max_completion_length = completion_mask.size(1)
+            loss_pg = self._aggregate_policy_loss(
+                per_token_loss,
+                completion_mask,
+                batch_size,
+                max_completion_length,
+                total_completion_tokens,
+            )
+        else:
+            # On-policy: no ratio, just advantage-weighted logprobs (sequence-level)
+            loss_pg = -(advantages_normalized * logprobs_current_sum).mean()
+
+        return loss_pg, ratio_clip_frac_val, ratio_ceiling_frac_val, ratios_pre_ceiling
+
+    def _compute_kl_divergence_loss(
+        self,
+        logprobs_current_per_token: torch.Tensor,
+        logprobs_ref_per_token: torch.Tensor,
+        batch_comp_lens: list[int],
+        current_kl_coef: float,
+        accelerator: Accelerator,
+    ) -> tuple[torch.Tensor, float]:
+        """Compute KL divergence loss between current and reference policies.
+
+        Args:
+            logprobs_current_per_token: Per-token logprobs from current policy
+            logprobs_ref_per_token: Per-token logprobs from reference policy
+            batch_comp_lens: Completion lengths for each sequence
+            current_kl_coef: Current KL coefficient
+            accelerator: Accelerator for device placement
+
+        Returns:
+            Tuple of (loss_kl, kl_value)
+        """
+        max_comp_len = logprobs_current_per_token.shape[1]
+        comp_lens_tensor = torch.as_tensor(batch_comp_lens, device=accelerator.device)
+        token_positions = torch.arange(max_comp_len, device=accelerator.device)
+        completion_mask = (token_positions.unsqueeze(0) < comp_lens_tensor.unsqueeze(1)).to(
+            torch.float32
+        )
+
+        per_token_log_ratio = logprobs_current_per_token - logprobs_ref_per_token
+        per_token_kl = 0.5 * per_token_log_ratio.pow(2) * completion_mask
+        kl_tensor = per_token_kl.sum() / completion_mask.sum().clamp(min=1.0)
+        loss_kl = current_kl_coef * kl_tensor
+        kl_value = float(kl_tensor.detach().item())
+
+        return loss_kl, kl_value
+
+    def _aggregate_policy_loss(
+        self,
+        per_token_loss: torch.Tensor,
+        completion_mask: torch.Tensor,
+        batch_size: int,
+        max_completion_length: int,
+        total_completion_tokens: int | None = None,
+    ) -> torch.Tensor:
+        """Aggregate per-token policy loss using the selected variant's normalization strategy.
+
+        Args:
+            per_token_loss: [batch_size, max_comp_len] per-token loss values
+            completion_mask: [batch_size, max_comp_len] mask (1=real token, 0=padding)
+            batch_size: Number of sequences in batch
+            max_completion_length: Maximum completion length in batch
+            total_completion_tokens: Total completion tokens across all processes (for DAPO)
+
+        Returns:
+            Aggregated scalar loss
+
+        Normalization strategies:
+            - grpo: Average loss per sequence, then average over batch
+                    → captures per-sequence quality, standard RL approach
+            - bnpo: Average over all valid tokens globally
+                    → treats all tokens equally, reduces variance
+            - dr_grpo: Normalize by fixed denominator (batch_size × max_length)
+                       → stable gradients regardless of actual token counts
+            - dapo: Normalize by total completion tokens across all processes
+                    → scales gradients consistently in distributed training
+        """
+        if self.grpo_variant == "grpo":
+            # Average per-sequence, then batch: sum tokens per seq / seq_length, then mean over batch
+            seq_losses = (per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(
+                dim=1
+            ).clamp(min=1.0)
+            return seq_losses.mean()
+
+        elif self.grpo_variant == "bnpo":
+            # Global token average: sum all tokens / total valid tokens
+            total_loss = (per_token_loss * completion_mask).sum()
+            total_tokens = completion_mask.sum().clamp(min=1.0)
+            return total_loss / total_tokens
+
+        elif self.grpo_variant == "dr_grpo":
+            # Fixed denominator normalization: independent of actual token counts
+            total_loss = (per_token_loss * completion_mask).sum()
+            denominator = batch_size * max_completion_length
+            return total_loss / denominator
+
+        elif self.grpo_variant == "dapo":
+            # Distributed normalization: requires total tokens across all processes
+            if total_completion_tokens is None:
+                raise ValueError("DAPO variant requires total_completion_tokens parameter")
+            total_loss = (per_token_loss * completion_mask).sum()
+            return total_loss / total_completion_tokens
+
+        else:
+            # Should never reach here due to __init__ validation
+            raise ValueError(f"Unknown variant: {self.grpo_variant}")
+
+    def _collect_batch_metrics(
+        self,
+        epoch_metrics: dict[str, list[float]],
+        loss_total: torch.Tensor,
+        loss_pg: torch.Tensor,
+        loss_kl: torch.Tensor,
+        loss_entropy: torch.Tensor,
+        grad_norm_scalar: float | None,
+        advantages_tensor: torch.Tensor,
+        advantages_normalized: torch.Tensor,
+        entropies: torch.Tensor,
+        kl_value: float,
+        ratios_pre_ceiling: torch.Tensor,
+        ratio_clip_frac_val: float,
+        ratio_ceiling_frac_val: float,
+        batch_rewards: list[float],
+    ) -> None:
+        """Collect batch metrics for epoch aggregation.
+
+        Args:
+            epoch_metrics: Dictionary to store metrics in
+            loss_total: Total loss value
+            loss_pg: Policy gradient loss
+            loss_kl: KL divergence loss
+            loss_entropy: Entropy loss
+            grad_norm_scalar: Gradient norm (None if not computed)
+            advantages_tensor: Raw advantages
+            advantages_normalized: Normalized advantages
+            entropies: Entropy values
+            kl_value: KL divergence value
+            ratios_pre_ceiling: Importance sampling ratios before ceiling
+            ratio_clip_frac_val: Fraction of ratios clipped
+            ratio_ceiling_frac_val: Fraction of ratios hitting ceiling
+            batch_rewards: List of rewards for this batch
+        """
+        epoch_metrics["loss_total"].append(loss_total.item())
+        epoch_metrics["loss_pg"].append(loss_pg.item())
+        epoch_metrics["loss_kl"].append(loss_kl.item())
+        epoch_metrics["loss_entropy"].append(loss_entropy.item())
+        epoch_metrics["grad_norm"].append(grad_norm_scalar if grad_norm_scalar is not None else 0.0)
+        epoch_metrics["advantage_mean"].append(advantages_tensor.mean().item())
+        epoch_metrics["advantage_std"].append(advantages_tensor.std().item())
+        epoch_metrics["entropy_mean"].append(entropies.mean().item())
+        # advantages_normalized is now same as advantages_tensor (no batch normalization)
+        epoch_metrics["advantage_mean_normalized"].append(advantages_normalized.mean().item())
+        epoch_metrics["advantage_std_normalized"].append(advantages_normalized.std().item())
+        # Track divergence metrics (use clamped log_ratio for safe exponentiation)
+        epoch_metrics["kl_divergence"].append(kl_value)
+
+        # Pre-ceiling ratio stats (consistent with historical logging)
+        epoch_metrics["ratio_mean"].append(ratios_pre_ceiling.mean().item())
+        epoch_metrics["ratio_std"].append(ratios_pre_ceiling.std().item())
+
+        # Clipping diagnostics (0 when importance sampling disabled)
+        epoch_metrics["ratio_clip_frac"].append(ratio_clip_frac_val)
+        epoch_metrics["ratio_ceiling_frac"].append(ratio_ceiling_frac_val)
+
+        # Track reward curve
+        epoch_metrics["reward_mean"].append(torch.tensor(batch_rewards).mean().item())
+        epoch_metrics["reward_std"].append(torch.tensor(batch_rewards).std().item())
+
+    async def _log_batch_metrics(
+        self,
+        monitor: Any,
+        loss_total: torch.Tensor,
+        loss_pg: torch.Tensor,
+        loss_kl: torch.Tensor,
+        loss_entropy: torch.Tensor,
+        grad_norm_scalar: float | None,
+        advantages_tensor: torch.Tensor,
+        batch_rewards: list[float],
+        kl_value: float,
+        entropies: torch.Tensor,
+        ratio_clip_frac_val: float,
+        ratio_ceiling_frac_val: float,
+    ) -> None:
+        """Log per-batch metrics to monitoring system.
+
+        Args:
+            monitor: Monitoring system instance
+            loss_total: Total loss value
+            loss_pg: Policy gradient loss
+            loss_kl: KL divergence loss
+            loss_entropy: Entropy loss
+            grad_norm_scalar: Gradient norm (None if not computed)
+            advantages_tensor: Raw advantages
+            batch_rewards: List of rewards for this batch
+            kl_value: KL divergence value
+            entropies: Entropy values
+            ratio_clip_frac_val: Fraction of ratios clipped
+            ratio_ceiling_frac_val: Fraction of ratios hitting ceiling
+        """
+        if monitor is None:
+            return
+
+        # Use global batch counter for smooth, continuous x-axis across all windows
+        self.global_batch_counter += 1
+        batch_log_metrics = {
+            "loss_total": loss_total.item(),
+            "loss_pg": loss_pg.item(),
+            "loss_kl": loss_kl.item(),
+            "loss_entropy": loss_entropy.item(),
+            "grad_norm": grad_norm_scalar if grad_norm_scalar is not None else 0.0,
+            "advantage_mean": advantages_tensor.mean().item(),
+            "reward_mean": torch.tensor(batch_rewards).mean().item(),
+            "kl_divergence": kl_value,
+            "entropy_mean": entropies.mean().item(),
+            "ratio_clip_frac": ratio_clip_frac_val,
+            "ratio_ceiling_frac": ratio_ceiling_frac_val,
+        }
+        for key, value in batch_log_metrics.items():
+            try:
+                await monitor.log_gauge(
+                    f"training/batch/{key}",
+                    value,
+                    tags={"batch_step": str(self.global_batch_counter)},  # Global counter
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Failed to log batch metric %s: %s", key, exc)
 
     async def train_epoch(
         self,
@@ -989,7 +1457,30 @@ class GRPOAlgorithm(TrainingAlgorithm):
         window: int,
         config: TrainingConfig,
     ) -> dict[str, float]:
-        """Train for one epoch using GRPO algorithm."""
+        """Train for one epoch using GRPO algorithm.
+
+        This method orchestrates the training loop by:
+        1. Preparing batches from rollout groups
+        2. Computing policy, reference, and behavior log probabilities
+        3. Computing policy gradient loss with importance sampling and PPO clipping
+        4. Computing KL divergence penalty and entropy regularization
+        5. Performing gradient accumulation and optimization steps
+        6. Tracking and logging training metrics
+
+        Args:
+            model: Current policy model to train
+            ref_model: Reference policy model for KL divergence
+            tokenizer: Tokenizer for batch preparation
+            groups: List of GRPO groups containing rollouts
+            optimizer: Optimizer for model updates
+            accelerator: Accelerator for device management and distributed training
+            monitor: Optional monitoring system for logging metrics
+            window: Current training window number
+            config: Training configuration
+
+        Returns:
+            Dictionary of averaged epoch metrics
+        """
         # Increment global epoch counter for continuous tracking
         self.global_epoch_counter += 1
 
@@ -1001,6 +1492,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
         if ref_model is not None:
             ref_model.eval()
 
+        # Flatten and sort all rollouts by group ID and nonce for deterministic batching
         all_rollouts: list[tuple] = []
         for group in groups:
             for rollout in group.rollouts:
@@ -1025,93 +1517,24 @@ class GRPOAlgorithm(TrainingAlgorithm):
             end_idx = min(start_idx + batch_size, len(all_rollouts))
             batch_rollouts = [all_rollouts[i][0] for i in range(start_idx, end_idx)]
 
-            batch_tokens: list[list[int]] = []
-            batch_prompt_lens: list[int] = []
-            batch_comp_lens: list[int] = []
-            batch_advantages: list[float] = []
-            batch_behavior_seq_logprobs: list[float] = []
-            # Store miner-provided behavior per-token logprobs over completion for prompt-average PG
-            batch_rewards: list[float] = []
+            # Step 1: Prepare batch tensors from rollouts
+            (
+                input_ids_tensor,
+                attention_mask_tensor,
+                batch_prompt_lens,
+                batch_comp_lens,
+                batch_advantages,
+                batch_behavior_per_token_logprobs,
+                batch_rewards,
+            ) = self._prepare_batch_tensors(batch_rollouts, tokenizer, accelerator)
 
-            for rollout in batch_rollouts:
-                tokens = rollout.tokens[:TRAINER_MAX_LENGTH]
-                batch_tokens.append(tokens)
-
-                # CRITICAL FIX: Recalculate completion_len after truncation
-                # If sequence is truncated, actual completion tokens may be fewer
-                actual_prompt_len = rollout.prompt_length
-                actual_comp_len = min(
-                    rollout.completion_length,
-                    TRAINER_MAX_LENGTH - rollout.prompt_length,
-                )
-                batch_prompt_lens.append(actual_prompt_len)
-                batch_comp_lens.append(actual_comp_len)
-
-                batch_advantages.append(rollout.advantage)
-                batch_rewards.append(rollout.reward)
-
-                # Miner-provided per-token logprobs must exist; aggregate over truncated completion
-                tlp: list[float] = list((rollout.token_logprobs or [])[:TRAINER_MAX_LENGTH])
-                prompt_len = actual_prompt_len
-                comp_len = actual_comp_len
-                expected_len = prompt_len + comp_len
-
-                if len(tlp) >= expected_len:
-                    # Extract completion logprobs: indices [prompt_len:prompt_len+comp_len]
-                    completion_logprobs = tlp[prompt_len : prompt_len + comp_len]
-                    provided = float(np.sum(completion_logprobs))
-                else:
-                    # Legacy: miner provided only completion logprobs; respect truncation
-                    provided = float(np.sum(tlp[:comp_len]))
-
-                batch_behavior_seq_logprobs.append(provided)
-
-            # Basic structural sanity checks (length mismatches can cause degenerate grads)
-            for i, tokens in enumerate(batch_tokens):
-                expected_len = max(0, batch_prompt_lens[i]) + max(0, batch_comp_lens[i])
-                if len(tokens) < expected_len:
-                    logger.warning(
-                        "Sequence shorter than expected after truncation",
-                        extra={
-                            "idx": i,
-                            "len_tokens": len(tokens),
-                            "expected_len": expected_len,
-                            "prompt_len": batch_prompt_lens[i],
-                            "completion_len": batch_comp_lens[i],
-                        },
-                    )
-
-            max_len = max(len(tokens) for tokens in batch_tokens)
-            # Ensure pad_token_id is set (fallback to eos_token_id if needed)
-            pad_id = tokenizer.pad_token_id
-            if pad_id is None:
-                pad_id = tokenizer.eos_token_id
-                logger.warning("pad_token_id is None; using eos_token_id as fallback")
-
-            input_ids = []
-            attention_masks = []
-            for tokens in batch_tokens:
-                pad_length = max_len - len(tokens)
-                input_ids.append(tokens + [pad_id] * pad_length)
-                attention_masks.append([1] * len(tokens) + [0] * pad_length)
-
-            input_ids_tensor = torch.tensor(
-                input_ids,
-                dtype=torch.long,
-                device=accelerator.device,
-            )
-            attention_mask_tensor = torch.tensor(
-                attention_masks,
-                dtype=torch.long,
-                device=accelerator.device,
-            )
             advantages_tensor = torch.tensor(
                 batch_advantages,
                 dtype=torch.float32,
                 device=accelerator.device,
             )
 
-            # Compute current policy logprobs (with per-token for proper KL)
+            # Step 2: Compute current policy logprobs (with per-token for proper KL)
             logprobs_current_sum, logprobs_current_per_token = compute_logprobs(
                 model,
                 input_ids_tensor,
@@ -1130,24 +1553,38 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 )
                 continue
 
-            # OLD/BEHAVIOR policy logprobs for importance sampling
-            # At this point, behavior logprobs are guaranteed to be present and valid
-            logprobs_old = torch.tensor(
-                list(batch_behavior_seq_logprobs),
-                dtype=torch.float32,
-                device=accelerator.device,
+            # Step 3: Prepare behavior policy logprobs and completion mask for importance sampling
+            # Convert per-token behavior logprobs to padded tensor matching completion shape
+            max_comp_len = logprobs_current_per_token.shape[1]
+            logprobs_old_per_token = torch.zeros(
+                len(batch_rollouts), max_comp_len, device=accelerator.device
+            )
+            completion_mask = torch.zeros(
+                len(batch_rollouts), max_comp_len, device=accelerator.device
             )
 
-            if not _is_finite_tensor(logprobs_old):
-                old_min = torch.nan_to_num(logprobs_old).min().item()
-                old_max = torch.nan_to_num(logprobs_old).max().item()
+            for idx, (logprobs_list, comp_len) in enumerate(
+                zip(batch_behavior_per_token_logprobs, batch_comp_lens, strict=True)
+            ):
+                actual_len = min(len(logprobs_list), max_comp_len)
+                if actual_len > 0:
+                    logprobs_old_per_token[idx, :actual_len] = torch.tensor(
+                        logprobs_list[:actual_len], device=accelerator.device
+                    )
+                    completion_mask[idx, :comp_len] = 1.0
+
+            # Validate behavior logprobs
+            logprobs_old_sum = (logprobs_old_per_token * completion_mask).sum(dim=1)
+            if not _is_finite_tensor(logprobs_old_sum):
+                old_min = torch.nan_to_num(logprobs_old_sum).min().item()
+                old_max = torch.nan_to_num(logprobs_old_sum).max().item()
                 logger.warning(
                     "Non-finite old/behavior logprobs; skipping batch",
                     extra={"min": float(old_min), "max": float(old_max)},
                 )
                 continue
 
-            # Compute REFERENCE model logprobs for KL divergence penalty only if enabled
+            # Step 4: Compute reference model logprobs for KL divergence penalty (only if enabled)
             if kl_enabled:
                 if ref_model is not None:
                     with torch.no_grad():
@@ -1171,77 +1608,43 @@ class GRPOAlgorithm(TrainingAlgorithm):
                     # If no ref model, set ref per-token logprobs equal to current (zero KL)
                     logprobs_ref_per_token = logprobs_current_per_token.detach()
 
-            # Importance sampling log-ratio: π_current / π_old (behavior)
-            log_ratio = logprobs_current_sum - logprobs_old
-            if not _is_finite_tensor(log_ratio):
-                logger.debug("Non-finite log-ratio before clamp; applying clamp")
-            # Moderate clamp for numerical stability when exponentiating to ratios
-            log_ratio_clamped = torch.clamp(
-                log_ratio, min=-TRAINER_LOGRATIO_CLAMP, max=TRAINER_LOGRATIO_CLAMP
+            # Step 5: Normalize advantages for stable gradients
+            advantages_normalized = self._normalize_advantages(advantages_tensor)
+
+            # Step 6: Compute total completion tokens for DAPO variant
+            total_completion_tokens = None
+            if self.grpo_variant == "dapo":
+                local_completion_tokens = completion_mask.sum()  # Keep as tensor
+                # Gather across all processes with proper shape [1] for each process
+                all_tokens = accelerator.gather(local_completion_tokens.unsqueeze(0))
+                total_completion_tokens = int(all_tokens.sum().item())
+
+            # Step 7: Compute policy gradient loss with importance sampling and PPO clipping
+            loss_pg, ratio_clip_frac_val, ratio_ceiling_frac_val, ratios_pre_ceiling = (
+                self._compute_policy_gradient_loss(
+                    logprobs_current_per_token,
+                    logprobs_old_per_token,
+                    advantages_normalized,
+                    completion_mask,
+                    len(batch_rollouts),
+                    total_completion_tokens,
+                )
             )
 
-            # Advantage normalization for stable gradients
-            # IMPORTANT: Normalize advantages to have unit variance while preserving zero-sum
-            # This prevents gradient explosion when advantages have large magnitude
-            # Clip extreme outliers first, then standardize
-            perc_val = float(TRAINER_ADV_CLIP_PERCENTILE)
-            q = max(0.0, min(100.0, perc_val)) / 100.0
-            if 0.0 < q < 1.0:
-                clip_val = torch.quantile(advantages_tensor.abs(), q)
-                if torch.isfinite(clip_val):
-                    advantages_tensor = advantages_tensor.clamp(-clip_val, clip_val)
-
-            # We don't normalize advantages since they are already normalized
-            advantages_normalized = advantages_tensor
-
-            # Policy gradient loss with importance sampling and PPO-style clipping
-            ratio_clip_frac_val: float = 0.0
-            ratio_ceiling_frac_val: float = 0.0
-            ratios_pre_ceiling = torch.exp(log_ratio_clamped)
-            if TRAINER_USE_IS:
-                # Importance sampling ratio with numerical stability clamp, then hard ceiling
-                if TRAINER_IS_RATIO_MAX > 0.0:
-                    ceiling_mask = ratios_pre_ceiling > TRAINER_IS_RATIO_MAX
-                    ratios = torch.clamp(ratios_pre_ceiling, max=TRAINER_IS_RATIO_MAX)
-                else:
-                    ceiling_mask = torch.zeros_like(ratios_pre_ceiling, dtype=torch.bool)
-                    ratios = ratios_pre_ceiling
-
-                # Asymmetric PPO-style clipping (DAPO-style): tighter lower bound, relaxed upper bound
-                lower = 1.0 - TRAINER_PPO_CLIP_EPS
-                upper = 1.0 + TRAINER_PPO_CLIP_EPS_UPPER
-                ratios_clipped = torch.clamp(ratios, lower, upper)
-
-                # Track clipping statistics for monitoring
-                clip_mask = (ratios < lower) | (ratios > upper)
-                ratio_clip_frac_val = clip_mask.float().mean().item()
-                ratio_ceiling_frac_val = ceiling_mask.float().mean().item()
-
-                pg_unclipped = ratios * advantages_normalized
-                pg_clipped = ratios_clipped * advantages_normalized
-                loss_pg = -torch.min(pg_unclipped, pg_clipped).mean()
-            else:
-                # On-policy: no ratio, just advantage-weighted logprobs
-                loss_pg = -(advantages_normalized * logprobs_current_sum).mean()
-
-            # KL divergence penalty: KL(π_current || π_ref) only when enabled
+            # Step 8: Compute KL divergence penalty (only when enabled)
             if kl_enabled:
-                max_comp_len = logprobs_current_per_token.shape[1]
-                comp_lens_tensor = torch.as_tensor(batch_comp_lens, device=accelerator.device)
-                token_positions = torch.arange(max_comp_len, device=accelerator.device)
-                completion_mask = (token_positions.unsqueeze(0) < comp_lens_tensor.unsqueeze(1)).to(
-                    torch.float32
+                loss_kl, kl_value = self._compute_kl_divergence_loss(
+                    logprobs_current_per_token,
+                    logprobs_ref_per_token,
+                    batch_comp_lens,
+                    current_kl_coef,
+                    accelerator,
                 )
-
-                per_token_log_ratio = logprobs_current_per_token - logprobs_ref_per_token
-                per_token_kl = 0.5 * per_token_log_ratio.pow(2) * completion_mask
-                kl_tensor = per_token_kl.sum() / completion_mask.sum().clamp(min=1.0)
-                loss_kl = current_kl_coef * kl_tensor
-                kl_value = float(kl_tensor.detach().item())
             else:
                 loss_kl = torch.tensor(0.0, device=logprobs_current_sum.device)
                 kl_value = 0.0
 
+            # Step 9: Compute entropy regularization
             entropies = compute_entropy(
                 model,
                 input_ids_tensor,
@@ -1254,6 +1657,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 continue
             loss_entropy = -TRAINER_ENTROPY_COEF * entropies.mean()
 
+            # Step 10: Aggregate total loss
             loss_total = loss_pg + loss_kl + loss_entropy
 
             # Skip backward on non-finite loss to avoid corrupting optimizer state
@@ -1271,6 +1675,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 )
                 continue
 
+            # Step 11: Perform gradient accumulation and optimization
             # Zero gradients before backward pass (only at start of accumulation)
             if grad_accum_counter == 0:
                 optimizer.zero_grad(set_to_none=True)
@@ -1291,6 +1696,10 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 grad_norm_scalar = grad_norm.item()
 
                 if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                    # Build diagnostic info for NaN/Inf gradient detection
+                    logprobs_current_sum = (logprobs_current_per_token * completion_mask).sum(dim=1)
+                    logprobs_old_sum = (logprobs_old_per_token * completion_mask).sum(dim=1)
+                    log_ratio = logprobs_current_sum - logprobs_old_sum
                     loss_tot_v = torch.nan_to_num(loss_total).item()
                     lr_mean = torch.nan_to_num(log_ratio).mean().item()
                     lr_std = torch.nan_to_num(log_ratio).std().item()
@@ -1319,60 +1728,39 @@ class GRPOAlgorithm(TrainingAlgorithm):
                     current_kl_coef = self.kl_controller.update(kl_value)
                 grad_accum_counter = 0
 
-            epoch_metrics["loss_total"].append(loss_total.item())
-            epoch_metrics["loss_pg"].append(loss_pg.item())
-            epoch_metrics["loss_kl"].append(loss_kl.item())
-            epoch_metrics["loss_entropy"].append(loss_entropy.item())
-            epoch_metrics["grad_norm"].append(
-                grad_norm_scalar if grad_norm_scalar is not None else 0.0
+            # Step 12: Collect batch metrics for epoch aggregation
+            self._collect_batch_metrics(
+                epoch_metrics,
+                loss_total,
+                loss_pg,
+                loss_kl,
+                loss_entropy,
+                grad_norm_scalar,
+                advantages_tensor,
+                advantages_normalized,
+                entropies,
+                kl_value,
+                ratios_pre_ceiling,
+                ratio_clip_frac_val,
+                ratio_ceiling_frac_val,
+                batch_rewards,
             )
-            epoch_metrics["advantage_mean"].append(advantages_tensor.mean().item())
-            epoch_metrics["advantage_std"].append(advantages_tensor.std().item())
-            epoch_metrics["entropy_mean"].append(entropies.mean().item())
-            # advantages_normalized is now same as advantages_tensor (no batch normalization)
-            epoch_metrics["advantage_mean_normalized"].append(advantages_normalized.mean().item())
-            epoch_metrics["advantage_std_normalized"].append(advantages_normalized.std().item())
-            # Track divergence metrics (use clamped log_ratio for safe exponentiation)
-            epoch_metrics["kl_divergence"].append(kl_value)
 
-            # Pre-ceiling ratio stats (consistent with historical logging)
-            epoch_metrics["ratio_mean"].append(ratios_pre_ceiling.mean().item())
-            epoch_metrics["ratio_std"].append(ratios_pre_ceiling.std().item())
-
-            # Clipping diagnostics (0 when importance sampling disabled)
-            epoch_metrics["ratio_clip_frac"].append(ratio_clip_frac_val)
-            epoch_metrics["ratio_ceiling_frac"].append(ratio_ceiling_frac_val)
-
-            # Track reward curve
-            epoch_metrics["reward_mean"].append(torch.tensor(batch_rewards).mean().item())
-            epoch_metrics["reward_std"].append(torch.tensor(batch_rewards).std().item())
-
-            # Log per-batch metrics if monitor is available for fine-grained tracking
-            if monitor is not None:
-                # Use global batch counter for smooth, continuous x-axis across all windows
-                self.global_batch_counter += 1
-                batch_log_metrics = {
-                    "loss_total": loss_total.item(),
-                    "loss_pg": loss_pg.item(),
-                    "loss_kl": loss_kl.item(),
-                    "loss_entropy": loss_entropy.item(),
-                    "grad_norm": grad_norm_scalar if grad_norm_scalar is not None else 0.0,
-                    "advantage_mean": advantages_tensor.mean().item(),
-                    "reward_mean": torch.tensor(batch_rewards).mean().item(),
-                    "kl_divergence": kl_value,
-                    "entropy_mean": entropies.mean().item(),
-                    "ratio_clip_frac": ratio_clip_frac_val,
-                    "ratio_ceiling_frac": ratio_ceiling_frac_val,
-                }
-                for key, value in batch_log_metrics.items():
-                    try:
-                        await monitor.log_gauge(
-                            f"training/batch/{key}",
-                            value,
-                            tags={"batch_step": str(self.global_batch_counter)},  # Global counter
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        logger.debug("Failed to log batch metric %s: %s", key, exc)
+            # Step 13: Log per-batch metrics to monitoring system
+            await self._log_batch_metrics(
+                monitor,
+                loss_total,
+                loss_pg,
+                loss_kl,
+                loss_entropy,
+                grad_norm_scalar,
+                advantages_tensor,
+                batch_rewards,
+                kl_value,
+                entropies,
+                ratio_clip_frac_val,
+                ratio_ceiling_frac_val,
+            )
 
         # Handle remaining accumulated gradients at epoch end
         if grad_accum_counter > 0:
