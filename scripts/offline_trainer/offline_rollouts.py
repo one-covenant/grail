@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -7,11 +8,14 @@ from typing import Any
 
 import numpy as np
 
-from grail.environments.core import ChatMessage
+from grail.environments.core import ChatMessage, MultiTurnEnv
 from grail.environments.loop import AgentEnvLoop, SGLangServerBackend, VLLMServerBackend
+from grail.environments.gsm8k_env import GSM8KEnv
 from grail.environments.sat_env import SATEnv
 from grail.shared.constants import ROLLOUTS_PER_PROBLEM, TRAINER_MAX_LENGTH
 from grail.trainer.algorithms.grpo import GRPOGroup, GRPORollout
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -26,6 +30,7 @@ class RolloutGenConfig:
     repetition_penalty: float | None
     rollouts_per_problem: int = ROLLOUTS_PER_PROBLEM
     return_logprobs: bool = True  # Enable behavior policy logprobs for IS
+    environment: str = "sat"  # "sat" | "gsm8k"
 
 
 class OfflineRolloutGenerator:
@@ -42,6 +47,17 @@ class OfflineRolloutGenerator:
         # Choose server backend
         backend_name = (self._cfg.backend or "sglang_server").lower()
         return_logprobs = bool(getattr(self._cfg, "return_logprobs", True))
+        
+        logger.info(
+            "Initializing rollout generator",
+            extra={
+                "backend": backend_name,
+                "base_url": self._cfg.base_url,
+                "rollouts_per_problem": self._cfg.rollouts_per_problem,
+                "environment": self._cfg.environment,
+                "return_logprobs": return_logprobs,
+            },
+        )
         
         if backend_name == "sglang_server":
             gen_backend = SGLangServerBackend(
@@ -61,6 +77,7 @@ class OfflineRolloutGenerator:
                 return_chosen_logprobs=return_logprobs,
             )
         else:
+            logger.error("Unsupported generation backend", extra={"backend": self._cfg.backend})
             raise ValueError(f"Unsupported generation backend: {self._cfg.backend}")
 
         # model=None (server-backed); device string irrelevant for server calls
@@ -77,6 +94,16 @@ class OfflineRolloutGenerator:
             gen_backend=gen_backend,
         )
 
+    def _create_env(self) -> MultiTurnEnv:
+        """Factory method to create environment based on config."""
+        env_type = getattr(self._cfg, "environment", "sat").lower()
+        if env_type == "gsm8k":
+            return GSM8KEnv()
+        elif env_type == "sat":
+            return SATEnv()
+        else:
+            raise ValueError(f"Unsupported environment type: {env_type}")
+
     async def generate_groups(
         self,
         seeds: Iterable[int],
@@ -92,11 +119,22 @@ class OfflineRolloutGenerator:
             seeds: Iterable of problem seeds
             batch_size: Number of rollouts to generate per batch
         """
+        seeds_list = list(seeds)
+        logger.info(
+            "Starting rollout generation",
+            extra={
+                "num_seeds": len(seeds_list),
+                "rollouts_per_problem": self._cfg.rollouts_per_problem,
+                "batch_size": batch_size,
+            },
+        )
+        
         groups: list[GRPOGroup] = []
         rollouts_per_problem = int(self._cfg.rollouts_per_problem)
-        for seed in seeds:
+        for idx, seed in enumerate(seeds_list):
+            logger.debug("Generating rollouts for seed", extra={"seed": seed, "index": idx})
             # Create a temporary env to render the prompt deterministically for this seed
-            env_for_prompt = SATEnv()
+            env_for_prompt = self._create_env()
             obs = env_for_prompt.reset(task_id=str(seed), seed=int(seed))
             prompts = [[{"role": m.role, "content": m.content} for m in obs.messages]]
             # Replicate prompt list per rollout
@@ -133,7 +171,7 @@ class OfflineRolloutGenerator:
                 text = self._tokenizer.decode(completion_ids, skip_special_tokens=False)
 
                 # Recreate env per replicate for clean single-turn stepping
-                env_r = SATEnv()
+                env_r = self._create_env()
                 _ = env_r.reset(task_id=str(seed), seed=int(seed))
                 _obs_r, reward_r, _t, _u, info_r = env_r.step(
                     ChatMessage(role="assistant", content=text)
@@ -176,7 +214,27 @@ class OfflineRolloutGenerator:
                 )
 
             groups.append(GRPOGroup(group_id=group_id, rollouts=rollouts))
+            
+            # Log stats for this group
+            group_rewards = [r.reward for r in rollouts]
+            group_successes = [r.success for r in rollouts]
+            logger.debug(
+                "Group generated",
+                extra={
+                    "group_id": group_id,
+                    "num_rollouts": len(rollouts),
+                    "mean_reward": float(np.mean(group_rewards)),
+                    "success_rate": float(np.mean(group_successes)),
+                },
+            )
 
+        logger.info(
+            "Rollout generation complete",
+            extra={
+                "num_groups": len(groups),
+                "total_rollouts": len(groups) * rollouts_per_problem,
+            },
+        )
         return groups
 
     @staticmethod

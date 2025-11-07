@@ -6,6 +6,7 @@ with CPU and GPU backends.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,8 @@ from grail.trainer.eval_planner import EvaluationPlan
 from grail.trainer.evaluator import EvaluatorService
 from scripts.offline_trainer.offline_rollouts import OfflineRolloutGenerator, RolloutGenConfig
 from tests.fixtures.fakes import DummyModel, DummyTokenizer, FakeBackend
+
+logger = logging.getLogger(__name__)
 
 
 class ToyLM(torch.nn.Module):
@@ -84,6 +87,7 @@ def _make_fake_generator(tokenizer: Any) -> OfflineRolloutGenerator:
 
 async def test_rollout_generator_produces_valid_groups() -> None:
     """Test that rollout generator produces valid GRPO groups."""
+    logger.info("Testing rollout generator produces valid groups")
     tokenizer = DummyTokenizer()
     generator = _make_fake_generator(tokenizer)
 
@@ -99,10 +103,12 @@ async def test_rollout_generator_produces_valid_groups() -> None:
         # Check advantage zero-sum property
         adv_sum = sum(r.advantage for r in group.rollouts)
         assert abs(adv_sum) < 1e-6, f"Advantages should sum to zero, got {adv_sum}"
+    logger.info("Test passed: rollout generator produces valid groups")
 
 
 async def test_train_epoch_cpu() -> None:
     """Test GRPO training epoch on CPU with toy models."""
+    logger.info("Testing GRPO training epoch on CPU")
     tokenizer = DummyTokenizer()
     generator = _make_fake_generator(tokenizer)
 
@@ -144,13 +150,15 @@ async def test_train_epoch_cpu() -> None:
     )  # Allow reasonable negatives
     assert isinstance(metrics["kl_divergence"], float)
     assert isinstance(metrics["reward_mean"], float)
+    logger.info("Test passed: GRPO training epoch on CPU", extra={"metrics": metrics})
 
 
 async def test_train_epoch_gpu() -> None:
     if not torch.cuda.is_available():
-        print("  SKIP: GPU not available")
+        logger.info("SKIP: GPU not available")
         return
     """Test GRPO training epoch on GPU with toy models."""
+    logger.info("Testing GRPO training epoch on GPU")
     tokenizer = DummyTokenizer()
     generator = _make_fake_generator(tokenizer)
 
@@ -191,10 +199,12 @@ async def test_train_epoch_gpu() -> None:
     assert isinstance(metrics["reward_mean"], float)
     # Verify GPU was used
     assert next(model.parameters()).device.type == "cuda"
+    logger.info("Test passed: GRPO training epoch on GPU", extra={"metrics": metrics})
 
 
 async def test_evaluator_smoke() -> None:
     """Test evaluator service with fake backend."""
+    logger.info("Testing evaluator service smoke test")
     model = DummyModel()
     tokenizer = DummyTokenizer()
 
@@ -225,13 +235,15 @@ async def test_evaluator_smoke() -> None:
     assert "mean@1" in metrics
     assert isinstance(metrics["pass@1"], float)
     assert isinstance(metrics["mean@1"], float)
+    logger.info("Test passed: evaluator smoke test", extra={"metrics": metrics})
 
 
 async def test_evaluator_gpu() -> None:
     if not torch.cuda.is_available():
-        print("  SKIP: GPU not available")
+        logger.info("SKIP: GPU not available")
         return
     """Test evaluator service on GPU."""
+    logger.info("Testing evaluator service on GPU")
     tokenizer = DummyTokenizer()
     model = ToyLM()
     model = model.to("cuda")
@@ -262,10 +274,12 @@ async def test_evaluator_gpu() -> None:
     assert "pass@1" in metrics
     assert isinstance(metrics["pass@1"], float)
     # Verify GPU was used if HF backend is used (but we're using FakeBackend so this is mainly structure test)
+    logger.info("Test passed: evaluator service on GPU", extra={"metrics": metrics})
 
 
 def test_rollout_generator_advantage_computation() -> None:
     """Test that advantage computation is zero-mean and variance-normalized."""
+    logger.info("Testing advantage computation")
     from scripts.offline_trainer.offline_rollouts import OfflineRolloutGenerator
 
     rewards = [1.0, 2.0, 3.0, 4.0]
@@ -279,10 +293,12 @@ def test_rollout_generator_advantage_computation() -> None:
     var_adv = sum(a * a for a in advantages) / len(advantages)
     std_adv = (var_adv) ** 0.5
     assert abs(std_adv - 1.0) < 1e-5, f"Advantages should have unit variance, got std={std_adv}"
+    logger.info("Test passed: advantage computation")
 
 
 def test_rollout_groups_are_valid() -> None:
     """Test that generated groups pass validation."""
+    logger.info("Testing rollout groups are valid")
     tokenizer = DummyTokenizer()
     generator = _make_fake_generator(tokenizer)
 
@@ -298,3 +314,4 @@ def test_rollout_groups_are_valid() -> None:
             assert rollout.nonce >= 0
             assert isinstance(rollout.reward, float)
             assert isinstance(rollout.advantage, float)
+    logger.info("Test passed: rollout groups are valid")

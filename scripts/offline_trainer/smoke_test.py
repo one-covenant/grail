@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,14 @@ from grail.trainer.eval_planner import EvaluationPlan
 from grail.trainer.evaluator import EvaluatorService
 from scripts.offline_trainer.offline_rollouts import OfflineRolloutGenerator, RolloutGenConfig
 from tests.fixtures.fakes import DummyModel, DummyTokenizer, FakeBackend
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 
 class ToyLM(torch.nn.Module):
@@ -70,12 +79,15 @@ def _make_generator(tokenizer: Any) -> OfflineRolloutGenerator:
 
 
 async def _train_epoch_smoke() -> dict[str, float]:
+    logger.info("Starting training epoch smoke test")
     tokenizer = DummyTokenizer()
     generator = _make_generator(tokenizer)
 
     # Generate small set of groups
     seeds = [1001, 1002]
+    logger.info("Generating rollout groups", extra={"num_seeds": len(seeds)})
     groups = generator.generate_groups(seeds)
+    logger.info("Groups generated", extra={"num_groups": len(groups)})
 
     # Tiny toy models for train/ref
     model = ToyLM()
@@ -87,11 +99,13 @@ async def _train_epoch_smoke() -> dict[str, float]:
     device = accelerator.device
     model = model.to(device)
     ref_model = ref_model.to(device)
+    logger.info("Models loaded to device", extra={"device": str(device)})
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 
     algo = GRPOAlgorithm()
     train_cfg = TrainingConfig(lr=1e-3, batch_size=4)
+    logger.info("Starting GRPO training epoch")
     metrics = await algo.train_epoch(
         model=model,
         ref_model=ref_model,
@@ -103,10 +117,12 @@ async def _train_epoch_smoke() -> dict[str, float]:
         window=0,
         config=train_cfg,
     )
+    logger.info("Training epoch complete", extra={"metrics": metrics})
     return metrics
 
 
 async def _eval_smoke() -> dict[str, float]:
+    logger.info("Starting evaluation smoke test")
     model = DummyModel()
     tokenizer = DummyTokenizer()
 
@@ -131,15 +147,28 @@ async def _eval_smoke() -> dict[str, float]:
     )
 
     plan = EvaluationPlan(ids=["1", "2"], replicates=2, cycle_index=0, seed_base=42)
+    logger.info("Running evaluation cycle")
     metrics = await svc.run_cycle(plan)
+    logger.info("Evaluation complete", extra={"metrics": metrics})
     return metrics
 
 
 def main() -> None:
+    logger.info("=" * 80)
+    logger.info("Running offline trainer smoke tests")
+    logger.info("=" * 80)
+    
+    logger.info("Running training smoke test")
     train_metrics = asyncio.run(_train_epoch_smoke())
-    print("Train metrics:", {k: float(v) for k, v in train_metrics.items()})
+    logger.info("Training smoke test complete", extra={"train_metrics": {k: float(v) for k, v in train_metrics.items()}})
+    
+    logger.info("Running evaluation smoke test")
     eval_metrics = asyncio.run(_eval_smoke())
-    print("Eval metrics:", {k: float(v) for k, v in eval_metrics.items()})
+    logger.info("Evaluation smoke test complete", extra={"eval_metrics": {k: float(v) for k, v in eval_metrics.items()}})
+    
+    logger.info("=" * 80)
+    logger.info("All smoke tests passed!")
+    logger.info("=" * 80)
 
 
 if __name__ == "__main__":
