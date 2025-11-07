@@ -58,6 +58,7 @@ def get_model(
     device: str | None = None,
     use_safetensors: bool = True,
     eval_mode: bool = True,
+    use_flash_attention: bool = False,
 ) -> Any:
     """Load model with consistent configuration.
 
@@ -66,6 +67,8 @@ def get_model(
         device: Target device ("cuda", "cpu", or None for auto-detect)
         use_safetensors: Whether to prefer safetensors format
         eval_mode: Whether to set model to eval() mode
+        use_flash_attention: Whether to use Flash Attention 2 (requires flash-attn package).
+                            Only enabled for training, not for evaluation/inference.
 
     Returns:
         Configured model instance with preserved original name
@@ -90,8 +93,27 @@ def get_model(
             except Exception as e:
                 logger.debug(f"Failed to read checkpoint metadata: {e}")
 
-    # Load model
-    model = AutoModelForCausalLM.from_pretrained(model_name, use_safetensors=use_safetensors)
+    # Configure attention implementation
+    attn_implementation = None
+    if use_flash_attention and device == "cuda":
+        try:
+            import flash_attn  # noqa: F401
+
+            attn_implementation = "flash_attention_2"
+            logger.info("Using Flash Attention 2 for model loading")
+        except ImportError:
+            logger.warning(
+                "flash-attn not installed; falling back to default attention. "
+                "Install with: uv pip install flash-attn"
+            )
+
+    # Load model with optimized attention if available
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        use_safetensors=use_safetensors,
+        attn_implementation=attn_implementation,
+        torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
+    )
 
     # Preserve original model name for GRAIL proof validation
     model.name_or_path = original_model_name

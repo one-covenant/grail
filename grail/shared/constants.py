@@ -74,6 +74,9 @@ TRAINER_KL_ADAPT_RATE = float(os.getenv("GRAIL_TRAINER_KL_ADAPT_RATE", "1.5"))
 TRAINER_KL_MIN = float(os.getenv("GRAIL_TRAINER_KL_MIN", "0.001"))
 TRAINER_KL_MAX = float(os.getenv("GRAIL_TRAINER_KL_MAX", "0.2"))
 
+# Flash Attention for training optimization
+TRAINER_USE_FLASH_ATTENTION = os.getenv("GRAIL_TRAINER_USE_FLASH_ATTENTION", "1") == "1"
+
 # Trainer miner trust filtering (weight-based)
 TRAINER_MIN_AGGREGATE_WEIGHT = float(os.getenv("GRAIL_TRAINER_MIN_AGGREGATE_WEIGHT", "0.01"))
 TRAINER_MIN_TRUSTED_MINERS = int(os.getenv("GRAIL_TRAINER_MIN_TRUSTED_MINERS", "1"))
@@ -83,6 +86,11 @@ TRAINER_MIN_TRUSTED_MINERS = int(os.getenv("GRAIL_TRAINER_MIN_TRUSTED_MINERS", "
 # Defaults are conservative so behavior is unchanged unless configured.
 GRPO_MAX_GROUPS = int(os.getenv("GRAIL_GRPO_MAX_GROUPS", "32"))
 GRPO_MAX_COMPLETION_TOKENS = int(os.getenv("GRAIL_GRPO_MAX_COMPLETION_TOKENS", "512"))
+
+# GRPO loss aggregation variant
+# Options: 'grpo' (per-sequence), 'bnpo' (global token avg),
+#          'dapo' (distributed token norm), 'dr_grpo' (fixed denominator)
+GRPO_VARIANT = os.getenv("GRAIL_GRPO_VARIANT", "dapo")
 
 # Stage 2 (refinement): quality/efficiency-oriented filters
 # Require at least this fraction of successes within a group (0 disables)

@@ -15,7 +15,13 @@ import torch
 from grail.environments.gsm8k_env import GSM8KEnv
 from grail.environments.providers import GSM8KTaskSource
 from grail.infrastructure.chain import GrailChainManager
-from grail.shared.constants import NETUID, READY_MARKER_UPLOAD_BLOCKS, WINDOW_LENGTH, is_kl_enabled
+from grail.shared.constants import (
+    NETUID,
+    READY_MARKER_UPLOAD_BLOCKS,
+    TRAINER_USE_FLASH_ATTENTION,
+    WINDOW_LENGTH,
+    is_kl_enabled,
+)
 from grail.shared.window_utils import (
     WindowWaitTracker,
     calculate_next_window,
@@ -719,13 +725,17 @@ class TrainerNeuron(BaseNeuron):
                 else (self._context.ref_model_path if kl_enabled else None)
             )
 
-            # Reload training model
+            # Reload training model with Flash Attention enabled if configured
             if self._context.train_model is None and train_reload_path:
                 reload_source = "eval checkpoint" if self._eval_checkpoint_dir else "original path"
                 logger.info(
                     "Reloading training model from %s: %s", reload_source, train_reload_path
                 )
-                self._context.train_model = get_model(train_reload_path, eval_mode=False)
+                self._context.train_model = get_model(
+                    train_reload_path,
+                    eval_mode=False,
+                    use_flash_attention=TRAINER_USE_FLASH_ATTENTION,
+                )
                 logger.info("✅ Reloaded training model from %s", reload_source)
             else:
                 logger.debug(

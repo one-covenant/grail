@@ -20,6 +20,7 @@ from typing import Any, Literal
 
 from grail.model.provider import get_model, get_tokenizer
 from grail.shared.chat_templates import build_qwen_chat_template
+from grail.shared.constants import TRAINER_USE_FLASH_ATTENTION
 from grail.shared.prompt_constants import REASONING_START, SYSTEM_PROMPT
 
 ModelLoadMode = Literal["latest", "hf", "window"]
@@ -153,22 +154,27 @@ async def load_training_artifacts(
     """Load (train_model, ref_model, tokenizer) per provided specs.
 
     - Trainer tokenizer installs Qwen chat template.
-    - Train model loads with eval_mode=False; Ref model with eval_mode=True.
+    - Train model loads with eval_mode=False and Flash Attention enabled; Ref model with eval_mode=True.
+    - Flash Attention 2 is enabled for training to optimize performance.
     """
     # Build trainer tokenizer with Qwen chat template
     chat_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
 
-    # Resolve train source
+    # Resolve train source - enable Flash Attention for training if configured
     if train_spec.mode == "hf":
         train_model_id = train_spec.hf_id or ""
-        train_model = get_model(train_model_id, eval_mode=False)
+        train_model = get_model(
+            train_model_id, eval_mode=False, use_flash_attention=TRAINER_USE_FLASH_ATTENTION
+        )
         tokenizer = get_tokenizer(train_model_id, chat_template=chat_template)
     else:
         train_ckpt = await _resolve_checkpoint(train_spec, checkpoint_manager)
-        train_model = get_model(str(train_ckpt), eval_mode=False)
+        train_model = get_model(
+            str(train_ckpt), eval_mode=False, use_flash_attention=TRAINER_USE_FLASH_ATTENTION
+        )
         tokenizer = get_tokenizer(str(train_ckpt), chat_template=chat_template)
 
-    # Resolve ref source (independent)
+    # Resolve ref source (independent) - no Flash Attention for reference model
     if ref_spec.mode == "hf":
         ref_model_id = ref_spec.hf_id or ""
         ref_model = get_model(ref_model_id, eval_mode=True)
