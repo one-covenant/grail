@@ -1,4 +1,4 @@
-# Full-scale GSM8K GRPO training (100 iterations)
+# Full-scale GSM8K GRPO training (100 iterations) - OPTIMIZED
 defaults:
   - offline_grpo
 
@@ -7,16 +7,35 @@ model:
   train_id: "Qwen/Qwen2.5-1.5B-Instruct"
   ref_id: "Qwen/Qwen2.5-1.5B-Instruct"
 
-# Training (GRPO best practices)
+# Training (Optimized GRPO for math reasoning)
 train:
   iterations: 100
-  batch_size: 4
-  lr: 1.0e6  # Conservative for stability
-  grad_accum_steps: 32  # Effective batch: 128
-  grad_clip: 1.0
-  kl_coef: 0.0  # Disabled - pure policy gradient
-  entropy_coef: 0.0005  # Exploration bonus
-  adaptive_kl: false
+  batch_size: 4  # Reduced for memory optimization with bf16
+  lr: 2.0e-6  # Better convergence for math (CRITICAL FIX: was 1.0e6!)
+  grad_accum_steps: 32  # Effective batch: 128 (faster iteration)
+  grad_clip: 1.0  # Tighter clipping for stability
+  warmup_steps: 50  # 5% warmup for better convergence
+  max_length: 1024
+  group_adv_sum_tol: 0.01
+  
+  # Advantage clipping
+  adv_clip_percentile: 98.0  # More aggressive outlier removal
+  
+  # KL divergence (disabled for pure policy gradient)
+  kl_coef: 0.0  # Disabled - pure on-policy GRPO
+  entropy_coef: 0.001  # Exploration bonus for math problems
+  adaptive_kl: false  # Disabled with kl_coef=0
+  kl_target: 0.04
+  kl_adapt_rate: 1.5
+  kl_min: 0.001
+  kl_max: 0.2
+  
+  # Importance sampling and PPO clipping (tight trust region for math)
+  use_is: true  # Enable importance sampling
+  ppo_clip_eps: 0.2  # TRAINER_PPO_CLIP_EPS
+  ppo_clip_eps_upper: 0.28  # TRAINER_PPO_CLIP_EPS_UPPER
+  is_ratio_max: 2.5  # GRAIL_TRAINER_IS_RATIO_MAX
+  logratio_clamp: 0.92  # GRAIL_TRAINER_LOGRATIO_CLAMP
 
 # Data
 data:
@@ -24,7 +43,7 @@ data:
   problems_per_iteration: 32  # Diverse training signal
   rollouts_per_problem: 16  # Good advantage variance
   train_seed_start: 0
-  num_train_seeds: 1000  # Large pool for diversity
+  num_train_seeds: 3200  # Large pool (100 iter × 32 prob = 3200 unique calls)
 
 # Evaluation
 eval:
@@ -45,5 +64,5 @@ logging:
     enabled: true
     project: "grail-offline"
     entity: "tplr"
-    tags: ["gsm8k", "grpo", "100-iter", "1.5b"]
+    tags: ["gsm8k", "grpo", "100-iter", "1.5b", "optimized"]
 

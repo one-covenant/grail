@@ -61,7 +61,7 @@ train:
   entropy_coef: 0.0005  # GRAIL_TRAINER_ENTROPY_COEF
   
   # Advantage and clipping
-  adv_clip_percentile: 99.0  # TRAINER_ADV_CLIP_PERCENTILE
+  adv_clip_percentile: 98.0  # More aggressive outlier removal (optimized from 99.0)
   group_adv_sum_tol: 0.01  # TRAINER_GROUP_ADV_SUM_TOL
   
   # Importance sampling and PPO clipping
@@ -72,9 +72,9 @@ train:
   logratio_clamp: 0.92  # GRAIL_TRAINER_LOGRATIO_CLAMP
   
   # Adaptive KL (disabled when kl_coef=0)
-  adaptive_kl: true  # TRAINER_ADAPTIVE_KL
-  kl_target: 0.04  # TRAINER_KL_TARGET
-  kl_adapt_rate: 1.2  # GRAIL_TRAINER_KL_ADAPT_RATE
+  adaptive_kl: false  # Disabled since kl_coef=0
+  kl_target: 0.04  # TRAINER_KL_TARGET (inactive)
+  kl_adapt_rate: 1.5  # GRAIL_TRAINER_KL_ADAPT_RATE
   kl_min: 0.001  # TRAINER_KL_MIN
   kl_max: 0.2  # TRAINER_KL_MAX
 
@@ -86,7 +86,7 @@ data:
   problems_per_iteration: 8  # Number of problems per training iteration
   rollouts_per_problem: 16  # ROLLOUTS_PER_PROBLEM from constants
   train_seed_start: 1000  # Starting seed for training problems
-  num_train_seeds: 64  # Total pool of training problem seeds
+  num_train_seeds: 320  # Larger pool to reduce seed reuse (5 iter × 8 prob = 40 unique calls)
 
 # ============================================================================
 # EVALUATION CONFIGURATION
