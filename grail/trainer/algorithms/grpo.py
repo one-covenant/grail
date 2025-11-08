@@ -969,6 +969,15 @@ class GRPOAlgorithm(TrainingAlgorithm):
     - 'bnpo': Batch Normalization Policy Optimization - averages over all tokens globally
     - 'dapo': Distributed Adaptive Policy Optimization - normalizes by total completion tokens
     - 'dr_grpo': Denominator-Reduced GRPO - normalizes by batch_size × max_completion_length
+
+    Importance Sampling Levels:
+    - 'sequence': Compute one importance sampling ratio per sequence (default)
+        Sums log-probabilities over tokens first, then computes ratio and clips at sequence level.
+        Standard PPO/GRPO approach with sequence-level clipping.
+    - 'token': Compute importance sampling ratio per token independently
+        Computes ratio for each token, then clips each token's contribution independently.
+        More fine-grained clipping that can be more stable for highly variable sequences.
+        Inspired by HuggingFace TRL GRPO implementation.
     """
 
     name: str = "grpo"
@@ -977,6 +986,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
         self,
         adaptive_kl_enabled: bool = False,
         grpo_variant: str | None = None,
+        importance_sampling_level: str = "sequence",
     ) -> None:
         super().__init__()
         # Persistent adaptive KL controller across epochs/windows
@@ -1004,6 +1014,18 @@ class GRPOAlgorithm(TrainingAlgorithm):
             )
         self.grpo_variant: str = selected_variant
         logger.info(f"Using {self.grpo_variant.upper()} loss variant")
+
+        # Validate and set importance sampling level
+        # Controls whether clipping is applied at the sequence or token level
+        importance_sampling_level = importance_sampling_level.strip().lower()
+        valid_is_levels = {"sequence", "token"}
+        if importance_sampling_level not in valid_is_levels:
+            raise ValueError(
+                f"Invalid importance_sampling_level '{importance_sampling_level}'. "
+                f"Must be one of {sorted(valid_is_levels)}"
+            )
+        self.importance_sampling_level: str = importance_sampling_level
+        logger.info(f"Using {self.importance_sampling_level}-level importance sampling")
 
     def _prepare_batch_tensors(
         self,
@@ -1153,6 +1175,11 @@ class GRPOAlgorithm(TrainingAlgorithm):
     ) -> tuple[torch.Tensor, float, float, torch.Tensor]:
         """Compute policy gradient loss with importance sampling and PPO clipping.
 
+        Supports both sequence-level and token-level importance sampling based on
+        self.importance_sampling_level:
+        - "sequence": Compute one ratio per sequence (sum logprobs, then compute ratio)
+        - "token": Compute ratio per token independently (more fine-grained clipping)
+
         Args:
             logprobs_current_per_token: [batch_size, max_comp_len] current policy per-token logprobs
             logprobs_old_per_token: [batch_size, max_comp_len] behavior policy per-token logprobs
@@ -1164,31 +1191,69 @@ class GRPOAlgorithm(TrainingAlgorithm):
         Returns:
             Tuple of (loss_pg, ratio_clip_frac, ratio_ceiling_frac, ratios_pre_ceiling)
         """
-        # Compute sequence-level log-ratios by summing over tokens
-        logprobs_current_sum = (logprobs_current_per_token * completion_mask).sum(dim=1)
-        logprobs_old_sum = (logprobs_old_per_token * completion_mask).sum(dim=1)
-        log_ratio = logprobs_current_sum - logprobs_old_sum
+        # Compute log-ratios based on importance sampling level
+        if self.importance_sampling_level == "token":
+            # Token-level: compute ratio per token independently
+            # Shape: [batch_size, max_comp_len]
+            log_ratio = logprobs_current_per_token - logprobs_old_per_token
 
-        if not _is_finite_tensor(log_ratio):
-            logger.debug("Non-finite log-ratio before clamp; applying clamp")
-        # Moderate clamp for numerical stability when exponentiating to ratios
-        log_ratio_clamped = torch.clamp(
-            log_ratio, min=-TRAINER_LOGRATIO_CLAMP, max=TRAINER_LOGRATIO_CLAMP
-        )
+            if not _is_finite_tensor(log_ratio):
+                logger.debug("Non-finite per-token log-ratio before clamp; applying clamp")
+            # Moderate clamp for numerical stability when exponentiating to ratios
+            log_ratio_clamped = torch.clamp(
+                log_ratio, min=-TRAINER_LOGRATIO_CLAMP, max=TRAINER_LOGRATIO_CLAMP
+            )
+
+            # For reporting, compute sequence-level ratios (same as original for monitoring)
+            logprobs_current_sum = (logprobs_current_per_token * completion_mask).sum(dim=1)
+            logprobs_old_sum = (logprobs_old_per_token * completion_mask).sum(dim=1)
+            log_ratio_seq = logprobs_current_sum - logprobs_old_sum
+            log_ratio_seq_clamped = torch.clamp(
+                log_ratio_seq, min=-TRAINER_LOGRATIO_CLAMP, max=TRAINER_LOGRATIO_CLAMP
+            )
+            ratios_pre_ceiling = torch.exp(log_ratio_seq_clamped)
+
+        elif self.importance_sampling_level == "sequence":
+            # Sequence-level: sum logprobs first, then compute ratio
+            # Shape: [batch_size]
+            logprobs_current_sum = (logprobs_current_per_token * completion_mask).sum(dim=1)
+            logprobs_old_sum = (logprobs_old_per_token * completion_mask).sum(dim=1)
+            log_ratio = logprobs_current_sum - logprobs_old_sum
+
+            if not _is_finite_tensor(log_ratio):
+                logger.debug("Non-finite log-ratio before clamp; applying clamp")
+            # Moderate clamp for numerical stability when exponentiating to ratios
+            log_ratio_clamped = torch.clamp(
+                log_ratio, min=-TRAINER_LOGRATIO_CLAMP, max=TRAINER_LOGRATIO_CLAMP
+            )
+            ratios_pre_ceiling = torch.exp(log_ratio_clamped)
+        else:
+            raise ValueError(
+                f"Invalid importance_sampling_level: {self.importance_sampling_level}. "
+                "Must be 'sequence' or 'token'."
+            )
 
         # Policy gradient loss with importance sampling and PPO-style clipping
         ratio_clip_frac_val: float = 0.0
         ratio_ceiling_frac_val: float = 0.0
-        ratios_pre_ceiling = torch.exp(log_ratio_clamped)
 
         if TRAINER_USE_IS:
-            # Importance sampling ratio with numerical stability clamp, then hard ceiling
+            # Compute ratios with optional ceiling
+            ratios = torch.exp(log_ratio_clamped)
+
+            # Apply hard ceiling if configured
             if TRAINER_IS_RATIO_MAX > 0.0:
-                ceiling_mask = ratios_pre_ceiling > TRAINER_IS_RATIO_MAX
-                ratios = torch.clamp(ratios_pre_ceiling, max=TRAINER_IS_RATIO_MAX)
+                ceiling_mask = ratios > TRAINER_IS_RATIO_MAX
+                ratios = torch.clamp(ratios, max=TRAINER_IS_RATIO_MAX)
+                # Compute ceiling fraction from valid (non-padding) tokens
+                if self.importance_sampling_level == "token":
+                    ratio_ceiling_frac_val = (
+                        (ceiling_mask * completion_mask).sum() / completion_mask.sum().clamp(min=1.0)
+                    ).item()
+                else:
+                    ratio_ceiling_frac_val = ceiling_mask.float().mean().item()
             else:
-                ceiling_mask = torch.zeros_like(ratios_pre_ceiling, dtype=torch.bool)
-                ratios = ratios_pre_ceiling
+                ceiling_mask = None
 
             # Asymmetric PPO-style clipping (DAPO-style): tighter lower bound, relaxed upper bound
             lower = 1.0 - TRAINER_PPO_CLIP_EPS
@@ -1197,23 +1262,39 @@ class GRPOAlgorithm(TrainingAlgorithm):
 
             # Track clipping statistics for monitoring
             clip_mask = (ratios < lower) | (ratios > upper)
-            ratio_clip_frac_val = clip_mask.float().mean().item()
-            ratio_ceiling_frac_val = ceiling_mask.float().mean().item()
+            if self.importance_sampling_level == "token":
+                # For token-level, compute clipping fraction over valid tokens
+                ratio_clip_frac_val = (
+                    (clip_mask * completion_mask).sum() / completion_mask.sum().clamp(min=1.0)
+                ).item()
+            else:
+                # For sequence-level, compute clipping fraction over sequences
+                ratio_clip_frac_val = clip_mask.float().mean().item()
 
-            # Compute sequence-level loss: -min(ratio * adv, clipped_ratio * adv)
-            # Then broadcast to token dimension for aggregation
-            # Note: This is sequence-level IS (one ratio per sequence), not token-level IS
-            # Expand advantages to [batch_size, 1] for broadcasting
-            advantages_expanded = advantages_normalized.unsqueeze(1)  # [batch_size, 1]
-            ratios_expanded = ratios.unsqueeze(1)  # [batch_size, 1]
-            ratios_clipped_expanded = ratios_clipped.unsqueeze(1)  # [batch_size, 1]
+            # Compute per-token loss based on importance sampling level
+            if self.importance_sampling_level == "token":
+                # Token-level: ratios and advantages interact per-token
+                # ratios: [batch_size, max_comp_len]
+                # advantages: [batch_size] -> expand to [batch_size, 1] for broadcasting
+                advantages_expanded = advantages_normalized.unsqueeze(1)  # [batch_size, 1]
 
-            pg_unclipped = ratios_expanded * advantages_expanded  # [batch_size, 1]
-            pg_clipped = ratios_clipped_expanded * advantages_expanded  # [batch_size, 1]
-            per_token_loss = -torch.min(pg_unclipped, pg_clipped)  # [batch_size, 1]
+                pg_unclipped = ratios * advantages_expanded  # [batch_size, max_comp_len]
+                pg_clipped = ratios_clipped * advantages_expanded  # [batch_size, max_comp_len]
+                per_token_loss = -torch.min(pg_unclipped, pg_clipped)  # [batch_size, max_comp_len]
 
-            # Expand to [batch_size, max_comp_len] by broadcasting
-            per_token_loss = per_token_loss.expand(-1, completion_mask.size(1))
+            elif self.importance_sampling_level == "sequence":
+                # Sequence-level: ratios are [batch_size], broadcast to token dimension
+                # Expand advantages to [batch_size, 1] for broadcasting
+                advantages_expanded = advantages_normalized.unsqueeze(1)  # [batch_size, 1]
+                ratios_expanded = ratios.unsqueeze(1)  # [batch_size, 1]
+                ratios_clipped_expanded = ratios_clipped.unsqueeze(1)  # [batch_size, 1]
+
+                pg_unclipped = ratios_expanded * advantages_expanded  # [batch_size, 1]
+                pg_clipped = ratios_clipped_expanded * advantages_expanded  # [batch_size, 1]
+                per_token_loss = -torch.min(pg_unclipped, pg_clipped)  # [batch_size, 1]
+
+                # Expand to [batch_size, max_comp_len] by broadcasting
+                per_token_loss = per_token_loss.expand(-1, completion_mask.size(1))
 
             # Aggregate using variant-specific strategy
             max_completion_length = completion_mask.size(1)
@@ -1225,7 +1306,11 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 total_completion_tokens,
             )
         else:
-            # On-policy: no ratio, just advantage-weighted logprobs (sequence-level)
+            # On-policy: no ratio, just advantage-weighted logprobs
+            if self.importance_sampling_level == "token":
+                # Sum over tokens first for on-policy
+                logprobs_current_sum = (logprobs_current_per_token * completion_mask).sum(dim=1)
+            # else: logprobs_current_sum already computed for sequence-level
             loss_pg = -(advantages_normalized * logprobs_current_sum).mean()
 
         return loss_pg, ratio_clip_frac_val, ratio_ceiling_frac_val, ratios_pre_ceiling
