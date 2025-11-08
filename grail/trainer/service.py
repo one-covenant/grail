@@ -24,8 +24,9 @@ from .trust import get_trusted_miner_hotkeys
 
 if TYPE_CHECKING:
     import bittensor as bt
-
-    from grail.infrastructure.checkpoints import CheckpointManager
+    from grail.infrastructure.checkpoints import (
+        CheckpointManager,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +58,8 @@ class TrainerService:
         self.credentials = credentials
         self.checkpoint_manager = checkpoint_manager
         self.monitor = monitor
-        self.algorithm = algorithm or GRPOAlgorithm()
         self.config = config or TrainingConfig()
+        self.algorithm = algorithm or GRPOAlgorithm(config=self.config)
         self.train_model = train_model
         self.ref_model = ref_model
         self.tokenizer = tokenizer

@@ -8,10 +8,10 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
-import bittensor as bt
 import numpy as np
 import torch
 
+import bittensor as bt
 from grail.environments.gsm8k_env import GSM8KEnv
 from grail.environments.providers import GSM8KTaskSource
 from grail.infrastructure.chain import GrailChainManager
@@ -30,7 +30,7 @@ from grail.shared.window_utils import (
 )
 from grail.trainer.algorithms import GRPOAlgorithm, TrainingAlgorithm
 from grail.trainer.checkpointing import finalize_checkpoint_ready
-from grail.trainer.config import EvalConfig
+from grail.trainer.config import EvalConfig, TrainingConfig
 from grail.trainer.eval_planner import EvaluationPlanner
 from grail.trainer.evaluator import EvaluatorService
 from grail.trainer.inference_server import create_inference_server
@@ -71,8 +71,14 @@ class TrainerNeuron(BaseNeuron):
         self._context = context
         self._optimizer: torch.optim.Optimizer | None = None
         self._scheduler: torch.optim.lr_scheduler.LRScheduler | None = None
+
+        # Initialize training configuration
+        self._train_cfg = TrainingConfig()
+
         # Persistent algorithm instance across windows (for KL controller, counters, etc.)
-        self._algorithm: TrainingAlgorithm = GRPOAlgorithm()
+        # Pass config to algorithm for dependency injection
+        self._algorithm: TrainingAlgorithm = GRPOAlgorithm(config=self._train_cfg)
+
         self._window_wait_tracker = WindowWaitTracker(log_interval_secs=120)
         self._wait_start_time: float | None = None
         self._last_wait_log: float = 0.0
@@ -945,6 +951,7 @@ class TrainerNeuron(BaseNeuron):
             optimizer=self._optimizer,
             scheduler=self._scheduler,
             chain_manager=ctx.chain_manager,
+            config=self._train_cfg,
         )
         logger.info("TrainerService created, calling train_window")
         result = await service.train_window(window, subtensor)

@@ -28,27 +28,7 @@ except Exception:  # pragma: no cover - optional in offline mode
         raise RuntimeError("Miner data fetching is unavailable in offline mode.")
 
 
-from grail.shared.constants import (
-    GRPO_VARIANT,
-    IMPORTANCE_SAMPLING_LEVEL,
-    ROLLOUTS_PER_PROBLEM,
-    TRAINER_ADV_CLIP_PERCENTILE,
-    TRAINER_ENTROPY_COEF,
-    TRAINER_GRAD_ACCUM_STEPS,
-    TRAINER_GRAD_CLIP,
-    TRAINER_IS_RATIO_MAX,
-    TRAINER_KL_ADAPT_RATE,
-    TRAINER_KL_COEF,
-    TRAINER_KL_MAX,
-    TRAINER_KL_MIN,
-    TRAINER_KL_TARGET,
-    TRAINER_LOGRATIO_CLAMP,
-    TRAINER_MAX_LENGTH,
-    TRAINER_PPO_CLIP_EPS,
-    TRAINER_PPO_CLIP_EPS_UPPER,
-    TRAINER_USE_IS,
-    is_kl_enabled,
-)
+from grail.shared.constants import IMPORTANCE_SAMPLING_LEVEL, ROLLOUTS_PER_PROBLEM, is_kl_enabled
 from grail.trainer.metrics import (
     KMetricsAggregator,
     TaskReplicateResult,
@@ -427,7 +407,10 @@ def _group_rollouts(raw_rollouts: list[dict[str, Any]]) -> dict[str, list[GRPORo
 
 
 def _compute_training_metrics(
-    groups: list[GRPOGroup], window: int, eos_token_id: int | None = None
+    groups: list[GRPOGroup],
+    window: int,
+    eos_token_id: int | None = None,
+    rollouts_per_problem: int | None = None,
 ) -> dict[str, Any]:
     """Compute and log pre-training data quality metrics for GRPO groups.
 
@@ -435,12 +418,16 @@ def _compute_training_metrics(
         groups: List of GRPO groups
         window: Training window number
         eos_token_id: Optional EOS token ID to determine terminated completions
+        rollouts_per_problem: Number of rollouts per problem (for k-metric derivation)
 
     Returns:
         Dictionary of computed metrics keyed by metric name (with pass@k, mean@k, etc.)
     """
+    if rollouts_per_problem is None:
+        rollouts_per_problem = 5  # Fallback default
+
     try:
-        report_ks = derive_k_values(ROLLOUTS_PER_PROBLEM)
+        report_ks = derive_k_values(rollouts_per_problem)
     except Exception:  # noqa: BLE001
         report_ks = [1, 5, 10]
         if groups:
@@ -810,7 +797,10 @@ async def load_grpo_groups(
     ]
 
     # Compute training-set metrics BEFORE filtering invalid groups
-    prefilter_metrics = _compute_training_metrics(groups, window, eos_token_id)
+    rollouts_per_problem = config.rollouts_per_problem if config else 5
+    prefilter_metrics = _compute_training_metrics(
+        groups, window, eos_token_id, rollouts_per_problem
+    )
 
     # Log prefilter metrics to monitor with distinct namespace
     if monitor is not None and prefilter_metrics:
@@ -988,21 +978,32 @@ class GRPOAlgorithm(TrainingAlgorithm):
         adaptive_kl_enabled: bool = False,
         grpo_variant: str | None = None,
         importance_sampling_level: str | None = None,
+        config: TrainingConfig | None = None,
     ) -> None:
         super().__init__()
+
+        # Use config if provided, otherwise construct from individual parameters
+        if config is not None:
+            self.config = config
+        else:
+            # Fallback: create minimal config with provided parameters (backward compatibility)
+            from grail.trainer.config import TrainingConfig as TC
+
+            self.config = TC(grpo_variant=grpo_variant or "grpo")
+
         # Persistent adaptive KL controller across epochs/windows
         self.kl_controller: AdaptiveKLController = AdaptiveKLController(
-            initial=TRAINER_KL_COEF,
-            target=TRAINER_KL_TARGET,
-            min_value=TRAINER_KL_MIN,
-            max_value=TRAINER_KL_MAX,
-            adapt_rate=TRAINER_KL_ADAPT_RATE,
+            initial=self.config.kl_coef,
+            target=self.config.kl_target,
+            min_value=self.config.kl_min,
+            max_value=self.config.kl_max,
+            adapt_rate=self.config.kl_adapt_rate,
         )
         self.adaptive_kl_enabled: bool = bool(adaptive_kl_enabled)
 
         # Validate and set loss variant (with common aliases)
-        # If not explicitly provided, use the environment-configured default
-        raw_variant = (grpo_variant or GRPO_VARIANT).strip().lower()
+        # If not explicitly provided, use config's default
+        raw_variant = (grpo_variant or self.config.grpo_variant).strip().lower()
         aliases = {
             "gspo": "dr_grpo",  # common misnomer maps to denominator-reduced GRPO
             "dr-grpo": "dr_grpo",
@@ -1062,7 +1063,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
         batch_rewards: list[float] = []
 
         for rollout in batch_rollouts:
-            tokens = rollout.tokens[:TRAINER_MAX_LENGTH]
+            tokens = rollout.tokens[: self.config.max_length]
             batch_tokens.append(tokens)
 
             # CRITICAL FIX: Recalculate completion_len after truncation
@@ -1070,7 +1071,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
             actual_prompt_len = rollout.prompt_length
             actual_comp_len = min(
                 rollout.completion_length,
-                TRAINER_MAX_LENGTH - rollout.prompt_length,
+                self.config.max_length - rollout.prompt_length,
             )
             batch_prompt_lens.append(actual_prompt_len)
             batch_comp_lens.append(actual_comp_len)
@@ -1079,7 +1080,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
             batch_rewards.append(rollout.reward)
 
             # Miner-provided per-token logprobs must exist; extract completion portion
-            tlp: list[float] = list((rollout.token_logprobs or [])[:TRAINER_MAX_LENGTH])
+            tlp: list[float] = list((rollout.token_logprobs or [])[: self.config.max_length])
             prompt_len = actual_prompt_len
             comp_len = actual_comp_len
             expected_len = prompt_len + comp_len
@@ -1156,7 +1157,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
         # IMPORTANT: Normalize advantages to have unit variance while preserving zero-sum
         # This prevents gradient explosion when advantages have large magnitude
         # Clip extreme outliers first, then standardize
-        perc_val = float(TRAINER_ADV_CLIP_PERCENTILE)
+        perc_val = float(self.config.adv_clip_percentile)
         q = max(0.0, min(100.0, perc_val)) / 100.0
         if 0.0 < q < 1.0:
             clip_val = torch.quantile(advantages_tensor.abs(), q)
@@ -1203,7 +1204,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 logger.debug("Non-finite per-token log-ratio before clamp; applying clamp")
             # Moderate clamp for numerical stability when exponentiating to ratios
             log_ratio_clamped = torch.clamp(
-                log_ratio, min=-TRAINER_LOGRATIO_CLAMP, max=TRAINER_LOGRATIO_CLAMP
+                log_ratio, min=-self.config.logratio_clamp, max=self.config.logratio_clamp
             )
 
             # For reporting, compute sequence-level ratios (same as original for monitoring)
@@ -1211,7 +1212,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
             logprobs_old_sum = (logprobs_old_per_token * completion_mask).sum(dim=1)
             log_ratio_seq = logprobs_current_sum - logprobs_old_sum
             log_ratio_seq_clamped = torch.clamp(
-                log_ratio_seq, min=-TRAINER_LOGRATIO_CLAMP, max=TRAINER_LOGRATIO_CLAMP
+                log_ratio_seq, min=-self.config.logratio_clamp, max=self.config.logratio_clamp
             )
             ratios_pre_ceiling = torch.exp(log_ratio_seq_clamped)
 
@@ -1226,7 +1227,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 logger.debug("Non-finite log-ratio before clamp; applying clamp")
             # Moderate clamp for numerical stability when exponentiating to ratios
             log_ratio_clamped = torch.clamp(
-                log_ratio, min=-TRAINER_LOGRATIO_CLAMP, max=TRAINER_LOGRATIO_CLAMP
+                log_ratio, min=-self.config.logratio_clamp, max=self.config.logratio_clamp
             )
             ratios_pre_ceiling = torch.exp(log_ratio_clamped)
         else:
@@ -1239,14 +1240,14 @@ class GRPOAlgorithm(TrainingAlgorithm):
         ratio_clip_frac_val: float = 0.0
         ratio_ceiling_frac_val: float = 0.0
 
-        if TRAINER_USE_IS:
+        if self.config.use_is:
             # Compute ratios with optional ceiling
             ratios = torch.exp(log_ratio_clamped)
 
             # Apply hard ceiling if configured
-            if TRAINER_IS_RATIO_MAX > 0.0:
-                ceiling_mask = ratios > TRAINER_IS_RATIO_MAX
-                ratios = torch.clamp(ratios, max=TRAINER_IS_RATIO_MAX)
+            if self.config.is_ratio_max > 0.0:
+                ceiling_mask = ratios > self.config.is_ratio_max
+                ratios = torch.clamp(ratios, max=self.config.is_ratio_max)
                 # Compute ceiling fraction from valid (non-padding) tokens
                 if self.importance_sampling_level == "token":
                     ratio_ceiling_frac_val = (
@@ -1259,8 +1260,8 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 ceiling_mask = None
 
             # Asymmetric PPO-style clipping (DAPO-style): tighter lower bound, relaxed upper bound
-            lower = 1.0 - TRAINER_PPO_CLIP_EPS
-            upper = 1.0 + TRAINER_PPO_CLIP_EPS_UPPER
+            lower = 1.0 - self.config.ppo_clip_eps
+            upper = 1.0 + self.config.ppo_clip_eps_upper
             ratios_clipped = torch.clamp(ratios, lower, upper)
 
             # Track clipping statistics for monitoring
@@ -1598,7 +1599,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
         if kl_enabled and self.adaptive_kl_enabled:
             current_kl_coef = self.kl_controller.value
         else:
-            current_kl_coef = float(TRAINER_KL_COEF)
+            current_kl_coef = float(self.config.kl_coef)
 
         for batch_idx in range(num_batches):
             start_idx = batch_idx * batch_size
@@ -1743,7 +1744,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
             if not _is_finite_tensor(entropies):
                 logger.warning("Non-finite entropies; skipping batch")
                 continue
-            loss_entropy = -TRAINER_ENTROPY_COEF * entropies.mean()
+            loss_entropy = -self.config.entropy_coef * entropies.mean()
 
             # Step 10: Aggregate total loss
             loss_total = loss_pg + loss_kl + loss_entropy
@@ -1769,17 +1770,17 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 optimizer.zero_grad(set_to_none=True)
 
             # Scale loss by accumulation steps to keep effective LR stable
-            scaled_loss = loss_total / float(TRAINER_GRAD_ACCUM_STEPS)
+            scaled_loss = loss_total / float(self.config.grad_accum_steps)
             accelerator.backward(scaled_loss)
             grad_accum_counter += 1
 
             grad_norm_scalar = None
             # Only step optimizer and clip gradients every N accumulation steps
-            if grad_accum_counter >= TRAINER_GRAD_ACCUM_STEPS:
+            if grad_accum_counter >= self.config.grad_accum_steps:
                 # Clip gradients in fp32 (no mixed precision)
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     model.parameters(),
-                    TRAINER_GRAD_CLIP,
+                    self.config.grad_clip,
                 )
                 grad_norm_scalar = grad_norm.item()
 
@@ -1854,7 +1855,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
         if grad_accum_counter > 0:
             final_grad_norm = torch.nn.utils.clip_grad_norm_(
                 model.parameters(),
-                TRAINER_GRAD_CLIP,
+                self.config.grad_clip,
             )
             if not (torch.isnan(final_grad_norm) or torch.isinf(final_grad_norm)):
                 optimizer.step()
