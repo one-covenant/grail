@@ -401,6 +401,7 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
         optimizer = torch.optim.AdamW(
             train_model.parameters(),
             lr=float(cfg.train.lr),
+            betas=(0.9, 0.999),
             weight_decay=0.1,
         )
         accelerator = Accelerator(mixed_precision="no")
@@ -425,15 +426,33 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
         )
         generator = OfflineRolloutGenerator(tokenizer=tokenizer, config=gen_cfg)
 
-        # Create training config
+        # Create training config from hydra config
         train_cfg = TrainingConfig(
+            # Basic training parameters
             lr=float(cfg.train.lr),
             batch_size=int(cfg.train.batch_size),
             grad_clip=float(cfg.train.grad_clip),
-            kl_coef=float(cfg.train.kl_coef),
-            entropy_coef=float(cfg.train.entropy_coef),
             warmup_steps=int(cfg.train.warmup_steps),
             max_length=int(cfg.train.max_length),
+            # Loss coefficients
+            kl_coef=float(cfg.train.kl_coef),
+            entropy_coef=float(cfg.train.entropy_coef),
+            kl_target=float(cfg.train.kl_target),
+            kl_adapt_rate=float(cfg.train.kl_adapt_rate),
+            kl_min=float(cfg.train.kl_min),
+            kl_max=float(cfg.train.kl_max),
+            # Gradient accumulation
+            grad_accum_steps=int(cfg.train.grad_accum_steps),
+            # Advantage normalization and PPO clipping
+            adv_clip_percentile=float(cfg.train.adv_clip_percentile),
+            ppo_clip_eps=float(cfg.train.ppo_clip_eps),
+            ppo_clip_eps_upper=float(cfg.train.ppo_clip_eps_upper),
+            logratio_clamp=float(cfg.train.logratio_clamp),
+            # Importance sampling
+            use_is=bool(cfg.train.use_is),
+            is_ratio_max=float(cfg.train.is_ratio_max),
+            # Data loading and filtering
+            rollouts_per_problem=int(cfg.data.rollouts_per_problem),
             group_adv_sum_tolerance=float(cfg.train.group_adv_sum_tol),
         )
 
@@ -442,9 +461,9 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
         num_train_seeds = int(cfg.data.num_train_seeds)
         all_train_seeds = [train_seed_start + i for i in range(num_train_seeds)]
 
-        # Initialize GRPO algorithm
+        # Initialize GRPO algorithm with config (CRITICAL: config must be passed!)
         adaptive_kl = bool(cfg.train.adaptive_kl) if hasattr(cfg.train, "adaptive_kl") else False
-        algorithm = GRPOAlgorithm(adaptive_kl_enabled=adaptive_kl)
+        algorithm = GRPOAlgorithm(adaptive_kl_enabled=adaptive_kl, config=train_cfg)
 
         # Log configuration
         logger.info("=" * 80)
