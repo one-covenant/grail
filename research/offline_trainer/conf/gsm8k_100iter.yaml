@@ -42,6 +42,7 @@ data:
   environment: "gsm8k"
   problems_per_iteration: 32  # Diverse training signal
   rollouts_per_problem: 16  # Good advantage variance
+  generation_batch_size: 4  # Process 4 problems at a time (64 rollouts total per batch)
   train_seed_start: 0
   num_train_seeds: 3200  # Large pool (100 iter × 32 prob = 3200 unique calls)
 

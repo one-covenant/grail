@@ -547,6 +547,8 @@ class VLLMServerManager(InferenceServerManager):
             str(self._bound_port),
             "--dtype",
             self._config.dtype,
+            "--kv-cache-dtype",
+            str(self._eval_config.vllm_kv_cache_dtype),
             "--tensor-parallel-size",
             "1",
             # Memory optimizations from EvalConfig to prevent OOM during KV cache allocation

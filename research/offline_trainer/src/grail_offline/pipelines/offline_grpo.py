@@ -424,7 +424,11 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
             rollouts_per_problem=int(cfg.data.rollouts_per_problem),
             environment=str(cfg.data.environment),
         )
-        generator = OfflineRolloutGenerator(tokenizer=tokenizer, config=gen_cfg)
+        # Pass HF model for computing ground-truth logprobs
+        # This ensures behavior policy logprobs match training logprobs exactly
+        generator = OfflineRolloutGenerator(
+            tokenizer=tokenizer, config=gen_cfg, hf_model=train_model
+        )
 
         # Create training config from hydra config
         train_cfg = TrainingConfig(
@@ -505,9 +509,14 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
 
             # Generate rollouts
             logger.info("Generating rollouts", extra={"num_seeds": len(iter_seeds)})
+            gen_batch_size = (
+                int(cfg.data.generation_batch_size)
+                if hasattr(cfg.data, "generation_batch_size")
+                else 4
+            )
             groups = await generator.generate_groups(
                 iter_seeds,
-                batch_size=cfg.data.batch_size if hasattr(cfg.data, "batch_size") else 1,
+                batch_size=gen_batch_size,
             )
             logger.info(
                 "Rollouts generated",
