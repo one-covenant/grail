@@ -1217,7 +1217,6 @@ dependencies = [
     { name = "bittensor" },
     { name = "botocore" },
     { name = "datasets" },
-    { name = "flash-attn" },
     { name = "huggingface-hub" },
     { name = "matplotlib" },
     { name = "numpy" },
@@ -1245,6 +1244,7 @@ all = [
     { name = "bittensor-cli" },
     { name = "black" },
     { name = "flake8" },
+    { name = "flash-attn" },
     { name = "jupyter" },
     { name = "mypy" },
     { name = "notebook" },
@@ -1269,6 +1269,9 @@ experiments = [
     { name = "notebook" },
     { name = "seaborn" },
 ]
+flash-attn = [
+    { name = "flash-attn" },
+]
 quantization = [
     { name = "auto-gptq" },
     { name = "autoawq" },
@@ -1278,6 +1281,9 @@ quantization = [
 dev = [
     { name = "flake8" },
     { name = "ruff" },
+]
+flash-attn = [
+    { name = "flash-attn" },
 ]
 
 [package.metadata]
@@ -1297,7 +1303,8 @@ requires-dist = [
     { name = "datasets", specifier = ">=2.14.0" },
     { name = "flake8", marker = "extra == 'all'", specifier = ">=5.0.0" },
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=5.0.0" },
-    { name = "flash-attn", specifier = ">=2.6.0" },
+    { name = "flash-attn", marker = "extra == 'all'", specifier = ">=2.8.0" },
+    { name = "flash-attn", marker = "extra == 'flash-attn'", specifier = ">=2.8.0" },
     { name = "huggingface-hub", specifier = ">=0.20.0" },
     { name = "jupyter", marker = "extra == 'all'", specifier = ">=1.0.0" },
     { name = "jupyter", marker = "extra == 'experiments'", specifier = ">=1.0.0" },
@@ -1332,13 +1339,14 @@ requires-dist = [
     { name = "zstandard", marker = "extra == 'all'", specifier = ">=0.21.0" },
     { name = "zstandard", marker = "extra == 'dev'", specifier = ">=0.21.0" },
 ]
-provides-extras = ["all", "dev", "experiments", "quantization"]
+provides-extras = ["all", "dev", "experiments", "flash-attn", "quantization"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "flake8", specifier = "==7.3.0" },
     { name = "ruff", specifier = ">=0.8.0" },
 ]
+flash-attn = [{ name = "flash-attn", specifier = ">=2.8.0" }]
 
 [[package]]
 name = "grpcio"

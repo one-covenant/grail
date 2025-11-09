@@ -50,7 +50,6 @@ dependencies = [
     "scipy>=1.7.0",
     "sglang==0.5.4",
     "tenacity>=8.0.0",
-    "flash-attn>=2.6.0",  # Flash Attention 2 for optimized training
 ]
 
 [project.optional-dependencies]
@@ -73,8 +72,11 @@ experiments = [
     "notebook>=6.4.0",
     "seaborn>=0.11.0",
 ]
+flash-attn = [
+    "flash-attn>=2.8.0",
+]
 all = [
-    "grail[dev,experiments,quantization]",
+    "grail[dev,experiments,quantization,flash-attn]",
 ]
 
 [project.scripts]
@@ -215,6 +217,9 @@ flash-attn = ["torch"]
 dev = [
     "flake8==7.3.0",
     "ruff>=0.8.0",
+]
+flash-attn = [
+    "flash-attn>=2.8.0",
 ]
 
 [tool.ruff]
