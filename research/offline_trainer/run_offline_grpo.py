@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,28 @@ from grail.monitoring import (  # noqa: E402, I001
 from grail_offline.pipelines.offline_grpo import run_training  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+
+def _configure_debug_logging() -> None:
+    """Force DEBUG logging for all relevant components and servers."""
+    # Environment variables for third-party loggers
+    os.environ.setdefault("VLLM_LOGGING_LEVEL", "DEBUG")
+    os.environ.setdefault("HF_LOG_LEVEL", "DEBUG")
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "debug")
+    # Root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    # Our namespaces
+    logging.getLogger("grail").setLevel(logging.DEBUG)
+    logging.getLogger("grail_offline").setLevel(logging.DEBUG)
+    # HTTP client / server side logs commonly used by vLLM
+    logging.getLogger("httpx").setLevel(logging.DEBUG)
+    logging.getLogger("uvicorn").setLevel(logging.DEBUG)
+    logging.getLogger("uvicorn.error").setLevel(logging.DEBUG)
+    logging.getLogger("uvicorn.access").setLevel(logging.DEBUG)
+    # vLLM python loggers (if any are propagated)
+    logging.getLogger("vllm").setLevel(logging.DEBUG)
+    logger.debug("Global log level set to DEBUG; environment updated for vLLM/transformers.")
 
 
 def _initialize_monitoring(cfg: DictConfig) -> Any | None:
@@ -84,6 +107,7 @@ async def _run(cfg: DictConfig) -> None:
 @hydra.main(config_path="conf", config_name="offline_grpo", version_base="1.3")
 def main(cfg: DictConfig) -> None:
     """Entry point for offline GRPO training."""
+    _configure_debug_logging()
     try:
         asyncio.run(_run(cfg))
     except KeyboardInterrupt:
