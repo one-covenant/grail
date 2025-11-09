@@ -92,6 +92,11 @@ GRPO_MAX_COMPLETION_TOKENS = int(os.getenv("GRAIL_GRPO_MAX_COMPLETION_TOKENS", "
 #          'dapo' (distributed token norm), 'dr_grpo' (fixed denominator)
 GRPO_VARIANT = os.getenv("GRAIL_GRPO_VARIANT", "dapo")
 
+# Importance sampling level for policy gradient computation
+# Options: 'sequence' (one ratio per sequence), 'token' (per-token ratios)
+# 'token': More fine-grained clipping, inspired by HuggingFace TRL GRPO
+IMPORTANCE_SAMPLING_LEVEL = os.getenv("GRAIL_IMPORTANCE_SAMPLING_LEVEL", "sequence")
+
 # Stage 2 (refinement): quality/efficiency-oriented filters
 # Require at least this fraction of successes within a group (0 disables)
 GRPO_MIN_SUCCESS_FRACTION = float(os.getenv("GRAIL_GRPO_MIN_SUCCESS_FRACTION", "0.0"))

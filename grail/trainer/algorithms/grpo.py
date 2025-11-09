@@ -30,6 +30,7 @@ except Exception:  # pragma: no cover - optional in offline mode
 
 from grail.shared.constants import (
     GRPO_VARIANT,
+    IMPORTANCE_SAMPLING_LEVEL,
     ROLLOUTS_PER_PROBLEM,
     TRAINER_ADV_CLIP_PERCENTILE,
     TRAINER_ENTROPY_COEF,
@@ -986,7 +987,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
         self,
         adaptive_kl_enabled: bool = False,
         grpo_variant: str | None = None,
-        importance_sampling_level: str = "sequence",
+        importance_sampling_level: str | None = None,
     ) -> None:
         super().__init__()
         # Persistent adaptive KL controller across epochs/windows
@@ -1017,14 +1018,15 @@ class GRPOAlgorithm(TrainingAlgorithm):
 
         # Validate and set importance sampling level
         # Controls whether clipping is applied at the sequence or token level
-        importance_sampling_level = importance_sampling_level.strip().lower()
+        # If not explicitly provided, use the environment-configured default
+        raw_is_level = (importance_sampling_level or IMPORTANCE_SAMPLING_LEVEL).strip().lower()
         valid_is_levels = {"sequence", "token"}
-        if importance_sampling_level not in valid_is_levels:
+        if raw_is_level not in valid_is_levels:
             raise ValueError(
-                f"Invalid importance_sampling_level '{importance_sampling_level}'. "
+                f"Invalid importance_sampling_level '{raw_is_level}'. "
                 f"Must be one of {sorted(valid_is_levels)}"
             )
-        self.importance_sampling_level: str = importance_sampling_level
+        self.importance_sampling_level: str = raw_is_level
         logger.info(f"Using {self.importance_sampling_level}-level importance sampling")
 
     def _prepare_batch_tensors(
@@ -1248,7 +1250,8 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 # Compute ceiling fraction from valid (non-padding) tokens
                 if self.importance_sampling_level == "token":
                     ratio_ceiling_frac_val = (
-                        (ceiling_mask * completion_mask).sum() / completion_mask.sum().clamp(min=1.0)
+                        (ceiling_mask * completion_mask).sum()
+                        / completion_mask.sum().clamp(min=1.0)
                     ).item()
                 else:
                     ratio_ceiling_frac_val = ceiling_mask.float().mean().item()
