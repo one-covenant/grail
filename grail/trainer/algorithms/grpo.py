@@ -864,7 +864,8 @@ def compute_logprobs(
     shift_logits = logits[:, :-1, :].contiguous()
     shift_labels = input_ids[:, 1:].contiguous()
 
-    log_probs = F.log_softmax(shift_logits, dim=-1)
+    # Cast to float32 for precise log_softmax (even if model is bfloat16)
+    log_probs = F.log_softmax(shift_logits.float(), dim=-1)
     token_log_probs = log_probs.gather(
         2,
         shift_labels.unsqueeze(-1),
@@ -934,8 +935,10 @@ def compute_entropy(
     )
     logits = outputs.logits[:, :-1, :].contiguous()
 
-    probs = F.softmax(logits, dim=-1)
-    log_probs = F.log_softmax(logits, dim=-1)
+    # Cast to float32 for precise softmax/log_softmax (even if model is bfloat16)
+    logits_f32 = logits.float()
+    probs = F.softmax(logits_f32, dim=-1)
+    log_probs = F.log_softmax(logits_f32, dim=-1)
     entropy_per_token = -(probs * log_probs).sum(dim=-1)
 
     entropies: list[torch.Tensor] = []
