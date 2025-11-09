@@ -244,14 +244,13 @@ def generate_realistic_sat_prompt(
     # Apply production chat template and system prompt
     from grail.shared.chat_templates import build_qwen_chat_template
     from grail.shared.prompt_constants import (
-        REASONING_START,
         SYSTEM_PROMPT,
     )
 
     # Apply Qwen chat template (same as mining)
     try:
         original_template = getattr(tokenizer, "chat_template", None)
-        tokenizer.chat_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
+        tokenizer.chat_template = build_qwen_chat_template(SYSTEM_PROMPT)
         messages = [{"role": "user", "content": base_prompt}]
         templated = str(
             tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)

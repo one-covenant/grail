@@ -22,7 +22,7 @@ if str(_REPO_ROOT) not in os.sys.path:
 
 from grail.model.provider import get_model, get_tokenizer
 from grail.shared.chat_templates import build_qwen_chat_template
-from grail.shared.prompt_constants import REASONING_START, SYSTEM_PROMPT
+from grail.shared.prompt_constants import SYSTEM_PROMPT
 from grail.trainer.algorithms.grpo import GRPOAlgorithm
 from grail.trainer.config import EvalConfig, TrainingConfig
 from grail.trainer.eval_planner import EvaluationPlan
@@ -190,7 +190,7 @@ async def test_vllm_server_training_epoch() -> None:
         device = accelerator.device
 
         # Load models directly to accelerator device
-        chat_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
+        chat_template = build_qwen_chat_template(SYSTEM_PROMPT)
         tokenizer = get_tokenizer(model_id, chat_template=chat_template)
         train_model = get_model(model_id, device=str(device), eval_mode=False)
         ref_model = get_model(model_id, device=str(device), eval_mode=True)
@@ -260,7 +260,7 @@ async def test_vllm_server_evaluator() -> None:
 
     with VLLMServerManager(model_id, port, gpu_id=3):
         # Load model and tokenizer
-        chat_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
+        chat_template = build_qwen_chat_template(SYSTEM_PROMPT)
         tokenizer = get_tokenizer(model_id, chat_template=chat_template)
         model = get_model(model_id, device=device, eval_mode=True)
 
@@ -316,7 +316,7 @@ async def test_end_to_end_iteration() -> None:
         device = accelerator.device
 
         # Load models to accelerator device
-        chat_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
+        chat_template = build_qwen_chat_template(SYSTEM_PROMPT)
         tokenizer = get_tokenizer(model_id, chat_template=chat_template)
         train_model = get_model(model_id, device=str(device), eval_mode=False)
         ref_model = get_model(model_id, device=str(device), eval_mode=True)

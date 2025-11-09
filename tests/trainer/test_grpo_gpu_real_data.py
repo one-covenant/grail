@@ -907,9 +907,9 @@ class TestGRPOGPURealData:
         logger.info("Loading model and tokenizer...")
         from grail.model.provider import get_model, get_tokenizer
         from grail.shared.chat_templates import build_qwen_chat_template
-        from grail.shared.prompt_constants import REASONING_START, SYSTEM_PROMPT
+        from grail.shared.prompt_constants import SYSTEM_PROMPT
 
-        chat_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
+        chat_template = build_qwen_chat_template(SYSTEM_PROMPT)
 
         model = get_model(TEST_CONFIG.model_name, device=str(accelerator.device), eval_mode=False)
         tokenizer = get_tokenizer(TEST_CONFIG.model_name, chat_template=chat_template)

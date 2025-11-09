@@ -33,7 +33,7 @@ from grail.model.provider import get_model, get_tokenizer
 from grail.monitoring import MonitoringConfig, get_monitoring_manager, initialize_monitoring
 from grail.shared.chat_templates import build_qwen_chat_template
 from grail.shared.constants import TRAINER_USE_FLASH_ATTENTION
-from grail.shared.prompt_constants import REASONING_START, SYSTEM_PROMPT
+from grail.shared.prompt_constants import SYSTEM_PROMPT
 from grail.trainer.algorithms.grpo import GRPOAlgorithm
 from grail.trainer.config import EvalConfig, TrainingConfig
 from grail.trainer.eval_planner import EvaluationPlan
@@ -105,7 +105,7 @@ async def _run(cfg: DictConfig) -> None:
         logger.info("WandB disabled - using in-memory metrics only")
 
     # Build tokenizer with Qwen chat template for consistency
-    chat_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
+    chat_template = build_qwen_chat_template(SYSTEM_PROMPT)
 
     train_id = str(cfg.model.train_id)
     ref_id = str(cfg.model.ref_id)

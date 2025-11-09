@@ -517,9 +517,9 @@ class TrainerNeuron(BaseNeuron):
             # This is critical for vLLM/SGLang to apply the correct formatting
             try:
                 from grail.shared.chat_templates import build_qwen_chat_template
-                from grail.shared.prompt_constants import REASONING_START, SYSTEM_PROMPT
+                from grail.shared.prompt_constants import SYSTEM_PROMPT
 
-                expected_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
+                expected_template = build_qwen_chat_template(SYSTEM_PROMPT)
                 current_template = getattr(self._context.tokenizer, "chat_template", None)
 
                 if not current_template:

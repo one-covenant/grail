@@ -21,7 +21,7 @@ from typing import Any, Literal
 from grail.model.provider import get_model, get_tokenizer
 from grail.shared.chat_templates import build_qwen_chat_template
 from grail.shared.constants import TRAINER_USE_FLASH_ATTENTION
-from grail.shared.prompt_constants import REASONING_START, SYSTEM_PROMPT
+from grail.shared.prompt_constants import SYSTEM_PROMPT
 
 ModelLoadMode = Literal["latest", "hf", "window"]
 
@@ -158,7 +158,7 @@ async def load_training_artifacts(
     - Flash Attention 2 is enabled for training to optimize performance.
     """
     # Build trainer tokenizer with Qwen chat template
-    chat_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
+    chat_template = build_qwen_chat_template(SYSTEM_PROMPT)
 
     # Resolve train source - enable Flash Attention for training if configured
     if train_spec.mode == "hf":

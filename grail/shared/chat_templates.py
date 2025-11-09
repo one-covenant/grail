@@ -6,16 +6,21 @@ Provides reusable chat template functions to avoid duplication across modules.
 """
 
 
-def build_qwen_chat_template(system_prompt: str, reasoning_start: str) -> str:
+def build_qwen_chat_template(system_prompt: str, reasoning_start: str = "") -> str:
     """
-    Build Qwen-style chat template with system prompt and reasoning start.
+    Build Qwen-style chat template with system prompt.
 
     Args:
         system_prompt: The system prompt to inject
-        reasoning_start: The reasoning start token (e.g., "<start_working>")
+        reasoning_start: DEPRECATED - No longer used. The model generates reasoning tokens.
 
     Returns:
         Jinja2 template string for Qwen-style chat formatting
+
+    Note:
+        The model is expected to generate <start_working_out> as part of its completion,
+        not receive it in the prompt. This allows proper reward computation on the
+        model's generated reasoning tokens.
     """
     # Keep Jinja2 template exactly as specified; substitute via string replace
     # TODO: later support jinja files for different system prompts,
@@ -35,7 +40,7 @@ def build_qwen_chat_template(system_prompt: str, reasoning_start: str) -> str:
         "{{ message['content'] + eos_token }}"
         "{% endif %}"
         "{% endfor %}"
-        "{% if add_generation_prompt %}{{ '{reasoning_start}' }}"
+        "{% if add_generation_prompt %}{{ '' }}"
         "{% endif %}"
     )
 
@@ -43,8 +48,6 @@ def build_qwen_chat_template(system_prompt: str, reasoning_start: str) -> str:
         "'{system_prompt}'",
         f"'{system_prompt}'",
     )
-    chat_template = chat_template.replace(
-        """'{reasoning_start}'""",
-        f"'{reasoning_start}'",
-    )
+    # Note: reasoning_start is no longer injected into the prompt
+    # The model must generate <start_working_out> as part of its completion
     return chat_template
