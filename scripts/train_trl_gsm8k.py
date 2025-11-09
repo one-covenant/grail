@@ -189,12 +189,29 @@ def prepare_dataset(tokenizer: PreTrainedTokenizer) -> Dataset:
 
 
 def prepare_eval_dataset() -> Dataset:
-    """Load eval dataset."""
+    """Load eval dataset.
+    
+    NOTE: TRL's evaluation expects raw messages (conversational format),
+    not pre-formatted prompts. The prompt will be formatted by TRL internally.
+    """
     ds = load_dataset("openai/gsm8k", "main", split="test")
     if cfg.num_eval_samples is not None:
         ds = ds.select(range(cfg.num_eval_samples))
+    
+    def format_for_trl(example: Dict[str, Any]) -> Dict[str, Any]:
+        question = example["question"]
+        # TRL expects "prompt" to be the chat messages (not templated string)
+        # TRL will apply the chat template internally
+        return {
+            "prompt": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": question},
+            ],
+            "gold_answer": example["answer"],
+        }
+    
     print(f"  Eval dataset: {len(ds)} samples")
-    return ds
+    return ds.map(format_for_trl, remove_columns=ds.column_names)
 
 
 # ────────────────  EVALUATION (OPTIMIZED)  ────────────────
@@ -331,7 +348,7 @@ def main() -> None:
             device_map="auto",
             attn_implementation="flash_attention_2",
         )
-    except (ImportError, RuntimeError) as e:
+    except (ImportError, RuntimeError, ValueError) as e:
         print(f"⚠️  Flash Attention 2 unavailable ({type(e).__name__}), using default attention")
         model = AutoModelForCausalLM.from_pretrained(
             cfg.model_id,
@@ -385,10 +402,10 @@ def main() -> None:
         num_completions_to_print=3,
         wandb_log_unique_prompts=True,
         save_strategy="no",
-        bf16=True,
+        bf16=True,  # Disable if no GPU or GPU doesn't support it
         report_to=["wandb"],
-        eval_strategy="steps",
-        eval_steps=30,
+        eval_strategy="no",  # Disable built-in eval; we'll use custom FullEvalEveryN callback
+        # eval_steps=30,  # Not needed with eval_strategy="no"
         run_name="trl_gsm8k_grpo_qwen15b_g16x16",
         loss_type="dapo",  # Match config.py GRPO_VARIANT
     )
