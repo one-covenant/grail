@@ -108,6 +108,9 @@ class EvalConfig:
     # - Set max_num_seqs low enough to fit in available KV cache (target ~24 for safety)
     # - Client concurrency at 50–70% of server max_num_seqs (avoid burst deadlock)
     vllm_gpu_memory_utilization: float = 0.82  # Conservative for graph capture safety
+    # KV cache precision control (vLLM): valid values typically include: 'auto', 'fp16', 'bf16', 'fp8'
+    # Note: 'fp32' is generally not supported for KV cache in vLLM V1 and will be rejected.
+    vllm_kv_cache_dtype: str = "auto"
     vllm_max_model_len: int = (
         2048  # Sufficient: ~512 token prompt + 512 token completion (MAX_NEW_TOKENS)
     )
