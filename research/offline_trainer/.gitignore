@@ -1,0 +1,22 @@
+# Local env
+.env
+.venv/
+
+# Build/installer
+*.egg-info/
+dist/
+build/
+
+# Experiment artifacts
+runs/
+outputs/
+wandb/
+*.log
+*.pid
+*.ckpt
+checkpoint*/
+
+# Jupyter
+.ipynb_checkpoints/
+
+

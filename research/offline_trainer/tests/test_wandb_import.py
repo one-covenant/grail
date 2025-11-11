@@ -17,6 +17,7 @@ for p in sys.path[:5]:
 print("\n1. Testing direct wandb import:")
 try:
     import wandb
+
     print(f"  ✓ wandb imported: {wandb}")
     print(f"  ✓ wandb.__file__: {wandb.__file__}")
     print(f"  ✓ wandb.__version__: {wandb.__version__}")
@@ -28,51 +29,53 @@ except Exception as e:
 print("\n2. Testing WandBBackend import:")
 try:
     from grail.monitoring.backends.wandb_backend import WandBBackend
-    print(f"  ✓ WandBBackend imported")
-   
+
+    print("  ✓ WandBBackend imported")
+
     backend = WandBBackend()
     print(f"  ✓ Backend created: {backend}")
     print(f"  ✓ backend._wandb_module before init: {backend._wandb_module}")
-    
+
     # Initialize
     backend.initialize({"project": "test", "mode": "disabled"})
     print(f"  ✓ Backend initialized: {backend._initialized}")
     print(f"  ✓ backend._wandb_module after init: {backend._wandb_module}")
-    
+
     if backend._wandb_module:
         print(f"  ✓ wandb module type: {type(backend._wandb_module)}")
         print(f"  ✓ wandb module has init: {hasattr(backend._wandb_module, 'init')}")
-        if hasattr(backend._wandb_module, '__name__'):
+        if hasattr(backend._wandb_module, "__name__"):
             print(f"  ✓ wandb module __name__: {backend._wandb_module.__name__}")
-        
+
 except Exception as e:
     print(f"  ✗ Error: {e}")
     import traceback
+
     traceback.print_exc()
 
 print("\n3. Testing initialize_monitoring:")
 try:
-    from grail.monitoring import initialize_monitoring, get_monitoring_manager
-    
+    from grail.monitoring import get_monitoring_manager, initialize_monitoring
+
     initialize_monitoring(
         backend_type="wandb",
         project="test",
         mode="disabled",
     )
-    print(f"  ✓ initialize_monitoring succeeded")
-    
+    print("  ✓ initialize_monitoring succeeded")  # noqa: F541
+
     manager = get_monitoring_manager()
     print(f"  ✓ manager: {manager}")
     print(f"  ✓ manager.backend: {manager.backend}")
-    if hasattr(manager.backend, '_wandb_module'):
+    if hasattr(manager.backend, "_wandb_module"):
         print(f"  ✓ manager.backend._wandb_module: {manager.backend._wandb_module}")
         if manager.backend._wandb_module:
             print(f"  ✓ has init: {hasattr(manager.backend._wandb_module, 'init')}")
-    
+
 except Exception as e:
     print(f"  ✗ Error: {e}")
     import traceback
+
     traceback.print_exc()
 
 print("\n✅ All tests completed")
-

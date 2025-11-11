@@ -341,6 +341,8 @@ class VLLMServerBackend:
                             "max_tokens": int(params.max_new_tokens),
                             "temperature": float(params.temperature),
                             "top_p": float(params.top_p),
+                            # Ensure single completion per request
+                            "n": 1,
                         }
                         # Provide vendor extensions via extra_body for vLLM
                         extra_body: dict[str, Any] = {}
@@ -348,6 +350,17 @@ class VLLMServerBackend:
                             extra_body["top_k"] = int(params.top_k)
                         if params.repetition_penalty is not None:
                             extra_body["repetition_penalty"] = float(params.repetition_penalty)
+
+                        # CRITICAL: Request token IDs to avoid re-tokenization mismatch
+                        # This ensures the token IDs we use match the logprobs from vLLM
+                        # Note: vLLM 0.10.2+ returns both text AND token_ids when this is set
+                        if self._return_chosen_logprobs:
+                            extra_body["return_token_ids"] = True
+                            # Ensure special tokens are preserved for exact alignment
+                            extra_body["skip_special_tokens"] = False
+                            extra_body["spaces_between_special_tokens"] = False
+                            # Include stop string to ensure logprobs length matches tokens
+                            extra_body["include_stop_str_in_output"] = True
 
                         if extra_body:
                             completion_kwargs["extra_body"] = extra_body
@@ -360,15 +373,43 @@ class VLLMServerBackend:
                         response = await self._client.completions.create(**completion_kwargs)
                         text = response.choices[0].text if response.choices else ""
                         chosen_logprobs: list[float] | None = None
+                        chosen_token_ids: list[int] | None = None
                         try:
+                            # Extract logprobs from response
                             lp = getattr(response.choices[0], "logprobs", None)
                             if lp is not None and hasattr(lp, "token_logprobs"):
                                 # OpenAI-compatible field; list of floats for chosen tokens
                                 chosen_logprobs = list(lp.token_logprobs or [])
-                        except Exception:
+
+                            # Extract token IDs from response (vLLM 0.10.2+)
+                            # When return_token_ids=True, vLLM returns token_ids in the choice
+                            choice = response.choices[0]
+                            if hasattr(choice, "token_ids") and choice.token_ids is not None:
+                                # Direct token_ids field (vLLM 0.10.2+)
+                                chosen_token_ids = list(choice.token_ids)
+                            elif lp is not None and hasattr(lp, "tokens"):
+                                # Fallback: try to extract from logprobs.tokens field
+                                tokens_field = lp.tokens
+                                if tokens_field:
+                                    try:
+                                        # tokens might be integers or strings
+                                        chosen_token_ids = [
+                                            int(t)
+                                            if isinstance(t, (int, str)) and str(t).isdigit()
+                                            else None
+                                            for t in tokens_field
+                                        ]
+                                        # If we got None values, token IDs weren't available
+                                        if any(t is None for t in chosen_token_ids):
+                                            chosen_token_ids = None
+                                    except (ValueError, TypeError):
+                                        chosen_token_ids = None
+                        except Exception as e:
+                            logger.debug("Failed to extract logprobs/token_ids: %s", e)
                             chosen_logprobs = None
+                            chosen_token_ids = None
                         _ = time.time() - req_start
-                        return (idx, text, chosen_logprobs)
+                        return (idx, text, chosen_logprobs, chosen_token_ids)
                     except Exception as e:
                         if attempt < max_retries - 1:
                             backoff = base_backoff * (2**attempt)
@@ -388,8 +429,8 @@ class VLLMServerBackend:
                                 max_retries,
                                 type(e).__name__,
                             )
-                            return (idx, "", None)
-            return (idx, "", None)
+                            return (idx, "", None, None)
+            return (idx, "", None, None)
 
         tasks = []
         for idx, prompt in enumerate(prompts):
@@ -399,14 +440,33 @@ class VLLMServerBackend:
         results_tuples = await asyncio.gather(*tasks, return_exceptions=False)
         completions: dict[int, str] = {}
         chosen_lp_map: dict[int, list[float] | None] = {}
-        for idx, text, chosen_lp in results_tuples:
+        chosen_token_ids_map: dict[int, list[int] | None] = {}
+        for idx, text, chosen_lp, chosen_tok_ids in results_tuples:
             completions[idx] = text
             chosen_lp_map[idx] = chosen_lp
+            chosen_token_ids_map[idx] = chosen_tok_ids
 
         results: list[tuple[list[int], list[float] | None]] = []
         for idx, p_ids in enumerate(prompt_ids_batch):
             completion_text = completions.get(idx, "")
-            comp_ids = _tokenize_completion(self._tokenizer, completion_text, [])
+            vllm_token_ids = chosen_token_ids_map.get(idx)
+
+            # CRITICAL FIX: Use actual token IDs from vLLM if available
+            # This ensures token IDs match the logprobs returned by vLLM
+            if vllm_token_ids is not None:
+                comp_ids = vllm_token_ids
+                logger.debug(
+                    "Using vLLM token IDs directly (count=%d) to avoid re-tokenization mismatch",
+                    len(comp_ids),
+                )
+            else:
+                # Fallback: re-tokenize (may cause logprob mismatch)
+                comp_ids = _tokenize_completion(self._tokenizer, completion_text, [])
+                logger.warning(
+                    "vLLM did not return token IDs; falling back to re-tokenization. "
+                    "This may cause importance sampling ratio mismatch!"
+                )
+
             all_ids = p_ids + comp_ids
             chosen_lp = chosen_lp_map.get(idx)
             results.append((all_ids, chosen_lp))
@@ -506,6 +566,8 @@ class SGLangServerBackend:
                             "max_tokens": int(params.max_new_tokens),
                             "temperature": float(params.temperature),
                             "top_p": float(params.top_p),
+                            # Ensure single completion per request
+                            "n": 1,
                         }
                         # Provide vendor extensions via extra_body for SGLang
                         extra_body: dict[str, Any] = {}

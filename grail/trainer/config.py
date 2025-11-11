@@ -18,17 +18,46 @@ class TrainingConfig:
     Values default from `grail.shared.constants` to avoid duplication.
     """
 
+    # Basic training parameters
     lr: float = constants.TRAINER_LR
     epochs: int = constants.TRAINER_EPOCHS
     batch_size: int = constants.TRAINER_BATCH_SIZE
     max_length: int = constants.TRAINER_MAX_LENGTH
     grad_clip: float = constants.TRAINER_GRAD_CLIP
     warmup_steps: int = constants.TRAINER_WARMUP_STEPS
+
+    # Loss coefficients
     kl_coef: float = constants.TRAINER_KL_COEF
     entropy_coef: float = constants.TRAINER_ENTROPY_COEF
+    kl_target: float = constants.TRAINER_KL_TARGET
+    kl_min: float = constants.TRAINER_KL_MIN
+    kl_max: float = constants.TRAINER_KL_MAX
+    kl_adapt_rate: float = constants.TRAINER_KL_ADAPT_RATE
+
+    # Gradient accumulation and clipping
+    grad_accum_steps: int = constants.TRAINER_GRAD_ACCUM_STEPS
+
+    # Advantage normalization and PPO clipping
+    adv_clip_percentile: float = constants.TRAINER_ADV_CLIP_PERCENTILE
+    ppo_clip_eps: float = constants.TRAINER_PPO_CLIP_EPS
+    ppo_clip_eps_upper: float = constants.TRAINER_PPO_CLIP_EPS_UPPER
+    logratio_clamp: float = constants.TRAINER_LOGRATIO_CLAMP
+
+    # Importance sampling
+    use_is: bool = constants.TRAINER_USE_IS
+    is_ratio_max: float = constants.TRAINER_IS_RATIO_MAX
+
+    # GRPO variant selection
+    grpo_variant: str = constants.GRPO_VARIANT
+
+    # Data loading
+    rollouts_per_problem: int = constants.ROLLOUTS_PER_PROBLEM
+
+    # Miner/data quality filters
     group_adv_sum_tolerance: float = constants.TRAINER_GROUP_ADV_SUM_TOL
     min_aggregate_weight: float = constants.TRAINER_MIN_AGGREGATE_WEIGHT
     min_trusted_miners: int = constants.TRAINER_MIN_TRUSTED_MINERS
+
     # GRPO two-stage filtering controls
     grpo_max_groups: int = constants.GRPO_MAX_GROUPS
     grpo_max_completion_tokens: int = constants.GRPO_MAX_COMPLETION_TOKENS
@@ -79,6 +108,9 @@ class EvalConfig:
     # - Set max_num_seqs low enough to fit in available KV cache (target ~24 for safety)
     # - Client concurrency at 50–70% of server max_num_seqs (avoid burst deadlock)
     vllm_gpu_memory_utilization: float = 0.82  # Conservative for graph capture safety
+    # KV cache precision control (vLLM): valid values typically include: 'auto', 'fp16', 'bf16', 'fp8'
+    # Note: 'fp32' is generally not supported for KV cache in vLLM V1 and will be rejected.
+    vllm_kv_cache_dtype: str = "auto"
     vllm_max_model_len: int = (
         2048  # Sufficient: ~512 token prompt + 512 token completion (MAX_NEW_TOKENS)
     )

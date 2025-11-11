@@ -26,7 +26,7 @@ jobs:
         run: uv sync --extra dev
       
       - name: Run Ruff linter
-        run: uv run ruff check .
+        run: uv run ruff check --no-cache .
       
       - name: Run Ruff formatter check
         run: uv run ruff format --check .
