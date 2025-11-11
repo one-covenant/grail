@@ -45,7 +45,7 @@ class EvalConfig:
     """
 
     enabled: bool = True
-    window_interval: int = 16
+    window_interval: int = 20
     split: str = "test"  # dataset-backed envs (e.g., GSM8K) #TODO: should be specified per env
     subset_size: int | None = None  # generative envs or capped dataset eval
     seed_base: int = 2025
