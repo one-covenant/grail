@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Minimal TRL GRPO training script for GSM8K matching GRAIL hyperparameters."""
 
+import asyncio
 import os
 import re
 import sys
+from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 from datasets import Dataset, load_dataset
@@ -20,9 +22,12 @@ sys.stderr = open(sys.stderr.fileno(), mode='w', buffering=1)
 from dotenv import load_dotenv
 load_dotenv("/root/grail/.env")  # Load WandB API key and project
 
+sys.path.append("/root/grail")
+
 # Import chat template builder and prompt constants
 from grail.shared.chat_templates import build_qwen_chat_template
 from grail.shared.prompt_constants import SYSTEM_PROMPT, REASONING_START
+from grail.trainer.metrics import KMetricsAggregator, TaskReplicateResult
 
 
 # ────────────────  HYPERPARAMETERS (from GRAIL config)  ────────────────
@@ -30,9 +35,9 @@ from grail.shared.prompt_constants import SYSTEM_PROMPT, REASONING_START
 class Config:
     model_id: str = "Qwen/Qwen2.5-1.5B-Instruct"
     lr: float = 2e-6
-    epochs: int = 1
-    batch_size: int = 16  # 16 groups (prompts) per step
-    grad_accum_steps: int = 16
+    epochs: int = 2
+    batch_size: int = 8  # 16 groups (prompts) per step
+    grad_accum_steps: int = 32
     max_length: int = 1536
     grad_clip: float = 1.0
     warmup_steps: int = 50
@@ -52,7 +57,7 @@ class Config:
     eval_replicates: int = 5
     report_ks: tuple = (1, 5, 10)
     # Evaluation optimization (for multi-GPU with 8 A100s)
-    eval_batch_size: int = 512  # Large batch for parallel generation
+    eval_batch_size: int = 128  # Large batch for parallel generation
     eval_num_workers: int = 4  # Dataloader workers
 
 
@@ -97,8 +102,10 @@ def parse_gsm8k_golden(text: str) -> str:
 
 def parse_completion(text: str) -> dict:
     """Parse completion for thinking/answer tags and numeric content."""
-    has_thinking = bool(re.search(rf"<{REASONING_START_TOKEN}>.*?</{REASONING_END_TOKEN}>", text, re.DOTALL))
-    answer_match = re.search(rf"<{SOLUTION_START_TOKEN}>\s*(.+?)\s*</{SOLUTION_END_TOKEN}>", text, re.DOTALL)
+    # Be robust to case in tags (model may emit <solution> instead of <SOLUTION>)
+    flags = re.DOTALL | re.IGNORECASE
+    has_thinking = bool(re.search(rf"<{REASONING_START_TOKEN}>.*?</{REASONING_END_TOKEN}>", text, flags))
+    answer_match = re.search(rf"<{SOLUTION_START_TOKEN}>\s*(.+?)\s*</{SOLUTION_END_TOKEN}>", text, flags)
     
     answer_text = ""
     has_answer = bool(answer_match)
@@ -187,173 +194,275 @@ def prepare_dataset(tokenizer: PreTrainedTokenizer) -> Dataset:
     print(f"  Training dataset: {len(ds)} samples")
     return ds.map(format_prompt, remove_columns=ds.column_names)
 
-
 def prepare_eval_dataset() -> Dataset:
-    """Load eval dataset.
-    
-    NOTE: TRL's evaluation expects raw messages (conversational format),
-    not pre-formatted prompts. The prompt will be formatted by TRL internally.
-    """
+    """Load eval dataset."""
     ds = load_dataset("openai/gsm8k", "main", split="test")
     if cfg.num_eval_samples is not None:
         ds = ds.select(range(cfg.num_eval_samples))
-    
-    def format_for_trl(example: Dict[str, Any]) -> Dict[str, Any]:
-        question = example["question"]
-        # TRL expects "prompt" to be the chat messages (not templated string)
-        # TRL will apply the chat template internally
-        return {
-            "prompt": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": question},
-            ],
-            "gold_answer": example["answer"],
-        }
-    
     print(f"  Eval dataset: {len(ds)} samples")
-    return ds.map(format_for_trl, remove_columns=ds.column_names)
+    return ds
 
 
-# ────────────────  EVALUATION (OPTIMIZED)  ────────────────
-def evaluate_model(
-    model: PreTrainedModel, tokenizer: PreTrainedTokenizer, eval_ds: Dataset,
-    batch_size: int = 64, num_workers: int = 4
-) -> Dict[str, float]:
-    """Compute pass@k, mean@k, best@k metrics with optimized batch processing.
+# ────────────────  VLLM EVALUATION CALLBACK  ────────────────
+class VLLMEvalCallback(TrainerCallback):
+    """Lightweight evaluation using TRL vLLM server /chat/ endpoint with KMetricsAggregator."""
     
-    Args:
-        model: Model to evaluate
-        tokenizer: Tokenizer for encoding
-        eval_ds: Evaluation dataset
-        batch_size: Batch size for generation (large for multi-GPU)
-        num_workers: Number of dataloader workers
-    """
-    model.eval()
-    device = model.device
+    def __init__(
+        self,
+        eval_ds: Dataset,
+        tokenizer: PreTrainedTokenizer,
+        vllm_base_url: str,
+        model_name: str,
+        eval_every_n_steps: int = 30,
+        max_concurrent: int = 512,
+    ) -> None:
+        self.eval_ds = eval_ds
+        self.tokenizer = tokenizer
+        self.eval_every_n = eval_every_n_steps
+        self.model_name = model_name
+        self.max_concurrent = max_concurrent
+        self.base_url = vllm_base_url.rstrip("/")
+        self._metrics_defined = False
+        
+        print(f"✓ VLLMEvalCallback initialized: url={vllm_base_url}, eval_every={eval_every_n_steps}")
     
-    # Create DataLoader for efficient batching
-    from torch.utils.data import DataLoader
-    dataloader = DataLoader(
-        eval_ds, 
-        batch_size=batch_size, 
-        shuffle=False, 
-        num_workers=0,  # 0 to avoid pickling issues with HF datasets
-        pin_memory=True if "cuda" in str(device) else False
-    )
-    
-    results = []
-    
-    with torch.inference_mode():
-        for batch_idx, batch in enumerate(dataloader):
-            batch_questions = batch["question"]
-            batch_golds = batch["answer"]
-            batch_size_actual = len(batch_questions)
-            
-            # Process all replicates for this batch in parallel
-            # Create replicated batch: (batch_size * replicates,)
-            replicated_questions = batch_questions * cfg.eval_replicates
-            
-            # Format prompts with chat template
-            prompts = []
-            for question in replicated_questions:
-                prompt = tokenizer.apply_chat_template(
-                    [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": question},
-                    ],
-                    tokenize=False,
-                    add_generation_prompt=True,
-                )
-                prompts.append(prompt)
-            
-            # Tokenize entire batch at once
-            inputs = tokenizer(
-                prompts,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=1024,  # Prompt only, not completions
-            ).to(device)
-            
-            # Batch generate (leverages multi-GPU parallelism)
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=cfg.max_new_tokens,
-                temperature=cfg.temperature,
-                top_p=cfg.top_p,
-                top_k=cfg.top_k,
-                do_sample=True,
-                pad_token_id=tokenizer.eos_token_id,
-            )
-            
-            # Decode all completions
-            completions = []
-            for i, output in enumerate(outputs):
-                # Skip prompt tokens
-                prompt_len = inputs.input_ids[i].shape[0]
-                generated = output[prompt_len:]
-                completion = tokenizer.decode(generated, skip_special_tokens=True)
-                completions.append(completion)
-            
-            # Group by original batch and compute rewards
-            # For each problem in batch, collect exactly 5 replicates
-            for sample_idx in range(batch_size_actual):
-                rewards: List[float] = []
-                for rep_idx in range(cfg.eval_replicates):  # Always 5
-                    # Index into flattened completions: [q0_r0, q0_r1, ..., q0_r4, q1_r0, q1_r1, ...]
-                    completion_idx = sample_idx + rep_idx * batch_size_actual
-                    completion = completions[completion_idx]
-                    gold = batch_golds[sample_idx]
-                    reward = compute_reward(completion, gold)
-                    rewards.append(reward)
+    def run_and_log(self, step: int, label: str = "VLLM EVAL") -> Dict[str, float]:
+        """Run evaluation and log to WandB (DRY helper for baseline/periodic/final eval)."""
+        print(f"\n{'='*80}")
+        print(f"[{label}] Step {step}: Starting evaluation...")
+        print(f"{'='*80}")
+        
+        metrics = asyncio.run(self._run_eval())
+        
+        # Log to WandB with independent eval_step axis
+        try:
+            import wandb
+            if wandb.run is not None:
+                # Define metrics once on first log
+                if not self._metrics_defined:
+                    wandb.define_metric("eval_step")
+                    wandb.define_metric("eval_vllm/*", step_metric="eval_step")
+                    self._metrics_defined = True
                 
-                # Verify exactly 5 rewards per problem
-                assert len(rewards) == cfg.eval_replicates, f"Expected {cfg.eval_replicates} rewards, got {len(rewards)}"
+                wandb_data = {
+                    "eval_step": step,
+                    "trainer/global_step": step,
+                }
+                wandb_data.update({f"eval_vllm/{k}": v for k, v in metrics.items()})
+                wandb.log(wandb_data)
+        except Exception as e:
+            print(f"⚠️  WandB logging failed: {e}")
+        
+        print(f"[{label}] Results: {metrics}")
+        print(f"{'='*80}\n")
+        return metrics
+    
+    def on_step_end(self, args: Any, state: Any, control: Any, **kwargs: Any) -> None:
+        """Run evaluation every N steps."""
+        if state.global_step >= self.eval_every_n and state.global_step % self.eval_every_n == 0:
+            self.run_and_log(state.global_step)
+    
+    async def _run_eval(self) -> Dict[str, float]:
+        """Run evaluation using vLLM chat completions API and compute metrics."""
+        import time
+        from tqdm import tqdm
+        start_time = time.time()
+        
+        aggregator = KMetricsAggregator(report_ks=cfg.report_ks)
+        
+        # Process in batches
+        total_tasks = len(self.eval_ds)
+        batch_size = cfg.eval_batch_size
+        
+        with tqdm(total=total_tasks, desc="Eval", unit="task") as pbar:
+            for batch_start in range(0, total_tasks, batch_size):
+                batch_end = min(batch_start + batch_size, total_tasks)
+                batch = self.eval_ds[batch_start:batch_end]
+                batch_questions = batch["question"]
+                batch_golds = batch["answer"]
                 
-                # Sort rewards descending for top-k
-                results.append(sorted(rewards, reverse=True))
+                # Expand: each question gets N replicates
+                tasks_to_generate = []
+                task_metadata = []
+                
+                for idx, question in enumerate(batch_questions):
+                    task_id = f"q{batch_start + idx}"
+                    for rep_idx in range(cfg.eval_replicates):
+                        tasks_to_generate.append(question)
+                        task_metadata.append({
+                            "task_id": task_id,
+                            "task_idx": idx,
+                            "replicate_idx": rep_idx,
+                        })
+                
+                # Generate completions using async chat API with concurrency control
+                completions = await self._generate_batch(tasks_to_generate)
+                
+                # Log sample completions (first 3 from first batch)
+                if batch_start == 0:
+                    print("\n  ━━━ Sample Completions ━━━")
+                    for i in range(min(3, len(completions))):
+                        question = tasks_to_generate[i]
+                        completion = completions[i]
+                        metadata = task_metadata[i]
+                        gold = batch_golds[metadata["task_idx"]]
+                        reward = compute_reward(completion, gold)
+                        
+                        # Truncate for display
+                        q_display = question[:150] + "..." if len(question) > 150 else question
+                        c_display = completion[:300] + "..." if len(completion) > 300 else completion
+                        print(f"\n  Sample {i+1}:")
+                        print(f"    Question: {q_display}")
+                        print(f"    Completion: {c_display}")
+                        print(f"    Reward: {reward:.3f} | Gold: {parse_gsm8k_golden(gold)}")
+                    print(f"  ━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+                
+                # Compute rewards and aggregate
+                for completion_text, metadata in zip(completions, task_metadata):
+                    task_id = metadata["task_id"]
+                    task_idx = metadata["task_idx"]
+                    replicate_idx = metadata["replicate_idx"]
+                    gold = batch_golds[task_idx]
+                    
+                    # Compute reward
+                    reward = compute_reward(completion_text, gold)
+                    success = reward >= 0.6  # Correctness threshold
+                    
+                    # Add to aggregator
+                    aggregator.add(TaskReplicateResult(
+                        task_id=task_id,
+                        replicate_idx=replicate_idx,
+                        reward=reward,
+                        success=success,
+                    ))
+                
+                # Update progress bar
+                pbar.update(len(batch_questions))
+        
+        # Compute final metrics
+        metrics = aggregator.summarize()
+        elapsed = time.time() - start_time
+        throughput = (total_tasks * cfg.eval_replicates) / elapsed if elapsed > 0 else 0
+        
+        print(f"  ✓ Evaluated {total_tasks} tasks × {cfg.eval_replicates} reps in {elapsed:.2f}s "
+              f"({throughput:.1f} completions/sec)")
+        
+        return metrics
+    
+    async def _generate_batch(self, questions: List[str]) -> List[str]:
+        """Generate completions using TRL /chat/ endpoint with true batching.
+        
+        Key: TRL's /chat/ accepts multiple message lists per request, enabling
+        vLLM's continuous batching for parallel generation across all prompts.
+        """
+        import asyncio
+        import aiohttp
+        
+        # Batch size per request (vLLM processes all in parallel)
+        # Optimal: 64-128 for 4xGPU setup (balance memory and throughput)
+        vllm_batch_size = 64
+        total = len(questions)
+        num_requests = (total + vllm_batch_size - 1) // vllm_batch_size
+        print(f"    Generating {total} completions via {num_requests} batched requests (batch_size={vllm_batch_size})")
+        
+        async def generate_batch_request(
+            session: aiohttp.ClientSession, 
+            batch_questions: List[str], 
+            start_idx: int
+        ) -> tuple[int, List[List[int]]]:
+            """Send one batched request with multiple message lists."""
+            max_retries = 3
+            base_backoff = 1.0
             
-            if (batch_idx + 1) % max(1, len(dataloader) // 10) == 0:
-                print(f"  Progress: {batch_idx + 1}/{len(dataloader)} batches")
-    
-    # Compute metrics
-    metrics = {}
-    for k in cfg.report_ks:
-        if k > cfg.eval_replicates:
-            continue
+            # Build batch: list of message lists (one per question)
+            messages = [
+                [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": q},
+                ]
+                for q in batch_questions
+            ]
+            
+            payload = {
+                "messages": messages,  # Multiple conversations in ONE request
+                "max_tokens": cfg.max_new_tokens,
+                "temperature": cfg.temperature,
+                "top_p": cfg.top_p,
+                "top_k": cfg.top_k,
+                "repetition_penalty": 1.1,
+                "n": 1,
+            }
+            
+            for attempt in range(max_retries):
+                try:
+                    async with session.post(
+                        f"{self.base_url}/chat/",
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=300.0),
+                    ) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            # Returns: {"completion_ids": [[...], [...], ...]}
+                            # One completion per input message list
+                            completion_ids_batch = data["completion_ids"]
+                            return (start_idx, completion_ids_batch)
+                        else:
+                            error_text = await response.text()
+                            raise Exception(f"HTTP {response.status}: {error_text}")
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        backoff = base_backoff * (2 ** attempt)
+                        await asyncio.sleep(backoff)
+                    else:
+                        print(f"  ⚠️  Batch request starting at {start_idx} failed: {type(e).__name__}")
+                        # Return empty completions for failed batch
+                        return (start_idx, [[] for _ in batch_questions])
+            return (start_idx, [[] for _ in batch_questions])
         
-        # pass@k: at least one correct in top-k (correctness threshold = 0.6)
-        pass_at_k = sum(max(r[:k]) >= 0.6 for r in results) / len(results)
+        # Split into batches and send concurrent batched requests
+        async with aiohttp.ClientSession() as session:
+            tasks = []
+            for batch_start in range(0, total, vllm_batch_size):
+                batch_end = min(batch_start + vllm_batch_size, total)
+                batch_questions = questions[batch_start:batch_end]
+                tasks.append(generate_batch_request(session, batch_questions, batch_start))
+            
+            # Execute all batched requests concurrently
+            results = await asyncio.gather(*tasks, return_exceptions=False)
         
-        # mean@k: average of top-k rewards
-        mean_at_k = sum(sum(r[:k]) / k for r in results) / len(results)
+        # Flatten results and decode
+        all_completion_ids: List[List[int]] = [[] for _ in range(total)]
+        for start_idx, completion_ids_batch in results:
+            for offset, comp_ids in enumerate(completion_ids_batch):
+                all_completion_ids[start_idx + offset] = comp_ids
         
-        # best@k: best reward in top-k
-        best_at_k = sum(max(r[:k]) for r in results) / len(results)
+        # Decode all completions
+        completions = []
+        for comp_ids in all_completion_ids:
+            if comp_ids:
+                completion_text = self.tokenizer.decode(comp_ids, skip_special_tokens=True)
+                completions.append(completion_text)
+            else:
+                completions.append("")
         
-        metrics[f"pass@{k}"] = pass_at_k
-        metrics[f"mean@{k}"] = mean_at_k
-        metrics[f"best@{k}"] = best_at_k
-    
-    return metrics
+        return completions
 
 
 # ────────────────  MAIN TRAINING  ────────────────
 def main() -> None:
     print("🚀 Loading model and tokenizer...")
+    # Remove device_map="auto" when using single GPU training (CUDA_VISIBLE_DEVICES=0)
     try:
         model = AutoModelForCausalLM.from_pretrained(
             cfg.model_id,
             dtype=torch.bfloat16,
-            device_map="auto",
             attn_implementation="flash_attention_2",
         )
-    except (ImportError, RuntimeError, ValueError) as e:
+    except (ImportError, RuntimeError) as e:
         print(f"⚠️  Flash Attention 2 unavailable ({type(e).__name__}), using default attention")
         model = AutoModelForCausalLM.from_pretrained(
             cfg.model_id,
             dtype=torch.bfloat16,
-            device_map="auto",
         )
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_id)
     tokenizer.pad_token = tokenizer.eos_token
@@ -362,7 +471,7 @@ def main() -> None:
     
     print("📊 Preparing datasets...")
     train_ds = prepare_dataset(tokenizer)
-    eval_ds = prepare_eval_dataset()
+    eval_ds = prepare_eval_dataset()  # For VLLMEvalCallback
     prompt_to_answer = {row["prompt"]: row["gold_answer"] for row in train_ds}
     
     print("⚙️  Configuring GRPO trainer...")
@@ -379,7 +488,6 @@ def main() -> None:
         learning_rate=cfg.lr,
         num_train_epochs=cfg.epochs,
         per_device_train_batch_size=cfg.batch_size,
-        per_device_eval_batch_size=16,  # Must be >= num_generations (16)
         gradient_accumulation_steps=cfg.grad_accum_steps,
         max_grad_norm=cfg.grad_clip,
         warmup_steps=cfg.warmup_steps,
@@ -393,21 +501,26 @@ def main() -> None:
         top_k=cfg.top_k,  # Match loop.py: 50 highest probability tokens
         repetition_penalty=1.1,  # Match loop.py: penalize repeating tokens
         num_generations=16,  # group size: 16 completions per prompt
-        generation_batch_size=16,  # generate 16 prompts per batch for generation
+        generation_batch_size=16,  # 64 prompts per generation batch
         steps_per_generation=None,
         logging_steps=1,
         # Enable logging a small sample of (prompt, completion) pairs each logging step.
         # Prints to console if `rich` is installed and logs a WandB table named "completions".
         log_completions=True,
-        num_completions_to_print=3,
+        num_completions_to_print=1,
         wandb_log_unique_prompts=True,
         save_strategy="no",
-        bf16=True,  # Disable if no GPU or GPU doesn't support it
+        bf16=True,
         report_to=["wandb"],
-        eval_strategy="no",  # Disable built-in eval; we'll use custom FullEvalEveryN callback
-        # eval_steps=30,  # Not needed with eval_strategy="no"
-        run_name="trl_gsm8k_grpo_qwen15b_g16x16",
+        eval_strategy="no",  # Disable TRL's internal eval (using VLLMEvalCallback instead)
+        run_name="trl_gsm8k_grpo_qwen15b_g16x16_vllm",
         loss_type="dapo",  # Match config.py GRPO_VARIANT
+        # vLLM configuration for offloading generation to separate GPUs
+        use_vllm=True,
+        vllm_mode="server",
+        vllm_server_base_url="http://127.0.0.1:8000",
+        vllm_importance_sampling_correction=False,  # Correct for vLLM/training distribution mismatch
+        vllm_importance_sampling_cap=2.0,  # Cap importance sampling ratio for stability
     )
     
     # Reward function wrapper
@@ -422,68 +535,50 @@ def main() -> None:
         golds = [prompt_to_answer.get(p, "") for p in prompts]
         return [compute_reward(c, g) for c, g in zip(completions, golds)]
     
-    print("🎯 Baseline evaluation (optimized batching)...")
-    # baseline_metrics = evaluate_model(
-    #     model, tokenizer, eval_ds,
-    #     batch_size=cfg.eval_batch_size,
-    #     num_workers=cfg.eval_num_workers
-    # )
-    # print("Baseline metrics:", baseline_metrics)
-    
     print("🏋️  Training with GRPO...")
-    # Callback to run full evaluation every 30 steps and log to wandb
-    try:
-        import wandb  # type: ignore
-        _wandb_available = True
-    except Exception:
-        _wandb_available = False
-
-    class FullEvalEveryN(TrainerCallback):
-        def on_step_end(self, args, state, control, **kwargs):  # type: ignore[override]
-            if state.global_step > 0 and state.global_step % 30 == 0:
-                metrics = evaluate_model(
-                    model,
-                    tokenizer,
-                    eval_ds,
-                    batch_size=cfg.eval_batch_size,
-                    num_workers=cfg.eval_num_workers,
-                )
-                if _wandb_available:
-                    data = {f"eval/{k}": v for k, v in metrics.items()}
-                    data["global_step"] = state.global_step
-                    wandb.log(data, step=state.global_step)
-                print(f"[Eval @ step {state.global_step}] {metrics}")
-                
+    
+    # Initialize vLLM evaluation callback
+    vllm_eval_callback = VLLMEvalCallback(
+        eval_ds=eval_ds,
+        tokenizer=tokenizer,
+        vllm_base_url=grpo_config.vllm_server_base_url,
+        model_name=cfg.model_id,
+        eval_every_n_steps=30,
+        max_concurrent=512,
+    )
+    
     trainer = GRPOTrainer(
         model=model,
         reward_funcs=reward_fn,
         args=grpo_config,
         train_dataset=train_ds,
         processing_class=tokenizer,
-        eval_dataset=eval_ds,
-        callbacks=[FullEvalEveryN()],
+        callbacks=[vllm_eval_callback],
     )
+    
+    # Baseline evaluation before training (step=0, after WandB init)
+    baseline_metrics = vllm_eval_callback.run_and_log(step=0, label="BASELINE EVAL")
     
     trainer.train()
     
-    print("📈 Final evaluation (optimized batching)...")
-    final_metrics = evaluate_model(
-        model, tokenizer, eval_ds,
-        batch_size=cfg.eval_batch_size,
-        num_workers=cfg.eval_num_workers
-    )
-    print("Final metrics:", final_metrics)
+    # Final evaluation after training (use max steps as step number)
+    final_step = trainer.state.global_step if hasattr(trainer, "state") else 9999
+    final_metrics = vllm_eval_callback.run_and_log(step=final_step, label="FINAL EVAL")
     
     print("\n" + "="*60)
-    print("RESULTS SUMMARY")
+    print("FINAL RESULTS SUMMARY")
     print("="*60)
     for k in cfg.report_ks:
         if k > cfg.eval_replicates:
             continue
         print(f"\nMetrics @ k={k}:")
-        print(f"  pass@{k}:  {baseline_metrics[f'pass@{k}']:.3f} → {final_metrics[f'pass@{k}']:.3f}")
-        print(f"  mean@{k}:  {baseline_metrics[f'mean@{k}']:.3f} → {final_metrics[f'mean@{k}']:.3f}")
-        print(f"  best@{k}:  {baseline_metrics[f'best@{k}']:.3f} → {final_metrics[f'best@{k}']:.3f}")
+        print(f"  pass@{k}:        {final_metrics[f'pass@{k}']:.3f}")
+        print(f"  pass_ordered@{k}: {final_metrics[f'pass_ordered@{k}']:.3f}")
+        print(f"  mean@{k}:        {final_metrics[f'mean@{k}']:.3f}")
+        print(f"  best@{k}:        {final_metrics[f'best@{k}']:.3f}")
+    print(f"\nGlobal metrics:")
+    print(f"  reward_mean_all: {final_metrics['reward_mean_all']:.3f}")
+    print(f"  success_rate_all: {final_metrics['success_rate_all']:.3f}")
 
 
 if __name__ == "__main__":
