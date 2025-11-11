@@ -24,6 +24,7 @@ from .trust import get_trusted_miner_hotkeys
 
 if TYPE_CHECKING:
     import bittensor as bt
+
     from grail.infrastructure.checkpoints import (
         CheckpointManager,
     )

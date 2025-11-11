@@ -7,9 +7,9 @@ import logging
 import os
 from typing import Any
 
+import bittensor as bt
 import typer
 
-import bittensor as bt
 from grail.infrastructure.checkpoints import (
     CheckpointManager,
     default_checkpoint_cache_root,

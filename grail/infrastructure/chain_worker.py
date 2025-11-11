@@ -6,10 +6,9 @@ import os
 import time
 from typing import Any
 
+import bittensor as bt
 from bittensor.core.chain_data import decode_account_id
 from pydantic import ValidationError
-
-import bittensor as bt
 
 from ..shared.schemas import Bucket
 

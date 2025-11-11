@@ -15,9 +15,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
 import bittensor as bt
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..infrastructure.chain import GrailChainManager
 from ..infrastructure.checkpoints import CheckpointManager

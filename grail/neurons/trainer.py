@@ -8,10 +8,10 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
+import bittensor as bt
 import numpy as np
 import torch
 
-import bittensor as bt
 from grail.environments.gsm8k_env import GSM8KEnv
 from grail.environments.providers import GSM8KTaskSource
 from grail.infrastructure.chain import GrailChainManager

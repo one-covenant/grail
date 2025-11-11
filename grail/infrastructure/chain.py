@@ -6,14 +6,13 @@ import multiprocessing
 import os
 from typing import Any
 
+import bittensor as bt
 from tenacity import (
     retry,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
 )
-
-import bittensor as bt
 
 from ..shared.schemas import Bucket, BucketCredentials
 from .chain_worker import chain_commitment_worker

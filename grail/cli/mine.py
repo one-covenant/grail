@@ -11,11 +11,10 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+import bittensor as bt
 import torch
 import typer
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
-import bittensor as bt
 
 from ..environments.gsm8k_env import GSM8KEnv
 from ..environments.loop import AgentEnvLoop

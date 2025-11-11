@@ -11,6 +11,7 @@ import time
 from datetime import datetime
 from typing import Any
 
+import bittensor as bt
 from aiobotocore.session import get_session
 from botocore.config import Config
 from datasets import Dataset
@@ -18,8 +19,6 @@ from huggingface_hub import HfFolder
 from safetensors.torch import load_file, save_file
 from tqdm import tqdm  # type: ignore[import-untyped]
 from transformers import AutoModelForCausalLM
-
-import bittensor as bt
 
 from ..shared.constants import UPLOAD_TIMEOUT, WINDOW_LENGTH
 from ..shared.schemas import Bucket, BucketCredentials
