@@ -215,7 +215,7 @@ flash-attn = ["torch"]
 [dependency-groups]
 dev = [
     "flake8==7.3.0",
-    "ruff>=0.8.0",
+    "ruff==0.14.4",
 ]
 flash-attn = [
     "flash-attn>=2.8.0",
