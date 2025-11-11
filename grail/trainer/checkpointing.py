@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 import bittensor as bt
-
 from grail.infrastructure.checkpoints import (
     CHECKPOINT_PREFIX,
     CheckpointManager,

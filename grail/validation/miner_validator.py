@@ -14,8 +14,9 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any
 
-import bittensor as bt
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+import bittensor as bt
 
 from ..infrastructure.chain import GrailChainManager
 from ..infrastructure.comms import get_file

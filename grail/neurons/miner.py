@@ -6,9 +6,9 @@ import logging
 import traceback
 from types import SimpleNamespace
 
-import bittensor as bt
 import torch
 
+import bittensor as bt
 from grail.cli.mine import (
     MiningTimers,
     generate_rollouts_for_window,
