@@ -8,26 +8,34 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
 import torch
 
-# Ensure repo root on sys.path
+# Ensure repo root and src on sys.path BEFORE any imports from these paths
 _THIS_FILE = Path(__file__).resolve()
-_REPO_ROOT = _THIS_FILE.parents[2]
-if str(_REPO_ROOT) not in os.sys.path:
-    os.sys.path.insert(0, str(_REPO_ROOT))
+_REPO_ROOT = _THIS_FILE.parents[3]
+_SRC_DIR = _THIS_FILE.parents[1] / "src"
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+if _SRC_DIR.exists() and str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
 
-from grail.model.provider import get_model, get_tokenizer
-from grail.shared.chat_templates import build_qwen_chat_template
-from grail.shared.prompt_constants import SYSTEM_PROMPT
-from grail.trainer.algorithms.grpo import GRPOAlgorithm
-from grail.trainer.config import EvalConfig, TrainingConfig
-from grail.trainer.eval_planner import EvaluationPlan
-from grail.trainer.evaluator import EvaluatorService
-from scripts.offline_trainer.offline_rollouts import OfflineRolloutGenerator, RolloutGenConfig
+from scripts.offline_trainer.offline_rollouts import (  # noqa: E402
+    OfflineRolloutGenerator,
+    RolloutGenConfig,
+)
+
+from grail.model.provider import get_model, get_tokenizer  # noqa: E402
+from grail.shared.chat_templates import build_qwen_chat_template  # noqa: E402
+from grail.shared.prompt_constants import SYSTEM_PROMPT  # noqa: E402
+from grail.trainer.algorithms.grpo import GRPOAlgorithm  # noqa: E402
+from grail.trainer.config import EvalConfig, TrainingConfig  # noqa: E402
+from grail.trainer.eval_planner import EvaluationPlan  # noqa: E402
+from grail.trainer.evaluator import EvaluatorService  # noqa: E402
 
 
 class VLLMServerManager:
@@ -154,7 +162,7 @@ async def test_vllm_server_rollout_generation() -> None:
 
         # Generate groups
         seeds = [3001, 3002]
-        groups = generator.generate_groups(seeds)
+        groups = await generator.generate_groups(seeds)
 
         # Validate
         assert len(groups) == 2, f"Expected 2 groups, got {len(groups)}"
@@ -212,7 +220,7 @@ async def test_vllm_server_training_epoch() -> None:
 
         generator = OfflineRolloutGenerator(tokenizer=tokenizer, config=cfg)
         seeds = [4001, 4002, 4003, 4004]
-        groups = generator.generate_groups(seeds)
+        groups = await generator.generate_groups(seeds)
 
         print(
             f"Generated {len(groups)} groups with {sum(len(g.rollouts) for g in groups)} rollouts"

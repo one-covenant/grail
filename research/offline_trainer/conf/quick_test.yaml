@@ -1,0 +1,40 @@
+# Quick integration test config (fast iterations for CI/testing)
+defaults:
+  - offline_grpo
+
+seed: 42
+
+model:
+  train_id: "Qwen/Qwen2.5-0.5B-Instruct"
+  ref_id: "Qwen/Qwen2.5-0.5B-Instruct"
+
+train:
+  iterations: 3
+  batch_size: 2
+  lr: 2.0e-6
+  grad_accum_steps: 8
+  kl_coef: 0.0
+  entropy_coef: 0.0005
+  adaptive_kl: false
+
+data:
+  environment: "sat"
+  problems_per_iteration: 4
+  rollouts_per_problem: 8
+  train_seed_start: 1000
+  num_train_seeds: 32
+
+eval:
+  enabled: true
+  interval: 1
+  num_ids: 16
+  replicates: 4
+
+checkpoint:
+  save_interval: 1
+  keep_last_k: 2
+
+logging:
+  wandb:
+    enabled: false
+
