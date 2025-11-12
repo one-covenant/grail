@@ -28,7 +28,13 @@ except Exception:  # pragma: no cover - optional in offline mode
         raise RuntimeError("Miner data fetching is unavailable in offline mode.")
 
 
-from grail.shared.constants import IMPORTANCE_SAMPLING_LEVEL, ROLLOUTS_PER_PROBLEM, is_kl_enabled
+from grail.shared.constants import (
+    GRPO_RANKING_REWARD_WEIGHT,
+    GRPO_RANKING_VARIANCE_WEIGHT,
+    IMPORTANCE_SAMPLING_LEVEL,
+    ROLLOUTS_PER_PROBLEM,
+    is_kl_enabled,
+)
 from grail.trainer.metrics import (
     KMetricsAggregator,
     TaskReplicateResult,
@@ -516,7 +522,7 @@ def _compute_training_metrics(
 
 
 def _group_reward_per_token(group: GRPOGroup) -> float:
-    """Calculate mean reward per completion token for a GRPO group.
+    """Calculate mean reward per completion token for a GRPO group (GFPO).
 
     Args:
         group: The GRPO group to calculate reward/token for
@@ -531,20 +537,61 @@ def _group_reward_per_token(group: GRPOGroup) -> float:
     return float(sum(totals) / max(1, len(totals)))
 
 
+def _group_advantage_variance(group: GRPOGroup) -> float:
+    """Calculate advantage variance for a GRPO group (learning signal strength).
+
+    Higher variance indicates stronger learning signal - diverse outcomes that
+    provide clear policy gradient direction.
+
+    Args:
+        group: The GRPO group to calculate advantage variance for
+
+    Returns:
+        Variance of advantages across rollouts (0.0 if insufficient rollouts)
+    """
+    if len(group.rollouts) < 2:
+        return 0.0
+    advantages = [r.advantage for r in group.rollouts]
+    mean_adv = sum(advantages) / len(advantages)
+    return sum((a - mean_adv) ** 2 for a in advantages) / len(advantages)
+
+
+def _group_efficiency_score(
+    group: GRPOGroup, reward_weight: float = 0.7, variance_weight: float = 0.3
+) -> float:
+    """Compute combined efficiency score for group ranking (GFPO + variance).
+
+    Combines token efficiency (reward/token) with learning signal strength
+    (advantage variance) using configurable weights. Groups are ranked by this
+    score for top-k selection.
+
+    Args:
+        group: The GRPO group to score
+        reward_weight: Weight for reward/token component (default: 0.7)
+        variance_weight: Weight for advantage variance component (default: 0.3)
+
+    Returns:
+        Combined efficiency score (normalized, higher is better)
+    """
+    reward_per_token = _group_reward_per_token(group)
+    adv_variance = _group_advantage_variance(group)
+    return reward_weight * reward_per_token + variance_weight * adv_variance
+
+
 def _filter_valid_groups(
     groups: list[GRPOGroup],
     advantage_tolerance: float,
     window: int,
     config: TrainingConfig | None = None,
 ) -> list[GRPOGroup]:
-    """Filter and refine GRPO groups based on multiple validation stages.
+    """Filter and refine GRPO groups using multi-stage pipeline.
 
-    Applies a series of filtering stages:
+    Implements filtering techniques from recent research (DAPO, GFPO, 2025):
     1. Structural validation (group size and zero-sum advantage condition)
-    2. Variance check (groups must have advantage variance to provide learning signal)
+    2. DAPO filtering: Remove uninformative groups (zero advantage variance)
     3. Completion token constraints (optional, from config)
-    4. Refinement filters (success rate, reward/token thresholds, quantile dropping)
-    5. Group count capping
+    4. GFPO refinement: Success rate, reward/token thresholds, quantile dropping
+    5. Top-k ranking: Combined efficiency score (reward/token + advantage variance)
 
     Args:
         groups: List of GRPO groups to filter
@@ -553,7 +600,7 @@ def _filter_valid_groups(
         config: Optional training config with filtering parameters
 
     Returns:
-        List of filtered and refined GRPO groups
+        List of filtered and refined GRPO groups (up to max_groups)
     """
     # Stage 1: Fast structural validation
     valid_groups: list[GRPOGroup] = [
@@ -567,14 +614,15 @@ def _filter_valid_groups(
             window,
         )
 
-    # Stage 2: Variance check to ensure learning signal
+    # Stage 2: DAPO filtering - remove uninformative groups (zero advantage variance)
+    # Groups where all rollouts have identical rewards provide no learning signal
     groups_with_variance: list[GRPOGroup] = [
         group for group in valid_groups if _has_advantage_variance(group)
     ]
     zero_variance_count: int = len(valid_groups) - len(groups_with_variance)
     if zero_variance_count > 0:
         logger.warning(
-            "Filtered out %s GRPO groups with zero advantage variance for window %s",
+            "DAPO: Filtered out %s uninformative groups (zero variance) for window %s",
             zero_variance_count,
             window,
         )
@@ -657,16 +705,30 @@ def _filter_valid_groups(
                     window,
                 )
 
-        # Stage 5: Cap groups by score (descending reward/token) to max_groups limit
+        # Stage 5: Rank by combined efficiency score and select top-k groups
         max_groups: int = int(getattr(config, "grpo_max_groups", 8))
         if len(refined_groups) > max_groups:
-            scored = [(group, _group_reward_per_token(group)) for group in refined_groups]
+            # Get ranking weights from config or fall back to constants
+            reward_weight: float = float(
+                getattr(config, "grpo_ranking_reward_weight", GRPO_RANKING_REWARD_WEIGHT)
+            )
+            variance_weight: float = float(
+                getattr(config, "grpo_ranking_variance_weight", GRPO_RANKING_VARIANCE_WEIGHT)
+            )
+            # Score each group with combined efficiency metric (GFPO + variance)
+            scored = [
+                (group, _group_efficiency_score(group, reward_weight, variance_weight))
+                for group in refined_groups
+            ]
             scored.sort(key=lambda item: item[1], reverse=True)
             refined_groups = [group for group, _ in scored[:max_groups]]
-            logger.warning(
-                "Limiting GRPO groups from %s to %s for window %s",
-                len(scored),
+            logger.info(
+                "Selected top %s/%s groups by efficiency score (reward_wt=%.2f, var_wt=%.2f) "
+                "for window %s",
                 max_groups,
+                len(scored),
+                reward_weight,
+                variance_weight,
                 window,
             )
     else:

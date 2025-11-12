@@ -107,6 +107,12 @@ GRPO_REWARD_PER_TOKEN_DROP_QUANTILE = float(
     os.getenv("GRAIL_GRPO_REWARD_PER_TOKEN_DROP_QUANTILE", "0.0")
 )
 
+# Group ranking: combined efficiency score weights (must sum to 1.0)
+# Higher reward_per_token weight prioritizes token efficiency (GFPO)
+# Higher advantage_variance weight prioritizes learning signal strength
+GRPO_RANKING_REWARD_WEIGHT = float(os.getenv("GRAIL_GRPO_RANKING_REWARD_WEIGHT", "0.7"))
+GRPO_RANKING_VARIANCE_WEIGHT = float(os.getenv("GRAIL_GRPO_RANKING_VARIANCE_WEIGHT", "0.3"))
+
 # Checkpoint retention controls
 CHECKPOINT_RETENTION_LIMIT = int(os.getenv("GRAIL_CHECKPOINT_RETENTION_LIMIT", "3"))
 CHECKPOINT_MILESTONE_INTERVAL = int(os.getenv("GRAIL_CHECKPOINT_MILESTONE_INTERVAL", "100"))
