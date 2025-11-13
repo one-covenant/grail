@@ -74,7 +74,7 @@ def test_math_env_success_case() -> None:
     payload = _pull_task(env)
     gold_answer = str(payload["answer"])
 
-    completion = _build_completion(f"\\boxed{{{gold_answer}}}")
+    completion = _build_completion(f"{SOLUTION_START}{gold_answer}{SOLUTION_END}")
 
     _obs, reward, terminated, truncated, info = env.step(
         ChatMessage(role="assistant", content=completion)
@@ -92,7 +92,7 @@ def test_math_env_incorrect_case() -> None:
     env = create_env("math")
     env.reset(seed=9, level=1, subject="Prealgebra")
 
-    completion = _build_completion("\\boxed{0}")
+    completion = _build_completion(f"{SOLUTION_START}0{SOLUTION_END}")
 
     _obs, reward, terminated, truncated, info = env.step(
         ChatMessage(role="assistant", content=completion)
@@ -103,3 +103,25 @@ def test_math_env_incorrect_case() -> None:
     assert info["success"] is False
     # Reward should miss the correctness component entirely.
     assert reward < 0.75
+
+
+@pytest.mark.parametrize(
+    ("predicted", "gold", "expected"),
+    [
+        (r"\dfrac{7}{20}", r"\frac{7}{20}", True),
+        (r"\frac{2 \sqrt{149}}{3}", r"\frac{2\sqrt{149}}{3}", True),
+        (
+            r"\begin{pmatrix} 8 & 12 \\ -4 & 20 \end{pmatrix}",
+            r"\begin{pmatrix}8&12\\-4&20\end{pmatrix}",
+            True,
+        ),
+        ("18\\text{ ways.}", "18\\text{ways.}", True),
+        ("y^4-2y^3+7y^2+y-5", "y^4-2y^3+7y^2+y-5", True),
+        (r"\frac{7}{20}", r"\frac{7}{21}", False),
+    ],
+)
+def test_math_answer_normalization_examples(predicted: str, gold: str, expected: bool) -> None:
+    """Verify normalization handles representative answers supplied by the user."""
+    from grail.environments.math_hendrycks_env import _math_answers_equal
+
+    assert _math_answers_equal(predicted, gold) is expected
