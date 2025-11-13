@@ -28,8 +28,50 @@ from .reward_components import (
 )
 
 
+def _normalize_latex_answer(s: str) -> str:
+    """Normalize LaTeX answer for robust comparison.
+
+    Handles variations found in MATH dataset (1.8% of 12,500 answers):
+    - \\dfrac vs \\frac (125 cases)
+    - \\tfrac vs \\frac (17 cases)
+    - \\left/\\right delimiters (122 cases)
+    - LaTeX spacing commands (93 cases)
+    - Whitespace variations (common)
+
+    Args:
+        s: LaTeX string to normalize
+
+    Returns:
+        Normalized string in canonical form
+    """
+    s = s.strip()
+
+    # Normalize fraction commands (1.1% of dataset)
+    s = s.replace(r"\dfrac", r"\frac")
+    s = s.replace(r"\tfrac", r"\frac")
+    s = s.replace(r"\cfrac", r"\frac")
+
+    # Remove sizing delimiters (1.0% of dataset)
+    s = re.sub(r"\\left\b", "", s)
+    s = re.sub(r"\\right\b", "", s)
+
+    # Remove LaTeX spacing commands (0.7% of dataset)
+    s = s.replace(r"\,", "").replace(r"\!", "")
+    s = s.replace(r"\;", "").replace(r"\:", "")
+
+    # Remove ALL whitespace (LaTeX meaning preserved)
+    # "2 \sqrt{x}" and "2\sqrt{x}" are mathematically identical
+    s = re.sub(r"\s+", "", s)
+
+    # Lowercase for case-insensitive matching
+    return s.lower()
+
+
 def _math_answers_equal(predicted: str, gold: str) -> bool:
     """Compare answers using exact, symbolic, and numeric strategies.
+
+    Uses LaTeX normalization to handle formatting variations before comparison.
+    Tries three strategies in order: exact → symbolic → numeric.
 
     Args:
         predicted: Model-predicted answer (raw string)
@@ -38,17 +80,18 @@ def _math_answers_equal(predicted: str, gold: str) -> bool:
     Returns:
         True if answers are equivalent under any strategy.
     """
-    pred_norm = predicted.strip()
-    gold_norm = gold.strip()
-
-    if not pred_norm or not gold_norm:
+    if not predicted or not gold:
         return False
 
-    # Strategy 1: Exact match
+    # Normalize LaTeX formatting first (handles 1.8% of dataset variations)
+    pred_norm = _normalize_latex_answer(predicted)
+    gold_norm = _normalize_latex_answer(gold)
+
+    # Strategy 1: Exact match after normalization (fast path)
     if pred_norm == gold_norm:
         return True
 
-    # Strategy 2: Symbolic equivalence via sympy (fractions, radicals)
+    # Strategy 2: Symbolic equivalence via sympy (fractions, radicals, algebra)
     try:
         import sympy
 
@@ -72,69 +115,44 @@ def _math_answers_equal(predicted: str, gold: str) -> bool:
 
 
 class MATHCompletionParser(ThinkingParser):
-    """Parser for Hendrycks MATH completions with \\boxed{} answer detection.
+    """Parser for Hendrycks MATH completions with <SOLUTION> tag detection.
 
-    Inherits thinking tag detection from ThinkingParser base class.
-    Provides MATH-specific answer parsing for boxed notation.
+    Inherits thinking and answer tag detection from ThinkingParser base class.
+    Uses same format as GSM8K for training consistency.
 
-    Detects:
+    Expected format:
     - Thinking blocks: <start_working_out>...</end_working_out> (inherited)
-    - Answer blocks: \\boxed{...} (LaTeX standard)
+    - Answer blocks: <SOLUTION>...</SOLUTION> (inherited)
     - Trailing text: tracks chars after answer
+
+    Note: Dataset gold answers use LaTeX (fractions, radicals, etc.) but
+    model completions should wrap them in <SOLUTION> tags.
     """
 
-    _BOXED_OPEN_PATTERN = re.compile(r"\\boxed\s*{", re.DOTALL)
-
-    def _extract_boxed_content(self, text: str) -> tuple[str | None, int]:
-        """Extract boxed LaTeX content handling nested braces."""
-        match = self._BOXED_OPEN_PATTERN.search(text)
-        if not match:
-            return None, 0
-
-        start = match.end()
-        depth = 1
-        idx = start
-        length = len(text)
-
-        while idx < length and depth > 0:
-            ch = text[idx]
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-            idx += 1
-
-        if depth != 0:
-            return None, 0
-
-        content = text[start : idx - 1].strip()
-        trailing = length - idx
-        return content, trailing
-
     def parse(self, completion: str, context: Any) -> dict[str, Any]:
-        """Parse completion for thinking tags and boxed answer.
+        """Parse completion for thinking tags and solution answer.
 
         Returns dict with:
-        - answer_text: extracted answer from \\boxed{}
+        - answer_text: extracted answer from <SOLUTION>...</SOLUTION>
         - has_thinking: bool, True if thinking block present
-        - has_answer: bool, True if \\boxed{} present
-        - trailing_after_answer: int, chars after answer
+        - has_answer: bool, True if <SOLUTION> tags present
+        - trailing_after_answer: int, chars after closing tag
         """
         text = completion or ""
 
-        # Use inherited method from ThinkingParser
+        # Use inherited methods from ThinkingParser
         has_thinking = self._detect_thinking_block(text)
+        has_answer = self._detect_answer_block(text)
 
-        # Extract answer from \\boxed{}
+        # Extract answer using inherited method
         answer_text = ""
         trailing_after_answer = 0
-        has_answer = False
 
-        answer_content, trailing = self._extract_boxed_content(text)
-        if answer_content is not None:
-            has_answer = True
-            answer_text = answer_content
-            trailing_after_answer = trailing
+        if has_answer:
+            content, trailing, _ = self._get_answer_with_thinking_check(text)
+            if content is not None:
+                answer_text = content.strip()
+                trailing_after_answer = trailing
 
         return {
             "answer_text": answer_text,
@@ -224,16 +242,20 @@ class MATHEnv(MathDatasetEnv):
     """Hendrycks MATH single-turn environment with multi-strategy validation.
 
     Extends MathDatasetEnv with MATH-specific logic:
-    - Answer extraction: \\boxed{...} notation (LaTeX standard)
-    - Gold answer: Direct from dataset['answer'] field
+    - Completion format: <SOLUTION>answer</SOLUTION> (consistent with GSM8K)
+    - Gold answer: Direct from dataset['answer'] field (LaTeX format)
     - Validation: Multi-strategy (exact, symbolic via sympy, numeric)
     - Filtering: Supports level (1-5) and subject (7 domains)
 
-    Answer types supported:
+    Answer types supported in dataset:
     - Numeric: 2, 18, 1.36, -5 (60% of dataset)
     - Fractions: \\frac{416}{27} (20% of dataset)
     - Radicals: 3\\sqrt{3}, \\frac{2\\sqrt{149}}{3} (19% of dataset)
     - Text/Special: \\text{June 20}, matrices (1% of dataset)
+
+    Model completion format:
+        <start_working_out>Step-by-step reasoning</end_working_out>
+        <SOLUTION>\\frac{3}{4}</SOLUTION>
 
     Usage:
         env = MATHEnv()
@@ -251,7 +273,7 @@ class MATHEnv(MathDatasetEnv):
         return task_payload.get("answer", "")
 
     def _extract_completion_answer(self, completion: str, context: dict[str, Any]) -> str | None:
-        """Extract answer from \\boxed{...} notation."""
+        """Extract answer from <SOLUTION>...</SOLUTION> tags."""
         parsed = self._parser.parse(completion, context)
         answer = parsed.get("answer_text", "")
         return answer if answer else None
