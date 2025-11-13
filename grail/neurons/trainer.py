@@ -12,8 +12,7 @@ import bittensor as bt
 import numpy as np
 import torch
 
-from grail.environments.gsm8k_env import GSM8KEnv
-from grail.environments.providers import GSM8KTaskSource
+from grail.environments.factory import create_env_factory
 from grail.infrastructure.chain import GrailChainManager
 from grail.shared.constants import (
     NETUID,
@@ -254,11 +253,11 @@ class TrainerNeuron(BaseNeuron):
         self._eval_in_progress = True
         logger.info("📊 Starting evaluation cycle (window_number=%d)", window_number)
 
-        # Build dataset-backed evaluation (GSM8K by default)
-        source = GSM8KTaskSource(split=self._eval_cfg.split)
+        # Build dataset-backed evaluation (MATH test set by default)
+        from grail.environments.providers import MATHTaskSource
 
-        def env_factory() -> GSM8KEnv:
-            return GSM8KEnv(task_source=source)
+        source = MATHTaskSource(split=self._eval_cfg.split)
+        env_factory = create_env_factory("math", task_source=source, split=self._eval_cfg.split)
 
         # Choose between full dataset or fixed subset evaluation
         if self._eval_cfg.subset_size is not None:
@@ -464,7 +463,7 @@ class TrainerNeuron(BaseNeuron):
             try:
                 if self._eval_checkpoint_dir:
                     logger.info("Reloading training models from eval checkpoint...")
-                    self._reload_training_models()
+                    await self._reload_training_models()
                     logger.info("Training models reloaded successfully")
 
                     self._cleanup_eval_checkpoint(self._eval_checkpoint_dir)
@@ -688,7 +687,7 @@ class TrainerNeuron(BaseNeuron):
                 evaluator.shutdown()
                 logger.info("🧹 Evaluator shutdown complete")
 
-    def _reload_training_models(self) -> None:
+    async def _reload_training_models(self) -> None:
         """Reload training and reference models after evaluation server shutdown.
 
         Prefers eval checkpoint (exact saved state) over original path to guarantee
@@ -732,12 +731,14 @@ class TrainerNeuron(BaseNeuron):
             )
 
             # Reload training model with Flash Attention enabled if configured
+            # Run in thread pool to avoid blocking event loop (keeps Bittensor websocket alive)
             if self._context.train_model is None and train_reload_path:
                 reload_source = "eval checkpoint" if self._eval_checkpoint_dir else "original path"
                 logger.info(
                     "Reloading training model from %s: %s", reload_source, train_reload_path
                 )
-                self._context.train_model = get_model(
+                self._context.train_model = await asyncio.to_thread(
+                    get_model,
                     train_reload_path,
                     eval_mode=False,
                     use_flash_attention=TRAINER_USE_FLASH_ATTENTION,
@@ -752,7 +753,9 @@ class TrainerNeuron(BaseNeuron):
             if kl_enabled and self._context.ref_model is None and ref_reload_path:
                 reload_source = "eval checkpoint" if self._eval_checkpoint_dir else "original path"
                 logger.info("Reloading reference model from %s: %s", reload_source, ref_reload_path)
-                self._context.ref_model = get_model(ref_reload_path, eval_mode=True)
+                self._context.ref_model = await asyncio.to_thread(
+                    get_model, ref_reload_path, eval_mode=True
+                )
                 logger.info("✅ Reloaded reference model from %s", reload_source)
             else:
                 logger.debug(
@@ -765,7 +768,7 @@ class TrainerNeuron(BaseNeuron):
             if train_reload_path:
                 reload_source = "eval checkpoint" if self._eval_checkpoint_dir else "original path"
                 logger.info("Reloading tokenizer from %s: %s", reload_source, train_reload_path)
-                self._context.tokenizer = get_tokenizer(train_reload_path)
+                self._context.tokenizer = await asyncio.to_thread(get_tokenizer, train_reload_path)
 
                 # Verify chat template is present
                 has_template = hasattr(self._context.tokenizer, "chat_template") and bool(

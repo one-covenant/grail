@@ -4,6 +4,8 @@ This environment serves a single math word problem per episode and computes
 reward by exact-match against the dataset answer (with light normalization).
 Uses RewardVector for decomposed reward components: correctness, strict format,
 thinking format, answer format, and no trailing text penalties.
+
+Refactored to extend MathDatasetEnv base class for better extensibility.
 """
 
 from __future__ import annotations
@@ -13,14 +15,13 @@ from collections.abc import Callable
 from typing import Any, cast
 
 from .base import Parser, RewardVector, ThinkingParser
-from .core import ChatMessage, Observation, Rubric, SingleTurnEnv
-from .providers import GSM8KTaskSource, TaskSpec
+from .dataset_base import MathDatasetEnv
+from .providers import GSM8KTaskSource, TaskSource
 from .reward_components import (
     answer_format_reward,
     no_trailing_reward,
     thinking_format_reward,
 )
-from .rubric import RewardVectorRubric
 
 
 class GSM8KCompletionParser(ThinkingParser):
@@ -196,10 +197,15 @@ def _create_gsm8k_reward_vector() -> RewardVector:
     )
 
 
-class GSM8KEnv(SingleTurnEnv):
+class GSM8KEnv(MathDatasetEnv):
     """GSM8K single-turn environment with RewardVector support.
 
-    Uses decomposed rewards to guide model learning:
+    Extends MathDatasetEnv with GSM8K-specific logic:
+    - Answer extraction: <SOLUTION>numeric</SOLUTION> format
+    - Gold parsing: #### answer format from dataset
+    - Validation: Numeric exact match after normalization
+
+    Uses decomposed rewards:
     - Correctness: exact match against gold
     - Strict format: numeric-only answer validation
     - Thinking: presence of reasoning
@@ -207,73 +213,29 @@ class GSM8KEnv(SingleTurnEnv):
     - No trailing: penalize verbose completions
     """
 
-    def __init__(
-        self,
-        *,
-        task_source: GSM8KTaskSource | None = None,
-        parser: Parser | None = None,
-        rubric: Rubric | None = None,
-    ) -> None:
-        super().__init__()
-        self._source = task_source or GSM8KTaskSource()
-        self._parser = parser or GSM8KCompletionParser()
-        self._rubric = rubric or RewardVectorRubric(_create_gsm8k_reward_vector())
-        self._task: TaskSpec | None = None
+    # =========================================================================
+    # Template Method Implementations (GSM8K-specific)
+    # =========================================================================
 
-    def _do_reset(self, *, task_id: str | None = None, seed: int | None = None) -> Observation:
-        self._task = self._source.next(seed=seed, task_id=task_id)
-        q = self._task.payload["question"]
+    def _extract_dataset_answer(self, task_payload: dict[str, Any]) -> str:
+        """Extract gold answer from GSM8K dataset format (#### answer)."""
+        return _parse_gsm8k_golden(task_payload.get("answer", ""))
 
-        obs = Observation(
-            messages=[ChatMessage(role="user", content=q)],
-            available_tools=[],
-            turn_index=0,
-            task_meta={"task_id": self._task.id, **self._task.metadata},
-        )
-        return obs
-
-    def _do_step(self, action: ChatMessage) -> tuple[Observation, float, bool, dict[str, Any]]:
-        assert self._task is not None
-
-        completion_text = action.content or ""
-
-        # Use rubric for decomposed reward computation
-        reward, components = self._rubric.step_reward(
-            parsed=completion_text,
-            context=self._task.payload,
-            turn_index=1,
-        )
-
-        # Parse for detailed logging
-        parsed = self._parser.parse(completion_text, self._task.payload)
+    def _extract_completion_answer(self, completion: str, context: dict[str, Any]) -> str | None:
+        """Extract numeric answer from <SOLUTION>...</SOLUTION> tags."""
+        # Use parser to extract answer
+        parsed = self._parser.parse(completion, context)
         answer_text = parsed.get("answer_text", "")
+        return answer_text if answer_text else None
 
-        # Get gold for info dict
-        gold = self._task.payload.get("answer", "")
-        gold_parsed = _parse_gsm8k_golden(gold)
+    def _default_task_source(self) -> TaskSource:
+        """Create GSM8K task source."""
+        return GSM8KTaskSource()
 
-        # Determine success (exact match)
-        pred_n = _normalize_answer(str(answer_text))
-        gold_n = _normalize_answer(str(gold_parsed))
-        success = pred_n == gold_n
+    def _create_parser(self) -> Parser:
+        """Create GSM8K-specific completion parser."""
+        return GSM8KCompletionParser()
 
-        obs = Observation(
-            messages=[
-                ChatMessage(role="user", content=self._task.payload["question"]),
-                ChatMessage(role="assistant", content=completion_text),
-            ],
-            available_tools=[],
-            turn_index=1,
-            task_meta={"task_id": self._task.id, **self._task.metadata},
-        )
-
-        info = {
-            "reward_components": components,
-            "termination_cause": "final",
-            "success": success,
-            "gold_answer": gold,
-            "pred_answer": answer_text,
-        }
-
-        truncated = False
-        return obs, float(reward), truncated, info
+    def _create_reward_vector(self) -> RewardVector:
+        """Create GSM8K-specific reward vector."""
+        return _create_gsm8k_reward_vector()

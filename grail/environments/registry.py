@@ -46,11 +46,9 @@ class SATEnvAdapter:
         seed: int,
         tokenizer: PreTrainedTokenizerBase,
     ) -> list[int]:
-        # Lazy imports to avoid heavy deps in import graph
-        from .sat_env import SATEnv
+        from .factory import create_env
 
-        env = SATEnv()
-        # Convert hex seed string to int for env.reset()
+        env = create_env("sat")
         seed_int = seed
         obs = env.reset(seed=seed_int)
         messages = [{"role": m.role, "content": m.content} for m in obs.messages]
@@ -83,12 +81,11 @@ class SATEnvAdapter:
         completion_text: str,
         tokenizer: PreTrainedTokenizerBase,
     ) -> dict:
-        from .sat_env import SATEnv
-
-        env = SATEnv()
-        env.reset(seed=int(seed))
-        # Single turn step
         from .core import ChatMessage
+        from .factory import create_env
+
+        env = create_env("sat")
+        env.reset(seed=int(seed))
 
         _, reward, _terminated, _truncated, info = env.step(
             ChatMessage(role="assistant", content=completion_text)
@@ -112,10 +109,9 @@ class GSM8KEnvAdapter:
         seed: int,
         tokenizer: PreTrainedTokenizerBase,
     ) -> list[int]:
-        # Lazy imports to avoid heavy deps in import graph
-        from .gsm8k_env import GSM8KEnv
+        from .factory import create_env
 
-        env = GSM8KEnv()
+        env = create_env("gsm8k")
         obs = env.reset(seed=seed)
         messages = [{"role": m.role, "content": m.content} for m in obs.messages]
 
@@ -148,9 +144,9 @@ class GSM8KEnvAdapter:
         tokenizer: PreTrainedTokenizerBase,
     ) -> dict:
         from .core import ChatMessage
-        from .gsm8k_env import GSM8KEnv
+        from .factory import create_env
 
-        env = GSM8KEnv()
+        env = create_env("gsm8k")
         env.reset(seed=int(seed))
 
         _obs, reward, _terminated, _truncated, info = env.step(
@@ -166,9 +162,76 @@ class GSM8KEnvAdapter:
         return result
 
 
+@dataclass(frozen=True)
+class MATHEnvAdapter:
+    """Hendrycks MATH adapter backed by MATHEnv.
+
+    Uses HF datasets-backed math problems with multi-strategy validation.
+    Supports filtering by level (1-5) and subject (7 domains).
+    """
+
+    def build_prompt_ids(
+        self,
+        seed: int,
+        tokenizer: PreTrainedTokenizerBase,
+    ) -> list[int]:
+        from .factory import create_env
+
+        env = create_env("math")
+        obs = env.reset(seed=seed)
+        messages = [{"role": m.role, "content": m.content} for m in obs.messages]
+
+        rendered = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        toks = tokenizer(
+            rendered,
+            return_tensors="pt",
+            return_attention_mask=False,
+        )
+        input_ids_tensor = toks.input_ids[0]
+        ids: list[int] = [int(v) for v in input_ids_tensor.tolist()]
+
+        # Debug: log rendered prompt text for comparison with miner
+        logger.debug(
+            ("VALIDATOR RENDERED PROMPT (MATH): length=%d chars, tokens=%d\n%s, seed=%d"),
+            len(rendered),
+            len(ids),
+            rendered,
+            int(seed),
+        )
+
+        return ids
+
+    def evaluate_completion(
+        self,
+        seed: int,
+        completion_text: str,
+        tokenizer: PreTrainedTokenizerBase,
+    ) -> dict:
+        from .core import ChatMessage
+        from .factory import create_env
+
+        env = create_env("math")
+        env.reset(seed=int(seed))
+
+        _obs, reward, _terminated, _truncated, info = env.step(
+            ChatMessage(role="assistant", content=completion_text)
+        )
+        success = bool(info.get("success", False))
+        result = {"success": success, "reward": float(reward)}
+        # Include metadata for diagnostics
+        if "gold_answer" in info:
+            result["gold_answer"] = info["gold_answer"]
+        if "pred_answer" in info:
+            result["pred_answer"] = info["pred_answer"]
+        return result
+
+
 _REGISTRY: dict[str, EnvAdapter] = {
     "sat": cast(EnvAdapter, SATEnvAdapter()),
     "gsm8k": cast(EnvAdapter, GSM8KEnvAdapter()),
+    "math": cast(EnvAdapter, MATHEnvAdapter()),
 }
 
 
