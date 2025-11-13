@@ -253,11 +253,11 @@ class TrainerNeuron(BaseNeuron):
         self._eval_in_progress = True
         logger.info("📊 Starting evaluation cycle (window_number=%d)", window_number)
 
-        # Build dataset-backed evaluation (GSM8K by default)
-        from grail.environments.providers import GSM8KTaskSource
+        # Build dataset-backed evaluation (MATH test set by default)
+        from grail.environments.providers import MATHTaskSource
 
-        source = GSM8KTaskSource(split=self._eval_cfg.split)
-        env_factory = create_env_factory(task_source=source, split=self._eval_cfg.split)
+        source = MATHTaskSource(split=self._eval_cfg.split)
+        env_factory = create_env_factory("math", task_source=source, split=self._eval_cfg.split)
 
         # Choose between full dataset or fixed subset evaluation
         if self._eval_cfg.subset_size is not None:

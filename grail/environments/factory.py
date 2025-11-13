@@ -22,7 +22,7 @@ def create_env(
     Args:
         env_id: Environment identifier (defaults to CURRENT_ENV_ID)
         task_source: Optional task source for dataset-backed envs
-        split: Dataset split for GSM8K (train/test/validation)
+        split: Dataset split for GSM8K/MATH (train/test/validation)
 
     Returns:
         Initialized environment instance
@@ -34,6 +34,7 @@ def create_env(
         >>> env = create_env()  # Uses CURRENT_ENV_ID
         >>> env = create_env("sat")
         >>> env = create_env("gsm8k", split="test")
+        >>> env = create_env("math", split="train")
     """
     env_id = env_id or CURRENT_ENV_ID
 
@@ -48,6 +49,13 @@ def create_env(
 
         source = task_source or GSM8KTaskSource(split=split)
         return GSM8KEnv(task_source=source)
+
+    if env_id == "math":
+        from .math_hendrycks_env import MATHEnv
+        from .providers import MATHTaskSource
+
+        source = task_source or MATHTaskSource(split=split)
+        return MATHEnv(task_source=source)
 
     raise ValueError(f"Unknown environment ID: {env_id}")
 

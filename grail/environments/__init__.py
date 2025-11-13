@@ -3,7 +3,8 @@
 Exports:
 - Core API: MultiTurnEnv, SingleTurnEnv, types
 - SAT: problem generator, parser, reward, env (all from sat_env)
-- GSM8K: dataset-backed env
+- GSM8K: dataset-backed env for grade school math
+- MATH: Hendrycks MATH benchmark env with multi-strategy validation
 - Loop: AgentEnvLoop, GRPORollout
 - Factory: create_env, create_env_factory (preferred for instantiation)
 - Legacy: Parser, RewardVector
@@ -19,10 +20,12 @@ from .core import (  # noqa: F401
     SingleTurnEnv,
     TaskSource,
 )
+from .dataset_base import MathDatasetEnv  # noqa: F401
 from .factory import create_env, create_env_factory  # noqa: F401
 from .gsm8k_env import GSM8KEnv  # noqa: F401
 from .loop import AgentEnvLoop, GRPORollout  # noqa: F401
-from .providers import GSM8KTaskSource, SATTaskSource  # noqa: F401
+from .math_hendrycks_env import MATHEnv  # noqa: F401
+from .providers import GSM8KTaskSource, MATHTaskSource, SATTaskSource  # noqa: F401
 from .rubric import RewardVectorRubric  # noqa: F401
 from .sat_env import (  # noqa: F401
     SATEnv,
@@ -64,13 +67,16 @@ __all__ = [
     "Rubric",
     "MultiTurnEnv",
     "SingleTurnEnv",
+    "MathDatasetEnv",
     # Providers and rubrics
     "SATTaskSource",
     "GSM8KTaskSource",
+    "MATHTaskSource",
     "RewardVectorRubric",
     # Environments
     "SATEnv",
     "GSM8KEnv",
+    "MATHEnv",
     # Factory functions (preferred)
     "create_env",
     "create_env_factory",
