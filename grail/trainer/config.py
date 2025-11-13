@@ -81,7 +81,7 @@ class EvalConfig:
     batch_size: int = 32  # Conservative for vLLM server: 8 tasks × 5 reps = 40 prompts/batch (prevent queue timeout)
     replicates: int = 5  # for pass@k / mean@k curves
     # Decoding configuration for evaluation (separate from training)
-    max_new_tokens: int = 512
+    max_new_tokens: int = 2048
     temperature: float = 0.8
     top_p: float = 0.95
     do_sample: bool = True
@@ -112,7 +112,7 @@ class EvalConfig:
     # Note: 'fp32' is generally not supported for KV cache in vLLM V1 and will be rejected.
     vllm_kv_cache_dtype: str = "auto"
     vllm_max_model_len: int = (
-        2048  # Sufficient: ~512 token prompt + 512 token completion (MAX_NEW_TOKENS)
+        4096  # Supports ~1k-token prompts plus 2k-token completions with headroom
     )
     vllm_max_num_seqs: int = 160  # Optimized for H200 with 141GB mem
     vllm_max_concurrent_requests: int = 128  # 75% of max_num_seqs for stability
@@ -131,6 +131,6 @@ class EvalConfig:
     # - Optionally log a few sample completions per batch for visibility
     stream_server_logs: bool = False
     log_completions_n: int = 1
-    log_completions_max_chars: int = 2048
+    log_completions_max_chars: int = 4096
     # vLLM: request chosen-token logprobs via OpenAI-compatible API (disabled by default)
     vllm_return_chosen_logprobs: bool = False

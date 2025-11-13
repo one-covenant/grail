@@ -39,7 +39,7 @@ class RolloutMetadata(BaseModel):
 
     # Required (validated)
     prompt_length: int = Field(ge=0)
-    completion_length: int = Field(gt=0, le=1024)  # MAX_NEW_TOKENS
+    completion_length: int = Field(gt=0, le=2048)  # MAX_NEW_TOKENS
     success: bool
     total_reward: float
     advantage: float
