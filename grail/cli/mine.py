@@ -16,10 +16,8 @@ import torch
 import typer
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from ..environments.gsm8k_env import GSM8KEnv
+from ..environments.factory import create_env
 from ..environments.loop import AgentEnvLoop
-from ..environments.providers import GSM8KTaskSource
-from ..environments.sat_env import SATEnv
 from ..grail import derive_env_seed
 from ..infrastructure.comms import sink_window_inferences
 from ..infrastructure.drand import get_drand_beacon
@@ -588,6 +586,8 @@ async def generate_rollouts_for_window(
         logger.info("Using batch_size=%d for parallel rollout generation", batch_size)
 
     # Create dataset-backed task source once per window to avoid repeated loads
+    from ..environments.providers import GSM8KTaskSource
+
     gsm8k_source = GSM8KTaskSource() if CURRENT_ENV_ID == "gsm8k" else None
 
     while True:
@@ -649,9 +649,7 @@ async def generate_rollouts_for_window(
 
             # Generate GRPO rollouts using AgentEnvLoop
             def _env_factory():
-                if CURRENT_ENV_ID == "gsm8k":
-                    return GSM8KEnv(task_source=gsm8k_source)
-                return SATEnv()
+                return create_env(task_source=gsm8k_source if CURRENT_ENV_ID == "gsm8k" else None)
 
             # Time the rollout generation for both logging and monitoring
             rollout_gen_start = time.time()

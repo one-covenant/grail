@@ -46,11 +46,9 @@ class SATEnvAdapter:
         seed: int,
         tokenizer: PreTrainedTokenizerBase,
     ) -> list[int]:
-        # Lazy imports to avoid heavy deps in import graph
-        from .sat_env import SATEnv
+        from .factory import create_env
 
-        env = SATEnv()
-        # Convert hex seed string to int for env.reset()
+        env = create_env("sat")
         seed_int = seed
         obs = env.reset(seed=seed_int)
         messages = [{"role": m.role, "content": m.content} for m in obs.messages]
@@ -83,12 +81,11 @@ class SATEnvAdapter:
         completion_text: str,
         tokenizer: PreTrainedTokenizerBase,
     ) -> dict:
-        from .sat_env import SATEnv
-
-        env = SATEnv()
-        env.reset(seed=int(seed))
-        # Single turn step
         from .core import ChatMessage
+        from .factory import create_env
+
+        env = create_env("sat")
+        env.reset(seed=int(seed))
 
         _, reward, _terminated, _truncated, info = env.step(
             ChatMessage(role="assistant", content=completion_text)
@@ -112,10 +109,9 @@ class GSM8KEnvAdapter:
         seed: int,
         tokenizer: PreTrainedTokenizerBase,
     ) -> list[int]:
-        # Lazy imports to avoid heavy deps in import graph
-        from .gsm8k_env import GSM8KEnv
+        from .factory import create_env
 
-        env = GSM8KEnv()
+        env = create_env("gsm8k")
         obs = env.reset(seed=seed)
         messages = [{"role": m.role, "content": m.content} for m in obs.messages]
 
@@ -148,9 +144,9 @@ class GSM8KEnvAdapter:
         tokenizer: PreTrainedTokenizerBase,
     ) -> dict:
         from .core import ChatMessage
-        from .gsm8k_env import GSM8KEnv
+        from .factory import create_env
 
-        env = GSM8KEnv()
+        env = create_env("gsm8k")
         env.reset(seed=int(seed))
 
         _obs, reward, _terminated, _truncated, info = env.step(

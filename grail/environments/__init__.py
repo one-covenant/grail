@@ -5,6 +5,7 @@ Exports:
 - SAT: problem generator, parser, reward, env (all from sat_env)
 - GSM8K: dataset-backed env
 - Loop: AgentEnvLoop, GRPORollout
+- Factory: create_env, create_env_factory (preferred for instantiation)
 - Legacy: Parser, RewardVector
 """
 
@@ -18,6 +19,7 @@ from .core import (  # noqa: F401
     SingleTurnEnv,
     TaskSource,
 )
+from .factory import create_env, create_env_factory  # noqa: F401
 from .gsm8k_env import GSM8KEnv  # noqa: F401
 from .loop import AgentEnvLoop, GRPORollout  # noqa: F401
 from .providers import GSM8KTaskSource, SATTaskSource  # noqa: F401
@@ -69,6 +71,9 @@ __all__ = [
     # Environments
     "SATEnv",
     "GSM8KEnv",
+    # Factory functions (preferred)
+    "create_env",
+    "create_env_factory",
     # SAT public API (validators use these)
     "SATProblem",
     "SATParser",
