@@ -47,7 +47,7 @@ READY_MARKER_UPLOAD_BLOCKS = 1  # ~12 seconds at 12s/block
 TRAINER_LR = float(os.getenv("GRAIL_TRAINER_LR", "1e-6"))
 TRAINER_EPOCHS = int(os.getenv("GRAIL_TRAINER_EPOCHS", "1"))
 TRAINER_BATCH_SIZE = int(os.getenv("GRAIL_TRAINER_BATCH_SIZE", "16"))
-TRAINER_MAX_LENGTH = int(os.getenv("GRAIL_TRAINER_MAX_LENGTH", "1024"))
+TRAINER_MAX_LENGTH = int(os.getenv("GRAIL_TRAINER_MAX_LENGTH", "2048"))
 TRAINER_GRAD_CLIP = float(os.getenv("GRAIL_TRAINER_GRAD_CLIP", "0.5"))
 TRAINER_WARMUP_STEPS = int(os.getenv("GRAIL_TRAINER_WARMUP_STEPS", "10"))
 TRAINER_KL_COEF = float(os.getenv("GRAIL_TRAINER_KL_COEF", "0.02"))
@@ -133,7 +133,7 @@ LAYER_INDEX = -1
 
 # ────────────────  TERMINATION VALIDATION HPs  ────────────────
 
-MAX_NEW_TOKENS = 512
+MAX_NEW_TOKENS = 1024
 
 # Must match rollout generator default
 MIN_EOS_PROBABILITY = 0.02  # Minimum probability for valid EOS termination
@@ -178,7 +178,7 @@ ROLLOUTS_PER_PROBLEM = 16
 # ────────────────  ENVIRONMENT CONFIGURATION  ────────────────
 
 # Current environment ID (validators use this constant, never trust miner data)
-CURRENT_ENV_ID = "gsm8k"
+CURRENT_ENV_ID = "math"
 
 # ────────────────  EMISSION BURN MECHANISM  ────────────────
 
