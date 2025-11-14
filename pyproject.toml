@@ -49,6 +49,9 @@ dependencies = [
     "wandb>=0.21.3",
     "scipy>=1.7.0",
     "tenacity>=8.0.0",
+    "openai>=2.7.0",
+    "ipykernel>=7.1.0",
+    "seaborn>=0.13.2",
 ]
 
 [project.optional-dependencies]
@@ -71,11 +74,9 @@ experiments = [
     "notebook>=6.4.0",
     "seaborn>=0.11.0",
 ]
-flash-attn = [
-    "flash-attn>=2.8.0",
-]
+
 all = [
-    "grail[dev,experiments,quantization,flash-attn]",
+    "grail[dev,experiments,quantization]",
 ]
 
 [project.scripts]
@@ -209,17 +210,13 @@ max-line-length = 100
 extend-ignore = ["E203", "W503"]
 max-complexity = 12
 
-[tool.uv.extra-build-dependencies]
-flash-attn = ["torch"]
 
 [dependency-groups]
 dev = [
     "flake8==7.3.0",
     "ruff==0.14.4",
 ]
-flash-attn = [
-    "flash-attn>=2.8.0",
-]
+
 
 [tool.ruff]
 line-length = 100
