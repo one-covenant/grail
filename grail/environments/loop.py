@@ -1036,7 +1036,11 @@ class AgentEnvLoop:
         randomness_hex: str,
         wallet: Any,  # bt.wallet, but optional in offline mode
     ) -> list[tuple[list[dict], list[float], bytes, dict, str]]:
-        """Batch compute GRAIL commitments and token logprobs in a single forward pass.
+        """Compute GRAIL commitments and token logprobs using unbatched forward passes.
+
+        CRITICAL: Uses individual forward passes (no batching, no padding) to ensure
+        hidden states match the validator's computation exactly. This is required for
+        proof verification to succeed.
 
         Args:
             all_token_ids_batch: List of full token sequences (prompt + completion)
@@ -1064,76 +1068,82 @@ class AgentEnvLoop:
         verifier = GRAILVerifier(hidden_dim=self._hidden_dim)
         r_vec = verifier.generate_r_vec(randomness_hex)
 
-        # Left-pad sequences to same length for batched forward pass
-        pad_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
-        max_len = max(len(seq) for seq in all_token_ids_batch)
-
-        padded_inputs: list[list[int]] = []
-        attention_masks: list[list[int]] = []
-        position_ids_list: list[list[int]] = []
-        left_pads: list[int] = []
-        for seq in all_token_ids_batch:
-            pad_len = max_len - len(seq)
-            padded_inputs.append([pad_id] * pad_len + seq)
-            attention_masks.append([0] * pad_len + [1] * len(seq))
-            # Position IDs: padding gets position 0, real tokens get [0, 1, 2, ...]
-            # This ensures RoPE positions match the validator's unpadded forward
-            position_ids_list.append([0] * pad_len + list(range(len(seq))))
-            left_pads.append(pad_len)
-
-        # Single batched forward pass
-        with torch.inference_mode():
-            token_tensor = torch.tensor(padded_inputs, dtype=torch.long).to(self.device)
-            attention_mask_tensor = torch.tensor(attention_masks, dtype=torch.long).to(self.device)
-            position_ids_tensor = torch.tensor(position_ids_list, dtype=torch.long).to(self.device)
-            model_outputs = self.model(
-                token_tensor,
-                attention_mask=attention_mask_tensor,
-                position_ids=position_ids_tensor,
-                output_hidden_states=True,
-            )
-
-            # Extract hidden states and logits
-            # hidden_states shape: [batch_size, seq_len, hidden_dim]
-            # logits shape: [batch_size, seq_len, vocab_size]
-            h_layer = model_outputs.hidden_states[LAYER_INDEX]
-            logits = model_outputs.logits
-
-        # Process each sequence in the batch
         results: list[tuple[list[dict], list[float], bytes, dict, str]] = []
 
-        for b in range(batch_size):
-            all_token_ids = all_token_ids_batch[b]
-            prompt_len = prompt_lens[b]
-            left_pad = left_pads[b]
+        # Process each rollout individually (unbatched) to match validator
+        for idx, all_token_ids in enumerate(all_token_ids_batch):
+            prompt_len = prompt_lens[idx]
+
+            # Log sequence details for first rollout
+            if idx == 0:
+                logger.debug(
+                    "MINER UNBATCHED COMPUTATION: seq_len=%d prompt_len=%d "
+                    "tokens_first_4=%s tokens_last_4=%s",
+                    len(all_token_ids),
+                    prompt_len,
+                    all_token_ids[:4],
+                    all_token_ids[-4:] if len(all_token_ids) >= 4 else all_token_ids,
+                )
+
+            # Single forward pass with no padding (matches validator exactly)
+            token_tensor = torch.tensor(
+                all_token_ids, dtype=torch.long, device=self.device
+            ).unsqueeze(0)
+
+            with torch.inference_mode():
+                # CRITICAL: No attention_mask, no position_ids - uses model defaults
+                # This ensures hidden states match validator's computation exactly
+                model_outputs = self.model(
+                    token_tensor,
+                    output_hidden_states=True,
+                )
+
+                # Extract hidden states and logits
+                # hidden_states shape: [1, seq_len, hidden_dim]
+                # logits shape: [1, seq_len, vocab_size]
+                h_layer = model_outputs.hidden_states[LAYER_INDEX][0]  # Remove batch dim
+                # Move logits to CPU (validator keeps logits on CPU as well)
+                logits = model_outputs.logits[0].detach().to("cpu")
 
             commitments: list[dict] = []
             logprobs: list[float] = []
 
-            # Extract commitments for this sequence (account for left padding)
+            # Extract commitments for this sequence
             for pos in range(len(all_token_ids)):
-                padded_pos = left_pad + pos
-                if padded_pos < h_layer.size(1):
-                    commitments.append(
-                        verifier.create_commitment(h_layer[b, padded_pos], r_vec, pos)
+                commitment = verifier.create_commitment(h_layer[pos], r_vec, pos)
+                commitments.append(commitment)
+
+                # Log sample commitments for debugging
+                if idx == 0 and pos in [0, prompt_len - 1, prompt_len, len(all_token_ids) - 1]:
+                    logger.debug(
+                        "MINER COMMITMENT pos=%d token_id=%d "
+                        "sketch_hash=%s rank_hash=%s hidden_norm=%.6f",
+                        pos,
+                        all_token_ids[pos],
+                        commitment.get("sketch_hash", "")[:16],
+                        commitment.get("rank_hash", "")[:16],
+                        float(h_layer[pos].norm().item()),
                     )
 
             # Extract logprobs for completion tokens
+            # For each completion token at position (prompt_len + i),
+            # we need the logits from the PREVIOUS position (prompt_len - 1 + i)
+            # to compute the probability of generating that token
             completion_ids = all_token_ids[prompt_len:]
             for i, token_id in enumerate(completion_ids):
-                # Position in original sequence
-                logit_pos = prompt_len - 1 + i
-                # Position in padded sequence
-                padded_logit_pos = left_pad + logit_pos
+                # Logit position: position BEFORE the token we're predicting
+                # Token at prompt_len+i uses logits from prompt_len-1+i
+                logit_pos = prompt_len + i - 1
 
-                if padded_logit_pos < logits.size(1):
-                    log_probs_dist = torch.log_softmax(logits[b, padded_logit_pos], dim=-1)
+                if logit_pos >= 0 and logit_pos < logits.size(0):
+                    log_probs_dist = torch.log_softmax(logits[logit_pos], dim=-1)
                     logprobs.append(log_probs_dist[token_id].item())
                 else:
                     logger.warning(
-                        "Missing logits for completion token %d/%d; setting logprob to -inf",
+                        "Missing logits for completion token %d/%d at logit_pos=%d; setting logprob to -inf",
                         i,
                         len(completion_ids),
+                        logit_pos,
                     )
                     logprobs.append(float("-inf"))
 
@@ -1150,6 +1160,10 @@ class AgentEnvLoop:
             proof_version = GRAIL_PROOF_VERSION
 
             results.append((commitments, logprobs, signature, beacon, proof_version))
+
+        logger.debug(
+            "Completed unbatched proof computation for %d rollout(s)", len(all_token_ids_batch)
+        )
 
         return results
 
