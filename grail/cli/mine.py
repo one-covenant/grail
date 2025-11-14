@@ -23,7 +23,6 @@ from ..infrastructure.comms import sink_window_inferences
 from ..infrastructure.drand import get_drand_beacon
 from ..shared.constants import (
     BLOCK_TIME_SECONDS,
-    CURRENT_ENV_ID,
     LAYER_INDEX,
     ROLLOUTS_PER_PROBLEM,
     WINDOW_LENGTH,
@@ -585,11 +584,6 @@ async def generate_rollouts_for_window(
     if batch_size > 1:
         logger.info("Using batch_size=%d for parallel rollout generation", batch_size)
 
-    # Create dataset-backed task source once per window to avoid repeated loads
-    from ..environments.providers import GSM8KTaskSource
-
-    gsm8k_source = GSM8KTaskSource() if CURRENT_ENV_ID == "gsm8k" else None
-
     while True:
         current_block = await subtensor.get_current_block()
         timers.update_block_time_ema(current_block)
@@ -648,8 +642,9 @@ async def generate_rollouts_for_window(
             )
 
             # Generate GRPO rollouts using AgentEnvLoop
+            # Factory uses cached task source automatically (no manual instantiation needed)
             def _env_factory():
-                return create_env(task_source=gsm8k_source if CURRENT_ENV_ID == "gsm8k" else None)
+                return create_env()
 
             # Time the rollout generation for both logging and monitoring
             rollout_gen_start = time.time()

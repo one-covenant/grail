@@ -254,9 +254,10 @@ class TrainerNeuron(BaseNeuron):
         logger.info("📊 Starting evaluation cycle (window_number=%d)", window_number)
 
         # Build dataset-backed evaluation (MATH test set by default)
-        from grail.environments.providers import MATHTaskSource
+        # Factory uses cached task source automatically (no manual instantiation needed)
+        from grail.environments import get_or_create_task_source
 
-        source = MATHTaskSource(split=self._eval_cfg.split)
+        source = get_or_create_task_source("math", split=self._eval_cfg.split)
         env_factory = create_env_factory("math", task_source=source, split=self._eval_cfg.split)
 
         # Choose between full dataset or fixed subset evaluation

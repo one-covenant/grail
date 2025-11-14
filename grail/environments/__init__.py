@@ -21,7 +21,12 @@ from .core import (  # noqa: F401
     TaskSource,
 )
 from .dataset_base import MathDatasetEnv  # noqa: F401
-from .factory import create_env, create_env_factory  # noqa: F401
+from .factory import (  # noqa: F401
+    clear_task_source_cache,
+    create_env,
+    create_env_factory,
+    get_or_create_task_source,
+)
 from .gsm8k_env import GSM8KEnv  # noqa: F401
 from .loop import AgentEnvLoop, GRPORollout  # noqa: F401
 from .math_hendrycks_env import MATHEnv  # noqa: F401
@@ -80,6 +85,8 @@ __all__ = [
     # Factory functions (preferred)
     "create_env",
     "create_env_factory",
+    "get_or_create_task_source",
+    "clear_task_source_cache",
     # SAT public API (validators use these)
     "SATProblem",
     "SATParser",
