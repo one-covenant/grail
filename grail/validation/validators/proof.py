@@ -188,12 +188,21 @@ class GRAILProofValidator(Validator):
 
         h_layer = outs.hidden_states[LAYER_INDEX][0]
 
+        # Log validator's hidden state computation for debugging
+        logger.debug(
+            "VALIDATOR HIDDEN STATE COMPUTATION: seq_len=%d "
+            "tokens_first_4=%s tokens_last_4=%s attention_mask=None position_ids=None",
+            seq_len,
+            tokens[:4],
+            tokens[-4:] if len(tokens) >= 4 else tokens,
+        )
+
         # Cache full logits for downstream validators (termination + distribution)
         ctx.cached_logits = outs.logits[0].detach().to("cpu")
 
         # Verify proof commitments at challenged indices
         failed_checks = []
-        for i in idxs:
+        for idx_num, i in enumerate(idxs):
             if i >= len(commitments):
                 logger.debug(
                     f"[proof_valid] Challenge index out of bounds | "
@@ -203,6 +212,19 @@ class GRAILProofValidator(Validator):
                 )
                 ctx.checks[self.check_name] = False
                 return False
+
+            # Log sample validator commitments for debugging
+            if idx_num == 0:
+                miner_commit = commitments[i]
+                logger.debug(
+                    "VALIDATOR COMMITMENT pos=%d token_id=%d "
+                    "miner_sketch_hash=%s miner_rank_hash=%s validator_hidden_norm=%.6f",
+                    i,
+                    tokens[i],
+                    miner_commit.get("sketch_hash", "")[:16],
+                    miner_commit.get("rank_hash", "")[:16],
+                    float(h_layer[i].norm().item()),
+                )
 
             is_valid, diagnostics = verifier.verify_commitment(
                 h_layer[i], commitments[i], r_vec, seq_len
