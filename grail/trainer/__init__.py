@@ -4,7 +4,7 @@ from __future__ import annotations
 
 __all__ = [
     "algorithms",
-    "checkpointing",
+    "checkpoint_publisher",
     "config",
     "data",
     "service",

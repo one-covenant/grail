@@ -10,7 +10,7 @@ import os
 
 import bittensor as bt
 
-from grail.infrastructure.checkpoints import (
+from grail.infrastructure.checkpoint_consumer import (
     CheckpointManager,
     default_checkpoint_cache_root,
 )

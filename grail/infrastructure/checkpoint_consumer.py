@@ -1,17 +1,17 @@
-"""Checkpoint management utilities.
+"""Checkpoint management utilities (Consumer Role).
 
 Central entry point for discovering, downloading, caching, and cleaning up
-model checkpoints stored in R2. Checkpoints are published by the trainer under
-``model_checkpoints/checkpoint-{window}/`` with a manifest describing all
-artifacts and their SHA256 hashes. Miners and validators rely on this module to
-retrieve the appropriate checkpoint for a given window while keeping local disk
-usage bounded.
+model checkpoints stored in R2. This module provides READ-ONLY operations for
+miners and validators to consume checkpoints published by the trainer.
+
+Checkpoints are published by the trainer under ``grail/checkpoints/checkpoint-{window}/``
+with a manifest describing all artifacts and their SHA256 hashes.
 
 Design goals:
  - Integrity validation for every download using manifest hashes.
  - Atomic download process to avoid partial/corrupt states.
  - Local cache with retention policy (last N + milestone windows).
- - Remote cleanup helpers for the trainer to enforce retention upstream.
+ - Read-only operations: download, validate, cache management.
 
 Checkpoint Retrieval Strategy:
  - With the trainer always publishing checkpoints for every window, this module
@@ -22,6 +22,10 @@ Checkpoint Retrieval Strategy:
 
 The module intentionally stays independent from model-loading details. It only
 manages files on disk and in R2; callers handle loading into Torch/Transformers.
+
+Note: Remote checkpoint publishing and deletion are handled by
+grail.trainer.checkpoint_publisher module (producer role). This module should never
+perform write operations to R2.
 """
 
 from __future__ import annotations
@@ -81,7 +85,15 @@ class CheckpointDownloadError(RuntimeError):
 
 
 class CheckpointManager:
-    """Manage checkpoint discovery, downloads, and cache cleanup."""
+    """Manage checkpoint discovery, downloads, and cache cleanup (Consumer Role).
+
+    This class provides READ-ONLY operations for discovering, downloading, and
+    validating checkpoints. It is used by miners and validators to consume
+    checkpoints published by the trainer.
+
+    Write operations (publishing, remote deletion) are handled by the
+    grail.trainer.checkpoint_publisher module.
+    """
 
     def __init__(
         self,
@@ -251,18 +263,6 @@ class CheckpointManager:
                         e,
                         exc_info=True,
                     )
-
-    async def cleanup_remote(self, current_window: int) -> None:
-        """Delete remote checkpoints outside retention policy (trainer role)."""
-
-        keep_windows = self._compute_keep_windows(current_window)
-        remote_windows = await self.list_remote_windows()
-
-        for window in remote_windows:
-            if window not in keep_windows:
-                prefix = f"{CHECKPOINT_PREFIX}checkpoint-{window}"
-                logger.info("Deleting remote checkpoint prefix %s", prefix)
-                await comms.delete_prefix(prefix, credentials=self.credentials, use_write=True)
 
     async def list_remote_windows(self) -> list[int]:
         """Return all checkpoint window numbers available in R2."""

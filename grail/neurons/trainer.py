@@ -28,7 +28,7 @@ from grail.shared.window_utils import (
     log_window_wait_periodic,
 )
 from grail.trainer.algorithms import GRPOAlgorithm, TrainingAlgorithm
-from grail.trainer.checkpointing import finalize_checkpoint_ready
+from grail.trainer.checkpoint_publisher import CheckpointPublisher
 from grail.trainer.config import EvalConfig, TrainingConfig
 from grail.trainer.eval_planner import EvaluationPlanner
 from grail.trainer.evaluator import EvaluatorService
@@ -52,6 +52,7 @@ class TrainerContext:
     wallet: bt.wallet
     credentials: Any
     checkpoint_manager: Any | None
+    checkpoint_publisher: CheckpointPublisher | None
     monitor: Any | None
     train_model: Any
     ref_model: Any
@@ -180,16 +181,21 @@ class TrainerNeuron(BaseNeuron):
                 # Finalize the checkpoint if we are still in the current window
                 # If not, we never finalize the checkpoint and the checkpoint is
                 # going to be cleaned up later on.
-                current_block = await subtensor.get_current_block()
-                current_block = current_block + READY_MARKER_UPLOAD_BLOCKS
-                try:
-                    finalized = await finalize_checkpoint_ready(
-                        current_block, current_window, self._context.credentials
-                    )
-                    if finalized:
-                        logger.info("✅ Finalized READY markers for checkpoint(s): %s", finalized)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Failed to finalize checkpoint READY markers: %s", exc)
+                if self._context.checkpoint_publisher:
+                    current_block = await subtensor.get_current_block()
+                    current_block = current_block + READY_MARKER_UPLOAD_BLOCKS
+                    try:
+                        finalized = (
+                            await self._context.checkpoint_publisher.finalize_checkpoint_ready(
+                                current_block, current_window
+                            )
+                        )
+                        if finalized:
+                            logger.info(
+                                "✅ Finalized READY markers for checkpoint(s): %s", finalized
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Failed to finalize checkpoint READY markers: %s", exc)
 
                 # Mark window as processed regardless of outcome
                 last_processed_window = target_window
@@ -947,6 +953,7 @@ class TrainerNeuron(BaseNeuron):
             wallet=ctx.wallet,
             credentials=ctx.credentials,
             checkpoint_manager=ctx.checkpoint_manager,
+            checkpoint_publisher=ctx.checkpoint_publisher,
             monitor=ctx.monitor,
             algorithm=self._algorithm,
             train_model=ctx.train_model,

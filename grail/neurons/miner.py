@@ -18,7 +18,10 @@ from grail.cli.mine import (
     upload_inferences_with_metrics,
 )
 from grail.infrastructure.chain import GrailChainManager
-from grail.infrastructure.checkpoints import CheckpointManager, default_checkpoint_cache_root
+from grail.infrastructure.checkpoint_consumer import (
+    CheckpointManager,
+    default_checkpoint_cache_root,
+)
 from grail.infrastructure.credentials import load_r2_credentials
 from grail.model.provider import clear_model_and_tokenizer, get_model, get_tokenizer
 from grail.monitoring import get_monitoring_manager

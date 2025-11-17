@@ -10,7 +10,7 @@ from typing import Any
 import bittensor as bt
 import typer
 
-from grail.infrastructure.checkpoints import (
+from grail.infrastructure.checkpoint_consumer import (
     CheckpointManager,
     default_checkpoint_cache_root,
 )
@@ -23,6 +23,7 @@ from grail.model.train_loading import (
 )
 from grail.monitoring import get_monitoring_manager
 from grail.monitoring.config import MonitoringConfig
+from grail.trainer.checkpoint_publisher import CheckpointPublisher
 
 from . import console
 
@@ -56,10 +57,16 @@ def train() -> None:
         # Credentials
         credentials = load_r2_credentials()
 
-        # Checkpoints
+        # Checkpoints (consumer)
         checkpoint_manager = CheckpointManager(
             cache_root=default_checkpoint_cache_root(),
             credentials=credentials,
+        )
+
+        # Checkpoint publisher (producer - trainer only)
+        checkpoint_publisher = CheckpointPublisher(
+            credentials=credentials,
+            wallet=wallet,
         )
 
         # Monitoring
@@ -107,6 +114,7 @@ def train() -> None:
             wallet=wallet,
             credentials=credentials,
             checkpoint_manager=checkpoint_manager,
+            checkpoint_publisher=checkpoint_publisher,
             monitor=monitor,
             train_model=train_model,
             ref_model=ref_model,

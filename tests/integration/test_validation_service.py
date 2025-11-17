@@ -16,7 +16,7 @@ import pytest
 if TYPE_CHECKING:
     from unittest.mock import AsyncMock, MagicMock
 
-from grail.infrastructure.checkpoints import CheckpointManager
+from grail.infrastructure.checkpoint_consumer import CheckpointManager
 from grail.scoring import WeightComputer
 from grail.validation import ValidationService, create_env_validation_pipeline
 
