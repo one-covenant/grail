@@ -715,10 +715,10 @@ def create_inference_server(
         ValueError: If backend is unsupported
     """
     config = ServerConfig(
-        host=eval_config.sglang_host,
-        port=eval_config.sglang_port,
-        timeout_s=eval_config.sglang_server_timeout_s,
-        trust_remote_code=eval_config.sglang_trust_remote_code,
+        host=eval_config.server_host,
+        port=eval_config.server_port,
+        timeout_s=eval_config.server_timeout,
+        trust_remote_code=eval_config.server_trust_remote_code,
         model_name_override=model_name_override,
         model_path=model_path,
         chat_template_path=chat_template_path,
