@@ -88,11 +88,11 @@ class EvalConfig:
     # Backend control: "hf" | "vllm" | "sglang"
     backend: str = "vllm"  # Server mode with async API avoids Gloo socket issues
     # sgLang server options (used when backend == "sglang")
-    sglang_host: str = "127.0.0.1"
-    sglang_port: int = 30000
-    sglang_start_server: bool = True  # Server runs in subprocess (avoids Gloo socket issues)
-    sglang_server_timeout_s: float = 120.0
-    sglang_trust_remote_code: bool = False
+    server_host: str = "127.0.0.1"
+    server_port: int = 30000
+    start_server: bool = True  # Server runs in subprocess (avoids Gloo socket issues)
+    server_timeout: float = 120.0
+    server_trust_remote_code: bool = False
     # vLLM server options (used when backend == "vllm")
     # Path to isolated vLLM environment Python executable
     # Override via GRAIL_VLLM_PYTHON env var for custom deployments

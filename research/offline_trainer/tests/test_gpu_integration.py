@@ -280,8 +280,8 @@ async def test_vllm_server_evaluator() -> None:
         # Create evaluator with vllm_server backend
         eval_cfg = EvalConfig(batch_size=4, replicates=3, do_sample=True, max_new_tokens=64)
         eval_cfg.backend = "vllm_server"
-        eval_cfg.sglang_host = "127.0.0.1"
-        eval_cfg.sglang_port = port
+        eval_cfg.server_host = "127.0.0.1"
+        eval_cfg.server_port = port
 
         evaluator = EvaluatorService(
             model=model,
@@ -375,8 +375,8 @@ async def test_end_to_end_iteration() -> None:
 
         eval_cfg = EvalConfig(batch_size=4, replicates=2, do_sample=True, max_new_tokens=64)
         eval_cfg.backend = "vllm_server"
-        eval_cfg.sglang_host = "127.0.0.1"
-        eval_cfg.sglang_port = port
+        eval_cfg.server_host = "127.0.0.1"
+        eval_cfg.server_port = port
 
         evaluator = EvaluatorService(
             model=train_model,

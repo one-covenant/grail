@@ -313,7 +313,7 @@ class TrainerNeuron(BaseNeuron):
         eval_start = _time.time()
 
         # Determine if we need to start a server
-        should_start_server = self._eval_cfg.sglang_start_server and self._eval_cfg.backend in (
+        should_start_server = self._eval_cfg.start_server and self._eval_cfg.backend in (
             "sglang",
             "vllm",
         )
