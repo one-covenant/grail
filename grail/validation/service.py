@@ -19,7 +19,7 @@ import bittensor as bt
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..infrastructure.chain import GrailChainManager
-from ..infrastructure.checkpoints import CheckpointManager
+from ..infrastructure.checkpoint_consumer import CheckpointManager
 from ..infrastructure.credentials import BucketCredentials
 from ..logging_utils import dump_asyncio_stacks
 from ..model.provider import (

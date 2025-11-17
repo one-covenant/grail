@@ -18,14 +18,14 @@ from grail.shared.constants import (
 
 from .algorithms import GRPOAlgorithm, TrainingAlgorithm
 from .algorithms.grpo import load_grpo_groups
-from .checkpointing import publish_checkpoint
+from .checkpoint_publisher import CheckpointPublisher
 from .config import TrainingConfig
 from .trust import get_trusted_miner_hotkeys
 
 if TYPE_CHECKING:
     import bittensor as bt
 
-    from grail.infrastructure.checkpoints import (
+    from grail.infrastructure.checkpoint_consumer import (
         CheckpointManager,
     )
 
@@ -44,6 +44,7 @@ class TrainerService:
         wallet: bt.wallet,
         credentials: Any,
         checkpoint_manager: CheckpointManager,
+        checkpoint_publisher: CheckpointPublisher | None,
         monitor: Any | None,
         algorithm: TrainingAlgorithm | None = None,
         config: TrainingConfig | None = None,
@@ -58,6 +59,7 @@ class TrainerService:
         self.wallet = wallet
         self.credentials = credentials
         self.checkpoint_manager = checkpoint_manager
+        self.checkpoint_publisher = checkpoint_publisher
         self.monitor = monitor
         self.config = config or TrainingConfig()
         self.algorithm = algorithm or GRPOAlgorithm(config=self.config)
@@ -266,29 +268,27 @@ class TrainerService:
 
         # Time the checkpoint publishing
         publish_start = time.monotonic()
-        if self.monitor:
-            with self.monitor.timer("profiling/checkpoint_publish"):
-                success = await publish_checkpoint(
+        success = False
+        if self.checkpoint_publisher:
+            if self.monitor:
+                with self.monitor.timer("profiling/checkpoint_publish"):
+                    success = await self.checkpoint_publisher.publish_checkpoint(
+                        unwrapped,
+                        tokenizer,
+                        checkpoint_publish_window,
+                        window,
+                        seed=window,
+                    )
+            else:
+                success = await self.checkpoint_publisher.publish_checkpoint(
                     unwrapped,
                     tokenizer,
                     checkpoint_publish_window,
                     window,
-                    self.wallet,
-                    self.credentials,
-                    self.checkpoint_manager,
                     seed=window,
                 )
         else:
-            success = await publish_checkpoint(
-                unwrapped,
-                tokenizer,
-                checkpoint_publish_window,
-                window,
-                self.wallet,
-                self.credentials,
-                self.checkpoint_manager,
-                seed=window,
-            )
+            logger.warning("No checkpoint publisher available, skipping checkpoint publication")
 
         publish_duration = time.monotonic() - publish_start
         if self.monitor:
