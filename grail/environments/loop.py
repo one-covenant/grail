@@ -279,6 +279,7 @@ class VLLMServerBackend:
         timeout: float = 300.0,
         max_concurrent_requests: int = 32,
         return_chosen_logprobs: bool = False,
+        warn_on_missing_token_ids: bool = True,
     ) -> None:
         from openai import AsyncOpenAI
 
@@ -288,6 +289,7 @@ class VLLMServerBackend:
         self._timeout = float(timeout)
         self._max_concurrent_requests = max_concurrent_requests
         self._return_chosen_logprobs = bool(return_chosen_logprobs)
+        self._warn_on_missing_token_ids = bool(warn_on_missing_token_ids)
 
         self._client = AsyncOpenAI(
             base_url=f"{self._base_url}/v1",
@@ -462,10 +464,11 @@ class VLLMServerBackend:
             else:
                 # Fallback: re-tokenize (may cause logprob mismatch)
                 comp_ids = _tokenize_completion(self._tokenizer, completion_text, [])
-                logger.warning(
-                    "vLLM did not return token IDs; falling back to re-tokenization. "
-                    "This may cause importance sampling ratio mismatch!"
-                )
+                if self._warn_on_missing_token_ids:
+                    logger.warning(
+                        "vLLM did not return token IDs; falling back to re-tokenization. "
+                        "This may cause importance sampling ratio mismatch!"
+                    )
 
             all_ids = p_ids + comp_ids
             chosen_lp = chosen_lp_map.get(idx)
