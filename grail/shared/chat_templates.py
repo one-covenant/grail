@@ -6,7 +6,7 @@ Provides reusable chat template functions to avoid duplication across modules.
 """
 
 
-def build_qwen_chat_template(system_prompt: str, reasoning_start: str = "") -> str:
+def build_qwen_chat_template(system_prompt: str) -> str:
     """
     Build Qwen-style chat template with system prompt.
 
@@ -22,9 +22,8 @@ def build_qwen_chat_template(system_prompt: str, reasoning_start: str = "") -> s
         not receive it in the prompt. This allows proper reward computation on the
         model's generated reasoning tokens.
     """
-    # Keep Jinja2 template exactly as specified; substitute via string replace
-    # TODO: later support jinja files for different system prompts,
-    # prompts, etc
+
+    # TODO: later support jinja files for different system prompts, etc
     chat_template = (
         "{% if messages[0]['role'] == 'system' %}"
         "{{ messages[0]['content'] + eos_token }}"
@@ -48,6 +47,5 @@ def build_qwen_chat_template(system_prompt: str, reasoning_start: str = "") -> s
         "'{system_prompt}'",
         f"'{system_prompt}'",
     )
-    # Note: reasoning_start is no longer injected into the prompt
-    # The model must generate <start_working_out> as part of its completion
+
     return chat_template
