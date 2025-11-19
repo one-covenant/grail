@@ -155,7 +155,6 @@ class TrainingService:
 
         logger.info("Training service exiting (epochs completed: %d)", self.epoch_counter)
 
-
     async def _wait_for_miners(self, stop_event: multiprocessing.Event) -> None:
         """Wait for miners to download initial checkpoint.
 
@@ -166,11 +165,13 @@ class TrainingService:
         # Wait 0 window for miners to download
         # TODO: Later on when we use extra process/GPUs, some waiting should be added here.
         WAIT_WINDOW_LENGTH = 0.0  # Wait 0 window for miners to download
-        
+
         # Get current block first before using it
         current_block = await self.subtensor.get_current_block()
         target_block = current_block + WAIT_WINDOW_LENGTH
-        logger.info("Waiting %s window for miners (until block %s)", WAIT_WINDOW_LENGTH, target_block)
+        logger.info(
+            "Waiting %s window for miners (until block %s)", WAIT_WINDOW_LENGTH, target_block
+        )
 
         while not stop_event.is_set():
             current_block = await self.subtensor.get_current_block()
@@ -182,8 +183,7 @@ class TrainingService:
         logger.info("Waiting for miners to download initial checkpoint complete")
 
     async def _initialize_resources(self) -> None:
-        """Initialize all async and GPU resources.
-        """
+        """Initialize all async and GPU resources."""
         logger.info(
             "Loading training artifacts (train_spec=%s, ref_spec=%s)",
             self.train_spec,
@@ -285,7 +285,9 @@ class TrainingService:
         current_block = await self.subtensor.get_current_block()
         current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
 
-        logger.info("Saving initial checkpoint for window %s (upload handled by worker)", current_window)
+        logger.info(
+            "Saving initial checkpoint for window %s (upload handled by worker)", current_window
+        )
 
         # Prepare training config for metadata
         training_config = {
@@ -354,12 +356,16 @@ class TrainingService:
                 await self._load_grpo_groups(current_window, trusted_hotkeys)
 
                 if not self.groups:
-                    logger.warning("No data available in replay buffer, sleeping %ds", NO_DATA_SLEEP_SECONDS)
+                    logger.warning(
+                        "No data available in replay buffer, sleeping %ds", NO_DATA_SLEEP_SECONDS
+                    )
                     await asyncio.sleep(NO_DATA_SLEEP_SECONDS)
                     continue
 
                 # Train one epoch
-                metrics = await self._train_epoch(train_model, ref_model, accelerator, current_window)
+                metrics = await self._train_epoch(
+                    train_model, ref_model, accelerator, current_window
+                )
 
                 # Save snapshot
                 self._save_snapshot(train_model, accelerator, current_window, metrics)
@@ -592,7 +598,9 @@ class TrainingService:
         """
         try:
             epoch_start = time.time()
-            logger.info("Training epoch %d with %d groups", self.epoch_counter + 1, len(self.groups))
+            logger.info(
+                "Training epoch %d with %d groups", self.epoch_counter + 1, len(self.groups)
+            )
 
             metrics = await self.algorithm.train_epoch(
                 train_model,

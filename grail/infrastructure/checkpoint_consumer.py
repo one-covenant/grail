@@ -171,7 +171,7 @@ class CheckpointManager:
                     window,
                 )
                 return None
-            
+
             logger.debug(
                 "Checkpoint-%s became ready at window %s",
                 window,
@@ -524,12 +524,14 @@ class CheckpointManager:
                         parts = key.split("/")
                         if len(parts) >= 4:
                             checkpoint_segment = parts[2]  # "checkpoint-1000"
-                            ready_filename = parts[3]      # "READY-1100"
+                            ready_filename = parts[3]  # "READY-1100"
 
-                            if checkpoint_segment.startswith("checkpoint-") and ready_filename.startswith("READY-"):
+                            if checkpoint_segment.startswith(
+                                "checkpoint-"
+                            ) and ready_filename.startswith("READY-"):
                                 checkpoint_window = int(checkpoint_segment.split("-")[1])
                                 ready_window = int(ready_filename.split("-")[1])
-                                
+
                                 # Only consider checkpoints that became ready before our window
                                 if ready_window < before_window:
                                     candidates.append((ready_window, checkpoint_window))
