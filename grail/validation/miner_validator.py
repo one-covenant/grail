@@ -174,6 +174,18 @@ class MinerValidator:
             inferences, miner_hotkey, window_rand, validator_wallet, total_inferences
         )
 
+        # Extract validator's checkpoint window from model path (if available)
+        validator_checkpoint_window = None
+        if hasattr(model, "name_or_path"):
+            model_path = str(model.name_or_path)
+            # Parse checkpoint-{window} from path like "/cache/checkpoints/checkpoint-1000"
+            if "checkpoint-" in model_path:
+                try:
+                    checkpoint_segment = model_path.split("checkpoint-")[-1].split("/")[0]
+                    validator_checkpoint_window = int(checkpoint_segment)
+                except (ValueError, IndexError):
+                    pass
+
         # Step 4: Validate selected rollouts
         validation_state = await self._validate_rollouts(
             inferences=inferences,
@@ -189,6 +201,7 @@ class MinerValidator:
             uid=uid,
             text_logs_emitted=text_logs_emitted,
             heartbeat_callback=heartbeat_callback,
+            validator_checkpoint_window=validator_checkpoint_window,
         )
 
         # Step 5: Check for early failures
@@ -388,6 +401,7 @@ class MinerValidator:
         uid: int | None,
         text_logs_emitted: dict[str, int],
         heartbeat_callback: Any,
+        validator_checkpoint_window: int | None = None,
     ) -> dict[str, Any]:
         """Validate selected rollouts and accumulate state.
 
@@ -437,6 +451,20 @@ class MinerValidator:
             state["checked_count"] += 1
 
             try:
+                # Check checkpoint_window matches (if validator has it)
+                if validator_checkpoint_window is not None:
+                    miner_checkpoint = inference.get("checkpoint_window")
+                    if miner_checkpoint != validator_checkpoint_window:
+                        logger.warning(
+                            "Checkpoint mismatch: miner=%s, validator=%s (uid=%s, window=%s)",
+                            miner_checkpoint,
+                            validator_checkpoint_window,
+                            uid_str,
+                            window,
+                        )
+                        state["hard_failure"] = True
+                        break
+
                 # Basic consistency checks
                 if not self._check_inference_consistency(
                     inference, window, window_hash, state, miner_hotkey
