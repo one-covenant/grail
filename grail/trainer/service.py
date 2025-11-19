@@ -276,7 +276,6 @@ class TrainerService:
                         unwrapped,
                         tokenizer,
                         checkpoint_publish_window,
-                        window,
                         seed=window,
                     )
             else:
@@ -284,7 +283,6 @@ class TrainerService:
                     unwrapped,
                     tokenizer,
                     checkpoint_publish_window,
-                    window,
                     seed=window,
                 )
         else:
