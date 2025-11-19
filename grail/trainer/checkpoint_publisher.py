@@ -165,62 +165,23 @@ class CheckpointPublisher:
 
     async def finalize_checkpoint_ready(
         self,
-        current_block: int,
-        current_window: int,
-    ) -> list[int]:
-        """Add READY marker to the current window's checkpoint if fully uploaded.
+        checkpoint_window: int,
+        ready_window: int,
+    ) -> bool:
+        """Add READY-{ready_window} marker to indicate when checkpoint became available.
 
-        The checkpoint becomes READY as soon as it's uploaded (has metadata), but only
-        if the current block is before the window starts (N + WINDOW_LENGTH). This ensures
-        miners/validators have time to download before needing the checkpoint.
+        The marker filename encodes the window when the upload completed, enabling
+        miners/validators to discover checkpoints via filename parsing alone.
 
         Args:
-            current_block: Current blockchain block number
-            current_window: Current window number to check
+            checkpoint_window: The checkpoint directory (based on upload start)
+            ready_window: The window when upload completed (based on finish block)
 
         Returns:
-            List of window numbers that were finalized (had READY added)
+            True if marker was added successfully, False otherwise
         """
-        from grail.infrastructure.comms import list_bucket_files
+        ready_key = f"{CHECKPOINT_PREFIX}checkpoint-{checkpoint_window}/READY-{ready_window}"
 
-        # List all checkpoint directories
-        keys = await list_bucket_files(
-            CHECKPOINT_PREFIX,
-            credentials=self.credentials,
-            use_write=True,
-        )
-
-        finalized_windows: list[int] = []
-        deadline_block = current_window + WINDOW_LENGTH
-
-        # Skip if past deadline - checkpoint wasn't ready on time
-        if current_block >= deadline_block:
-            logger.warning(
-                "Checkpoint %s missed READY deadline (block %s >= %s)",
-                current_window,
-                current_block,
-                deadline_block,
-            )
-            return finalized_windows
-
-        # Check if READY already exists
-        ready_key = f"{CHECKPOINT_PREFIX}checkpoint-{current_window}/READY"
-        if ready_key in keys:
-            return finalized_windows  # Already has READY marker
-
-        # Check if checkpoint has metadata (indicates complete upload)
-        metadata_key = f"{CHECKPOINT_PREFIX}checkpoint-{current_window}/metadata.json.gz"
-        metadata_key_uncompressed = f"{CHECKPOINT_PREFIX}checkpoint-{current_window}/metadata.json"
-        has_metadata = metadata_key in keys or metadata_key_uncompressed in keys
-
-        if not has_metadata:
-            logger.debug(
-                "Checkpoint window %s missing metadata, skipping READY marker",
-                current_window,
-            )
-            return finalized_windows
-
-        # Add READY marker at deterministic block
         try:
             await upload_file_chunked(
                 ready_key,
@@ -229,19 +190,19 @@ class CheckpointPublisher:
                 use_write=True,
             )
             logger.info(
-                "✅ Added READY marker for checkpoint window %s at block %s",
-                current_window,
-                current_block,
+                "✅ Added READY-%s marker for checkpoint-%s",
+                ready_window,
+                checkpoint_window,
             )
-            finalized_windows.append(current_window)
+            return True
         except Exception as exc:  # noqa: BLE001
             logger.error(
-                "Failed to add READY marker for checkpoint window %s: %s",
-                current_window,
+                "Failed to add READY-%s marker for checkpoint-%s: %s",
+                ready_window,
+                checkpoint_window,
                 exc,
             )
-
-        return finalized_windows
+            return False
 
     async def publish_checkpoint(
         self,
@@ -319,7 +280,7 @@ class CheckpointPublisher:
                     rel_path = path.relative_to(temp_dir)
                     remote_key = f"{remote_prefix}/{rel_path}"
                     try:
-                        # Get upload timeout from environment (default 180 sec per chunk - 3 minutes)
+                        # Get upload timeout from environment (default 180 sec per chunk)
                         upload_timeout = UPLOAD_TIMEOUT
                         file_size_mb = path.stat().st_size / (1024 * 1024)
                         logger.debug(
@@ -430,3 +391,147 @@ class CheckpointPublisher:
             return False
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+    async def upload_from_staging(
+        self,
+        staging_path: Path,
+        snapshot_metadata: dict[str, Any],
+        target_window: int,
+    ) -> bool:
+        """Upload pre-serialized checkpoint from staging directory.
+
+        Used by upload worker to upload snapshots that have already been
+        written to disk by the training process.
+
+        Args:
+            staging_path: Path to staging directory containing checkpoint files
+            snapshot_metadata: Metadata from snapshot (epoch, timestamp, metrics)
+            target_window: The window number to publish this checkpoint to
+
+        Returns:
+            True if upload succeeded, False otherwise
+        """
+        try:
+            # Build file manifest from existing files
+            file_manifest: dict[str, str] = {}
+            for file_path in staging_path.rglob("*"):
+                if file_path.is_file() and file_path.name != "snapshot_metadata.json":
+                    rel_path = str(file_path.relative_to(staging_path))
+                    file_manifest[rel_path] = hashlib.sha256(file_path.read_bytes()).hexdigest()
+
+            # Read training config from snapshot metadata or use defaults
+            training_config = snapshot_metadata.get(
+                "training_config",
+                {
+                    "lr": TRAINER_LR,
+                    "epochs": TRAINER_EPOCHS,
+                    "batch_size": TRAINER_BATCH_SIZE,
+                    "max_length": TRAINER_MAX_LENGTH,
+                    "grad_clip": TRAINER_GRAD_CLIP,
+                    "warmup_steps": TRAINER_WARMUP_STEPS,
+                    "kl_coef": TRAINER_KL_COEF,
+                    "entropy_coef": TRAINER_ENTROPY_COEF,
+                },
+            )
+
+            # Create metadata
+            # Use parent_window from snapshot metadata if available (authoritative source)
+            # Fallback to calculation if not present (e.g. old snapshot format)
+            parent_window = snapshot_metadata.get("parent_window")
+            if parent_window is None:
+                parent_window = max(0, target_window - WINDOW_LENGTH)
+
+            metadata = CheckpointMetadata(
+                window=target_window,
+                parent_window=parent_window,
+                file_manifest=file_manifest,
+                training_config=training_config,
+                git_commit=os.getenv("GIT_COMMIT", "unknown"),
+                created_at=snapshot_metadata.get("timestamp", time.time()),
+                model_name="async_trainer_snapshot",
+            )
+
+            config_hash = hashlib.sha256(
+                json.dumps(training_config, sort_keys=True).encode()
+            ).hexdigest()
+
+            metadata_dict = {**metadata.__dict__, "config_hash": config_hash}
+
+            # Save metadata to staging directory
+            metadata_path = staging_path / "metadata.json"
+            metadata_path.write_text(json.dumps(metadata_dict, ensure_ascii=False, indent=2))
+
+            # Sign metadata
+            canonical_metadata = json.dumps(metadata_dict, sort_keys=True, separators=(",", ":"))
+            signature = self.wallet.hotkey.sign(data=canonical_metadata).hex()
+            (staging_path / "manifest.sig").write_text(signature)
+
+            # Upload to target window location
+            remote_prefix = f"{CHECKPOINT_PREFIX}checkpoint-{target_window}"
+
+            logger.info("Uploading checkpoint from staging to %s", remote_prefix)
+
+            semaphore = asyncio.Semaphore(4)
+
+            async def upload_file(path: Path) -> bool:
+                async with semaphore:
+                    rel_path = path.relative_to(staging_path)
+                    remote_key = f"{remote_prefix}/{rel_path}"
+                    try:
+                        upload_timeout = UPLOAD_TIMEOUT
+                        file_size_mb = path.stat().st_size / (1024 * 1024)
+                        logger.debug(
+                            "Uploading %s (%.1f MB) with timeout=%ds",
+                            rel_path,
+                            file_size_mb,
+                            upload_timeout,
+                        )
+                        return await upload_file_chunked(
+                            remote_key,
+                            path.read_bytes(),
+                            credentials=self.credentials,
+                            use_write=True,
+                            upload_timeout=upload_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error(
+                            "Upload TIMEOUT for %s (exceeds %s seconds)",
+                            rel_path,
+                            UPLOAD_TIMEOUT,
+                        )
+                        return False
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error("Failed to upload %s: %s", rel_path, exc)
+                        return False
+
+            # Upload all files (metadata.json last would be better, but async gather is concurrent)
+            # We rely on the READY marker for visibility, so file upload order is less critical
+            # provided READY is checked.
+            upload_tasks = [upload_file(path) for path in staging_path.rglob("*") if path.is_file()]
+            total_bytes = sum(
+                path.stat().st_size for path in staging_path.rglob("*") if path.is_file()
+            )
+            total_mb = total_bytes / (1024 * 1024)
+
+            upload_start = time.time()
+            results = await asyncio.gather(*upload_tasks)
+            upload_duration = time.time() - upload_start
+
+            if not all(results):
+                logger.error("Some checkpoint files failed to upload from staging")
+                return False
+
+            throughput_mbps = (total_mb / upload_duration) if upload_duration > 0 else 0
+            logger.info(
+                "Uploaded %.1f MB in %.1fs (%.1f MB/s) to %s",
+                total_mb,
+                upload_duration,
+                throughput_mbps,
+                remote_prefix,
+            )
+
+            return True
+
+        except Exception as exc:
+            logger.exception("Failed to upload checkpoint from staging: %s", exc)
+            return False
