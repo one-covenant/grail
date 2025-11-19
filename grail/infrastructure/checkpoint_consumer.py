@@ -64,12 +64,12 @@ class CheckpointMetadata:
     """Metadata describing a checkpoint directory."""
 
     window: int
-    parent_window: int | None
     file_manifest: dict[str, str]
     training_config: dict[str, Any] = field(default_factory=dict)
     git_commit: str = "unknown"
     created_at: float = 0.0
     model_name: str = "no_name"
+    parent_window: int | None = None
 
     def remote_prefix(self) -> str:
         return f"{CHECKPOINT_PREFIX}checkpoint-{self.window}"
@@ -163,14 +163,20 @@ class CheckpointManager:
                     logger.warning("Failed to verify cached checkpoint: %s", exc)
                 shutil.rmtree(local_dir, ignore_errors=True)
 
-            # Check READY marker to ensure checkpoint is fully uploaded
-            is_ready = await self._is_checkpoint_ready(window)
-            if not is_ready:
+            # Check READY-{window} marker to ensure checkpoint is fully uploaded
+            ready_window = await self._get_checkpoint_ready_window(window)
+            if ready_window is None:
                 logger.warning(
-                    "Checkpoint for window %s not ready (READY marker not found); will retry later",
+                    "Checkpoint for window %s not ready (READY-{window} marker not found); will retry later",
                     window,
                 )
                 return None
+            
+            logger.debug(
+                "Checkpoint-%s became ready at window %s",
+                window,
+                ready_window,
+            )
 
             tmp_dir = self.cache_root / f"checkpoint-{window}.partial"
             if tmp_dir.exists():
@@ -198,7 +204,6 @@ class CheckpointManager:
                         json.dumps(
                             {
                                 "window": metadata.window,
-                                "parent_window": metadata.parent_window,
                                 "file_manifest": metadata.file_manifest,
                                 "training_config": metadata.training_config,
                                 "git_commit": metadata.git_commit,
@@ -288,17 +293,37 @@ class CheckpointManager:
                 continue
         return sorted(windows)
 
-    async def _is_checkpoint_ready(self, window: int) -> bool:
-        """Check if a checkpoint has been marked as READY (fully uploaded).
+    async def _get_checkpoint_ready_window(self, checkpoint_window: int) -> int | None:
+        """Get the ready_window for a checkpoint by parsing READY-{window} marker.
 
-        The trainer creates a READY file as the final step of publishing a checkpoint.
-        This prevents miners from downloading partially uploaded checkpoints.
+        Args:
+            checkpoint_window: The checkpoint directory window
 
         Returns:
-            True if READY marker exists, False otherwise.
+            The ready_window (when upload finished), or None if not ready
         """
-        ready_key = f"{CHECKPOINT_PREFIX}checkpoint-{window}/READY"
-        return await comms.file_exists(ready_key, credentials=self.credentials, use_write=False)
+        try:
+            # List files in checkpoint directory
+            prefix = f"{CHECKPOINT_PREFIX}checkpoint-{checkpoint_window}/"
+            keys = await comms.list_bucket_files(
+                prefix,
+                credentials=self.credentials,
+                use_write=False,
+            )
+
+            # Find READY-{window} marker
+            for key in keys:
+                if "/READY-" in key:
+                    # Extract ready_window from "checkpoint-1000/READY-1100"
+                    filename = key.split("/")[-1]
+                    if filename.startswith("READY-"):
+                        ready_window = int(filename.split("-")[1])
+                        return ready_window
+
+            return None
+        except Exception as exc:
+            logger.debug("Failed to get ready_window for checkpoint %s: %s", checkpoint_window, exc)
+            return None
 
     async def get_recent_checkpoints(self, n: int) -> list[Path]:
         """Get the N most recent checkpoints available locally or remotely.
@@ -356,7 +381,6 @@ class CheckpointManager:
 
         metadata = CheckpointMetadata(
             window=payload.get("window", window),
-            parent_window=payload.get("parent_window"),
             file_manifest=payload.get("file_manifest", {}),
             training_config=payload.get("training_config", {}),
             git_commit=payload.get("git_commit", "unknown"),
@@ -471,31 +495,69 @@ class CheckpointManager:
 
         return keep
 
-    async def _find_latest_checkpoint_window(self) -> int | None:
-        """Find the highest window number available in R2."""
-        keys = await comms.list_bucket_files(
-            CHECKPOINT_PREFIX,
-            credentials=self.credentials,
-            use_write=False,
-        )
+    async def get_latest_ready_checkpoint(self, before_window: int) -> int | None:
+        """Find the latest checkpoint that became READY before the given window.
 
-        latest_window = None
-        for key in keys:
-            parts = key.split("/")
-            # Expect keys like 'grail/checkpoints/checkpoint-<window>/...'
-            if len(parts) < 3:
-                continue
-            segment = parts[2]
-            if not segment.startswith("checkpoint-"):
-                continue
-            try:
-                # Extract window number from "checkpoint-<window>"
-                window = int(segment.split("-", 1)[1])
-                if latest_window is None or window > latest_window:
-                    latest_window = window
-            except (IndexError, ValueError):
-                continue
-        return latest_window
+        Parses READY-{ready_window} markers to determine when each checkpoint
+        became available, ensuring miners/validators use the same model version.
+
+        Args:
+            before_window: Upper bound (exclusive) for ready_window
+
+        Returns:
+            Checkpoint window number, or None if none found
+        """
+        try:
+            # List all checkpoint directories
+            keys = await comms.list_bucket_files(
+                CHECKPOINT_PREFIX,
+                credentials=self.credentials,
+                use_write=False,
+            )
+
+            # Parse all READY-{ready_window} markers
+            candidates: list[tuple[int, int]] = []  # (ready_window, checkpoint_window)
+            for key in keys:
+                if "/READY-" in key:
+                    try:
+                        # Parse: "grail/checkpoints/checkpoint-1000/READY-1100"
+                        parts = key.split("/")
+                        if len(parts) >= 4:
+                            checkpoint_segment = parts[2]  # "checkpoint-1000"
+                            ready_filename = parts[3]      # "READY-1100"
+
+                            if checkpoint_segment.startswith("checkpoint-") and ready_filename.startswith("READY-"):
+                                checkpoint_window = int(checkpoint_segment.split("-")[1])
+                                ready_window = int(ready_filename.split("-")[1])
+                                
+                                # Only consider checkpoints that became ready before our window
+                                if ready_window < before_window:
+                                    candidates.append((ready_window, checkpoint_window))
+                    except (IndexError, ValueError):
+                        continue
+
+            if not candidates:
+                logger.warning(
+                    "No READY checkpoints found before window %s",
+                    before_window,
+                )
+                return None
+
+            # Sort by ready_window descending (most recently ready first)
+            candidates.sort(reverse=True)
+            ready_window, checkpoint_window = candidates[0]
+
+            logger.info(
+                "Found latest checkpoint: checkpoint-%s (ready at window %s, requested < %s)",
+                checkpoint_window,
+                ready_window,
+                before_window,
+            )
+            return checkpoint_window
+
+        except Exception as exc:
+            logger.error("Failed to discover latest ready checkpoint: %s", exc)
+            return None
 
 
 # --------------------------------------------------------------------------- #
