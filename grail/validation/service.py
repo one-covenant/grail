@@ -373,9 +373,7 @@ class ValidationService:
                 else contextlib.nullcontext()
             )
             with timer_ctx:
-                checkpoint_path = await self._checkpoint_manager.get_checkpoint(
-                    checkpoint_window
-                )
+                checkpoint_path = await self._checkpoint_manager.get_checkpoint(checkpoint_window)
         except Exception:
             logger.warning(
                 f"Failed to download checkpoint for window {checkpoint_window} "

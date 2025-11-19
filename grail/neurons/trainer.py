@@ -293,7 +293,9 @@ class TrainerNeuron(BaseNeuron):
         """
         heartbeat_age = self._snapshot_manager.get_training_heartbeat_age()
         if heartbeat_age == float("inf"):
-            logger.debug("Training process still initializing (no heartbeat yet), skipping evaluation check")
+            logger.debug(
+                "Training process still initializing (no heartbeat yet), skipping evaluation check"
+            )
             return True
         return False
 
@@ -501,6 +503,7 @@ class TrainerNeuron(BaseNeuron):
         Returns:
             Evaluation plan
         """
+
         def generate_fixed_subset(cycle_index: int, subset_size: int) -> list[str]:
             all_ids = source.iter_ids()
             n_samples = min(subset_size, len(all_ids))
@@ -703,7 +706,9 @@ class TrainerNeuron(BaseNeuron):
             Dictionary of evaluation metrics
         """
         is_startup_eval = self._eval_last_run_window_number is None
-        eval_reason = "startup" if is_startup_eval else f"after {self._windows_since_last_eval} windows"
+        eval_reason = (
+            "startup" if is_startup_eval else f"after {self._windows_since_last_eval} windows"
+        )
 
         logger.info(
             "🧪 Starting evaluation: window=%s tasks=%s replicates=%s split=%s backend=%s (%s)",

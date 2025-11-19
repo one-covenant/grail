@@ -47,7 +47,7 @@ def _extract_boxed_answer(text: str) -> str | None:
     start = boxed_indices[-1]
     # Skip \boxed{ (7 chars)
     content_start = start + 7
-    
+
     depth = 1
     for i, char in enumerate(text[content_start:], start=content_start):
         if char == "{":
@@ -56,7 +56,7 @@ def _extract_boxed_answer(text: str) -> str | None:
             depth -= 1
             if depth == 0:
                 return text[content_start:i]
-    
+
     return None
 
 
@@ -302,7 +302,7 @@ class MATHEnv(MathDatasetEnv):
 
     def _extract_dataset_answer(self, task_payload: dict[str, Any]) -> str:
         """Extract gold answer from MATH dataset.
-        
+
         Tries 'answer' field first, falls back to parsing \\boxed{...} from 'solution'.
         """
         # 1. Try direct field (pre-processed datasets)

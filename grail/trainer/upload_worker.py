@@ -216,6 +216,7 @@ def run_upload_worker(
     # Configure logging to write to stdout/stderr (inherited from parent, redirected to train.log)
     # Child processes need handlers configured even though file descriptors are inherited
     import sys
+
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(
         logging.Formatter(
@@ -227,7 +228,7 @@ def run_upload_worker(
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(logging.INFO)
-    
+
     # Force immediate flush
     sys.stdout.flush()
     sys.stderr.flush()

@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import json
 import multiprocessing
-import os
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,7 +20,6 @@ import pytest
 import typer
 
 from grail.cli import train as train_cli
-
 
 # ------------------------------------------------------------------------------
 # Helper Fakes
@@ -65,10 +63,10 @@ class _FakeArtifact:
         (path / "config.json").write_text("{}", encoding="utf-8")
 
     # The real training process moves models between CPU/GPU. Return self.
-    def cpu(self) -> "_FakeArtifact":  # pragma: no cover - trivial
+    def cpu(self) -> _FakeArtifact:  # pragma: no cover - trivial
         return self
 
-    def cuda(self) -> "_FakeArtifact":  # pragma: no cover - trivial
+    def cuda(self) -> _FakeArtifact:  # pragma: no cover - trivial
         return self
 
 
@@ -180,7 +178,9 @@ def train_cli_test_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[
 # ------------------------------------------------------------------------------
 
 
-def test_train_cli_smoke(monkeypatch: pytest.MonkeyPatch, train_cli_test_env: dict[str, Path]) -> None:
+def test_train_cli_smoke(
+    monkeypatch: pytest.MonkeyPatch, train_cli_test_env: dict[str, Path]
+) -> None:
     """Full CLI smoke test with lightweight training/upload workers."""
 
     cache_root = train_cli_test_env["cache_root"]
@@ -215,7 +215,9 @@ def test_train_cli_smoke(monkeypatch: pytest.MonkeyPatch, train_cli_test_env: di
 # ------------------------------------------------------------------------------
 
 
-def test_train_cli_reports_env_errors(monkeypatch: pytest.MonkeyPatch, train_cli_test_env: dict[str, Path]) -> None:
+def test_train_cli_reports_env_errors(
+    monkeypatch: pytest.MonkeyPatch, train_cli_test_env: dict[str, Path]
+) -> None:
     """CLI should exit with code 1 when model env parsing fails."""
 
     # Cause parse_train_env to raise so we exercise the error path
@@ -228,4 +230,3 @@ def test_train_cli_reports_env_errors(monkeypatch: pytest.MonkeyPatch, train_cli
         train_cli.train()
 
     assert excinfo.value.exit_code == 1
-
