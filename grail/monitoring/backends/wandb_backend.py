@@ -130,9 +130,14 @@ class WandBBackend(MonitoringBackend):
             "tags": self.config.get("tags", []),
             "notes": self.config.get("notes", ""),
             "resume": self.config.get("resume", "allow"),
-            # Use resume instead of deprecated reinit
-            "force": True,  # Force new run even if one exists
         }
+
+        # Handle run ID for multi-process coordination
+        # If run_id is provided, resume that specific run
+        if self.config.get("run_id"):
+            init_kwargs["id"] = self.config["run_id"]
+            init_kwargs["resume"] = "allow"
+            logger.info("Resuming W&B run with ID: %s", self.config["run_id"])
 
         # Only set entity if provided
         if self.config.get("entity"):
