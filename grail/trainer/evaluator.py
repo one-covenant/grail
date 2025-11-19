@@ -115,15 +115,15 @@ class EvaluatorService:
             from grail.environments.loop import VLLMServerBackend
 
             model_id = model_name or getattr(self._model, "name_or_path", "model")
+            return_chosen_lp = bool(getattr(self._cfg, "vllm_return_chosen_logprobs", False))
             backend = VLLMServerBackend(
                 base_url=base_url,
                 model_name=str(model_id),
                 tokenizer=self._tokenizer,
                 timeout=300.0,
                 max_concurrent_requests=self._cfg.vllm_max_concurrent_requests,
-                return_chosen_logprobs=bool(
-                    getattr(self._cfg, "vllm_return_chosen_logprobs", False)
-                ),
+                return_chosen_logprobs=return_chosen_lp,
+                warn_on_missing_token_ids=return_chosen_lp,
             )
             logger.info(
                 "Evaluator using vLLM server backend: url=%s model=%s concurrency=%d",

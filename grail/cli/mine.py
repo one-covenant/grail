@@ -405,6 +405,7 @@ def package_rollout_data(
     window_block_hash: str,
     combined_randomness: str,
     use_drand: bool,
+    checkpoint_window: int,
 ) -> dict:
     """Assemble the full on-chain/off-chain payload for a single rollout.
 
@@ -424,6 +425,7 @@ def package_rollout_data(
         window_block_hash: Window block hash
         combined_randomness: Challenge randomness
         use_drand: Whether drand was used
+        checkpoint_window: The checkpoint window used for this rollout
 
     Returns:
         Signed dictionary ready to upload for validation
@@ -457,6 +459,7 @@ def package_rollout_data(
         "rollout_group": base_nonce,
         "rollout_index": rollout_idx,
         "total_in_group": total_in_group,
+        "checkpoint_window": checkpoint_window,  # Explicit checkpoint used
         "commit": {
             "tokens": rollout.tokens,
             "commitments": rollout.commitments,
@@ -534,6 +537,7 @@ async def generate_rollouts_for_window(
     timers: MiningTimers,
     monitor: Any | None,
     use_drand: bool,
+    checkpoint_window: int,
 ) -> list[dict]:
     """Generate as many GRPO rollouts as safely possible within a window.
 
@@ -554,6 +558,7 @@ async def generate_rollouts_for_window(
         timers: EMA-based timing estimates for safety.
         monitor: Optional monitoring client for metrics.
         use_drand: Whether drand was used in randomness generation.
+        checkpoint_window: The checkpoint window used for this generation
 
     Returns:
         List of signed rollout data ready for upload.
@@ -731,6 +736,7 @@ async def generate_rollouts_for_window(
                     window_block_hash,
                     combined_randomness,
                     use_drand,
+                    checkpoint_window,
                 )
                 inferences.append(rollout_data)
 
