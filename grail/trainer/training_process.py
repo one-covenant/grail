@@ -91,7 +91,7 @@ class TrainingService:
         snapshot_manager: SnapshotManager,
         credentials: Any,
         wallet: bt.wallet,
-        monitor: Any | None = None,
+        monitor_config: dict[str, Any] | None = None,
         *,
         train_spec: ModelLoadSpec,
         ref_spec: ModelLoadSpec,
@@ -103,7 +103,7 @@ class TrainingService:
             snapshot_manager: Snapshot manager for IPC
             credentials: R2 credentials for loading rollouts
             wallet: Wallet for trust computation
-            monitor: Optional monitoring manager
+            monitor_config: Optional monitoring configuration (will be initialized in async context)
             train_spec: Specification for loading the training model/tokenizer
             ref_spec: Specification for loading the reference model
         """
@@ -111,7 +111,8 @@ class TrainingService:
         self.snapshot_manager = snapshot_manager
         self.credentials = credentials
         self.wallet = wallet
-        self.monitor = monitor
+        self.monitor_config = monitor_config
+        self.monitor: Any | None = None
         self.train_spec = train_spec
         self.ref_spec = ref_spec
 
@@ -141,8 +142,11 @@ class TrainingService:
         """
         logger.info("Training service starting")
 
-        # Initialize all resources
+        # Initialize all resources (models, chain manager, etc.)
         await self._initialize_resources()
+
+        # Initialize monitoring AFTER heavy resources are loaded
+        await self._initialize_monitoring()
 
         # Upload initial checkpoint and wait for miners
         await self._upload_initial_checkpoint(stop_event)
@@ -237,6 +241,65 @@ class TrainingService:
         await self.chain_manager.initialize()
         logger.info("Chain manager initialized")
 
+    async def _initialize_monitoring(self) -> None:
+        """Initialize monitoring after heavy resources are loaded.
+        
+        This is called AFTER models and chain manager are initialized to avoid
+        resource contention during WandB connection.
+        """
+        if not self.monitor_config:
+            logger.info("No monitoring config provided, skipping monitoring setup")
+            return
+
+        try:
+            backend_type = self.monitor_config.get("backend_type", "wandb")
+            init_config = {k: v for k, v in self.monitor_config.items() if k != "backend_type"}
+
+            logger.debug(
+                "Initializing monitoring: backend_type=%s run_name=%s run_id=%s",
+                backend_type,
+                init_config.get("run_name"),
+                init_config.get("run_id"),
+            )
+
+            if "run_id" in init_config:
+                logger.info(
+                    "Resuming W&B run %s in training process for multi-process logging",
+                    init_config["run_id"],
+                )
+
+            initialize_monitoring(backend_type=backend_type, **init_config)
+            self.monitor = get_monitoring_manager()
+            logger.info("Monitoring initialized in training process")
+
+            # Test WandB connection immediately
+            run_name = init_config.get("run_name")
+            if self.monitor and run_name:
+                logger.info(
+                    f"Testing WandB connection (shared mode: x_primary=False, x_label=training_process, run_id={init_config.get('run_id')}, run_name={run_name})",
+                )
+                connection_start = time.time()
+                try:
+                    await self.monitor.log_gauge("training_process/connection_test", 1.0)
+                    await self.monitor.flush_metrics()
+                    connection_duration = time.time() - connection_start
+                    logger.info(
+                        "✅ WandB connection successful in %.1fs (run_id=%s)",
+                        connection_duration,
+                        init_config.get("run_id"),
+                    )
+                except Exception as conn_exc:
+                    connection_duration = time.time() - connection_start
+                    logger.error(
+                        "❌ WandB connection failed after %.1fs: %s",
+                        connection_duration,
+                        conn_exc,
+                    )
+
+        except Exception as exc:
+            logger.warning("Failed to initialize monitoring in training process: %s", exc)
+            self.monitor = None
+
     def _create_optimizer(self) -> torch.optim.Optimizer:
         """Create AdamW optimizer with configured hyperparameters.
 
@@ -321,6 +384,13 @@ class TrainingService:
         train_model, ref_model, optimizer = self._prepare_models_with_accelerator(accelerator)
 
         logger.info("Models and optimizer prepared with Accelerator")
+
+        # Start event loop monitoring in background (only in DEBUG mode)
+        if logger.isEnabledFor(logging.DEBUG):
+            from grail.logging_utils import monitor_event_loop_lag
+
+            asyncio.create_task(monitor_event_loop_lag(interval=5.0, threshold=1.0))
+            logger.debug("Event loop lag monitoring started")
 
         while not stop_event.is_set():
             try:
@@ -431,15 +501,35 @@ class TrainingService:
         Returns:
             Tuple of (train_model, ref_model, optimizer) after resuming
         """
-        logger.info("PAUSE_TRAINING flag detected, freeing GPU for evaluation...")
+        logger.info("🔄 STATE: pause_requested - freeing GPU for evaluation")
 
-        # Unwrap and move models to CPU
+        # Unwrap models to access raw PyTorch objects
+        # Note: optimizer from accelerator.prepare() is already unwrapped
         unwrapped_train = accelerator.unwrap_model(train_model)
         unwrapped_ref = accelerator.unwrap_model(ref_model) if ref_model else None
 
-        logger.info("Moving models to CPU to free GPU memory...")
-        train_model_cpu = unwrapped_train.cpu()
-        ref_model_cpu = unwrapped_ref.cpu() if unwrapped_ref else None
+        logger.info("🔄 STATE: models_moving_to_cpu - starting GPU→CPU transfer")
+        start_cpu_transfer = time.time()
+
+        # Move models to CPU in thread pool to avoid blocking event loop
+        train_model_cpu = await asyncio.to_thread(unwrapped_train.cpu)
+        ref_model_cpu = await asyncio.to_thread(unwrapped_ref.cpu) if unwrapped_ref else None
+
+        # Move optimizer state to CPU (momentum buffers, variance estimates, etc.)
+        # This is critical for AdamW which stores per-parameter state on GPU
+        def move_optimizer_to_cpu(opt: torch.optim.Optimizer) -> None:
+            for state in opt.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.cpu()
+
+        await asyncio.to_thread(move_optimizer_to_cpu, optimizer)
+
+        cpu_transfer_duration = time.time() - start_cpu_transfer
+        logger.info(
+            "✅ Models and optimizer moved to CPU in %.3fs",
+            cpu_transfer_duration,
+        )
 
         # Clear GPU cache
         gc.collect()
@@ -458,7 +548,22 @@ class TrainingService:
                 "status": "paused_for_evaluation",
             },
         )
-        logger.info("Saved snapshot before pause (models on CPU)")
+        logger.info("🔄 STATE: models_on_cpu_waiting - snapshot saved, waiting for resume")
+
+        # Close subtensor connection before long idle period (prevents 10s timeout)
+        if self.subtensor:
+            try:
+                if hasattr(self.subtensor, "_subtensor"):
+                    # Unwrap ResilientSubtensor to get underlying subtensor
+                    inner = object.__getattribute__(self.subtensor, "_subtensor")
+                    if hasattr(inner, "close"):
+                        await inner.close()
+                elif hasattr(self.subtensor, "close"):
+                    await self.subtensor.close()
+                logger.info("Closed subtensor connection during pause to prevent idle timeout")
+            except Exception as e:
+                logger.warning("Failed to close subtensor during pause: %s", e)
+            self.subtensor = None
 
         # Wait for pause flag to be cleared
         while self.snapshot_manager.check_pause_flag() and not stop_event.is_set():
@@ -467,23 +572,60 @@ class TrainingService:
         if stop_event.is_set():
             return train_model_cpu, ref_model_cpu, optimizer
 
-        # Move models back to GPU
-        logger.info("PAUSE_TRAINING cleared, moving models back to GPU...")
-        train_model_gpu = train_model_cpu.cuda()
-        ref_model_gpu = ref_model_cpu.cuda() if ref_model_cpu else None
+        logger.info("🔄 STATE: resume_requested - PAUSE_TRAINING cleared")
 
-        # Re-prepare with accelerator
+        # Recreate subtensor connection after pause
+        logger.info("Recreating subtensor connection after pause...")
+        self.subtensor = await create_subtensor(resilient=True)
+        logger.info("Subtensor connection recreated successfully")
+
+        logger.info("🔄 STATE: models_moving_to_gpu - starting CPU→GPU transfer")
+        start_gpu_transfer = time.time()
+
+        # Move models back to GPU using thread pool to avoid blocking event loop
+        train_model_gpu = await asyncio.to_thread(train_model_cpu.cuda)
+        ref_model_gpu = await asyncio.to_thread(ref_model_cpu.cuda) if ref_model_cpu else None
+
+        # Move optimizer state back to GPU
+        def move_optimizer_to_gpu(opt: torch.optim.Optimizer) -> None:
+            for state in opt.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.cuda()
+
+        await asyncio.to_thread(move_optimizer_to_gpu, optimizer)
+
+        gpu_transfer_duration = time.time() - start_gpu_transfer
+        logger.info(
+            "✅ Models and optimizer moved to GPU in %.3fs",
+            gpu_transfer_duration,
+        )
+
+        # Re-prepare with accelerator (also blocking, use thread pool)
+        logger.info("🔄 STATE: accelerator_preparing - wrapping models with accelerator")
+        start_prepare = time.time()
+
         if ref_model_gpu:
-            train_model, ref_model, optimizer = accelerator.prepare(
-                train_model_gpu, ref_model_gpu, optimizer
+            train_model, ref_model, prepared_optimizer = await asyncio.to_thread(
+                accelerator.prepare,
+                train_model_gpu,
+                ref_model_gpu,
+                optimizer,
             )
             ref_model.eval()
         else:
-            train_model, optimizer = accelerator.prepare(train_model_gpu, optimizer)
+            train_model, prepared_optimizer = await asyncio.to_thread(
+                accelerator.prepare,
+                train_model_gpu,
+                optimizer,
+            )
             ref_model = None
 
-        logger.info("Models moved back to GPU, resuming training")
-        return train_model, ref_model, optimizer
+        prepare_duration = time.time() - start_prepare
+        logger.info("✅ Accelerator prepare complete in %.3fs", prepare_duration)
+        logger.info("🔄 STATE: training_resumed - models ready, resuming training")
+
+        return train_model, ref_model, prepared_optimizer
 
     async def _get_current_window(self) -> int:
         """Get current window number from subtensor.
@@ -690,27 +832,19 @@ def _seed_all(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def _configure_child_process_logging() -> None:
-    """Configure logging for child process.
+def _configure_child_process_logging(verbosity: int) -> None:
+    """Configure enhanced logging for training process.
 
-    Child processes need handlers configured even though file descriptors
-    are inherited from parent (redirected to train.log).
+    Args:
+        verbosity: CLI verbosity level (0=silent, 1=INFO, >=2=DEBUG)
+
+    Uses structured logging with process/thread IDs, timing, and correlation IDs.
     """
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(
-        logging.Formatter(
-            "%(asctime)s %(levelname)-8s [training_process] %(name)s: %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
-    )
-    root = logging.getLogger()
-    root.handlers.clear()
-    root.addHandler(handler)
-    root.setLevel(logging.INFO)
+    from grail.logging_utils import configure_process_logging
 
-    # Force immediate flush
-    sys.stdout.flush()
-    sys.stderr.flush()
+    # Map verbosity to log level (same as parent CLI)
+    log_level = logging.DEBUG if verbosity >= 2 else logging.INFO
+    configure_process_logging("training", level=log_level, include_function=True)
 
 
 def _reconstruct_wallet(wallet_args: dict[str, str]) -> bt.wallet:
@@ -725,36 +859,7 @@ def _reconstruct_wallet(wallet_args: dict[str, str]) -> bt.wallet:
     return bt.wallet(**wallet_args)
 
 
-def _initialize_monitoring(monitor_config: dict[str, Any]) -> Any | None:
-    """Initialize monitoring in child process.
-
-    Args:
-        monitor_config: Monitoring configuration
-
-    Returns:
-        Monitoring manager instance or None if initialization fails
-    """
-    if not monitor_config:
-        return None
-
-    try:
-        backend_type = monitor_config.get("backend_type", "wandb")
-        init_config = {k: v for k, v in monitor_config.items() if k != "backend_type"}
-
-        if "run_id" in init_config:
-            logger.info(
-                "Resuming W&B run %s in training process for multi-process logging",
-                init_config["run_id"],
-            )
-
-        initialize_monitoring(backend_type=backend_type, **init_config)
-        monitor = get_monitoring_manager()
-        logger.info("Monitoring initialized in training process")
-        return monitor
-
-    except Exception as exc:
-        logger.warning("Failed to initialize monitoring in child process: %s", exc)
-        return None
+# Removed: _initialize_monitoring() is now a method of TrainingService class
 
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -771,6 +876,7 @@ def run_training_process(
     wallet_args: dict[str, str],
     monitor_config: dict[str, Any],
     stop_event: multiprocessing.Event,
+    verbosity: int = 1,
 ) -> None:
     """Entry point for training process.
 
@@ -787,21 +893,21 @@ def run_training_process(
         wallet_args: Wallet configuration (name, hotkey, path)
         monitor_config: Monitoring configuration
         stop_event: Event to signal shutdown
+        verbosity: CLI verbosity level (0=silent, 1=INFO, >=2=DEBUG)
     """
     # Configure logging for child process
-    _configure_child_process_logging()
+    _configure_child_process_logging(verbosity)
 
     logger.info("Training process starting (PID=%d)", multiprocessing.current_process().pid)
     sys.stdout.flush()
 
     # Reconstruct objects from primitives
     try:
-        logger.info("Reconstructing wallet and services in child process...")
+        logger.info("Reconstructing wallet in child process...")
         wallet = _reconstruct_wallet(wallet_args)
-        monitor = _initialize_monitoring(monitor_config)
 
     except Exception as exc:
-        logger.exception("Failed to reconstruct services in training process: %s", exc)
+        logger.exception("Failed to reconstruct wallet in training process: %s", exc)
         return
 
     # Run training service
@@ -811,7 +917,7 @@ def run_training_process(
             snapshot_manager=snapshot_manager,
             credentials=credentials,
             wallet=wallet,
-            monitor=monitor,
+            monitor_config=monitor_config,
             train_spec=train_spec,
             ref_spec=ref_spec,
         )

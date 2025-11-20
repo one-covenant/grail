@@ -72,6 +72,7 @@ class TrainerContext:
         monitor: Monitoring manager (W&B, etc.)
         train_spec: Specification for loading training model
         ref_spec: Specification for loading reference model
+        verbosity: CLI verbosity level for child process logging
         chain_manager: Chain manager for miner data (initialized later)
     """
 
@@ -81,6 +82,7 @@ class TrainerContext:
     monitor: Any | None
     train_spec: ModelLoadSpec
     ref_spec: ModelLoadSpec
+    verbosity: int = 1
     chain_manager: Any | None = None
 
 
@@ -188,6 +190,7 @@ class TrainerNeuron(BaseNeuron):
                 wallet_args,
                 monitor_config,
                 self._stop_event,
+                self._context.verbosity,
             ),
         )
         self._training_process.start()
@@ -205,6 +208,7 @@ class TrainerNeuron(BaseNeuron):
                 wallet_args,
                 self._stop_event,
                 SNAPSHOT_POLL_INTERVAL_SECONDS,
+                self._context.verbosity,
             ),
         )
         self._upload_process.start()
@@ -354,19 +358,25 @@ class TrainerNeuron(BaseNeuron):
         Args:
             current_window: Current window number
         """
+        logger.info("🔄 STATE: evaluation_pause_requested (window=%d)", current_window)
         self._snapshot_manager.set_pause_flag()
         logger.info("Set PAUSE_TRAINING flag, waiting for training to pause...")
 
         if not await self._wait_for_training_pause():
             logger.error("Training process failed to pause in time, skipping evaluation")
             self._snapshot_manager.clear_pause_flag()
+            self.reset_subtensor()  # Reset connection after idle wait period
             return
 
+        logger.info("🔄 STATE: evaluation_starting - training paused, GPU freed")
         try:
             await self._maybe_run_evaluation(current_window)
+            logger.info("🔄 STATE: evaluation_complete - clearing pause flag")
         finally:
             self._snapshot_manager.clear_pause_flag()
-            logger.info("Cleared PAUSE_TRAINING, training will resume")
+            # Reset main process subtensor connection after idle period during evaluation
+            self.reset_subtensor()
+            logger.info("🔄 STATE: evaluation_resume_signaled - training will resume")
 
     async def _wait_for_training_pause(self) -> bool:
         """Wait for training to confirm pause via snapshot status.
@@ -747,7 +757,28 @@ class TrainerNeuron(BaseNeuron):
         if not self._context.monitor:
             return {}
 
-        monitor_config = self._context.monitor._config.copy()
+        # Copy from backend.config (not manager._config) to get run_name and updated settings
+        # The backend.config is updated by start_run() with run_name, while manager._config
+        # contains only the initial config from CLI initialization.
+        if hasattr(self._context.monitor, "backend") and hasattr(
+            self._context.monitor.backend, "config"
+        ):
+            monitor_config = self._context.monitor.backend.config.copy()
+            # Add backend_type from backend class name (needed by subprocess)
+            backend_class_name = self._context.monitor.backend.__class__.__name__
+            if "WandB" in backend_class_name:
+                monitor_config["backend_type"] = "wandb"
+            elif "Null" in backend_class_name:
+                monitor_config["backend_type"] = "null"
+            
+            # If using shared mode, training subprocess is a worker (not primary)
+            if monitor_config.get("wandb_shared_mode"):
+                monitor_config["wandb_x_primary"] = False
+                monitor_config["wandb_x_label"] = "training_process"
+                logger.debug("Training subprocess will use shared mode as worker")
+        else:
+            # Fallback to manager config if backend doesn't have config
+            monitor_config = self._context.monitor._config.copy()
 
         if hasattr(self._context.monitor, "backend") and hasattr(
             self._context.monitor.backend, "run"
@@ -759,6 +790,14 @@ class TrainerNeuron(BaseNeuron):
                     "Passing W&B run ID %s to training process for multi-process logging",
                     wandb_run.id,
                 )
+
+        # Debug log to verify config contents
+        logger.debug(
+            "Monitor config for subprocess: backend_type=%s run_name=%s run_id=%s",
+            monitor_config.get("backend_type"),
+            monitor_config.get("run_name"),
+            monitor_config.get("run_id"),
+        )
 
         return monitor_config
 

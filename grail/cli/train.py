@@ -37,10 +37,15 @@ def register(app: typer.Typer) -> None:
     app.command("train")(train)
 
 
-def train() -> None:
+def train(
+    ctx: typer.Context,
+) -> None:
     """Run the training process via TrainerNeuron orchestration."""
     from grail.neurons import TrainerNeuron
     from grail.neurons.trainer import TrainerContext
+
+    # Get verbosity from parent context (set by main callback)
+    verbosity = getattr(ctx.parent, "params", {}).get("verbose", 1) if ctx.parent else 1
 
     coldkey = get_conf("BT_WALLET_COLD", "default")
     hotkey = get_conf("BT_WALLET_HOT", "default")
@@ -64,9 +69,18 @@ def train() -> None:
             training_config = MonitoringConfig.for_training(wallet.name)
             run_id = await monitor.start_run(
                 f"trainer_{wallet.name}",
-                training_config.get("hyperparameters", {}),
+                training_config,  # Pass full config (includes wandb_shared_mode)
             )
             logger.info(f"Started monitoring run: {run_id}")
+            
+            # CRITICAL: Wait for WandB run to fully sync to cloud before spawning subprocess
+            # Shared mode requires the primary run to be API-accessible before workers connect
+            # Without this delay, workers timeout trying to connect to a not-yet-synced run
+            if training_config.get("wandb_shared_mode"):
+                import asyncio
+                logger.info("Waiting 5s for WandB run to sync to cloud (shared mode requirement)...")
+                await asyncio.sleep(5)
+                logger.info("WandB run sync complete, safe to spawn worker processes")
 
         # Parse env (strict; no defaults)
         try:
@@ -97,6 +111,7 @@ def train() -> None:
             monitor=monitor,
             train_spec=train_spec,
             ref_spec=ref_spec,
+            verbosity=verbosity,
         )
 
         # Run neuron (watchdog is managed by BaseNeuron)
