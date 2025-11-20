@@ -20,8 +20,8 @@ from typing import Any
 
 import bittensor as bt
 
+from grail.infrastructure.network import create_subtensor
 from grail.shared.constants import (
-    NETWORK,
     UPLOAD_RETRY_BACKOFF_BASE,
     UPLOAD_RETRY_MAX_ATTEMPTS,
     WINDOW_LENGTH,
@@ -52,9 +52,9 @@ async def upload_worker_loop(
     """
     logger.info("Upload worker starting (poll_interval=%ds)", poll_interval)
 
-    # Create subtensor connection in child process
-    subtensor = bt.async_subtensor(network=NETWORK)
-    logger.info("Created subtensor connection in upload worker")
+    # Create resilient subtensor connection in child process
+    subtensor = await create_subtensor(resilient=True)
+    logger.info("Created resilient subtensor connection in upload worker")
 
     while not stop_event.is_set():
         try:
@@ -200,6 +200,7 @@ def run_upload_worker(
     wallet_args: dict[str, str],
     stop_event: multiprocessing.Event,
     poll_interval: int = 30,
+    verbosity: int = 1,
 ) -> None:
     """Entry point for upload worker process.
 
@@ -212,29 +213,16 @@ def run_upload_worker(
         wallet_args: Wallet configuration (name, hotkey, path)
         stop_event: Event to signal shutdown
         poll_interval: Seconds between snapshot checks
+        verbosity: CLI verbosity level (0=silent, 1=INFO, >=2=DEBUG)
     """
-    # Configure logging to write to stdout/stderr (inherited from parent, redirected to train.log)
-    # Child processes need handlers configured even though file descriptors are inherited
-    import sys
+    # Configure enhanced logging for upload worker
+    from grail.logging_utils import configure_process_logging
 
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(
-        logging.Formatter(
-            "%(asctime)s %(levelname)-8s [upload_worker] %(name)s: %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
-    )
-    root = logging.getLogger()
-    root.handlers.clear()
-    root.addHandler(handler)
-    root.setLevel(logging.INFO)
-
-    # Force immediate flush
-    sys.stdout.flush()
-    sys.stderr.flush()
+    # Map verbosity to log level (same as parent CLI)
+    log_level = logging.DEBUG if verbosity >= 2 else logging.INFO
+    configure_process_logging("upload", level=log_level, include_function=False)
 
     logger.info("Upload worker process starting (PID=%d)", multiprocessing.current_process().pid)
-    sys.stdout.flush()  # Force flush after first log
 
     try:
         # Reconstruct wallet and publisher
