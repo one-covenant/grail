@@ -7,5 +7,6 @@ __all__ = [
     "checkpoint_publisher",
     "config",
     "data",
+    "replay_buffer",
     "service",
 ]
