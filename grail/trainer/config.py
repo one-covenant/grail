@@ -65,6 +65,13 @@ class TrainingConfig:
     grpo_min_reward_per_token: float = constants.GRPO_MIN_REWARD_PER_TOKEN
     grpo_reward_per_token_drop_quantile: float = constants.GRPO_REWARD_PER_TOKEN_DROP_QUANTILE
 
+    # Replay buffer configuration
+    replay_buffer_enabled: bool = True
+    replay_buffer_max_windows: int = 1  # Store last 1 windows (~6 min of data)
+    replay_buffer_recent_fraction: float = 0.5  # 50% samples from most recent window
+    replay_buffer_decay_factor: float = 0.7  # Exponential decay for older windows
+    replay_buffer_max_groups_per_epoch: int = 64  # Max groups to sample per epoch
+
 
 @dataclass
 class EvalConfig:

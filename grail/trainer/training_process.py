@@ -37,6 +37,7 @@ from grail.shared.constants import NETUID, WINDOW_LENGTH, is_kl_enabled
 from grail.trainer.algorithms import GRPOAlgorithm, TrainingAlgorithm
 from grail.trainer.algorithms.grpo import load_grpo_groups
 from grail.trainer.config import TrainingConfig
+from grail.trainer.replay_buffer import ReplayBuffer, create_replay_buffer
 from grail.trainer.snapshot_manager import SnapshotManager
 from grail.trainer.trust import get_trusted_miner_hotkeys
 
@@ -129,7 +130,24 @@ class TrainingService:
         # Training state
         self.epoch_counter: int = 0
         self.last_loaded_window: int = INITIAL_LAST_LOADED_WINDOW
-        self.groups: list[Any] = []
+
+        # Initialize replay buffer
+        if config.replay_buffer_enabled:
+            self.replay_buffer: ReplayBuffer | None = create_replay_buffer(
+                buffer_type="recency_weighted",
+                max_windows=config.replay_buffer_max_windows,
+                recent_window_fraction=config.replay_buffer_recent_fraction,
+                decay_factor=config.replay_buffer_decay_factor,
+            )
+            logger.info(
+                "Replay buffer initialized (max_windows=%d, recent_fraction=%.2f, decay_factor=%.2f)",
+                config.replay_buffer_max_windows,
+                config.replay_buffer_recent_fraction,
+                config.replay_buffer_decay_factor,
+            )
+        else:
+            self.replay_buffer = None
+            logger.info("Replay buffer disabled, using single-window training")
 
     async def run(
         self,
@@ -468,10 +486,19 @@ class TrainingService:
                 # Load GRPO groups (Replay Buffer)
                 await self._load_grpo_groups(current_window, trusted_hotkeys)
 
-                if not self.groups:
-                    logger.warning(
-                        "No data available in replay buffer, sleeping %ds", NO_DATA_SLEEP_SECONDS
-                    )
+                # Check if replay buffer has data
+                if self.replay_buffer is not None:
+                    stats = self.replay_buffer.get_stats()
+                    if stats["total_groups"] == 0:
+                        logger.warning(
+                            "No data available in replay buffer, sleeping %ds",
+                            NO_DATA_SLEEP_SECONDS,
+                        )
+                        await asyncio.sleep(NO_DATA_SLEEP_SECONDS)
+                        continue
+                else:
+                    # Legacy mode: no replay buffer (should not happen with default config)
+                    logger.warning("Replay buffer disabled, cannot train without groups")
                     await asyncio.sleep(NO_DATA_SLEEP_SECONDS)
                     continue
 
@@ -746,17 +773,40 @@ class TrainingService:
 
             if new_groups:
                 logger.info(
-                    "Loaded %d GRPO groups for window %s (updating replay buffer)",
+                    "Loaded %d GRPO groups for window %s",
                     len(new_groups),
                     target_data_window,
                 )
-                self.groups = new_groups
+
+                # Add groups to replay buffer if enabled
+                if self.replay_buffer is not None:
+                    self.replay_buffer.add_window(target_data_window, new_groups)
+                    stats = self.replay_buffer.get_stats()
+                    logger.info(
+                        "Replay buffer updated: %d windows, %d total groups (%.1f MB) [%s → %s]",
+                        stats["windows"],
+                        stats["total_groups"],
+                        stats["memory_mb"],
+                        stats["oldest_window"],
+                        stats["newest_window"],
+                    )
+
+                    # Log per-window allocation preview
+                    if logger.isEnabledFor(logging.DEBUG):
+                        max_groups = self.config.replay_buffer_max_groups_per_epoch
+                        seed = current_window + self.epoch_counter
+                        sample_preview = self.replay_buffer.sample_groups(max_groups, seed)
+                        logger.debug(
+                            "Replay buffer sample preview: would sample %d groups with seed=%d",
+                            len(sample_preview),
+                            seed,
+                        )
+
                 self.last_loaded_window = target_data_window
             else:
                 logger.warning(
-                    "No valid GRPO groups found for window %s, retaining old groups (%d)",
+                    "No valid GRPO groups found for window %s",
                     target_data_window,
-                    len(self.groups),
                 )
 
         except Exception as exc:
@@ -770,7 +820,7 @@ class TrainingService:
         accelerator: Accelerator,
         current_window: int,
     ) -> dict[str, Any]:
-        """Train one epoch on current groups.
+        """Train one epoch by sampling groups from replay buffer.
 
         Args:
             train_model: Training model
@@ -782,16 +832,35 @@ class TrainingService:
             Training metrics dictionary
         """
         try:
+            # Sample groups from replay buffer
+            if self.replay_buffer is not None:
+                seed = current_window + self.epoch_counter
+                groups = self.replay_buffer.sample_groups(
+                    self.config.replay_buffer_max_groups_per_epoch,
+                    seed,
+                )
+
+                if not groups:
+                    logger.warning("Replay buffer returned no groups for training")
+                    return {}
+
+                logger.info(
+                    "Training epoch %d with %d groups sampled from replay buffer (seed=%d)",
+                    self.epoch_counter + 1,
+                    len(groups),
+                    seed,
+                )
+            else:
+                logger.error("Replay buffer not initialized, cannot train")
+                return {}
+
             epoch_start = time.time()
-            logger.info(
-                "Training epoch %d with %d groups", self.epoch_counter + 1, len(self.groups)
-            )
 
             metrics = await self.algorithm.train_epoch(
                 train_model,
                 ref_model,
                 self.tokenizer,
-                self.groups,
+                groups,
                 self.optimizer,
                 accelerator,
                 self.monitor,

@@ -84,7 +84,7 @@ TRAINER_MIN_TRUSTED_MINERS = int(os.getenv("GRAIL_TRAINER_MIN_TRUSTED_MINERS", "
 # ────────────────  GRPO DATA FILTERING (TWO-STAGE)  ────────────────
 # Stage 1 (fast structural/cheap filters) happens before Stage 2.
 # Defaults are conservative so behavior is unchanged unless configured.
-GRPO_MAX_GROUPS = int(os.getenv("GRAIL_GRPO_MAX_GROUPS", "32"))
+GRPO_MAX_GROUPS = int(os.getenv("GRAIL_GRPO_MAX_GROUPS", "10000"))
 GRPO_MAX_COMPLETION_TOKENS = int(os.getenv("GRAIL_GRPO_MAX_COMPLETION_TOKENS", "512"))
 
 # GRPO loss aggregation variant
