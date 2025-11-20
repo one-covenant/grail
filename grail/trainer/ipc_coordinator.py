@@ -10,7 +10,6 @@ import logging
 import multiprocessing
 import time
 from dataclasses import dataclass
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -165,4 +164,3 @@ class IPCCoordinator:
         with self.epoch_counter.get_lock():
             self.epoch_counter.value += 1
             return self.epoch_counter.value
-

@@ -243,7 +243,7 @@ class TrainingService:
 
     async def _initialize_monitoring(self) -> None:
         """Initialize monitoring after heavy resources are loaded.
-        
+
         This is called AFTER models and chain manager are initialized to avoid
         resource contention during WandB connection.
         """
@@ -253,6 +253,7 @@ class TrainingService:
 
         # FIRST: Test direct WandB connection (bypasses monitoring class)
         import os
+
         os.environ["WANDB_DISABLE_SERVICE"] = "false"  # Ensure service is enabled
         os.environ["WANDB_SERVICE"] = ""  # Clear any inherited service path
         try:
@@ -268,8 +269,9 @@ class TrainingService:
                 init_config.get("project"),
                 init_config.get("mode"),
             )
-            logger.debug("Full init_config keys received in training process: %s", list(init_config.keys()))
-            
+            logger.debug(
+                "Full init_config keys received in training process: %s", list(init_config.keys())
+            )
             # Verify critical parameters are present
             if not init_config.get("entity"):
                 logger.warning("⚠️  WandB entity not set in training process - will use default")
@@ -322,7 +324,6 @@ class TrainingService:
                     # Set current block context so metric appears in WandB properly
                     current_block = await self.subtensor.get_current_block()
                     self.monitor.set_block_context(current_block, None)
-                    
                     await self.monitor.log_gauge("training_process/connection_test", 1.0)
                     await self.monitor.flush_metrics()
                     test_duration = time.time() - test_start
