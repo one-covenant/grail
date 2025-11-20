@@ -251,16 +251,30 @@ class TrainingService:
             logger.info("No monitoring config provided, skipping monitoring setup")
             return
 
+        # FIRST: Test direct WandB connection (bypasses monitoring class)
+        import os
+        os.environ["WANDB_DISABLE_SERVICE"] = "false"  # Ensure service is enabled
+        os.environ["WANDB_SERVICE"] = ""  # Clear any inherited service path
         try:
             backend_type = self.monitor_config.get("backend_type", "wandb")
             init_config = {k: v for k, v in self.monitor_config.items() if k != "backend_type"}
 
             logger.debug(
-                "Initializing monitoring: backend_type=%s run_name=%s run_id=%s",
+                "Initializing monitoring: backend_type=%s run_name=%s run_id=%s entity=%s project=%s mode=%s",
                 backend_type,
                 init_config.get("run_name"),
                 init_config.get("run_id"),
+                init_config.get("entity"),
+                init_config.get("project"),
+                init_config.get("mode"),
             )
+            logger.debug("Full init_config keys received in training process: %s", list(init_config.keys()))
+            
+            # Verify critical parameters are present
+            if not init_config.get("entity"):
+                logger.warning("⚠️  WandB entity not set in training process - will use default")
+            if not init_config.get("project"):
+                logger.warning("⚠️  WandB project not set in training process - will use default")
 
             if "run_id" in init_config:
                 logger.info(
@@ -272,28 +286,56 @@ class TrainingService:
             self.monitor = get_monitoring_manager()
             logger.info("Monitoring initialized in training process")
 
-            # Test WandB connection immediately
+            # Actually start the WandB run (connects to API, resumes run)
+            # This is critical - without this, the run is not actually initialized
             run_name = init_config.get("run_name")
-            if self.monitor and run_name:
-                logger.info(
-                    f"Testing WandB connection (shared mode: x_primary=False, x_label=training_process, run_id={init_config.get('run_id')}, run_name={run_name})",
-                )
-                connection_start = time.time()
+            if run_name:
+                logger.info("Starting WandB run: %s", run_name)
+                start_time = time.time()
                 try:
+                    actual_run_id = await self.monitor.start_run(run_name, init_config)
+                    start_duration = time.time() - start_time
+                    logger.info(
+                        "✅ WandB run started successfully in %.1fs (run_id=%s)",
+                        start_duration,
+                        actual_run_id,
+                    )
+                except Exception as start_exc:
+                    start_duration = time.time() - start_time
+                    logger.error(
+                        "❌ Failed to start WandB run after %.1fs: %s",
+                        start_duration,
+                        start_exc,
+                    )
+                    logger.info(
+                        "Hint: Increase WANDB_INIT_TIMEOUT (current: %s) if shared mode workers timeout",
+                        init_config.get("init_timeout", "120"),
+                    )
+                    # Continue without monitoring
+                    return
+
+            # Test WandB metric logging with a simple gauge
+            if self.monitor and run_name:
+                logger.info("Testing WandB metric logging...")
+                test_start = time.time()
+                try:
+                    # Set current block context so metric appears in WandB properly
+                    current_block = await self.subtensor.get_current_block()
+                    self.monitor.set_block_context(current_block, None)
+                    
                     await self.monitor.log_gauge("training_process/connection_test", 1.0)
                     await self.monitor.flush_metrics()
-                    connection_duration = time.time() - connection_start
+                    test_duration = time.time() - test_start
                     logger.info(
-                        "✅ WandB connection successful in %.1fs (run_id=%s)",
-                        connection_duration,
-                        init_config.get("run_id"),
+                        "✅ WandB metric logging successful in %.3fs",
+                        test_duration,
                     )
-                except Exception as conn_exc:
-                    connection_duration = time.time() - connection_start
-                    logger.error(
-                        "❌ WandB connection failed after %.1fs: %s",
-                        connection_duration,
-                        conn_exc,
+                except Exception as test_exc:
+                    test_duration = time.time() - test_start
+                    logger.warning(
+                        "⚠️  WandB metric logging test failed after %.3fs: %s (training will continue)",
+                        test_duration,
+                        test_exc,
                     )
 
         except Exception as exc:
