@@ -91,6 +91,66 @@ class WandBBackend(MonitoringBackend):
         except ImportError:
             return None
 
+    def _build_wandb_settings(self) -> Any | None:
+        """Build wandb.Settings with shared mode, init_timeout, and custom overrides.
+        
+        WandB shared mode (>= 0.19.9) enables multiple processes to write to ONE run:
+        - Primary process: mode="shared", x_primary=True
+        - Worker processes: mode="shared", x_primary=False, x_label="worker_name"
+        
+        This replaces the old resume-based approach which caused 180s timeouts.
+        
+        Returns:
+            wandb.Settings instance if any overrides specified, else None
+        """
+        if self._wandb_module is None:
+            return None
+
+        settings_kwargs: dict[str, Any] = {}
+        
+        # Debug: Log what we have in config
+        logger.debug(
+            "_build_wandb_settings: checking config - wandb_shared_mode=%s",
+            self.config.get("wandb_shared_mode"),
+        )
+
+        # Init timeout (for slow network connections)
+        init_timeout = self.config.get("init_timeout")
+        if isinstance(init_timeout, (int, float)) and init_timeout > 0:
+            settings_kwargs["init_timeout"] = float(init_timeout)
+
+        # Shared mode for multi-process logging (wandb >= 0.19.9)
+        # Note: mode="shared" is passed as direct init() arg, not in Settings
+        # Settings only contains x_primary and x_label for process identification
+        if self.config.get("wandb_shared_mode"):
+            # Primary process or worker process?
+            x_primary = self.config.get("wandb_x_primary", False)
+            settings_kwargs["x_primary"] = x_primary
+            
+            # Label to distinguish processes in logs
+            x_label = self.config.get("wandb_x_label", "unknown")
+            settings_kwargs["x_label"] = x_label
+            
+            logger.info(
+                "Configuring WandB Settings for shared mode: x_primary=%s x_label=%s",
+                x_primary,
+                x_label,
+            )
+
+        # Allow additional custom settings from config
+        custom_settings = self.config.get("wandb_settings")
+        if isinstance(custom_settings, dict):
+            settings_kwargs.update(custom_settings)
+
+        if not settings_kwargs:
+            return None
+
+        try:
+            return self._wandb_module.Settings(**settings_kwargs)
+        except Exception as exc:
+            logger.warning("Failed to build WandB settings %s: %s", settings_kwargs, exc)
+            return None
+
     async def _ensure_wandb_run(self) -> None:
         """Ensure wandb run is initialized (lazy initialization)."""
         if self._wandb_run_started or not self._initialized or self._wandb_module is None:
@@ -126,22 +186,53 @@ class WandBBackend(MonitoringBackend):
             "project": self.config.get("project", "grail"),
             "name": self.config.get("run_name"),
             "config": self.config.get("hyperparameters", {}),
-            "mode": mode,
             "tags": self.config.get("tags", []),
             "notes": self.config.get("notes", ""),
-            "resume": self.config.get("resume", "allow"),
         }
 
-        # Handle run ID for multi-process coordination
-        # If run_id is provided, resume that specific run
-        if self.config.get("run_id"):
-            init_kwargs["id"] = self.config["run_id"]
-            init_kwargs["resume"] = "allow"
-            logger.info("Resuming W&B run with ID: %s", self.config["run_id"])
+        # Build settings first (includes shared mode + timeout config)
+        wandb_settings = self._build_wandb_settings()
+        
+        # Handle multi-process coordination
+        if self.config.get("wandb_shared_mode"):
+            # Shared mode (wandb >= 0.19.9): multiple processes write to ONE run
+            # Per WandB docs, mode="shared" is a direct init() parameter
+            # Settings contains x_primary=True/False, x_label="..." for process identification
+            init_kwargs["mode"] = "shared"
+            
+            if self.config.get("run_id"):
+                init_kwargs["id"] = self.config["run_id"]
+                logger.info(
+                    "Using WandB shared mode with run ID: %s (x_primary=%s, x_label=%s)",
+                    self.config["run_id"],
+                    self.config.get("wandb_x_primary"),
+                    self.config.get("wandb_x_label"),
+                )
+        else:
+            # Legacy mode: use resume-based multi-process (slower, deprecated)
+            init_kwargs["mode"] = mode
+            init_kwargs["resume"] = self.config.get("resume", "allow")
+            
+            if self.config.get("run_id"):
+                init_kwargs["id"] = self.config["run_id"]
+                init_kwargs["resume"] = "allow"
+                logger.info("Resuming W&B run with ID: %s", self.config["run_id"])
 
         # Only set entity if provided
         if self.config.get("entity"):
             init_kwargs["entity"] = self.config["entity"]
+
+        if wandb_settings is not None:
+            init_kwargs["settings"] = wandb_settings
+
+        # Debug: Log exact parameters being passed to wandb.init()
+        logger.debug(
+            "Calling wandb.init() with: mode=%s, id=%s, project=%s, has_settings=%s",
+            init_kwargs.get("mode"),
+            init_kwargs.get("id"),
+            init_kwargs.get("project"),
+            wandb_settings is not None,
+        )
 
         run = self._wandb_module.init(**init_kwargs)
         self.run = run
@@ -565,13 +656,34 @@ class WandBBackend(MonitoringBackend):
 
         Args:
             run_name: Name for this run
-            config: Configuration and metadata for the run
+            config: Configuration and metadata for the run (from MonitoringConfig.for_training/mining/validation)
 
         Returns:
             Run ID for this session
         """
-        # Update config with new run name
-        self.config.update({**config, "run_name": run_name})
+        # Debug: Log what we received
+        logger.debug(
+            "Backend start_run called: run_name=%s, config_keys=%s, wandb_shared_mode=%s",
+            run_name,
+            list(config.keys()) if config else None,
+            config.get("wandb_shared_mode") if config else None,
+        )
+        
+        # Update config with new values from training/mining/validation config
+        # Note: config already includes run_name from MonitoringConfig.for_training()
+        self.config.update(config)
+        
+        # Ensure run_name is set (in case it's not in config)
+        if "run_name" not in self.config:
+            self.config["run_name"] = run_name
+        
+        # Debug: Verify shared mode config is present after update
+        logger.debug(
+            "Backend after config update: wandb_shared_mode=%s x_primary=%s x_label=%s",
+            self.config.get("wandb_shared_mode"),
+            self.config.get("wandb_x_primary"),
+            self.config.get("wandb_x_label"),
+        )
 
         # Ensure wandb run is started
         await self._ensure_wandb_run()
