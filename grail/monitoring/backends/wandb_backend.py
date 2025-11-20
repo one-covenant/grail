@@ -93,13 +93,13 @@ class WandBBackend(MonitoringBackend):
 
     def _build_wandb_settings(self) -> Any | None:
         """Build wandb.Settings with shared mode, init_timeout, and custom overrides.
-        
+
         WandB shared mode (>= 0.19.9) enables multiple processes to write to ONE run:
         - Primary process: mode="shared", x_primary=True
         - Worker processes: mode="shared", x_primary=False, x_label="worker_name"
-        
+
         This replaces the old resume-based approach which caused 180s timeouts.
-        
+
         Returns:
             wandb.Settings instance if any overrides specified, else None
         """
@@ -110,36 +110,30 @@ class WandBBackend(MonitoringBackend):
         # Adding any other settings (disable_git, heartbeat_seconds, etc.) may cause API timeouts
         if self.config.get("wandb_shared_mode"):
             settings_kwargs: dict[str, Any] = {}
-            
             # Primary process or worker process?
             x_primary = self.config.get("wandb_x_primary", False)
             settings_kwargs["x_primary"] = x_primary
-            
             # Label to distinguish processes in logs
             x_label = self.config.get("wandb_x_label", "unknown")
             settings_kwargs["x_label"] = x_label
-            
             # Init timeout (default 120s, increase for slow networks)
             init_timeout = self.config.get("init_timeout", 120.0)
             if isinstance(init_timeout, (int, float)) and init_timeout > 0:
                 settings_kwargs["init_timeout"] = float(init_timeout)
-            
             logger.info(
                 "Configuring MINIMAL WandB Settings for shared mode: x_primary=%s x_label=%s init_timeout=%ss",
                 x_primary,
                 x_label,
                 settings_kwargs.get("init_timeout"),
             )
-            
+
             try:
                 return self._wandb_module.Settings(**settings_kwargs)
             except Exception as exc:
                 logger.warning("Failed to build WandB settings %s: %s", settings_kwargs, exc)
                 return None
-        
         # Non-shared mode: standard settings
         settings_kwargs: dict[str, Any] = {}
-        
         # Init timeout (for slow network connections)
         init_timeout = self.config.get("init_timeout")
         if isinstance(init_timeout, (int, float)) and init_timeout > 0:
@@ -177,7 +171,7 @@ class WandBBackend(MonitoringBackend):
 
     def _sync_wandb_init(self) -> Any:
         """Synchronous wandb.init() call.
-        
+
         CRITICAL: In shared mode, workers MUST NOT pass name/config/tags/notes!
         Only primary process sets metadata. Workers only pass: id, project, entity.
         Passing metadata to workers causes 120s+ API timeout.
@@ -200,26 +194,25 @@ class WandBBackend(MonitoringBackend):
 
         # Build settings first (includes shared mode + timeout config)
         wandb_settings = self._build_wandb_settings()
-        
         # Handle multi-process coordination
         if self.config.get("wandb_shared_mode"):
             # Shared mode (wandb >= 0.19.9): multiple processes write to ONE run
             # Per WandB docs, mode="shared" is a direct init() parameter
             # Settings contains x_primary=True/False, x_label="..." for process identification
             init_kwargs["mode"] = "shared"
-            
             # Primary process: sets run metadata
             # Worker processes: only pass id, project, entity to connect to existing run
             is_primary = self.config.get("wandb_x_primary", False)
-            
             if is_primary:
                 # Primary creates the run with full metadata
-                init_kwargs.update({
-                    "name": self.config.get("run_name"),
-                    "config": self.config.get("hyperparameters", {}),
-                    "tags": self.config.get("tags", []),
-                    "notes": self.config.get("notes", ""),
-                })
+                init_kwargs.update(
+                    {
+                        "name": self.config.get("run_name"),
+                        "config": self.config.get("hyperparameters", {}),
+                        "tags": self.config.get("tags", []),
+                        "notes": self.config.get("notes", ""),
+                    }
+                )
                 logger.info(
                     "Using WandB shared mode as PRIMARY (x_label=%s)",
                     self.config.get("wandb_x_label"),
@@ -245,15 +238,16 @@ class WandBBackend(MonitoringBackend):
         else:
             # Legacy mode: use resume-based multi-process (slower, deprecated)
             # In legacy mode, always pass full metadata for resume
-            init_kwargs.update({
-                "name": self.config.get("run_name"),
-                "config": self.config.get("hyperparameters", {}),
-                "tags": self.config.get("tags", []),
-                "notes": self.config.get("notes", ""),
-                "mode": mode,
-                "resume": self.config.get("resume", "allow"),
-            })
-            
+            init_kwargs.update(
+                {
+                    "name": self.config.get("run_name"),
+                    "config": self.config.get("hyperparameters", {}),
+                    "tags": self.config.get("tags", []),
+                    "notes": self.config.get("notes", ""),
+                    "mode": mode,
+                    "resume": self.config.get("resume", "allow"),
+                }
+            )
             if self.config.get("run_id"):
                 init_kwargs["id"] = self.config["run_id"]
                 init_kwargs["resume"] = "allow"
@@ -277,10 +271,10 @@ class WandBBackend(MonitoringBackend):
                 logger.error(
                     "❌ BUG: Worker has metadata params (name/config/tags) - this causes 120s timeout!"
                 )
-            
             # CRITICAL FIX: Use separate directory for worker process to avoid file conflicts
             # This prevents "Stale file handle" errors when parent and child both write to wandb/
             import os
+
             subprocess_wandb_dir = os.path.join(os.getcwd(), "wandb_training")
             try:
                 os.makedirs(subprocess_wandb_dir, exist_ok=True)
@@ -290,18 +284,19 @@ class WandBBackend(MonitoringBackend):
                     subprocess_wandb_dir,
                 )
             except Exception as dir_exc:
-                logger.warning("Failed to create separate WandB dir %s: %s", subprocess_wandb_dir, dir_exc)
-            
+                logger.warning(
+                    "Failed to create separate WandB dir %s: %s", subprocess_wandb_dir, dir_exc
+                )
+
             # Debug: Log WandB-related environment variables that might affect connection
-            wandb_env_vars = {k: v for k, v in os.environ.items() if 'WANDB' in k.upper()}
+            wandb_env_vars = {k: v for k, v in os.environ.items() if "WANDB" in k.upper()}
             if wandb_env_vars:
                 logger.debug("WandB env vars in subprocess: %s", list(wandb_env_vars.keys()))
 
         # Debug: Log exact parameters being passed to wandb.init()
         # Log all wandb.init parameters for traceability (excluding any secrets)
         formatted_params = {
-            k: ("***" if "key" in k or "secret" in k else v)
-            for k, v in init_kwargs.items()
+            k: ("***" if "key" in k or "secret" in k else v) for k, v in init_kwargs.items()
         }
         logger.debug(
             "Calling wandb.init() with parameters: %s",
@@ -743,15 +738,12 @@ class WandBBackend(MonitoringBackend):
             list(config.keys()) if config else None,
             config.get("wandb_shared_mode") if config else None,
         )
-        
         # Update config with new values from training/mining/validation config
         # Note: config already includes run_name from MonitoringConfig.for_training()
         self.config.update(config)
-        
         # Ensure run_name is set (in case it's not in config)
         if "run_name" not in self.config:
             self.config["run_name"] = run_name
-        
         # Debug: Verify shared mode config is present after update
         logger.debug(
             "Backend after config update: wandb_shared_mode=%s x_primary=%s x_label=%s",

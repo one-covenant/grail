@@ -72,13 +72,16 @@ def train(
                 training_config,  # Pass full config (includes wandb_shared_mode)
             )
             logger.info(f"Started monitoring run: {run_id}")
-            
+
             # CRITICAL: Wait for WandB run to fully sync to cloud before spawning subprocess
             # Shared mode requires the primary run to be API-accessible before workers connect
             # Without this delay, workers timeout trying to connect to a not-yet-synced run
             if training_config.get("wandb_shared_mode"):
                 import asyncio
-                logger.info("Waiting 5s for WandB run to sync to cloud (shared mode requirement)...")
+
+                logger.info(
+                    "Waiting 5s for WandB run to sync to cloud (shared mode requirement)..."
+                )
                 await asyncio.sleep(5)
                 logger.info("WandB run sync complete, safe to spawn worker processes")
 

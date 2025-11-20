@@ -770,7 +770,7 @@ class TrainerNeuron(BaseNeuron):
                 monitor_config["backend_type"] = "wandb"
             elif "Null" in backend_class_name:
                 monitor_config["backend_type"] = "null"
-            
+
             # If using shared mode, training subprocess is a worker (not primary)
             if monitor_config.get("wandb_shared_mode"):
                 monitor_config["wandb_x_primary"] = False
@@ -801,7 +801,7 @@ class TrainerNeuron(BaseNeuron):
             monitor_config.get("project"),
         )
         logger.debug("Full monitor config keys being passed: %s", list(monitor_config.keys()))
-        
+
         # Warn if critical parameters are missing
         if not monitor_config.get("entity"):
             logger.warning("⚠️  entity not in monitor_config passed to subprocess!")
