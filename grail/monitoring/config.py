@@ -32,6 +32,8 @@ class MonitoringConfig:
             WANDB_NOTES: Description/notes for runs
             GRAIL_METRIC_BUFFER_SIZE: Size of metric buffer before flushing
             GRAIL_METRIC_FLUSH_INTERVAL: Interval in seconds between flushes
+            WANDB_INIT_TIMEOUT: Timeout (seconds) for wandb.init() (default: 180).
+                Increase if child processes timeout resuming parent runs (90s often insufficient).
 
         Returns:
             Configuration dictionary
@@ -39,6 +41,14 @@ class MonitoringConfig:
         # Parse tags from comma-separated string
         tags_str = os.getenv("WANDB_TAGS", "grail,bittensor")
         tags = [tag.strip() for tag in tags_str.split(",") if tag.strip()]
+
+        # Configure wandb.init() timeout (default 80s)
+        # Reduced timeout to fail faster if connection issues occur
+        init_timeout_env = os.getenv("WANDB_INIT_TIMEOUT", "80")
+        try:
+            init_timeout = float(init_timeout_env)
+        except ValueError:
+            init_timeout = 80.0
 
         return {
             "backend_type": os.getenv("GRAIL_MONITORING_BACKEND", "wandb"),
@@ -50,6 +60,7 @@ class MonitoringConfig:
             "buffer_size": int(os.getenv("GRAIL_METRIC_BUFFER_SIZE", "100")),
             "flush_interval": float(os.getenv("GRAIL_METRIC_FLUSH_INTERVAL", "30.0")),
             "resume": os.getenv("WANDB_RESUME", "allow"),
+            "init_timeout": init_timeout,
         }
 
     @staticmethod
@@ -135,6 +146,10 @@ class MonitoringConfig:
                     "operation_type": "training",
                     "wallet_name": wallet_part,
                 },
+                # Use WandB shared mode for multi-process logging (primary process)
+                "wandb_shared_mode": True,
+                "wandb_x_primary": True,
+                "wandb_x_label": "main_process",
             }
         )
 
