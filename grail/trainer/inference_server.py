@@ -155,13 +155,12 @@ class InferenceServerManager(ABC):
         if self._process is None or self._process.stdout is None:
             return
 
-        loop = asyncio.get_running_loop()
         try:
             while True:
                 if self._process is None or self._process.stdout is None:
                     break
                 # Read one line without blocking the event loop
-                line: bytes = await loop.run_in_executor(None, self._process.stdout.readline)
+                line: bytes = await asyncio.to_thread(self._process.stdout.readline)
                 if not line:
                     break
                 try:
