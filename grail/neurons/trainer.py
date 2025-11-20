@@ -793,11 +793,20 @@ class TrainerNeuron(BaseNeuron):
 
         # Debug log to verify config contents
         logger.debug(
-            "Monitor config for subprocess: backend_type=%s run_name=%s run_id=%s",
+            "Monitor config for subprocess: backend_type=%s run_name=%s run_id=%s entity=%s project=%s",
             monitor_config.get("backend_type"),
             monitor_config.get("run_name"),
             monitor_config.get("run_id"),
+            monitor_config.get("entity"),
+            monitor_config.get("project"),
         )
+        logger.debug("Full monitor config keys being passed: %s", list(monitor_config.keys()))
+        
+        # Warn if critical parameters are missing
+        if not monitor_config.get("entity"):
+            logger.warning("⚠️  entity not in monitor_config passed to subprocess!")
+        if not monitor_config.get("project"):
+            logger.warning("⚠️  project not in monitor_config passed to subprocess!")
 
         return monitor_config
 
