@@ -1689,14 +1689,15 @@ class GRPOAlgorithm(TrainingAlgorithm):
             )
 
             # Step 2: Compute current policy logprobs (with per-token for proper KL)
-            logprobs_current_sum, logprobs_current_per_token = compute_logprobs(
-                model,
-                input_ids_tensor,
-                attention_mask_tensor,
-                batch_prompt_lens,
-                batch_comp_lens,
-                return_per_token=True,
-            )
+            with accelerator.autocast():
+                logprobs_current_sum, logprobs_current_per_token = compute_logprobs(
+                    model,
+                    input_ids_tensor,
+                    attention_mask_tensor,
+                    batch_prompt_lens,
+                    batch_comp_lens,
+                    return_per_token=True,
+                )
 
             if not _is_finite_tensor(logprobs_current_sum):
                 cur_min = torch.nan_to_num(logprobs_current_sum).min().item()
@@ -1739,9 +1740,10 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 continue
 
             # Step 4: Compute reference model logprobs for KL divergence penalty (only if enabled)
+            logprobs_ref_per_token = None
             if kl_enabled:
                 if ref_model is not None:
-                    with torch.no_grad():
+                    with torch.no_grad(), accelerator.autocast():
                         logprobs_ref_sum, logprobs_ref_per_token = compute_logprobs(
                             ref_model,
                             input_ids_tensor,
@@ -1757,7 +1759,11 @@ class GRPOAlgorithm(TrainingAlgorithm):
                             "Non-finite reference logprobs; skipping batch",
                             extra={"min": float(ref_min), "max": float(ref_max)},
                         )
+                        # Free tensors before continuing
+                        del logprobs_ref_sum, logprobs_ref_per_token
                         continue
+                    # Delete reference sum to free memory (only need per-token)
+                    del logprobs_ref_sum
                 else:
                     # If no ref model, set ref per-token logprobs equal to current (zero KL)
                     logprobs_ref_per_token = logprobs_current_per_token.detach()
@@ -1799,17 +1805,23 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 kl_value = 0.0
 
             # Step 9: Compute entropy regularization
-            entropies = compute_entropy(
-                model,
-                input_ids_tensor,
-                attention_mask_tensor,
-                batch_prompt_lens,
-                batch_comp_lens,
-            )
-            if not _is_finite_tensor(entropies):
-                logger.warning("Non-finite entropies; skipping batch")
-                continue
-            loss_entropy = -self.config.entropy_coef * entropies.mean()
+            # Only compute entropy if coefficient is non-zero (saves memory)
+            if self.config.entropy_coef > 0.0:
+                entropies = compute_entropy(
+                    model,
+                    input_ids_tensor,
+                    attention_mask_tensor,
+                    batch_prompt_lens,
+                    batch_comp_lens,
+                )
+                if not _is_finite_tensor(entropies):
+                    logger.warning("Non-finite entropies; skipping batch")
+                    continue
+                loss_entropy = -self.config.entropy_coef * entropies.mean()
+            else:
+                # Skip entropy computation entirely when coefficient is zero
+                entropies = torch.zeros(len(batch_rollouts), device=accelerator.device)
+                loss_entropy = torch.tensor(0.0, device=accelerator.device)
 
             # Step 10: Aggregate total loss
             loss_total = loss_pg + loss_kl + loss_entropy
