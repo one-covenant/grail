@@ -77,6 +77,13 @@ TRAINER_KL_MAX = float(os.getenv("GRAIL_TRAINER_KL_MAX", "0.2"))
 # Flash Attention for training optimization
 TRAINER_USE_FLASH_ATTENTION = os.getenv("GRAIL_TRAINER_USE_FLASH_ATTENTION", "1") == "1"
 
+# Gradient checkpointing for training memory efficiency
+# Reduces activation memory by recomputing on backward pass (~20-30% memory reduction)
+# Trade-off: ~10-15% slower training (recomputation cost), but enables larger batches/longer sequences
+TRAINER_USE_GRADIENT_CHECKPOINTING = (
+    os.getenv("GRAIL_TRAINER_USE_GRADIENT_CHECKPOINTING", "1") == "1"
+)
+
 # Trainer miner trust filtering (weight-based)
 TRAINER_MIN_AGGREGATE_WEIGHT = float(os.getenv("GRAIL_TRAINER_MIN_AGGREGATE_WEIGHT", "0.01"))
 TRAINER_MIN_TRUSTED_MINERS = int(os.getenv("GRAIL_TRAINER_MIN_TRUSTED_MINERS", "1"))
@@ -85,7 +92,7 @@ TRAINER_MIN_TRUSTED_MINERS = int(os.getenv("GRAIL_TRAINER_MIN_TRUSTED_MINERS", "
 # Stage 1 (fast structural/cheap filters) happens before Stage 2.
 # Defaults are conservative so behavior is unchanged unless configured.
 GRPO_MAX_GROUPS = int(os.getenv("GRAIL_GRPO_MAX_GROUPS", "10000"))
-GRPO_MAX_COMPLETION_TOKENS = int(os.getenv("GRAIL_GRPO_MAX_COMPLETION_TOKENS", "512"))
+GRPO_MAX_COMPLETION_TOKENS = int(os.getenv("GRAIL_GRPO_MAX_COMPLETION_TOKENS", "1024"))
 
 # GRPO loss aggregation variant
 # Options: 'grpo' (per-sequence), 'bnpo' (global token avg),
@@ -118,7 +125,7 @@ CHECKPOINT_RETENTION_LIMIT = int(os.getenv("GRAIL_CHECKPOINT_RETENTION_LIMIT", "
 CHECKPOINT_MILESTONE_INTERVAL = int(os.getenv("GRAIL_CHECKPOINT_MILESTONE_INTERVAL", "100"))
 
 # Trainer identity used for checkpoint publication
-TRAINER_UID = 0
+TRAINER_UID = 80
 
 # ────────────────  LOGGING  ────────────────
 
