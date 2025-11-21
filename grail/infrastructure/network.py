@@ -59,6 +59,8 @@ class ResilientSubtensor:
         object.__setattr__(self, "_circuit_timeout", 30.0)  # Stay open for 30s
         # Metagraph cache
         object.__setattr__(self, "_metagraph_cache", {})
+        # Track last successful call for idle detection
+        object.__setattr__(self, "_last_call_timestamp", time.time())
 
     def _is_circuit_open(self) -> bool:
         """Check if circuit breaker is currently open."""
@@ -111,11 +113,36 @@ class ResilientSubtensor:
             if hasattr(subtensor, "network")
             else os.getenv("BT_NETWORK", "finney")
         )
+
+        # Close old subtensor to prevent resource leaks
+        try:
+            if hasattr(subtensor, "close"):
+                if asyncio.iscoroutinefunction(subtensor.close):
+                    await subtensor.close()
+                else:
+                    subtensor.close()
+                logger.debug("Closed old subtensor connection")
+        except Exception as exc:
+            logger.warning("Failed to close old subtensor: %s", exc)
+
         new_subtensor = bt.async_subtensor(network=network)
         await new_subtensor.initialize()
         object.__setattr__(self, "_subtensor", new_subtensor)
         self._reset_circuit_breaker()
         logger.info("✅ Subtensor connection restarted")
+
+    async def restart(self) -> None:
+        """Public method to restart subtensor connection."""
+        await self._restart_subtensor()
+
+    async def close(self) -> None:
+        """Close the underlying subtensor connection."""
+        subtensor = object.__getattribute__(self, "_subtensor")
+        if hasattr(subtensor, "close"):
+            if asyncio.iscoroutinefunction(subtensor.close):
+                await subtensor.close()
+            else:
+                subtensor.close()
 
     async def _handle_circuit_open(self, method_name: str, args: tuple) -> Any:
         """Handle method call when circuit breaker is open."""
@@ -138,6 +165,8 @@ class ResilientSubtensor:
             self._cache_metagraph(args[0], result)
         if retry > 0:
             logger.info("✅ %s() succeeded on attempt %d", method_name, retry + 1)
+        # Update last call timestamp
+        object.__setattr__(self, "_last_call_timestamp", time.time())
 
     async def _handle_retry_backoff(
         self,
@@ -197,6 +226,22 @@ class ResilientSubtensor:
         # Double timeout for metagraph calls
         if method_name == "metagraph":
             timeout = timeout * 2
+
+        # Double timeout if connection has been idle for 20+ seconds
+        # Research-based threshold:
+        # - Bittensor WebSocket auto-closes after 10s inactivity
+        # - Substrate layer closes after ~60s inactivity
+        # - 20s catches stale connections early without false positives
+        # - Critical for upload worker (40-300s idle during R2 uploads)
+        last_call_timestamp = object.__getattribute__(self, "_last_call_timestamp")
+        idle_duration = time.time() - last_call_timestamp
+        if idle_duration > 60.0:
+            logger.warning(
+                "⏰ Connection idle for %.1fs, restarting subtensor and doubling timeout for %s",
+                idle_duration,
+                method_name,
+            )
+            await self._restart_subtensor()
 
         # Retry loop
         for retry in range(retries):
