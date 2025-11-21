@@ -52,6 +52,16 @@ async def upload_worker_loop(
     """
     logger.info("Upload worker starting (poll_interval=%ds)", poll_interval)
 
+    # Log subtensor configuration (verify env vars are propagated)
+    import os
+
+    logger.info(
+        "Subtensor config: BT_CALL_TIMEOUT=%s BT_CALL_RETRIES=%s BT_CALL_BACKOFF=%s",
+        os.getenv("BT_CALL_TIMEOUT", "NOT_SET"),
+        os.getenv("BT_CALL_RETRIES", "NOT_SET"),
+        os.getenv("BT_CALL_BACKOFF", "NOT_SET"),
+    )
+
     # Create resilient subtensor connection in child process
     subtensor = await create_subtensor(resilient=True)
     logger.info("Created resilient subtensor connection in upload worker")
@@ -99,6 +109,11 @@ async def upload_worker_loop(
             upload_duration = time.time() - upload_start_time
 
             # Calculate ready_window based on FINISH time
+            # ResilientSubtensor will auto-double timeout due to idle period during upload
+            logger.info(
+                "Getting current block after %.1fs upload (idle detection will extend timeout)",
+                upload_duration,
+            )
             current_block = await subtensor.get_current_block()
             ready_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
             blocks_elapsed = current_block - upload_start_block
