@@ -13,11 +13,15 @@ import asyncio
 import gc
 import logging
 import multiprocessing
+import os
 import random
 import sys
 import time
 from types import SimpleNamespace
 from typing import Any
+
+if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import bittensor as bt
 import numpy as np
@@ -190,6 +194,9 @@ class TrainingService:
 
         # Get current block first before using it
         current_block = await self.subtensor.get_current_block()
+        current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
+        if self.monitor:
+            self.monitor.set_block_context(current_block, current_window)
         target_block = current_block + WAIT_WINDOW_LENGTH
         logger.info(
             "Waiting %s window for miners (until block %s)", WAIT_WINDOW_LENGTH, target_block
@@ -197,6 +204,9 @@ class TrainingService:
 
         while not stop_event.is_set():
             current_block = await self.subtensor.get_current_block()
+            current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
+            if self.monitor:
+                self.monitor.set_block_context(current_block, current_window)
             if current_block >= target_block:
                 logger.info("Wait complete, starting continuous training")
                 break
@@ -225,6 +235,23 @@ class TrainingService:
         self.train_model = train_model
         self.ref_model = ref_model
         self.tokenizer = tokenizer
+
+        # Enable gradient checkpointing on the raw model before accelerator wrapping (if configured)
+        if self.config.use_gradient_checkpointing:
+            if hasattr(self.train_model, "gradient_checkpointing_enable"):
+                try:
+                    self.train_model.gradient_checkpointing_enable()
+                    logger.info(
+                        "✅ Gradient checkpointing enabled for train_model (pre-accelerator)"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to enable gradient checkpointing: %s", exc)
+            else:
+                logger.debug("Model does not support gradient_checkpointing_enable()")
+        else:
+            logger.info(
+                "Gradient checkpointing disabled (via GRAIL_TRAINER_USE_GRADIENT_CHECKPOINTING=0)"
+            )
         logger.info(
             "Training artifacts loaded (train=%s, ref=%s, ref_enabled=%s)",
             getattr(self.train_model, "name_or_path", "unknown"),
@@ -341,7 +368,8 @@ class TrainingService:
                 try:
                     # Set current block context so metric appears in WandB properly
                     current_block = await self.subtensor.get_current_block()
-                    self.monitor.set_block_context(current_block, None)
+                    current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
+                    self.monitor.set_block_context(current_block, current_window)
                     await self.monitor.log_gauge("training_process/connection_test", 1.0)
                     await self.monitor.flush_metrics()
                     test_duration = time.time() - test_start
@@ -408,6 +436,8 @@ class TrainingService:
         """
         current_block = await self.subtensor.get_current_block()
         current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
+        if self.monitor:
+            self.monitor.set_block_context(current_block, current_window)
 
         logger.info(
             "Saving initial checkpoint for window %s (upload handled by worker)", current_window
@@ -705,7 +735,10 @@ class TrainingService:
         """
         try:
             current_block = await self.subtensor.get_current_block()
-            return (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
+            current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
+            if self.monitor:
+                self.monitor.set_block_context(current_block, current_window)
+            return current_window
         except Exception as exc:
             logger.warning("Failed to get current block: %s", exc)
             return self.epoch_counter * WINDOW_LENGTH
@@ -758,6 +791,9 @@ class TrainingService:
                 target_data_window,
                 self.last_loaded_window,
             )
+
+            # TEST: filter to uid 80 hotkey and choose between all hotkeys
+            trusted_hotkeys = [hk for hk, uid in uid_by_hotkey.items() if uid == 80]
 
             new_groups = await load_grpo_groups(
                 target_data_window,

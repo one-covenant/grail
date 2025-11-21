@@ -50,6 +50,9 @@ class TrainingConfig:
     # GRPO variant selection
     grpo_variant: str = constants.GRPO_VARIANT
 
+    # Gradient checkpointing for memory efficiency
+    use_gradient_checkpointing: bool = constants.TRAINER_USE_GRADIENT_CHECKPOINTING
+
     # Data loading
     rollouts_per_problem: int = constants.ROLLOUTS_PER_PROBLEM
 
