@@ -38,7 +38,6 @@ from grail.infrastructure.checkpoint_consumer import (
 )
 from grail.infrastructure.comms import delete_prefix, get_file_size, upload_file_chunked
 from grail.shared.constants import (
-    CHECKPOINT_MILESTONE_INTERVAL,
     CHECKPOINT_RETENTION_LIMIT,
     TRAINER_BATCH_SIZE,
     TRAINER_ENTROPY_COEF,
@@ -58,10 +57,13 @@ logger = logging.getLogger(__name__)
 def _compute_keep_windows(current_window: int) -> set[int]:
     """Calculate which checkpoint windows should be retained.
 
-    Retention policy:
-    - Always keep windows 0-9 (bootstrap checkpoints)
-    - Keep latest N windows (CHECKPOINT_RETENTION_LIMIT)
-    - Keep milestone windows (every CHECKPOINT_MILESTONE_INTERVAL)
+    Retention policy (simplified to avoid S3 pagination issues):
+    - Keep only latest N windows (CHECKPOINT_RETENTION_LIMIT)
+    - No bootstrap checkpoint retention (removes 0-9)
+    - No milestone retention (keeps total R2 objects under 1000)
+
+    This ensures list_objects_v2 never needs pagination, avoiding
+    stale client issues with aiobotocore cached connections.
 
     Args:
         current_window: Current window number
@@ -73,22 +75,11 @@ def _compute_keep_windows(current_window: int) -> set[int]:
     if current_window < 0:
         return keep
 
-    # Always keep windows 0-9
-    keep.update(range(10))
-
-    # Keep latest windows up to limit
+    # Keep only latest N windows (typically 1-3)
     for idx in range(CHECKPOINT_RETENTION_LIMIT):
         window = current_window - idx * WINDOW_LENGTH
         if window >= 0:
             keep.add(window)
-
-    # Keep milestones (every CHECKPOINT_MILESTONE_INTERVAL windows)
-    interval_blocks = CHECKPOINT_MILESTONE_INTERVAL * WINDOW_LENGTH
-    if interval_blocks > 0:
-        milestone = (current_window // interval_blocks) * interval_blocks
-        while milestone >= 0:
-            keep.add(milestone)
-            milestone -= interval_blocks
 
     return keep
 
