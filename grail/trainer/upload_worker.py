@@ -66,6 +66,9 @@ async def upload_worker_loop(
     subtensor = await create_subtensor(resilient=True)
     logger.info("Created resilient subtensor connection in upload worker")
 
+    # Track last uploaded window to prevent duplicate uploads within same window
+    last_uploaded_window = -1
+
     while not stop_event.is_set():
         try:
             # Check if snapshot ready
@@ -74,6 +77,24 @@ async def upload_worker_loop(
                 continue
 
             logger.info("New snapshot detected, preparing upload")
+
+            # Determine target window BEFORE copying snapshot
+            upload_start_block = await subtensor.get_current_block()
+            checkpoint_window = (upload_start_block // WINDOW_LENGTH) * WINDOW_LENGTH
+
+            # Skip if we already uploaded to this window
+            if checkpoint_window == last_uploaded_window:
+                logger.info(
+                    "Already uploaded to window %s, skipping duplicate upload and clearing snapshot marker",
+                    checkpoint_window,
+                )
+                # Clear the snapshot marker so training can continue
+                try:
+                    snapshot_manager.copy_snapshot_to_staging()
+                    snapshot_manager.cleanup_staging()
+                except FileNotFoundError as exc:
+                    logger.warning("Snapshot not found during cleanup: %s", exc)
+                continue
 
             # Copy snapshot to staging
             try:
@@ -84,8 +105,6 @@ async def upload_worker_loop(
 
             # Record upload start for timing
             upload_start_time = time.time()
-            upload_start_block = await subtensor.get_current_block()
-            checkpoint_window = (upload_start_block // WINDOW_LENGTH) * WINDOW_LENGTH
 
             logger.info(
                 "Starting upload at block %s for checkpoint-%s",
@@ -140,6 +159,9 @@ async def upload_worker_loop(
                     )
             except Exception as exc:
                 logger.error("Failed to finalize checkpoint READY marker: %s", exc)
+
+            # Update last uploaded window to prevent duplicates
+            last_uploaded_window = checkpoint_window
 
             # Cleanup staging directory
             snapshot_manager.cleanup_staging()
