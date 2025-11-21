@@ -203,7 +203,13 @@ class MinerNeuron(BaseNeuron):
                                     )
                                     tokenizer = get_tokenizer(str(checkpoint_path))
                                     current_checkpoint_window = checkpoint_window
+
+                                    # Log model configuration details
                                     if torch.cuda.is_available():
+                                        logger.info(
+                                            f"GPU Memory: allocated={torch.cuda.memory_allocated() / 1024**3:.2f}GB, "
+                                            f"reserved={torch.cuda.memory_reserved() / 1024**3:.2f}GB"
+                                        )
                                         torch.cuda.empty_cache()
                                 except Exception:
                                     logger.exception(
