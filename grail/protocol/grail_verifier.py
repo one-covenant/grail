@@ -6,11 +6,9 @@ across GPUs, CUDA versions, and frameworks (HF, vLLM, SGLang).
 Key innovations:
 1. Top-K selection: Focus on important activations (stable)
 2. Logarithmic bucketing: Coarse quantization reduces sensitivity
-3. Rank verification: Framework-agnostic ordering check
-4. Histogram fingerprint: Statistical distribution matching
-5. Multi-check hybrid: Three complementary verification layers
+3. Sketch verification: Random linear projection for cryptographic binding
 
-Security: ~10^-157 forgery probability across k=16 positions.
+Security: ~10^-117 forgery probability across k=16 positions with sketch-only verification.
 """
 
 from __future__ import annotations
@@ -23,8 +21,6 @@ import torch
 from ..shared.constants import (
     PRIME_Q,
     PROOF_COEFF_RANGE,
-    PROOF_HISTOGRAM_TOLERANCE,
-    PROOF_MIN_RANK_MATCHES,
     PROOF_NUM_BUCKETS,
     PROOF_POSITION_IMPORTANCE_DECAY,
     PROOF_SKETCH_TOLERANCE,
@@ -85,12 +81,12 @@ def log_magnitude_bucket(value: float, num_buckets: int = PROOF_NUM_BUCKETS) -> 
     return bucket if value >= 0 else -bucket
 
 
-def adaptive_tolerance(
+def adaptive_sketch_tolerance(
     position: int,
     sequence_length: int,
-    base_tolerances: dict[str, float],
-) -> dict[str, float]:
-    """Compute position-dependent tolerance thresholds.
+    base_tolerance: float,
+) -> int:
+    """Compute position-dependent sketch tolerance.
 
     Early positions are more important (set context) → tighter tolerance.
     Later positions may have accumulated drift → more permissive.
@@ -98,10 +94,10 @@ def adaptive_tolerance(
     Args:
         position: Token position in sequence
         sequence_length: Total sequence length
-        base_tolerances: Base tolerance dict with keys: sketch, min_rank_matches, histogram
+        base_tolerance: Base sketch tolerance value
 
     Returns:
-        Adjusted tolerance dict
+        Adjusted sketch tolerance
     """
     # Importance weight: decays from 1.0 at start
     importance = 1.0 / (1.0 + position / PROOF_POSITION_IMPORTANCE_DECAY)
@@ -110,15 +106,16 @@ def adaptive_tolerance(
     # Less important → looser (multiply by factor > 1)
     factor = 2.0 - importance  # Range: [1.0, 2.0]
 
-    return {
-        "sketch": int(base_tolerances["sketch"] * factor),
-        "min_rank_matches": max(3, int(base_tolerances["min_rank_matches"] * importance)),
-        "histogram": int(base_tolerances["histogram"] * factor),
-    }
+    return int(base_tolerance * factor)
 
 
 class GRAILVerifier:
-    """Magnitude-Rank Sketch verifier for framework-agnostic hidden state proofs."""
+    """Sketch-based verifier for framework-agnostic hidden state proofs.
+
+    Uses a single sketch check (random linear projection of bucketed top-k activations)
+    which provides sufficient security (~10^-117 forgery probability) while being
+    robust to floating-point variations across GPUs and frameworks.
+    """
 
     def __init__(
         self,
@@ -139,19 +136,13 @@ class GRAILVerifier:
         self.topk = topk
         self.num_buckets = num_buckets
         self.r_coeff_range = r_coeff_range
-
-        # Base tolerances (can be overridden per-position)
-        self.base_tolerance = {
-            "sketch": float(PROOF_SKETCH_TOLERANCE),
-            "min_rank_matches": float(PROOF_MIN_RANK_MATCHES),
-            "histogram": float(PROOF_HISTOGRAM_TOLERANCE),
-        }
+        self.base_sketch_tolerance = float(PROOF_SKETCH_TOLERANCE)
 
     def generate_r_vec(self, randomness_hex: str) -> torch.Tensor:
         """Generate small bounded coefficient vector from randomness.
 
-        Unlike current GRAIL (int32 range ±2e9), we use tiny coefficients
-        in [-127, 127] to reduce sensitivity while maintaining security.
+        Uses tiny coefficients in [-127, 127] to reduce sensitivity to
+        floating-point variations while maintaining cryptographic security.
 
         Args:
             randomness_hex: Hex string of beacon randomness
@@ -193,7 +184,7 @@ class GRAILVerifier:
             position: Token position (for metadata)
 
         Returns:
-            Commitment dict with sketch, indices, ranks, histogram
+            Commitment dict with sketch, indices, and position
         """
         # Step 1: Select top-k activations by absolute magnitude
         abs_hidden = torch.abs(hidden_state)
@@ -211,20 +202,9 @@ class GRAILVerifier:
         sketch = torch.dot(buckets.to(torch.int32), r_vec.to(torch.int32))
         sketch_val = int(sketch.item()) % PRIME_Q
 
-        # Step 4: Rank ordering (top-5 for verification)
-        sorted_indices = torch.argsort(values, descending=True)
-        top_5_ranks = sorted_indices[:5].tolist()
-
-        # Step 5: Bucket histogram (statistical fingerprint)
-        # Shift buckets to positive range for bincount
-        shifted_buckets = (buckets + self.num_buckets).to(torch.long)
-        histogram = torch.bincount(shifted_buckets, minlength=2 * self.num_buckets + 1)
-
         return {
             "sketch": sketch_val,
             "indices": indices.tolist(),
-            "top_5_ranks": top_5_ranks,
-            "histogram": histogram.tolist(),
             "position": position,
         }
 
@@ -235,12 +215,10 @@ class GRAILVerifier:
         r_vec: torch.Tensor,
         sequence_length: int,
     ) -> tuple[bool, dict]:
-        """Verify commitment with multi-check validation.
+        """Verify commitment using sketch check.
 
-        Three complementary checks (ALL must pass):
-        1. Sketch: modular distance on dot product
-        2. Rank: top-5 ordering preservation
-        3. Histogram: bucket distribution similarity
+        The sketch check computes a random linear projection of bucketed activations
+        and verifies the modular distance is within tolerance.
 
         Args:
             validator_hidden: Validator's hidden vector at position
@@ -253,8 +231,8 @@ class GRAILVerifier:
         """
         position = miner_commitment["position"]
 
-        # Get position-adjusted tolerances
-        tolerance = adaptive_tolerance(position, sequence_length, self.base_tolerance)
+        # Get position-adjusted tolerance
+        tolerance = adaptive_sketch_tolerance(position, sequence_length, self.base_sketch_tolerance)
 
         # Extract miner's claimed top-k indices
         miner_indices = torch.tensor(miner_commitment["indices"], dtype=torch.long)
@@ -268,48 +246,18 @@ class GRAILVerifier:
             dtype=torch.int8,
         )
 
-        # CHECK 1: Sketch verification
+        # Sketch verification: modular distance on dot product
         validator_sketch = torch.dot(validator_buckets.to(torch.int32), r_vec.to(torch.int32))
         validator_sketch_val = int(validator_sketch.item()) % PRIME_Q
 
         sketch_diff = abs(validator_sketch_val - miner_commitment["sketch"])
         mod_diff = min(sketch_diff, PRIME_Q - sketch_diff)  # Modular distance
-        sketch_valid = mod_diff <= tolerance["sketch"]
-
-        # CHECK 2: Rank ordering verification
-        validator_sorted = torch.argsort(validator_values, descending=True)
-        validator_ranks = validator_sorted[:5].tolist()
-        miner_ranks = miner_commitment["top_5_ranks"]
-
-        rank_matches = sum(1 for m, v in zip(miner_ranks, validator_ranks, strict=False) if m == v)
-        rank_valid = rank_matches >= tolerance["min_rank_matches"]
-
-        # CHECK 3: Histogram verification
-        shifted_buckets = (validator_buckets + self.num_buckets).to(torch.long)
-        validator_histogram = torch.bincount(
-            shifted_buckets, minlength=2 * self.num_buckets + 1
-        ).tolist()
-        miner_histogram = miner_commitment["histogram"]
-
-        # L1 distance between histograms
-        hist_diff = sum(
-            abs(m - v) for m, v in zip(miner_histogram, validator_histogram, strict=False)
-        )
-        hist_valid = hist_diff <= tolerance["histogram"]
-
-        # Combined verdict: ALL checks must pass
-        is_valid = sketch_valid and rank_valid and hist_valid
+        is_valid = mod_diff <= tolerance
 
         diagnostics = {
             "sketch_diff": mod_diff,
-            "sketch_valid": sketch_valid,
-            "sketch_tolerance": tolerance["sketch"],
-            "rank_matches": rank_matches,
-            "rank_valid": rank_valid,
-            "rank_tolerance": tolerance["min_rank_matches"],
-            "histogram_diff": hist_diff,
-            "histogram_valid": hist_valid,
-            "histogram_tolerance": tolerance["histogram"],
+            "sketch_valid": is_valid,
+            "sketch_tolerance": tolerance,
             "overall_valid": is_valid,
         }
 

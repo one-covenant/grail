@@ -85,7 +85,7 @@ TRAINER_MIN_TRUSTED_MINERS = int(os.getenv("GRAIL_TRAINER_MIN_TRUSTED_MINERS", "
 # Stage 1 (fast structural/cheap filters) happens before Stage 2.
 # Defaults are conservative so behavior is unchanged unless configured.
 GRPO_MAX_GROUPS = int(os.getenv("GRAIL_GRPO_MAX_GROUPS", "32"))
-GRPO_MAX_COMPLETION_TOKENS = int(os.getenv("GRAIL_GRPO_MAX_COMPLETION_TOKENS", "512"))
+GRPO_MAX_COMPLETION_TOKENS = int(os.getenv("GRAIL_GRPO_MAX_COMPLETION_TOKENS", "1024"))
 
 # GRPO loss aggregation variant
 # Options: 'grpo' (per-sequence), 'bnpo' (global token avg),
@@ -221,18 +221,9 @@ PROOF_NUM_BUCKETS = 16  # Buckets per sign
 # Small bounded coefficients for sketch robustness
 PROOF_COEFF_RANGE = 127  # r ∈ [-127, 127]
 
-# Multi-check tolerances (calibrate empirically via cross-framework tests)
-# Sketch: modular distance on dot product
-# UPDATED: Reduced from 1000 to 50 for tighter verification
+# Sketch tolerance: modular distance on dot product
+# Calibrated empirically via cross-framework tests
 PROOF_SKETCH_TOLERANCE = 50
-
-# Rank: minimum matches required in top-5 ordering
-# UPDATED: Increased from 4 to 5 for stricter rank matching
-PROOF_MIN_RANK_MATCHES = 5
-
-# Histogram: L1 distance on bucket distribution
-# UPDATED: Reduced from 50 to 10 for tighter distribution matching
-PROOF_HISTOGRAM_TOLERANCE = 10
 
 # Adaptive tolerance: position importance decay rate
 PROOF_POSITION_IMPORTANCE_DECAY = 100.0

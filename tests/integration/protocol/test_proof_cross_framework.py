@@ -105,14 +105,9 @@ class TestProofCrossFramework:
         # All checks should pass perfectly (same run)
         assert is_valid, f"Prompt {prompt_idx} verification failed"
 
-        # Verify perfect match
+        # Verify perfect sketch match
         avg_sketch_diff = sum(d["sketch_diff"] for d in diagnostics) / len(diagnostics)
-        avg_rank_matches = sum(d["rank_matches"] for d in diagnostics) / len(diagnostics)
-        avg_hist_diff = sum(d["histogram_diff"] for d in diagnostics) / len(diagnostics)
-
         assert avg_sketch_diff == 0.0, "Same run should have 0 sketch diff"
-        assert avg_rank_matches == 5.0, "Same run should have 5/5 rank matches"
-        assert avg_hist_diff == 0.0, "Same run should have 0 histogram diff"
 
     @requires_gpu
     def test_hf_to_hf_determinism(self, tokenizer: AutoTokenizer, device: str) -> None:
@@ -155,10 +150,7 @@ class TestProofCrossFramework:
 
         # Verify perfect match across loads
         max_sketch_diff = max(d["sketch_diff"] for d in diagnostics)
-        min_rank_matches = min(d["rank_matches"] for d in diagnostics)
-
         assert max_sketch_diff == 0, f"Sketch drift across loads: {max_sketch_diff}"
-        assert min_rank_matches == 5, "Rank mismatch across loads"
 
     @requires_gpu
     def test_proof_structure(
@@ -207,16 +199,12 @@ class TestProofCrossFramework:
         for idx, commitment in enumerate(proof["commitments"]):
             assert "sketch" in commitment, f"Position {idx} missing sketch"
             assert "indices" in commitment, f"Position {idx} missing indices"
-            assert "top_5_ranks" in commitment, f"Position {idx} missing ranks"
-            assert "histogram" in commitment, f"Position {idx} missing histogram"
             assert commitment["position"] == idx, f"Position mismatch at {idx}"
 
             # Type and size checks
             assert isinstance(commitment["sketch"], int)
             # Indices length depends on actual topk used (min of hidden_dim and PROOF_TOPK)
             assert len(commitment["indices"]) > 0
-            assert len(commitment["top_5_ranks"]) == 5
-            assert len(commitment["histogram"]) == 33  # 2*16+1
 
     @requires_gpu
     @pytest.mark.slow
@@ -229,8 +217,6 @@ class TestProofCrossFramework:
     ) -> None:
         """Test that verification metrics are reasonable across prompts."""
         all_sketch_diffs = []
-        all_rank_matches = []
-        all_hist_diffs = []
 
         from tests.proof_test_utils import hash_hex
 
@@ -252,10 +238,6 @@ class TestProofCrossFramework:
             # Collect metrics
             for d in diagnostics:
                 all_sketch_diffs.append(d["sketch_diff"])
-                all_rank_matches.append(d["rank_matches"])
-                all_hist_diffs.append(d["histogram_diff"])
 
         # All should be perfect for same-framework
         assert max(all_sketch_diffs) == 0, "Expected 0 sketch diff for HF→HF"
-        assert min(all_rank_matches) == 5, "Expected 5/5 rank matches for HF→HF"
-        assert max(all_hist_diffs) == 0, "Expected 0 histogram diff for HF→HF"

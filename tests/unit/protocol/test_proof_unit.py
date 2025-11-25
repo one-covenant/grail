@@ -8,12 +8,10 @@ import torch
 
 from grail.protocol.grail_verifier import (
     GRAILVerifier,
-    adaptive_tolerance,
+    adaptive_sketch_tolerance,
     log_magnitude_bucket,
 )
 from grail.shared.constants import (
-    PROOF_HISTOGRAM_TOLERANCE,
-    PROOF_MIN_RANK_MATCHES,
     PROOF_NUM_BUCKETS,
     PROOF_SKETCH_TOLERANCE,
 )
@@ -54,34 +52,25 @@ class TestLogMagnitudeBucket:
         assert abs(b_huge) <= PROOF_NUM_BUCKETS
 
 
-class TestAdaptiveTolerance:
-    """Test suite for adaptive tolerance computation."""
+class TestAdaptiveSketchTolerance:
+    """Test suite for adaptive sketch tolerance computation."""
 
-    @pytest.fixture
-    def base_tolerances(self) -> dict[str, float]:
-        """Base tolerance dict fixture."""
-        return {
-            "sketch": float(PROOF_SKETCH_TOLERANCE),
-            "min_rank_matches": float(PROOF_MIN_RANK_MATCHES),
-            "histogram": float(PROOF_HISTOGRAM_TOLERANCE),
-        }
-
-    def test_early_position_tighter(self, base_tolerances: dict[str, float]) -> None:
+    def test_early_position_tighter(self) -> None:
         """Early positions should have tighter or equal tolerance."""
-        tol_early = adaptive_tolerance(0, 100, base_tolerances)
-        assert tol_early["sketch"] <= base_tolerances["sketch"]
+        tol_early = adaptive_sketch_tolerance(0, 100, float(PROOF_SKETCH_TOLERANCE))
+        assert tol_early <= PROOF_SKETCH_TOLERANCE
 
-    def test_late_position_looser(self, base_tolerances: dict[str, float]) -> None:
+    def test_late_position_looser(self) -> None:
         """Late positions should have looser tolerance."""
-        tol_late = adaptive_tolerance(99, 100, base_tolerances)
-        assert tol_late["sketch"] >= base_tolerances["sketch"]
+        tol_late = adaptive_sketch_tolerance(99, 100, float(PROOF_SKETCH_TOLERANCE))
+        assert tol_late >= PROOF_SKETCH_TOLERANCE
 
-    def test_monotonic_increase(self, base_tolerances: dict[str, float]) -> None:
+    def test_monotonic_increase(self) -> None:
         """Tolerance should increase monotonically with position."""
-        tol_early = adaptive_tolerance(0, 100, base_tolerances)
-        tol_mid = adaptive_tolerance(50, 100, base_tolerances)
-        tol_late = adaptive_tolerance(99, 100, base_tolerances)
-        assert tol_early["sketch"] <= tol_mid["sketch"] <= tol_late["sketch"]
+        tol_early = adaptive_sketch_tolerance(0, 100, float(PROOF_SKETCH_TOLERANCE))
+        tol_mid = adaptive_sketch_tolerance(50, 100, float(PROOF_SKETCH_TOLERANCE))
+        tol_late = adaptive_sketch_tolerance(99, 100, float(PROOF_SKETCH_TOLERANCE))
+        assert tol_early <= tol_mid <= tol_late
 
 
 class TestGRAILVerifier:
@@ -128,8 +117,6 @@ class TestGRAILVerifier:
 
         assert "sketch" in commitment
         assert "indices" in commitment
-        assert "top_5_ranks" in commitment
-        assert "histogram" in commitment
         assert "position" in commitment
 
     def test_commitment_sizes(self, verifier: GRAILVerifier, randomness: str) -> None:
@@ -139,8 +126,6 @@ class TestGRAILVerifier:
         commitment = verifier.create_commitment(hidden, r_vec, position=0)
 
         assert len(commitment["indices"]) == 256
-        assert len(commitment["top_5_ranks"]) == 5
-        assert len(commitment["histogram"]) == 2 * PROOF_NUM_BUCKETS + 1
 
     def test_self_verification(self, verifier: GRAILVerifier, randomness: str) -> None:
         """Commitment should verify against itself perfectly."""
@@ -154,18 +139,16 @@ class TestGRAILVerifier:
 
         assert is_valid
         assert diagnostics["sketch_diff"] == 0
-        assert diagnostics["rank_matches"] == 5
-        assert diagnostics["histogram_diff"] == 0
 
     def test_robustness_to_small_drift(self, verifier: GRAILVerifier, randomness: str) -> None:
-        """Small drift should not break verification when top-5 are well-separated.
+        """Small drift should not break verification when top activations are well-separated.
 
         Realistic scenario: Important activations in trained models are clearly separated,
-        so tiny numerical drift from framework/GPU differences shouldn't change ordering.
+        so tiny numerical drift from framework/GPU differences shouldn't change bucketing.
         """
         r_vec = verifier.generate_r_vec(randomness)
 
-        # Build realistic hidden state: well-separated top-5 with background noise
+        # Build realistic hidden state: well-separated top activations with background noise
         hidden = torch.randn(4096) * 0.1
         top_indices = [10, 20, 30, 40, 50]
         hidden[top_indices] = torch.tensor([5.0, 4.0, 3.0, 2.0, 1.0])
@@ -179,10 +162,10 @@ class TestGRAILVerifier:
             hidden_drifted, commitment, r_vec, sequence_length=100
         )
 
-        assert is_valid, f"Well-separated top-5 should be robust to small drift: {diagnostics}"
+        assert is_valid, (
+            f"Well-separated activations should be robust to small drift: {diagnostics}"
+        )
         assert diagnostics["sketch_diff"] < PROOF_SKETCH_TOLERANCE
-        assert diagnostics["rank_matches"] == 5
-        assert diagnostics["histogram_valid"]
 
     def test_rejects_different_hidden_state(self, verifier: GRAILVerifier, randomness: str) -> None:
         """Completely different hidden state should be rejected."""

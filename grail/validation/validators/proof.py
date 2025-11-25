@@ -3,7 +3,8 @@
 Verifies rollout tokens using GPU/framework-agnostic hidden state verification.
 
 This validator works across HuggingFace Transformers, vLLM, SGLang, and different
-GPU/CUDA configurations using an activation sketch proof system.
+GPU/CUDA configurations using a sketch-based proof system (random linear projection
+of bucketed top-k activations).
 """
 
 from __future__ import annotations
@@ -24,15 +25,15 @@ logger = logging.getLogger(__name__)
 
 
 class GRAILProofValidator(Validator):
-    """Verifies GRAIL cryptographic proof using activation sketch verification.
+    """Verifies GRAIL cryptographic proof using sketch-based verification.
 
-    Multi-layer verification:
+    Verification steps:
     1. Signature binding (tokens, commitments, model, layer, randomness)
     2. Model inference to get hidden states
-    3. Multi-check verification at challenged indices (sketch + rank + histogram)
+    3. Sketch verification at challenged indices
     4. Caches logits for downstream validators (termination check)
 
-    Security: ~10^-157 forgery probability with 3 independent checks at k=16 positions.
+    Security: ~10^-117 forgery probability with sketch check at k=16 positions.
     """
 
     check_name = "proof_valid"
@@ -234,12 +235,8 @@ class GRAILProofValidator(Validator):
                 failed_checks.append((i, diagnostics))
                 logger.debug(
                     f"[proof_valid] Commitment verification failed at position {i} | "
-                    f"Sketch: diff={diagnostics['sketch_diff']:.6f} | "
-                    f"tolerance={diagnostics['sketch_tolerance']:.6f} | "
-                    f"Rank: matches={diagnostics['rank_matches']} | "
-                    f"tolerance={diagnostics['rank_tolerance']} | "
-                    f"Histogram: diff={diagnostics['histogram_diff']:.6f} | "
-                    f"tolerance={diagnostics['histogram_tolerance']:.6f}"
+                    f"sketch_diff={diagnostics['sketch_diff']:.6f} | "
+                    f"tolerance={diagnostics['sketch_tolerance']:.6f}"
                 )
 
         if failed_checks:
