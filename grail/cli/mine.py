@@ -431,7 +431,10 @@ def package_rollout_data(
     Returns:
         Signed dictionary ready to upload for validation
     """
-    rollout_nonce = base_nonce * 10 + rollout_idx
+    # CRITICAL: Use ROLLOUTS_PER_PROBLEM (16) as multiplier to avoid nonce collisions
+    # Old formula (base_nonce * 10) caused duplicates when rollout_idx >= 10
+    # e.g., problem 14 rollout 10 = 150, problem 15 rollout 0 = 150 (collision!)
+    rollout_nonce = base_nonce * ROLLOUTS_PER_PROBLEM + rollout_idx
 
     # Sign commit binding (tokens, randomness, model, layer, commitments)
     from ..protocol.signatures import sign_commit_binding
