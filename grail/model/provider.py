@@ -59,6 +59,7 @@ def get_model(
     use_safetensors: bool = True,
     eval_mode: bool = True,
     use_flash_attention: bool = False,
+    use_sdpa: bool = True,
 ) -> Any:
     """Load model with consistent configuration.
 
@@ -68,7 +69,9 @@ def get_model(
         use_safetensors: Whether to prefer safetensors format
         eval_mode: Whether to set model to eval() mode
         use_flash_attention: Whether to use Flash Attention 2 (requires flash-attn package).
-                            Only enabled for training, not for evaluation/inference.
+                            Takes priority over SDPA if both are enabled.
+        use_sdpa: Whether to use PyTorch SDPA (Scaled Dot-Product Attention).
+                  Built into PyTorch 2.0+, provides 10-30% speedup. Default: True.
 
     Returns:
         Configured model instance with preserved original name
@@ -93,19 +96,27 @@ def get_model(
             except Exception as e:
                 logger.debug(f"Failed to read checkpoint metadata: {e}")
 
-    # Configure attention implementation
+    # Configure attention implementation (priority: Flash Attention 2 > SDPA > default)
     attn_implementation = None
-    if use_flash_attention and device == "cuda":
-        try:
-            import flash_attn  # noqa: F401
+    if device == "cuda":
+        if use_flash_attention:
+            try:
+                import flash_attn  # noqa: F401
 
-            attn_implementation = "flash_attention_2"
-            logger.info("Using Flash Attention 2 for model loading")
-        except ImportError:
-            logger.warning(
-                "flash-attn not installed; falling back to default attention. "
-                "Install with: uv pip install flash-attn"
-            )
+                attn_implementation = "flash_attention_2"
+                logger.info("Using Flash Attention 2 for model loading")
+            except ImportError:
+                logger.warning(
+                    "flash-attn not installed; falling back to SDPA. "
+                    "Install with: uv pip install flash-attn"
+                )
+                if use_sdpa:
+                    attn_implementation = "sdpa"
+                    logger.info("Using PyTorch SDPA (Scaled Dot-Product Attention)")
+        elif use_sdpa:
+            # SDPA is built into PyTorch 2.0+ and provides good speedup
+            attn_implementation = "sdpa"
+            logger.info("Using PyTorch SDPA (Scaled Dot-Product Attention)")
 
     # Load model with optimized attention if available
     model = AutoModelForCausalLM.from_pretrained(
