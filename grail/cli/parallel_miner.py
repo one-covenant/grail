@@ -70,7 +70,7 @@ class GPUWorkerConfig:
     use_drand: bool
     checkpoint_path: str | None
     # Wallet names read from environment in worker for subprocess isolation
-    batch_size: int = 2
+    batch_size: int = 16  # Match single miner's default for optimal performance
     safety_blocks: int = 3
 
 
@@ -80,7 +80,7 @@ class ParallelMinerConfig:
 
     num_gpus: int = 8
     problems_per_gpu: int = 12
-    batch_size: int = 2
+    batch_size: int = 16  # Match single miner's default for optimal performance
     safety_blocks: int = 3
     use_drand: bool = True
     results_dir: Path = field(
@@ -531,8 +531,18 @@ class ParallelMiningCoordinator:
         all_succeeded = (successful_gpus == expected_gpu_count) and len(failed_gpus) == 0
 
         if all_succeeded:
+            # CRITICAL: Sort inferences by rollout_group (problem_index) then rollout_index
+            # The validator uses file-order to derive seed: first group in file = group_index 0
+            # If we don't sort, a GPU that finishes first could put problem 24 before problem 0,
+            # causing the validator to derive wrong seeds and fail validation!
+            all_inferences.sort(
+                key=lambda x: (
+                    int(x.get("rollout_group", 0)),  # Primary: problem index
+                    int(x.get("rollout_index", 0)),  # Secondary: rollout within problem
+                )
+            )
             logger.info(
-                "✅ All %d GPUs succeeded: %d total rollouts ready for upload",
+                "✅ All %d GPUs succeeded: %d total rollouts ready for upload (sorted by problem ID)",
                 successful_gpus,
                 len(all_inferences),
             )
@@ -668,8 +678,30 @@ async def run_parallel_miner(
                 await asyncio.sleep(30)
                 continue
 
-            # Check time budget - skip for parallel mode since workers manage their own time
-            # The parallel coordinator ensures all workers complete before upload
+            # Check time budget BEFORE starting parallel mining
+            # Parallel mode needs more time since all GPUs must complete before upload
+            current_block = await subtensor.get_current_block()
+            blocks_remaining = (window_start + WINDOW_LENGTH) - current_block
+
+            # Estimate time needed: rough estimate based on problems and safety margin
+            # Each GPU needs ~30-60s per problem with batch_size=16, plus upload time
+            estimated_time_per_problem = 45  # seconds, conservative estimate
+            estimated_upload_time = 30  # seconds
+            total_estimated_seconds = (
+                config.problems_per_gpu * estimated_time_per_problem + estimated_upload_time
+            )
+            # Convert to blocks (12 seconds per block)
+            estimated_blocks_needed = (total_estimated_seconds // 12) + config.safety_blocks
+
+            if blocks_remaining < estimated_blocks_needed:
+                logger.warning(
+                    "⏰ Skipping window %d: only %d blocks remaining, need ~%d blocks for parallel mining",
+                    window_start,
+                    blocks_remaining,
+                    estimated_blocks_needed,
+                )
+                await asyncio.sleep(10)
+                continue
 
             # Get window randomness
             window_block_hash, combined_randomness = await get_window_randomness(
@@ -692,12 +724,31 @@ async def run_parallel_miner(
                 checkpoint_path,
             )
 
-            # Upload aggregated results
+            # Upload aggregated results - but first check we have time!
             if inferences:
+                # CRITICAL: Check blocks remaining before upload
+                current_block = await subtensor.get_current_block()
+                blocks_remaining = (window_start + WINDOW_LENGTH) - current_block
+
+                if blocks_remaining < config.safety_blocks:
+                    logger.error(
+                        "❌ SKIPPING UPLOAD: Only %d blocks remaining (need %d safety blocks)",
+                        blocks_remaining,
+                        config.safety_blocks,
+                    )
+                    logger.error(
+                        "Window %d will be missed - workers took too long",
+                        window_start,
+                    )
+                    # Don't upload late - validator would reject anyway
+                    last_window_start = window_start
+                    continue
+
                 logger.info(
-                    "📤 Uploading %d aggregated rollouts for window %d",
+                    "📤 Uploading %d aggregated rollouts for window %d (%d blocks remaining)",
                     len(inferences),
                     window_start,
+                    blocks_remaining,
                 )
                 upload_duration = await upload_inferences_with_metrics(
                     wallet,
@@ -740,10 +791,10 @@ def parallel_mine(
         help="Minimum number of problems each GPU should generate",
     ),
     batch_size: int = typer.Option(
-        2,
+        16,
         "--batch-size",
         "-b",
-        help="Rollout batch size within each problem (1-16)",
+        help="Rollout batch size within each problem (default 16 for optimal A100 performance)",
     ),
     safety_blocks: int = typer.Option(
         3,
