@@ -75,7 +75,7 @@ class EvalConfig:
 
     enabled: bool = True
     window_interval: int = 20
-    split: str = "test"  # dataset-backed envs (e.g., GSM8K) #TODO: should be specified per env
+    split: str = "val"  # Use validation split (500 stratified samples from train)
     subset_size: int | None = None  # generative envs or capped dataset eval
     seed_base: int = 2025
     batch_size: int = 32  # Conservative for vLLM server: 8 tasks × 5 reps = 40 prompts/batch (prevent queue timeout)
