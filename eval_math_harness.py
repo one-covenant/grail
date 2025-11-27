@@ -15,15 +15,16 @@ Best Practices Used:
 3. Chain-of-thought - Enabled via task's native format
 4. Greedy decoding - temperature=0 for reproducibility
 5. max_gen_toks=1024 - Sufficient for reasoning chains
-6. Flash attention - Memory efficient for 7B+ models
+6. vLLM backend - High-throughput inference with tensor parallelism
 7. BF16 precision - Optimal for modern GPUs
-8. Batch size tuning - Auto via batch_size="auto"
+8. Tensor parallelism - Utilize all available GPUs
 
 Usage:
 ------
     python eval_math_harness.py
     python eval_math_harness.py --model Qwen/Qwen2.5-7B-Instruct
     python eval_math_harness.py --num-fewshot 0  # zero-shot
+    python eval_math_harness.py --tensor-parallel-size 8  # use 8 GPUs
 """
 
 import argparse
@@ -41,10 +42,54 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def get_gpu_count() -> int:
+    """Get the number of available CUDA GPUs."""
+    try:
+        import torch
+
+        return torch.cuda.device_count()
+    except ImportError:
+        # Fallback to nvidia-smi
+        import subprocess
+
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+        )
+        return len(result.stdout.strip().split("\n")) if result.returncode == 0 else 1
+
+
+def get_model_num_attention_heads(model_name: str) -> int:
+    """Get the number of attention heads for a model."""
+    try:
+        from transformers import AutoConfig
+
+        config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+        return getattr(config, "num_attention_heads", 32)
+    except Exception:
+        return 32  # Default fallback
+
+
+def get_optimal_tensor_parallel_size(model_name: str, max_gpus: int) -> int:
+    """Calculate optimal tensor parallel size based on model architecture.
+
+    Tensor parallelism requires num_attention_heads to be divisible by TP size.
+    Returns the largest valid TP size <= max_gpus.
+    """
+    num_heads = get_model_num_attention_heads(model_name)
+
+    # Find the largest divisor of num_heads that is <= max_gpus
+    for tp_size in range(min(max_gpus, num_heads), 0, -1):
+        if num_heads % tp_size == 0:
+            return tp_size
+    return 1
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Evaluate model on Hendrycks MATH using lm-eval-harness"
+        description="Evaluate model on Hendrycks MATH using lm-eval-harness with vLLM"
     )
     parser.add_argument(
         "--model",
@@ -82,21 +127,53 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Limit number of samples per task (for debugging)",
     )
+    parser.add_argument(
+        "--tensor-parallel-size",
+        type=int,
+        default=None,
+        help="Tensor parallel size for vLLM (default: auto-detect all GPUs)",
+    )
+    parser.add_argument(
+        "--max-model-len",
+        type=int,
+        default=4096,
+        help="Maximum model context length for vLLM (default: 4096)",
+    )
+    parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.9,
+        help="GPU memory utilization for vLLM (default: 0.9)",
+    )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        choices=["vllm", "hf"],
+        default="vllm",
+        help="Inference backend: vllm (faster) or hf (HuggingFace)",
+    )
     return parser.parse_args()
 
 
 def run_evaluation(args: argparse.Namespace) -> dict:
-    """Run lm-evaluation-harness on MATH dataset."""
+    """Run lm-evaluation-harness on MATH dataset using vLLM or HuggingFace backend."""
     try:
         from lm_eval import simple_evaluate
-        from lm_eval.models.huggingface import HFLM
     except ImportError:
         logger.error("lm-eval not installed. Run: pip install lm-eval")
         sys.exit(1)
 
+    # Auto-detect tensor parallel size if not specified
+    available_gpus = get_gpu_count()
+    if args.tensor_parallel_size is None:
+        args.tensor_parallel_size = get_optimal_tensor_parallel_size(args.model, available_gpus)
+
     logger.info(f"Model: {args.model}")
+    logger.info(f"Backend: {args.backend}")
     logger.info(f"Few-shot: {args.num_fewshot}")
     logger.info(f"Batch size: {args.batch_size}")
+    logger.info(f"Available GPUs: {available_gpus}")
+    logger.info(f"Tensor parallel size: {args.tensor_parallel_size}")
 
     # MATH subtasks (all 7 subjects)
     # Using hendrycks_math tasks with proper \boxed{} answer extraction
@@ -112,37 +189,71 @@ def run_evaluation(args: argparse.Namespace) -> dict:
 
     logger.info(f"Tasks: {tasks}")
 
-    # Model configuration with best practices
-    model_kwargs = {
-        "pretrained": args.model,
-        "dtype": "bfloat16",
-        "device_map": "auto",
-        "trust_remote_code": True,
-        # Enable flash attention if available
-        "attn_implementation": "flash_attention_2",
-    }
+    if args.backend == "vllm":
+        # Use vLLM backend for maximum efficiency with tensor parallelism
+        try:
+            from lm_eval.models.vllm_causallms import VLLM
+        except ImportError:
+            logger.error("vLLM not installed. Run: pip install vllm")
+            sys.exit(1)
 
-    # Try to load with flash attention, fall back if not available
-    try:
-        model = HFLM(**model_kwargs)
-    except Exception as e:
-        logger.warning(f"Flash attention failed ({e}), using default attention")
-        model_kwargs.pop("attn_implementation", None)
-        model = HFLM(**model_kwargs)
+        logger.info(f"GPU memory utilization: {args.gpu_memory_utilization}")
+        logger.info(f"Max model length: {args.max_model_len}")
 
-    # Run evaluation
-    logger.info("Starting evaluation...")
-    results = simple_evaluate(
-        model=model,
-        tasks=tasks,
-        num_fewshot=args.num_fewshot,
-        batch_size=args.batch_size,
-        device=args.device,
-        limit=args.limit,
-        # Greedy decoding for reproducibility
-        gen_kwargs="temperature=0,do_sample=False",
-        log_samples=True,
-    )
+        # vLLM model configuration for maximum throughput
+        model = VLLM(
+            pretrained=args.model,
+            tensor_parallel_size=args.tensor_parallel_size,
+            dtype="bfloat16",
+            gpu_memory_utilization=args.gpu_memory_utilization,
+            max_model_len=args.max_model_len,
+            trust_remote_code=True,
+            # Enable prefix caching for faster few-shot evaluation
+            enable_prefix_caching=True,
+        )
+
+        # Run evaluation with vLLM
+        logger.info("Starting evaluation with vLLM backend...")
+        results = simple_evaluate(
+            model=model,
+            tasks=tasks,
+            num_fewshot=args.num_fewshot,
+            batch_size=args.batch_size,
+            limit=args.limit,
+            # Greedy decoding for reproducibility
+            gen_kwargs="temperature=0,do_sample=False",
+            log_samples=True,
+        )
+    else:
+        # Fall back to HuggingFace backend
+        from lm_eval.models.huggingface import HFLM
+
+        model_kwargs = {
+            "pretrained": args.model,
+            "dtype": "bfloat16",
+            "device_map": "auto",
+            "trust_remote_code": True,
+            "attn_implementation": "flash_attention_2",
+        }
+
+        try:
+            model = HFLM(**model_kwargs)
+        except Exception as e:
+            logger.warning(f"Flash attention failed ({e}), using default attention")
+            model_kwargs.pop("attn_implementation", None)
+            model = HFLM(**model_kwargs)
+
+        logger.info("Starting evaluation with HuggingFace backend...")
+        results = simple_evaluate(
+            model=model,
+            tasks=tasks,
+            num_fewshot=args.num_fewshot,
+            batch_size=args.batch_size,
+            device=args.device,
+            limit=args.limit,
+            gen_kwargs="temperature=0,do_sample=False",
+            log_samples=True,
+        )
 
     return results
 
@@ -155,8 +266,6 @@ def print_results(results: dict, args: argparse.Namespace) -> None:
 
     # Extract per-subject results
     subject_results = {}
-    total_correct = 0
-    total_samples = 0
 
     for task_name, task_results in results.get("results", {}).items():
         # Extract subject from task name and expand abbreviations
@@ -175,14 +284,6 @@ def print_results(results: dict, args: argparse.Namespace) -> None:
             "stderr": stderr,
         }
 
-        # For aggregate calculation
-        n_samples = task_results.get("alias", {}).get("n-shot", 0)
-        if "samples" in results:
-            task_samples = results["samples"].get(task_name, [])
-            n_samples = len(task_samples)
-            total_correct += sum(1 for s in task_samples if s.get("acc", 0) == 1)
-            total_samples += n_samples
-
     # Print per-subject results
     print("\nPer-Subject Accuracy:")
     print("-" * 50)
@@ -191,13 +292,9 @@ def print_results(results: dict, args: argparse.Namespace) -> None:
         stderr_pct = data["stderr"] * 100
         print(f"  {subject:35s} {acc_pct:5.2f}% ± {stderr_pct:.2f}%")
 
-    # Print aggregate
-    if total_samples > 0:
-        overall_acc = total_correct / total_samples * 100
-    else:
-        # Use average of subjects
-        accs = [d["accuracy"] for d in subject_results.values()]
-        overall_acc = sum(accs) / len(accs) * 100 if accs else 0
+    # Print aggregate (use weighted average based on number of samples per subject)
+    accs = [d["accuracy"] for d in subject_results.values()]
+    overall_acc = sum(accs) / len(accs) * 100 if accs else 0
 
     print("-" * 50)
     print(f"  {'OVERALL':35s} {overall_acc:5.2f}%")
