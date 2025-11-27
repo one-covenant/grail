@@ -215,6 +215,44 @@ _MATH_VAL_SIZE = 500
 _MATH_VAL_SEED = 42
 
 
+def _extract_boxed_answer(solution: str) -> str:
+    """Extract answer from \\boxed{...} in solution, handling nested braces."""
+    import re
+
+    match = re.search(r"\\boxed\{", solution)
+    if not match:
+        return ""
+
+    start = match.end()
+    depth = 1
+    i = start
+    while i < len(solution) and depth > 0:
+        if solution[i] == "{":
+            depth += 1
+        elif solution[i] == "}":
+            depth -= 1
+        i += 1
+
+    return solution[start : i - 1] if depth == 0 else ""
+
+
+# Subsets in EleutherAI/hendrycks_math dataset
+_MATH_SUBSETS = (
+    "algebra",
+    "counting_and_probability",
+    "geometry",
+    "intermediate_algebra",
+    "number_theory",
+    "prealgebra",
+    "precalculus",
+)
+
+# Fixed validation set size (stratified across problem types)
+_MATH_VAL_SIZE = 500
+# Seed for deterministic stratified sampling of validation set
+_MATH_VAL_SEED = 42
+
+
 class MATHTaskSource(TaskSource):
     """HF datasets-backed Hendrycks MATH provider with stratified train/val split.
 
