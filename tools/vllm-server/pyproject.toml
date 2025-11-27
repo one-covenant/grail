@@ -12,6 +12,8 @@ dependencies = [
     "openai>=1.0.0",
     "trl>=0.22.0",
     "wandb>=0.22.3",
+    # Evaluation harness with vLLM support
+    "lm-eval>=0.4.0",
 ]
 
 [tool.ruff]
