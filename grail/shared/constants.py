@@ -185,6 +185,12 @@ CURRENT_ENV_ID = "math"
 GRAIL_BURN_UID = 0
 GRAIL_BURN_PERCENTAGE = 95.0
 
+# ────────────────  UNIQUE ROLLOUTS CAP  ────────────────
+
+# Maximum unique rollouts per miner that count toward weight allocation.
+# Miners are rewarded proportionally to how close they are to this cap.
+UNIQUE_ROLLOUTS_CAP = 4096
+
 # ────────────────  MINER SAMPLING (VALIDATION COST CONTROL)  ────────────────
 
 # Enable/disable miner-level subsampling per window.

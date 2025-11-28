@@ -6,6 +6,8 @@ import logging
 import math
 from collections import defaultdict
 
+from ..shared.constants import UNIQUE_ROLLOUTS_CAP
+
 logger = logging.getLogger(__name__)
 
 
@@ -101,17 +103,26 @@ class WeightComputer:
             extrapolation_factor = windows_active / windows_checked
             total_unique_extrapolated = total_unique_checked * extrapolation_factor
 
+            # Cap-proportional scoring: reward based on fraction of cap reached
+            capped_unique = min(total_unique_extrapolated, UNIQUE_ROLLOUTS_CAP)
+
             # Apply superlinear scoring
-            base_score = max(0.0, float(total_unique_extrapolated))
+            base_score = max(0.0, float(capped_unique))
             superlinear_score = base_score**self.superlinear_exponent
             raw_scores.append(superlinear_score)
 
-        # Normalize
-        denom = math.fsum(raw_scores)
-        if denom > 0.0:
-            pre_burn_weights = [score / denom for score in raw_scores]
+        # Normalize against theoretical max (cap^exponent)
+        # This ensures miners are rewarded proportionally to cap achievement
+        max_score = UNIQUE_ROLLOUTS_CAP**self.superlinear_exponent
+        cap_relative = [score / max_score for score in raw_scores]
+        total_cap_relative = math.fsum(cap_relative)
+
+        if total_cap_relative > 1.0:
+            # Multiple strong miners: share proportionally, capped at 1.0 total
+            pre_burn_weights = [cr / total_cap_relative for cr in cap_relative]
         else:
-            pre_burn_weights = [0.0] * len(meta_hotkeys)
+            # Underproduction: miners get their cap-relative share, rest burns
+            pre_burn_weights = cap_relative
 
         pre_burn_nonzero_indices = [i for i, w in enumerate(pre_burn_weights) if w > 0.0]
 
@@ -120,7 +131,7 @@ class WeightComputer:
             pre_burn_weights,
             pre_burn_nonzero_indices,
             meta_uids,
-            denom,
+            total_cap_relative,
         )
 
         # Compose non-zero list
@@ -140,15 +151,20 @@ class WeightComputer:
         pre_burn_weights: list[float],
         pre_burn_nonzero_indices: list[int],
         meta_uids: list[int],
-        denom: float,
+        total_cap_relative: float,
     ) -> list[float]:
-        """Apply burn mechanism to allocate percentage to burn UID."""
+        """Apply burn mechanism to allocate percentage to burn UID.
+
+        When miners underperform (total_cap_relative < 1.0), the "missing"
+        weight goes to burn rather than being redistributed to miners.
+        """
         if self.burn_uid is None or self.burn_percentage <= 0:
             raise ValueError("GRAIL_BURN_UID and GRAIL_BURN_PERCENTAGE must be set")
 
         burn_uid = int(self.burn_uid)
         burn_pct = max(0.0, min(100.0, self.burn_percentage))
         burn_fraction = burn_pct / 100.0
+        remaining_fraction = 1.0 - burn_fraction
 
         if burn_uid not in meta_uids:
             logger.warning(f"Burn UID {burn_uid} not in metagraph; burn disabled")
@@ -156,26 +172,28 @@ class WeightComputer:
 
         burn_index = meta_uids.index(burn_uid)
 
-        if denom <= 0.0:
+        if total_cap_relative <= 0.0:
             # No signal: allocate 100% to burn UID
             weights = [0.0] * len(pre_burn_weights)
             weights[burn_index] = 1.0
             return weights
 
-        # Scale non-burn weights to remaining fraction
-        remaining_fraction = 1.0 - burn_fraction
-        non_burn_sum = sum(w for i, w in enumerate(pre_burn_weights) if i != burn_index)
+        # Compute effective miner allocation (capped by remaining_fraction)
+        # If total_cap_relative < 1.0, miners get less than remaining_fraction
+        effective_miner_fraction = min(remaining_fraction, remaining_fraction * total_cap_relative)
 
-        if non_burn_sum > 0:
-            scale_factor = remaining_fraction / non_burn_sum
+        # Scale pre_burn_weights to effective_miner_fraction
+        pre_burn_sum = math.fsum(pre_burn_weights)
+        if pre_burn_sum > 0:
+            scale_factor = effective_miner_fraction / pre_burn_sum
             weights = [
-                w * scale_factor if i != burn_index else 0 for i, w in enumerate(pre_burn_weights)
+                w * scale_factor if i != burn_index else 0.0 for i, w in enumerate(pre_burn_weights)
             ]
         else:
             weights = [0.0] * len(pre_burn_weights)
 
-        # Set burn UID to exact fraction
-        weights[burn_index] = burn_fraction
+        # Burn gets base burn_fraction + any unallocated miner fraction
+        weights[burn_index] = 1.0 - math.fsum(w for i, w in enumerate(weights) if i != burn_index)
 
-        logger.info(f"🔥 Burn: {burn_pct:.1f}% to UID {burn_uid}")
+        logger.info(f"🔥 Burn: {weights[burn_index] * 100:.1f}% to UID {burn_uid}")
         return weights
