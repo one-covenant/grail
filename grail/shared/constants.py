@@ -183,13 +183,13 @@ CURRENT_ENV_ID = "math"
 # ────────────────  EMISSION BURN MECHANISM  ────────────────
 
 GRAIL_BURN_UID = 0
-GRAIL_BURN_PERCENTAGE = 95.0
+GRAIL_BURN_PERCENTAGE = 80.0
 
 # ────────────────  UNIQUE ROLLOUTS CAP  ────────────────
 
 # Maximum unique rollouts per miner that count toward weight allocation.
 # Miners are rewarded proportionally to how close they are to this cap.
-UNIQUE_ROLLOUTS_CAP = 4096
+UNIQUE_ROLLOUTS_CAP = 5120
 
 # ────────────────  MINER SAMPLING (VALIDATION COST CONTROL)  ────────────────
 
