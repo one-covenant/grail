@@ -1,0 +1,28 @@
+tag:
+  - math_word_problems
+task: amc2023
+dataset_path: sparkle-reasoning/amc2023
+output_type: generate_until
+test_split: test
+fewshot_split: test
+doc_to_text: "Problem: {{question}}\n\nAnswer: The answer is"
+doc_to_target: " ${{answer|int}}$"
+process_results: !function utils.process_results
+metric_list:
+  - metric: exact_match
+    aggregation: mean
+    higher_is_better: true
+generation_kwargs:
+  until:
+    - "Problem:"
+    - "\n\n"
+    - "</s>"
+    - "<|im_end|>"
+    - "<|endoftext|>"
+  do_sample: false
+  temperature: 0.0
+  max_gen_toks: 512
+repeats: 1
+metadata:
+  version: 1.0
+

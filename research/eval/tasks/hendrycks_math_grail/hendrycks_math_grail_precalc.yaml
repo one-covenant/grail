@@ -1,0 +1,5 @@
+include: _default_template.yaml
+tag:
+  - math_word_problems
+task: hendrycks_math_grail_precalc
+dataset_name: precalculus

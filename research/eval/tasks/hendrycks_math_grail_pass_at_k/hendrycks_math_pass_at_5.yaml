@@ -1,0 +1,33 @@
+# MATH pass@5 evaluation task
+# Generates 10 samples per problem with temperature sampling
+# Computes pass@1, pass@5
+
+group: hendrycks_math_pass_at_k
+task: hendrycks_math_pass_at_5
+dataset_path: EleutherAI/hendrycks_math
+dataset_name: algebra
+output_type: generate_until
+training_split: train
+test_split: test
+doc_to_text: "{{problem}}"
+doc_to_target: "{{answer}}"
+process_results: !function utils.process_results
+metric_list:
+  - metric: !function utils.aggregate_pass_at_1
+    aggregation: mean
+    higher_is_better: true
+  - metric: !function utils.aggregate_pass_at_5
+    aggregation: mean
+    higher_is_better: true
+generation_kwargs:
+  until:
+    - "<|im_end|>"
+    - "<|endoftext|>"
+  do_sample: true
+  temperature: 0.7
+  top_p: 0.95
+  max_gen_toks: 2048
+repeats: 10
+num_fewshot: 0
+metadata:
+  version: 1.0

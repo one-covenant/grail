@@ -1,0 +1,15 @@
+group: hendrycks_math_grail
+task:
+  - hendrycks_math_grail_algebra
+  - hendrycks_math_grail_counting_and_prob
+  - hendrycks_math_grail_geometry
+  - hendrycks_math_grail_intermediate_algebra
+  - hendrycks_math_grail_num_theory
+  - hendrycks_math_grail_prealgebra
+  - hendrycks_math_grail_precalc
+aggregate_metric_list:
+  - metric: exact_match
+    aggregation: mean
+    weight_by_size: true
+metadata:
+  version: 1.0
