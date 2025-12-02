@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .consistency import ConsistencyValidator
 from .distribution import DistributionValidator
 from .environment import (
     EnvironmentEvaluationValidator,
@@ -11,6 +12,12 @@ from .environment import (
 )
 from .proof import GRAILProofValidator
 from .schema import SchemaValidator
+from .security import (
+    HiddenStateAnomalyValidator,
+    ModelFingerprintValidator,
+    RateLimitValidator,
+    TimestampValidator,
+)
 from .termination import TerminationValidator
 from .tokens import TokenValidator
 
@@ -24,4 +31,9 @@ __all__ = [
     "RewardValidator",
     "LogprobValidator",
     "DistributionValidator",
+    "ConsistencyValidator",
+    "TimestampValidator",
+    "HiddenStateAnomalyValidator",
+    "RateLimitValidator",
+    "ModelFingerprintValidator",
 ]
