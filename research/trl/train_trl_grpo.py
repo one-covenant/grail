@@ -49,56 +49,102 @@ from grail.trainer.metrics import KMetricsAggregator, TaskReplicateResult  # noq
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# HYPERPARAMETERS (from .env GRAIL config)
+# HYPERPARAMETERS (from .env GRAIL config - exactly matching grail/trainer/algorithms/grpo.py)
 # ════════════════════════════════════════════════════════════════════════════
 @dataclass
 class Config:
-    # Model (from GRAIL_TRAIN_MODEL_ID)
+    # ────────────────────────────────────────────────────────────────────────
+    # Model Configuration (from GRAIL_TRAIN_MODEL_ID)
+    # ────────────────────────────────────────────────────────────────────────
     model_id: str = "Qwen/Qwen2.5-1.5B-Instruct"
-    # Learning rate (from GRAIL_TRAINER_LR)
+
+    # ────────────────────────────────────────────────────────────────────────
+    # Training Hyperparameters (from grail/shared/constants.py + env vars)
+    # These match GRAIL's GRPOAlgorithm config exactly
+    # ────────────────────────────────────────────────────────────────────────
+    # Learning rate (GRAIL_TRAINER_LR, constants.py default: 1e-6)
     lr: float = 3e-6
-    # Epochs per window (from GRAIL_TRAINER_EPOCHS)
+    # Epochs per training iteration (GRAIL_TRAINER_EPOCHS, constants.py default: 1)
     epochs: int = 1
-    # Batch size (from GRAIL_TRAINER_BATCH_SIZE)
+    # Batch size per device (GRAIL_TRAINER_BATCH_SIZE, constants.py default: 16)
     batch_size: int = 4
-    # Gradient accumulation (from GRAIL_TRAINER_GRAD_ACCUM_STEPS)
+    # Gradient accumulation steps (GRAIL_TRAINER_GRAD_ACCUM_STEPS, constants.py default: 8)
+    # Effective batch = batch_size × grad_accum_steps = 4 × 128 = 512
     grad_accum_steps: int = 128
-    # Max sequence length (from GRAIL_TRAINER_MAX_LENGTH)
+    # Max sequence length (GRAIL_TRAINER_MAX_LENGTH, constants.py default: 2048)
     max_length: int = 2048
-    # Gradient clipping (from GRAIL_TRAINER_GRAD_CLIP)
+    # Gradient clipping threshold (GRAIL_TRAINER_GRAD_CLIP, constants.py default: 0.5)
     grad_clip: float = 1.0
-    # Warmup steps (from GRAIL_TRAINER_WARMUP_STEPS)
+    # Warmup steps for LR scheduler (GRAIL_TRAINER_WARMUP_STEPS, constants.py default: 10)
     warmup_steps: int = 50
-    # KL coefficient (from GRAIL_TRAINER_KL_COEF)
+    # Total training windows (GRAIL_TRAINER_TOTAL_WINDOWS) - controls iteration count
+    # Each optimizer step = 32 groups × 16 rollouts = 512 samples
+    # total_optimizer_steps calculated below based on total_windows
+    total_windows: int = 100
+
+    # ────────────────────────────────────────────────────────────────────────
+    # GRPO Loss Configuration (from grail/trainer/algorithms/grpo.py)
+    # ────────────────────────────────────────────────────────────────────────
+    # KL divergence coefficient (GRAIL_TRAINER_KL_COEF, constants.py default: 0.02)
     kl_coef: float = 0.0
-    # Entropy coefficient (from GRAIL_TRAINER_ENTROPY_COEF)
+    # Entropy coefficient for exploration (GRAIL_TRAINER_ENTROPY_COEF, constants.py default: 0.001)
+    # Note: TRL may not support entropy regularization directly
     entropy_coef: float = 0.0005
-    # PPO clip epsilon (standard GRAIL values)
+    # PPO clip epsilon lower bound (TRAINER_PPO_CLIP_EPS, constants.py default: 0.2)
     ppo_clip_eps: float = 0.2
+    # PPO clip epsilon upper bound - DAPO-style asymmetric clipping
+    # (TRAINER_PPO_CLIP_EPS_UPPER, constants.py default: 0.28)
     ppo_clip_eps_upper: float = 0.28
-    # Importance sampling ratio max (from GRAIL_TRAINER_IS_RATIO_MAX)
+    # Importance sampling ratio ceiling (GRAIL_TRAINER_IS_RATIO_MAX, constants.py default: 10.0)
+    # Prevents training instability from extreme ratios
     is_ratio_max: float = 2.5
-    # Log-ratio clamp (from GRAIL_TRAINER_LOGRATIO_CLAMP)
+    # Log-ratio clamp for numerical stability (GRAIL_TRAINER_LOGRATIO_CLAMP, constants.py default: 5.0)
+    # ln(2.5) ≈ 0.916 → aligned with IS_RATIO_MAX
     logratio_clamp: float = 0.92
-    # Dataset sampling
+    # Advantage clipping percentile (GRAIL_TRAINER_ADV_CLIP_PERCENTILE, constants.py default: 99.0)
+    # Note: TRL handles advantage normalization differently
+    adv_clip_percentile: float = 99.0
+    # Group advantage sum tolerance (GRAIL_TRAINER_GROUP_ADV_SUM_TOL, constants.py default: 0.01)
+    # Note: TRL doesn't use group validation, but kept for reference
+    group_adv_sum_tol: float = 0.01
+    # GRPO loss variant (GRAIL_GRPO_VARIANT, constants.py default: "dapo")
+    # Options: 'grpo', 'bnpo', 'dapo', 'dr_grpo'
+    grpo_variant: str = "dapo"
+    # Importance sampling level (GRAIL_IMPORTANCE_SAMPLING_LEVEL, constants.py default: "sequence")
+    # Options: 'sequence' (one ratio per sequence), 'token' (per-token ratios)
+    # Note: TRL uses token-level IS by default when using vLLM
+    importance_sampling_level: str = "sequence"
+
+    # ────────────────────────────────────────────────────────────────────────
+    # GRPO Data Configuration (from grail/shared/constants.py)
+    # ────────────────────────────────────────────────────────────────────────
+    # Groups per optimizer step = effective_batch / rollouts_per_problem = 512 / 16 = 32
+    max_groups: int = 32
+    # Max completion tokens (GRPO_MAX_COMPLETION_TOKENS, constants.py default: 1024)
+    max_new_tokens: int = 1024
+    # Rollouts per problem (ROLLOUTS_PER_PROBLEM, constants.py: 16)
+    rollouts_per_problem: int = 16
+
+    # ────────────────────────────────────────────────────────────────────────
+    # Dataset Sampling
+    # ────────────────────────────────────────────────────────────────────────
     num_train_samples: int | None = None  # None = use all training samples
     num_eval_samples: int | None = None  # None = use all test samples
-    # Rollouts per problem (matches GRAIL default)
-    rollouts_per_problem: int = 16
-    # Generation parameters
+
+    # ────────────────────────────────────────────────────────────────────────
+    # Generation Parameters
+    # ────────────────────────────────────────────────────────────────────────
     temperature: float = 0.7
     top_p: float = 0.95
     top_k: int = 50
-    # Max completion tokens (from GRPO_MAX_COMPLETION_TOKENS)
-    max_new_tokens: int = 1024
-    # Evaluation config
+
+    # ────────────────────────────────────────────────────────────────────────
+    # Evaluation Configuration
+    # ────────────────────────────────────────────────────────────────────────
     eval_replicates: int = 5
     report_ks: tuple[int, ...] = (1, 5, 10)
-    # Evaluation optimization
     eval_batch_size: int = 128
     eval_num_workers: int = 4
-    # Max groups for GRPO (from GRPO_MAX_GROUPS)
-    max_groups: int = 128
 
 
 cfg = Config()
@@ -508,6 +554,143 @@ def get_dataset_adapter(dataset_name: str) -> DatasetAdapter:
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# TRAINING PASS@K TRACKER
+# ════════════════════════════════════════════════════════════════════════════
+class TrainingPassAtKTracker:
+    """Computes and logs pass@k metrics during GRPO training.
+
+    This class wraps the reward computation and tracks pass@k metrics
+    by grouping completions by their prompts. Uses the same unbiased pass@k
+    formula as evaluation (KMetricsAggregator from grail.trainer.metrics).
+
+    Usage:
+        tracker = TrainingPassAtKTracker(adapter, prompt_to_answer)
+        trainer = GRPOTrainer(..., reward_funcs=tracker, ...)
+    """
+
+    # Required by TRL GRPOTrainer for reward function naming
+    __name__ = "reward_with_pass_at_k"
+
+    def __init__(
+        self,
+        adapter: DatasetAdapter,
+        prompt_to_answer: dict[str, str],
+        report_ks: tuple[int, ...] = (1, 5, 10),
+    ) -> None:
+        """Initialize the tracker.
+
+        Args:
+            adapter: Dataset adapter for reward computation and success threshold
+            prompt_to_answer: Mapping from prompt text to gold answer
+            report_ks: Tuple of k values for pass@k metrics
+        """
+        self._adapter = adapter
+        self._prompt_to_answer = prompt_to_answer
+        self._report_ks = report_ks
+        self._step_count = 0
+
+    def __call__(
+        self,
+        completions: list[str],
+        prompts: list[str],
+        **kwargs: Any,
+    ) -> list[float]:
+        """Compute rewards and log pass@k metrics.
+
+        This method is called by GRPOTrainer for each batch of completions.
+
+        Args:
+            completions: List of model completions
+            prompts: List of corresponding prompts
+            **kwargs: Additional arguments (gold_answer, metadatas, etc.)
+
+        Returns:
+            List of reward values for each completion
+        """
+        gold_answers = self._extract_gold_answers(prompts, kwargs)
+        rewards = self._compute_rewards(completions, gold_answers)
+        metrics = self._compute_pass_at_k_metrics(prompts, rewards)
+        self._log_to_wandb(metrics)
+        self._step_count += 1
+        return rewards
+
+    def _extract_gold_answers(
+        self,
+        prompts: list[str],
+        kwargs: dict[str, Any],
+    ) -> list[str]:
+        """Extract gold answers from kwargs or prompt mapping."""
+        if "gold_answer" in kwargs and kwargs["gold_answer"]:
+            return kwargs["gold_answer"]
+        if "metadatas" in kwargs and kwargs["metadatas"]:
+            return [m.get("gold_answer", "") for m in kwargs["metadatas"]]
+        return [self._prompt_to_answer.get(p, "") for p in prompts]
+
+    def _compute_rewards(
+        self,
+        completions: list[str],
+        gold_answers: list[str],
+    ) -> list[float]:
+        """Compute reward for each completion."""
+        return [
+            self._adapter.compute_reward(c, g)
+            for c, g in zip(completions, gold_answers, strict=False)
+        ]
+
+    def _compute_pass_at_k_metrics(
+        self,
+        prompts: list[str],
+        rewards: list[float],
+    ) -> dict[str, float]:
+        """Compute all metrics using KMetricsAggregator (unbiased pass@k formula)."""
+        from collections import defaultdict
+
+        # Group rewards by prompt
+        prompt_groups: dict[str, list[float]] = defaultdict(list)
+        for prompt, reward in zip(prompts, rewards, strict=False):
+            prompt_groups[prompt].append(reward)
+
+        group_count = len(prompt_groups)
+        expected_groups = cfg.max_groups
+        step_index = self._step_count + 1
+        print(
+            "[TrainingPassAtKTracker] "
+            f"Step {step_index}: grouped {group_count} prompts "
+            f"(max_groups={expected_groups})"
+        )
+        if group_count != expected_groups:
+            print(
+                "[TrainingPassAtKTracker] ⚠️ "
+                f"group_count ({group_count}) != max_groups ({expected_groups})"
+            )
+
+        # Use KMetricsAggregator for metrics computation
+        aggregator = KMetricsAggregator(report_ks=self._report_ks)
+        threshold = self._adapter.success_threshold
+
+        for task_id, group_rewards in enumerate(prompt_groups.values()):
+            successes = [r >= threshold for r in group_rewards]
+            aggregator.add_group(
+                task_id=str(task_id),
+                rewards=group_rewards,
+                successes=successes,
+            )
+
+        return aggregator.summarize()
+
+    def _log_to_wandb(self, metrics: dict[str, float]) -> None:
+        """Log metrics to WandB."""
+        try:
+            import wandb
+
+            if wandb.run is not None and metrics:
+                wandb_data = {f"train/{k}": v for k, v in metrics.items()}
+                wandb.log(wandb_data)
+        except Exception:
+            pass  # Silently ignore WandB errors
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # DATA PREPARATION
 # ════════════════════════════════════════════════════════════════════════════
 def prepare_train_dataset(adapter: DatasetAdapter, tokenizer: PreTrainedTokenizer) -> Dataset:
@@ -577,14 +760,14 @@ class VLLMEvalCallback(TrainerCallback):
         eval_data: list[dict[str, Any]],
         tokenizer: PreTrainedTokenizer,
         vllm_base_url: str,
-        eval_every_n_steps: int = 30,
+        eval_every_n_steps: int = 40,
     ) -> None:
         self.adapter = adapter
         self.eval_data = eval_data
         self.tokenizer = tokenizer
         self.eval_every_n = eval_every_n_steps
         self.base_url = vllm_base_url.rstrip("/")
-        self._metrics_defined = False
+        self._wandb_configured = False
 
         print(
             f"✓ VLLMEvalCallback initialized: dataset={adapter.name}, "
@@ -603,16 +786,15 @@ class VLLMEvalCallback(TrainerCallback):
             import wandb
 
             if wandb.run is not None:
-                if not self._metrics_defined:
+                # Configure step metric for eval on first call
+                if not self._wandb_configured:
                     wandb.define_metric("eval_step")
-                    wandb.define_metric("eval_vllm/*", step_metric="eval_step")
-                    self._metrics_defined = True
+                    wandb.define_metric("eval/*", step_metric="eval_step")
+                    self._wandb_configured = True
 
-                wandb_data = {
-                    "eval_step": step,
-                    "trainer/global_step": step,
-                }
-                wandb_data.update({f"eval_vllm/{k}": v for k, v in metrics.items()})
+                # Log eval metrics with 'eval/' prefix and custom step
+                wandb_data = {"eval_step": step}
+                wandb_data.update({f"eval/{k}": v for k, v in metrics.items()})
                 wandb.log(wandb_data)
         except Exception as e:
             print(f"⚠️  WandB logging failed: {e}")
@@ -816,7 +998,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--eval-every",
         type=int,
-        default=30,
+        default=40,
         help="Run evaluation every N steps (default: 30)",
     )
     return parser.parse_args()
@@ -826,10 +1008,42 @@ def main() -> None:
     args = parse_args()
 
     print(f"🚀 Starting TRL GRPO training with {args.dataset.upper()} dataset")
-    print("=" * 60)
+    print("=" * 80)
+
+    # Print hyperparameter alignment summary
+    print("\n📋 GRAIL Hyperparameter Alignment Summary:")
+    print("─" * 80)
+    print(f"  {'Parameter':<40} {'Value':<15} {'GRAIL Env Var'}")
+    print("─" * 80)
+    print(f"  {'Model ID':<40} {cfg.model_id:<15} GRAIL_TRAIN_MODEL_ID")
+    print(f"  {'Learning Rate':<40} {cfg.lr:<15} GRAIL_TRAINER_LR")
+    print(f"  {'Epochs (per window)':<40} {cfg.epochs:<15} GRAIL_TRAINER_EPOCHS")
+    print(f"  {'Batch Size':<40} {cfg.batch_size:<15} GRAIL_TRAINER_BATCH_SIZE")
+    print(
+        f"  {'Gradient Accum Steps':<40} {cfg.grad_accum_steps:<15} GRAIL_TRAINER_GRAD_ACCUM_STEPS"
+    )
+    print(f"  {'Max Length':<40} {cfg.max_length:<15} GRAIL_TRAINER_MAX_LENGTH")
+    print(f"  {'Max Completion Tokens':<40} {cfg.max_new_tokens:<15} GRPO_MAX_COMPLETION_TOKENS")
+    print(f"  {'Gradient Clip':<40} {cfg.grad_clip:<15} GRAIL_TRAINER_GRAD_CLIP")
+    print(f"  {'Warmup Steps':<40} {cfg.warmup_steps:<15} GRAIL_TRAINER_WARMUP_STEPS")
+    print(f"  {'Total Windows':<40} {cfg.total_windows:<15} GRAIL_TRAINER_TOTAL_WINDOWS")
+    print(f"  {'KL Coefficient':<40} {cfg.kl_coef:<15} GRAIL_TRAINER_KL_COEF")
+    print(f"  {'Entropy Coefficient':<40} {cfg.entropy_coef:<15} GRAIL_TRAINER_ENTROPY_COEF")
+    print(f"  {'PPO Clip Epsilon':<40} {cfg.ppo_clip_eps:<15} TRAINER_PPO_CLIP_EPS")
+    print(
+        f"  {'PPO Clip Epsilon Upper':<40} {cfg.ppo_clip_eps_upper:<15} TRAINER_PPO_CLIP_EPS_UPPER"
+    )
+    print(f"  {'IS Ratio Max':<40} {cfg.is_ratio_max:<15} GRAIL_TRAINER_IS_RATIO_MAX")
+    print(f"  {'Log-Ratio Clamp':<40} {cfg.logratio_clamp:<15} GRAIL_TRAINER_LOGRATIO_CLAMP")
+    print(f"  {'GRPO Variant':<40} {cfg.grpo_variant:<15} GRAIL_GRPO_VARIANT")
+    print(f"  {'IS Level':<40} {cfg.importance_sampling_level:<15} GRAIL_IMPORTANCE_SAMPLING_LEVEL")
+    print(f"  {'Max Groups':<40} {cfg.max_groups:<15} GRPO_MAX_GROUPS")
+    print(f"  {'Rollouts per Problem':<40} {cfg.rollouts_per_problem:<15} ROLLOUTS_PER_PROBLEM")
+    print("─" * 80)
 
     # Get dataset adapter
     adapter = get_dataset_adapter(args.dataset)
+    print("\n📚 Dataset Configuration:")
     print(f"  Dataset: {adapter.name}")
     print(f"  Correctness weight: {adapter.correctness_weight}")
     print(f"  Success threshold: {adapter.success_threshold}")
@@ -869,56 +1083,95 @@ def main() -> None:
         wandb.login(key=wandb_api_key)
         print(f"  ✓ WandB logged in (project: {os.getenv('WANDB_PROJECT', 'grail')})")
 
-    # Calculate max_prompt_length
+    # Calculate max_prompt_length (GRAIL_TRAINER_MAX_LENGTH - GRPO_MAX_COMPLETION_TOKENS)
     max_prompt_length = cfg.max_length - cfg.max_new_tokens
 
+    # Calculate training schedule
+    # Each optimizer step = generation_batch_size = effective_batch = 512 samples
+    # = 32 groups × 16 rollouts
+    effective_batch = cfg.batch_size * cfg.grad_accum_steps  # 4 × 128 = 512
+    groups_per_step = effective_batch // cfg.rollouts_per_problem  # 512 / 16 = 32
+    total_optimizer_steps = 320  # Fixed: maintains original training duration
+
+    print("\n📊 Training Schedule:")
+    print(f"  • Effective batch size: {effective_batch} samples")
+    print(f"  • Groups per optimizer step: {groups_per_step}")
+    print(f"  • Rollouts per group: {cfg.rollouts_per_problem}")
+    print(f"  • Total optimizer steps: {total_optimizer_steps}")
+
     grpo_config = GRPOConfig(
-        output_dir=f"./outputs/trl_{adapter.name}",
-        learning_rate=cfg.lr,
+        output_dir=f"./outputs/trl_{adapter.name}_final",
+        # ─────────────────────────────────────────────────────────────────────
+        # Learning Rate & Schedule (matching GRAIL trainer config)
+        # ─────────────────────────────────────────────────────────────────────
+        learning_rate=cfg.lr,  # GRAIL_TRAINER_LR
+        warmup_steps=cfg.warmup_steps,  # GRAIL_TRAINER_WARMUP_STEPS
+        lr_scheduler_type="cosine",  # Cosine annealing (matches grail/neurons/trainer.py)
+        # Use max_steps to control iterations (matching GRAIL_TRAINER_TOTAL_WINDOWS)
+        # num_train_epochs is ignored when max_steps is set
         num_train_epochs=cfg.epochs,
-        per_device_train_batch_size=cfg.batch_size,
-        gradient_accumulation_steps=cfg.grad_accum_steps,
-        max_grad_norm=cfg.grad_clip,
-        warmup_steps=cfg.warmup_steps,
-        beta=cfg.kl_coef,
-        epsilon=cfg.ppo_clip_eps,
-        epsilon_high=cfg.ppo_clip_eps_upper,
-        max_prompt_length=max_prompt_length,
-        max_completion_length=cfg.max_new_tokens,
+        max_steps=total_optimizer_steps,  # Calculated from total_windows
+        # ─────────────────────────────────────────────────────────────────────
+        # Batch Size & Gradient Accumulation (matching GRAIL trainer config)
+        # ─────────────────────────────────────────────────────────────────────
+        per_device_train_batch_size=cfg.batch_size,  # GRAIL_TRAINER_BATCH_SIZE
+        gradient_accumulation_steps=cfg.grad_accum_steps,  # GRAIL_TRAINER_GRAD_ACCUM_STEPS
+        max_grad_norm=cfg.grad_clip,  # GRAIL_TRAINER_GRAD_CLIP
+        # ─────────────────────────────────────────────────────────────────────
+        # GRPO Loss Configuration (matching grail/trainer/algorithms/grpo.py)
+        # ─────────────────────────────────────────────────────────────────────
+        beta=cfg.kl_coef,  # GRAIL_TRAINER_KL_COEF (KL divergence coefficient)
+        epsilon=cfg.ppo_clip_eps,  # TRAINER_PPO_CLIP_EPS (lower clip bound)
+        epsilon_high=cfg.ppo_clip_eps_upper,  # TRAINER_PPO_CLIP_EPS_UPPER (DAPO asymmetric)
+        loss_type=cfg.grpo_variant,  # GRAIL_GRPO_VARIANT ("dapo")
+        # ─────────────────────────────────────────────────────────────────────
+        # Sequence Length (matching GRAIL trainer config)
+        # ─────────────────────────────────────────────────────────────────────
+        max_prompt_length=max_prompt_length,  # max_length - max_completion_tokens
+        max_completion_length=cfg.max_new_tokens,  # GRPO_MAX_COMPLETION_TOKENS
+        # ─────────────────────────────────────────────────────────────────────
+        # Generation Parameters
+        # ─────────────────────────────────────────────────────────────────────
         temperature=cfg.temperature,
         top_p=cfg.top_p,
         top_k=cfg.top_k,
         repetition_penalty=1.1,
-        num_generations=cfg.rollouts_per_problem,
-        generation_batch_size=16,
-        steps_per_generation=None,
+        num_generations=cfg.rollouts_per_problem,  # ROLLOUTS_PER_PROBLEM
+        # generation_batch_size must equal effective_batch to ensure:
+        # - One generation per optimizer step (no stale advantages)
+        # - 32 groups × 16 rollouts = 512 samples per optimizer update
+        generation_batch_size=cfg.batch_size * cfg.grad_accum_steps,  # 4 × 128 = 512
+        # ─────────────────────────────────────────────────────────────────────
+        # Logging & Checkpointing
+        # ─────────────────────────────────────────────────────────────────────
         logging_steps=1,
         log_completions=True,
         num_completions_to_print=1,
         wandb_log_unique_prompts=True,
-        save_strategy="no",
+        save_strategy="steps",
+        save_steps=40,
         bf16=True,
         report_to=["wandb"],
         eval_strategy="no",
-        run_name=f"trl_{adapter.name}_grpo_qwen15b_env_matched",
-        loss_type="dapo",
+        run_name=f"trl_{adapter.name}_grpo_qwen15b_grail_matched_final",
+        # ─────────────────────────────────────────────────────────────────────
+        # vLLM Configuration
+        # ─────────────────────────────────────────────────────────────────────
         use_vllm=True,
         vllm_mode="server",
         vllm_server_base_url="http://127.0.0.1:8000",
+        # Importance sampling configuration (matching GRAIL_IMPORTANCE_SAMPLING_LEVEL=token)
         vllm_importance_sampling_correction=False,
-        vllm_importance_sampling_cap=cfg.is_ratio_max,
+        vllm_importance_sampling_cap=cfg.is_ratio_max,  # GRAIL_TRAINER_IS_RATIO_MAX
     )
 
-    # Create reward function using adapter
-    def reward_fn(completions: list[str], prompts: list[str], **kwargs: Any) -> list[float]:
-        if "gold_answer" in kwargs and kwargs["gold_answer"]:
-            golds = kwargs["gold_answer"]
-            return [adapter.compute_reward(c, g) for c, g in zip(completions, golds, strict=False)]
-        if "metadatas" in kwargs and kwargs["metadatas"]:
-            golds = [m.get("gold_answer", "") for m in kwargs["metadatas"]]
-            return [adapter.compute_reward(c, g) for c, g in zip(completions, golds, strict=False)]
-        golds = [prompt_to_answer.get(p, "") for p in prompts]
-        return [adapter.compute_reward(c, g) for c, g in zip(completions, golds, strict=False)]
+    # Create reward tracker with pass@k logging
+    reward_tracker = TrainingPassAtKTracker(
+        adapter=adapter,
+        prompt_to_answer=prompt_to_answer,
+        report_ks=cfg.report_ks,
+    )
+    print(f"  ✓ TrainingPassAtKTracker initialized (report_ks={cfg.report_ks})")
 
     print(f"\n🏋️  Training with GRPO on {adapter.name.upper()}...")
 
@@ -933,12 +1186,23 @@ def main() -> None:
 
     trainer = GRPOTrainer(
         model=model,
-        reward_funcs=reward_fn,
+        reward_funcs=reward_tracker,
         args=grpo_config,
         train_dataset=train_ds,
         processing_class=tokenizer,
         callbacks=[vllm_eval_callback],
     )
+
+    # Initialize WandB explicitly before baseline eval (GRPOTrainer does it lazily in .train())
+    import wandb
+
+    if wandb.run is None and grpo_config.report_to and "wandb" in grpo_config.report_to:
+        wandb.init(
+            project=os.getenv("WANDB_PROJECT", "grail"),
+            name=grpo_config.run_name,
+            config=grpo_config.to_dict(),
+        )
+        print("  ✓ WandB initialized explicitly for baseline eval")
 
     # Baseline evaluation
     vllm_eval_callback.run_and_log(step=0, label="BASELINE EVAL")
