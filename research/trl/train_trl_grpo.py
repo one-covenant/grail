@@ -80,7 +80,7 @@ class Config:
     # Total training windows (GRAIL_TRAINER_TOTAL_WINDOWS) - controls iteration count
     # Each optimizer step = 32 groups × 16 rollouts = 512 samples
     # total_optimizer_steps calculated below based on total_windows
-    total_windows: int = 100
+    total_steps: int = 400
 
     # ────────────────────────────────────────────────────────────────────────
     # GRPO Loss Configuration (from grail/trainer/algorithms/grpo.py)
@@ -1026,7 +1026,7 @@ def main() -> None:
     print(f"  {'Max Completion Tokens':<40} {cfg.max_new_tokens:<15} GRPO_MAX_COMPLETION_TOKENS")
     print(f"  {'Gradient Clip':<40} {cfg.grad_clip:<15} GRAIL_TRAINER_GRAD_CLIP")
     print(f"  {'Warmup Steps':<40} {cfg.warmup_steps:<15} GRAIL_TRAINER_WARMUP_STEPS")
-    print(f"  {'Total Windows':<40} {cfg.total_windows:<15} GRAIL_TRAINER_TOTAL_WINDOWS")
+    print(f"  {'Total Steps':<40} {cfg.total_steps:<15} GRAIL_TRAINER_TOTAL_STEPS")
     print(f"  {'KL Coefficient':<40} {cfg.kl_coef:<15} GRAIL_TRAINER_KL_COEF")
     print(f"  {'Entropy Coefficient':<40} {cfg.entropy_coef:<15} GRAIL_TRAINER_ENTROPY_COEF")
     print(f"  {'PPO Clip Epsilon':<40} {cfg.ppo_clip_eps:<15} TRAINER_PPO_CLIP_EPS")
@@ -1091,7 +1091,7 @@ def main() -> None:
     # = 32 groups × 16 rollouts
     effective_batch = cfg.batch_size * cfg.grad_accum_steps  # 4 × 128 = 512
     groups_per_step = effective_batch // cfg.rollouts_per_problem  # 512 / 16 = 32
-    total_optimizer_steps = 320  # Fixed: maintains original training duration
+    total_optimizer_steps = cfg.total_steps  # Fixed: maintains original training duration
 
     print("\n📊 Training Schedule:")
     print(f"  • Effective batch size: {effective_batch} samples")
@@ -1129,6 +1129,11 @@ def main() -> None:
         # ─────────────────────────────────────────────────────────────────────
         max_prompt_length=max_prompt_length,  # max_length - max_completion_tokens
         max_completion_length=cfg.max_new_tokens,  # GRPO_MAX_COMPLETION_TOKENS
+
+        # ─────────────────────────────────────────────────────────────────────
+        # Importance Sampling Level
+        # ─────────────────────────────────────────────────────────────────────
+        importance_sampling_level=cfg.importance_sampling_level,  # GRAIL_IMPORTANCE_SAMPLING_LEVEL
         # ─────────────────────────────────────────────────────────────────────
         # Generation Parameters
         # ─────────────────────────────────────────────────────────────────────
@@ -1160,7 +1165,6 @@ def main() -> None:
         use_vllm=True,
         vllm_mode="server",
         vllm_server_base_url="http://127.0.0.1:8000",
-        # Importance sampling configuration (matching GRAIL_IMPORTANCE_SAMPLING_LEVEL=token)
         vllm_importance_sampling_correction=False,
         vllm_importance_sampling_cap=cfg.is_ratio_max,  # GRAIL_TRAINER_IS_RATIO_MAX
     )
