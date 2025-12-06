@@ -1129,7 +1129,6 @@ def main() -> None:
         # ─────────────────────────────────────────────────────────────────────
         max_prompt_length=max_prompt_length,  # max_length - max_completion_tokens
         max_completion_length=cfg.max_new_tokens,  # GRPO_MAX_COMPLETION_TOKENS
-
         # ─────────────────────────────────────────────────────────────────────
         # Importance Sampling Level
         # ─────────────────────────────────────────────────────────────────────
