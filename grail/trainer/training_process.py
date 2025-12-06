@@ -41,6 +41,7 @@ from grail.shared.constants import NETUID, WINDOW_LENGTH, is_kl_enabled
 from grail.trainer.algorithms import GRPOAlgorithm, TrainingAlgorithm
 from grail.trainer.algorithms.grpo import load_grpo_groups
 from grail.trainer.config import TrainingConfig
+from grail.trainer.ipc import IPCChannels
 from grail.trainer.replay_buffer import ReplayBuffer, create_replay_buffer
 from grail.trainer.snapshot_manager import SnapshotManager
 from grail.trainer.trust import get_trusted_miner_hotkeys
@@ -100,8 +101,7 @@ class TrainingService:
         *,
         train_spec: ModelLoadSpec,
         ref_spec: ModelLoadSpec,
-        pause_requested: multiprocessing.Event | None = None,
-        pause_confirmed: multiprocessing.Event | None = None,
+        ipc: IPCChannels | None = None,
     ) -> None:
         """Initialize training service.
 
@@ -113,8 +113,7 @@ class TrainingService:
             monitor_config: Optional monitoring configuration (will be initialized in async context)
             train_spec: Specification for loading the training model/tokenizer
             ref_spec: Specification for loading the reference model
-            pause_requested: Event from orchestrator requesting pause (None = use filesystem)
-            pause_confirmed: Event to confirm pause to orchestrator (None = use filesystem)
+            ipc: IPC channels for coordination (None = use filesystem fallback)
         """
         self.config = config
         self.snapshot_manager = snapshot_manager
@@ -125,9 +124,8 @@ class TrainingService:
         self.train_spec = train_spec
         self.ref_spec = ref_spec
 
-        # IPC events for pause coordination (with filesystem fallback)
-        self._pause_requested = pause_requested
-        self._pause_confirmed = pause_confirmed
+        # IPC channels for all inter-process communication (with filesystem fallback)
+        self._ipc = ipc
 
         # Async resources (initialized in run())
         self.subtensor: bt.subtensor | None = None
@@ -160,6 +158,17 @@ class TrainingService:
         else:
             self.replay_buffer = None
             logger.info("Replay buffer disabled, using single-window training")
+
+    def _update_heartbeat(self) -> None:
+        """Update heartbeat timestamp via IPC channels (primary) or filesystem (fallback).
+
+        Uses atomic Value update for reliable IPC without file I/O overhead.
+        Also updates filesystem for crash recovery.
+        """
+        if self._ipc is not None:
+            self._ipc.update_heartbeat()
+        # Also update filesystem for crash recovery / backward compat
+        self.snapshot_manager.set_training_heartbeat()
 
     async def run(
         self,
@@ -493,13 +502,13 @@ class TrainingService:
 
         while not stop_event.is_set():
             try:
-                # Update heartbeat
-                self.snapshot_manager.set_training_heartbeat()
+                # Update heartbeat via shared Value (primary) + filesystem (backup)
+                self._update_heartbeat()
 
-                # Check for pause request via IPC event (primary) or filesystem (fallback)
+                # Check for pause request via IPC (primary) or filesystem (fallback)
                 pause_requested = (
-                    self._pause_requested.is_set()
-                    if self._pause_requested is not None
+                    self._ipc.is_pause_requested()
+                    if self._ipc is not None
                     else self.snapshot_manager.check_pause_flag()
                 )
                 if pause_requested:
@@ -553,8 +562,8 @@ class TrainingService:
                 # Save snapshot
                 self._save_snapshot(train_model, accelerator, current_window, metrics)
 
-                # Update heartbeat
-                self.snapshot_manager.set_training_heartbeat()
+                # Update heartbeat via shared Value (primary) + filesystem (backup)
+                self._update_heartbeat()
 
             except asyncio.CancelledError:
                 logger.info("Training process received CancelledError, exiting")
@@ -662,10 +671,10 @@ class TrainingService:
             },
         )
 
-        # Signal pause confirmed via IPC event (primary) - orchestrator is waiting for this
-        if self._pause_confirmed is not None:
-            self._pause_confirmed.set()
-            logger.info("🔄 STATE: pause_confirmed - signaled orchestrator via IPC event")
+        # Signal pause confirmed via IPC (primary) - orchestrator is waiting for this
+        if self._ipc is not None:
+            self._ipc.confirm_pause()
+            logger.info("🔄 STATE: pause_confirmed - signaled orchestrator via IPC")
         else:
             logger.info("🔄 STATE: models_on_cpu_waiting - snapshot saved (filesystem mode)")
 
@@ -684,12 +693,12 @@ class TrainingService:
                 logger.warning("Failed to close subtensor during pause: %s", e)
             self.subtensor = None
 
-        # Wait for pause flag to be cleared via IPC event (primary) or filesystem (fallback)
+        # Wait for pause flag to be cleared via IPC (primary) or filesystem (fallback)
         while not stop_event.is_set():
             # Check if resume signal received
             pause_still_active = (
-                self._pause_requested.is_set()
-                if self._pause_requested is not None
+                self._ipc.is_pause_requested()
+                if self._ipc is not None
                 else self.snapshot_manager.check_pause_flag()
             )
             if not pause_still_active:
@@ -700,8 +709,8 @@ class TrainingService:
             return train_model_cpu, ref_model_cpu, optimizer
 
         # Clear the confirmed event for next cycle
-        if self._pause_confirmed is not None:
-            self._pause_confirmed.clear()
+        if self._ipc is not None:
+            self._ipc.clear_pause_confirmed()
 
         logger.info("🔄 STATE: resume_requested - pause signal cleared")
 
@@ -962,7 +971,7 @@ class TrainingService:
         current_window: int,
         metrics: dict[str, Any],
     ) -> None:
-        """Save model snapshot atomically.
+        """Save model snapshot atomically and notify upload worker.
 
         Args:
             train_model: Training model
@@ -973,18 +982,26 @@ class TrainingService:
         try:
             unwrapped_train = accelerator.unwrap_model(train_model)
 
+            snapshot_metadata = {
+                "epoch": self.epoch_counter,
+                "timestamp": time.time(),
+                "window": current_window,
+                "parent_window": current_window - WINDOW_LENGTH,
+                "metrics": metrics,
+                "lr": self.scheduler.get_last_lr()[0] if self.scheduler else 0.0,
+            }
+
             self.snapshot_manager.save_snapshot_atomic(
                 unwrapped_train,
                 self.tokenizer,
-                {
-                    "epoch": self.epoch_counter,
-                    "timestamp": time.time(),
-                    "window": current_window,
-                    "parent_window": current_window - WINDOW_LENGTH,
-                    "metrics": metrics,
-                    "lr": self.scheduler.get_last_lr()[0] if self.scheduler else 0.0,
-                },
+                snapshot_metadata,
             )
+
+            # Notify upload worker via IPC queue (primary) or filesystem marker (fallback)
+            snapshot_path = self.snapshot_manager.get_latest_snapshot_path()
+            if self._ipc is not None and snapshot_path:
+                self._ipc.queue_snapshot(snapshot_path, snapshot_metadata, current_window)
+                logger.debug("Snapshot message queued for upload worker")
 
             logger.info("Snapshot saved for epoch %d", self.epoch_counter)
 
@@ -1054,9 +1071,7 @@ def run_training_process(
     credentials: Any,
     wallet_args: dict[str, str],
     monitor_config: dict[str, Any],
-    stop_event: multiprocessing.Event,
-    pause_requested: multiprocessing.Event,
-    pause_confirmed: multiprocessing.Event,
+    ipc: IPCChannels,
     verbosity: int = 1,
 ) -> None:
     """Entry point for training process.
@@ -1073,9 +1088,7 @@ def run_training_process(
         credentials: R2 credentials
         wallet_args: Wallet configuration (name, hotkey, path)
         monitor_config: Monitoring configuration
-        stop_event: Event to signal shutdown
-        pause_requested: Event signaling orchestrator requests pause
-        pause_confirmed: Event to confirm pause to orchestrator
+        ipc: IPC channels for coordination with orchestrator
         verbosity: CLI verbosity level (0=silent, 1=INFO, >=2=DEBUG)
     """
     # Configure logging for child process
@@ -1103,11 +1116,10 @@ def run_training_process(
             monitor_config=monitor_config,
             train_spec=train_spec,
             ref_spec=ref_spec,
-            pause_requested=pause_requested,
-            pause_confirmed=pause_confirmed,
+            ipc=ipc,
         )
 
-        asyncio.run(service.run(stop_event))
+        asyncio.run(service.run(ipc.stop))
 
     except KeyboardInterrupt:
         logger.info("Training process interrupted")

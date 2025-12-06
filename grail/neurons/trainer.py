@@ -33,6 +33,7 @@ from grail.trainer.config import EvalConfig, TrainingConfig
 from grail.trainer.eval_planner import EvaluationPlanner
 from grail.trainer.evaluator import EvaluatorService
 from grail.trainer.inference_server import create_inference_server
+from grail.trainer.ipc import IPCChannels, create_ipc_channels
 from grail.trainer.snapshot_manager import SnapshotManager
 from grail.trainer.training_process import run_training_process
 from grail.trainer.upload_worker import run_upload_worker
@@ -127,11 +128,9 @@ class TrainerNeuron(BaseNeuron):
         # Child processes
         self._training_process: multiprocessing.Process | None = None
         self._upload_process: multiprocessing.Process | None = None
-        self._stop_event = multiprocessing.Event()
 
-        # IPC events for pause coordination (native timeout support)
-        self._pause_requested = multiprocessing.Event()
-        self._pause_confirmed = multiprocessing.Event()
+        # Unified IPC channels for all inter-process communication
+        self._ipc: IPCChannels = create_ipc_channels()
 
         # Evaluation state
         self._eval_in_progress: bool = False
@@ -194,9 +193,7 @@ class TrainerNeuron(BaseNeuron):
                 self._context.credentials,
                 wallet_args,
                 monitor_config,
-                self._stop_event,
-                self._pause_requested,
-                self._pause_confirmed,
+                self._ipc,
                 self._context.verbosity,
             ),
         )
@@ -213,7 +210,7 @@ class TrainerNeuron(BaseNeuron):
                 self._snapshot_manager,
                 self._context.credentials,
                 wallet_args,
-                self._stop_event,
+                self._ipc,
                 SNAPSHOT_POLL_INTERVAL_SECONDS,
                 self._context.verbosity,
             ),
@@ -225,7 +222,7 @@ class TrainerNeuron(BaseNeuron):
         """Gracefully shutdown child processes."""
         logger.info("Shutting down child processes...")
 
-        self._stop_event.set()
+        self._ipc.stop.set()
 
         await self._shutdown_process(self._training_process, "Training")
         await self._shutdown_process(self._upload_process, "Upload")
@@ -302,7 +299,7 @@ class TrainerNeuron(BaseNeuron):
         Returns:
             True if should wait, False if ready
         """
-        heartbeat_age = self._snapshot_manager.get_training_heartbeat_age()
+        heartbeat_age = self._get_heartbeat_age()
         if heartbeat_age == float("inf"):
             logger.debug(
                 "Training process still initializing (no heartbeat yet), skipping evaluation check"
@@ -333,13 +330,26 @@ class TrainerNeuron(BaseNeuron):
         if self._upload_process and not self._upload_process.is_alive():
             logger.error("Upload process died - system should restart")
 
-        heartbeat_age = self._snapshot_manager.get_training_heartbeat_age()
+        # Get heartbeat age from IPC (primary) or filesystem (fallback)
+        heartbeat_age = self._get_heartbeat_age()
         if heartbeat_age > TRAINING_HEARTBEAT_TIMEOUT_SECONDS:
             logger.error(
                 "Training heartbeat stale (%.1fs > %ds)",
                 heartbeat_age,
                 TRAINING_HEARTBEAT_TIMEOUT_SECONDS,
             )
+
+    def _get_heartbeat_age(self) -> float:
+        """Get training heartbeat age from IPC channels.
+
+        Returns:
+            Age in seconds, or infinity if no heartbeat received yet
+        """
+        age = self._ipc.get_heartbeat_age()
+        if age == float("inf"):
+            # No heartbeat yet - fall back to filesystem for backward compat
+            return self._snapshot_manager.get_training_heartbeat_age()
+        return age
 
     def _should_run_evaluation(self) -> bool:
         """Check if evaluation should run.
@@ -371,13 +381,13 @@ class TrainerNeuron(BaseNeuron):
         logger.info("🔄 STATE: evaluation_pause_requested (window=%d)", current_window)
 
         # Signal pause via IPC event (primary) and filesystem marker (backup for crash recovery)
-        self._pause_requested.set()
+        self._ipc.request_pause()
         self._snapshot_manager.set_pause_flag()
         logger.info("Set pause_requested event, waiting for training to pause...")
 
         if not await self._wait_for_training_pause():
             logger.error("Training process failed to pause in time, skipping evaluation")
-            self._pause_requested.clear()
+            self._ipc.clear_pause()
             self._snapshot_manager.clear_pause_flag()
             self.reset_subtensor()  # Reset connection after idle wait period
             return
@@ -388,7 +398,7 @@ class TrainerNeuron(BaseNeuron):
             logger.info("🔄 STATE: evaluation_complete - clearing pause flag")
         finally:
             # Signal resume via IPC event and filesystem marker
-            self._pause_requested.clear()
+            self._ipc.clear_pause()
             self._snapshot_manager.clear_pause_flag()
             # Reset main process subtensor connection after idle period during evaluation
             self.reset_subtensor()
@@ -405,9 +415,6 @@ class TrainerNeuron(BaseNeuron):
         """
         start_wait = time.time()
         timeout = PAUSE_CONFIRMATION_TIMEOUT_SECONDS
-
-        # Clear any stale confirmation from previous cycle
-        self._pause_confirmed.clear()
 
         # Use Event.wait() with timeout in thread pool to avoid blocking event loop
         loop = asyncio.get_event_loop()
@@ -437,7 +444,7 @@ class TrainerNeuron(BaseNeuron):
             # Using run_in_executor to avoid blocking the asyncio event loop
             confirmed = await loop.run_in_executor(
                 None,
-                self._pause_confirmed.wait,
+                self._ipc.wait_for_pause_confirmation,
                 PAUSE_CONFIRMATION_POLL_SECONDS,  # Short wait, then re-check conditions
             )
 

@@ -1,7 +1,7 @@
 """Upload worker process for async checkpoint uploading.
 
 Runs as separate process that:
-1. Polls for new snapshots (SNAPSHOT_READY marker)
+1. Receives snapshot messages from training process via IPC queue
 2. Copies snapshot to staging
 3. Uploads to R2 asynchronously
 4. Determines window number after upload completes
@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import multiprocessing
+import queue
 import time
 from pathlib import Path
 from typing import Any
@@ -27,27 +28,58 @@ from grail.shared.constants import (
     WINDOW_LENGTH,
 )
 from grail.trainer.checkpoint_publisher import CheckpointPublisher
+from grail.trainer.ipc import IPCChannels
 from grail.trainer.snapshot_manager import SnapshotManager
 
 logger = logging.getLogger(__name__)
 
 
+async def _wait_for_snapshot(
+    ipc: IPCChannels,
+    poll_interval: int,
+) -> dict[str, Any] | None:
+    """Wait for snapshot notification via IPC queue.
+
+    Args:
+        ipc: IPC channels for communication
+        poll_interval: Seconds to wait before timeout
+
+    Returns:
+        Snapshot message dict if available, None if timeout
+    """
+    loop = asyncio.get_event_loop()
+
+    try:
+        # Use run_in_executor to avoid blocking the event loop
+        msg = await loop.run_in_executor(
+            None,
+            lambda: ipc.snapshot_queue.get(timeout=poll_interval),
+        )
+        if msg and msg.get("type") == "snapshot_ready":
+            logger.debug("Received snapshot message from queue: window=%s", msg.get("window"))
+            return msg
+        return None
+    except queue.Empty:
+        # Timeout - return None to re-check stop_event
+        return None
+
+
 async def upload_worker_loop(
     snapshot_manager: SnapshotManager,
     checkpoint_publisher: CheckpointPublisher,
-    stop_event: multiprocessing.Event,
+    ipc: IPCChannels,
     poll_interval: int = 30,
 ) -> None:
     """Main upload worker loop.
 
-    Polls for new snapshots and uploads them to R2 asynchronously.
+    Receives snapshot messages via IPC queue from training process.
     Window number is determined AFTER upload completes based on current block.
     Creates its own subtensor connection in child process.
 
     Args:
-        snapshot_manager: Snapshot manager for IPC
+        snapshot_manager: Snapshot manager for staging/cleanup
         checkpoint_publisher: Publisher for R2 uploads
-        stop_event: Event to signal shutdown
+        ipc: IPC channels for coordination
         poll_interval: Seconds between snapshot checks
     """
     logger.info("Upload worker starting (poll_interval=%ds)", poll_interval)
@@ -69,11 +101,13 @@ async def upload_worker_loop(
     # Track last uploaded window to prevent duplicate uploads within same window
     last_uploaded_window = -1
 
-    while not stop_event.is_set():
+    while not ipc.stop.is_set():
         try:
-            # Check if snapshot ready
-            if not snapshot_manager.check_snapshot_ready():
-                await asyncio.sleep(poll_interval)
+            # Wait for snapshot via IPC queue
+            snapshot_msg = await _wait_for_snapshot(ipc, poll_interval)
+
+            if snapshot_msg is None:
+                # Timeout or stop event - continue loop to check stop_event
                 continue
 
             logger.info("New snapshot detected, preparing upload")
@@ -85,15 +119,9 @@ async def upload_worker_loop(
             # Skip if we already uploaded to this window
             if checkpoint_window == last_uploaded_window:
                 logger.info(
-                    "Already uploaded to window %s, skipping duplicate upload and clearing snapshot marker",
+                    "Already uploaded to window %s, skipping duplicate upload",
                     checkpoint_window,
                 )
-                # Clear the snapshot marker so training can continue
-                try:
-                    snapshot_manager.copy_snapshot_to_staging()
-                    snapshot_manager.cleanup_staging()
-                except FileNotFoundError as exc:
-                    logger.warning("Snapshot not found during cleanup: %s", exc)
                 continue
 
             # Copy snapshot to staging
@@ -235,7 +263,7 @@ def run_upload_worker(
     snapshot_manager: SnapshotManager,
     credentials: Any,
     wallet_args: dict[str, str],
-    stop_event: multiprocessing.Event,
+    ipc: IPCChannels,
     poll_interval: int = 30,
     verbosity: int = 1,
 ) -> None:
@@ -248,7 +276,7 @@ def run_upload_worker(
         snapshot_manager: Snapshot manager for IPC
         credentials: R2 credentials
         wallet_args: Wallet configuration (name, hotkey, path)
-        stop_event: Event to signal shutdown
+        ipc: IPC channels for coordination
         poll_interval: Seconds between snapshot checks
         verbosity: CLI verbosity level (0=silent, 1=INFO, >=2=DEBUG)
     """
@@ -272,7 +300,7 @@ def run_upload_worker(
             upload_worker_loop(
                 snapshot_manager,
                 checkpoint_publisher,
-                stop_event,
+                ipc,
                 poll_interval,
             )
         )
