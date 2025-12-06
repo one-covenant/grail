@@ -100,6 +100,8 @@ class TrainingService:
         *,
         train_spec: ModelLoadSpec,
         ref_spec: ModelLoadSpec,
+        pause_requested: multiprocessing.Event | None = None,
+        pause_confirmed: multiprocessing.Event | None = None,
     ) -> None:
         """Initialize training service.
 
@@ -111,6 +113,8 @@ class TrainingService:
             monitor_config: Optional monitoring configuration (will be initialized in async context)
             train_spec: Specification for loading the training model/tokenizer
             ref_spec: Specification for loading the reference model
+            pause_requested: Event from orchestrator requesting pause (None = use filesystem)
+            pause_confirmed: Event to confirm pause to orchestrator (None = use filesystem)
         """
         self.config = config
         self.snapshot_manager = snapshot_manager
@@ -120,6 +124,10 @@ class TrainingService:
         self.monitor: Any | None = None
         self.train_spec = train_spec
         self.ref_spec = ref_spec
+
+        # IPC events for pause coordination (with filesystem fallback)
+        self._pause_requested = pause_requested
+        self._pause_confirmed = pause_confirmed
 
         # Async resources (initialized in run())
         self.subtensor: bt.subtensor | None = None
@@ -488,8 +496,13 @@ class TrainingService:
                 # Update heartbeat
                 self.snapshot_manager.set_training_heartbeat()
 
-                # Check PAUSE_TRAINING flag
-                if self.snapshot_manager.check_pause_flag():
+                # Check for pause request via IPC event (primary) or filesystem (fallback)
+                pause_requested = (
+                    self._pause_requested.is_set()
+                    if self._pause_requested is not None
+                    else self.snapshot_manager.check_pause_flag()
+                )
+                if pause_requested:
                     train_model, ref_model, optimizer = await self._handle_pause(
                         train_model,
                         ref_model,
@@ -648,7 +661,13 @@ class TrainingService:
                 "status": "paused_for_evaluation",
             },
         )
-        logger.info("🔄 STATE: models_on_cpu_waiting - snapshot saved, waiting for resume")
+
+        # Signal pause confirmed via IPC event (primary) - orchestrator is waiting for this
+        if self._pause_confirmed is not None:
+            self._pause_confirmed.set()
+            logger.info("🔄 STATE: pause_confirmed - signaled orchestrator via IPC event")
+        else:
+            logger.info("🔄 STATE: models_on_cpu_waiting - snapshot saved (filesystem mode)")
 
         # Close subtensor connection before long idle period (prevents 10s timeout)
         if self.subtensor:
@@ -665,14 +684,26 @@ class TrainingService:
                 logger.warning("Failed to close subtensor during pause: %s", e)
             self.subtensor = None
 
-        # Wait for pause flag to be cleared
-        while self.snapshot_manager.check_pause_flag() and not stop_event.is_set():
+        # Wait for pause flag to be cleared via IPC event (primary) or filesystem (fallback)
+        while not stop_event.is_set():
+            # Check if resume signal received
+            pause_still_active = (
+                self._pause_requested.is_set()
+                if self._pause_requested is not None
+                else self.snapshot_manager.check_pause_flag()
+            )
+            if not pause_still_active:
+                break
             await asyncio.sleep(PAUSE_CHECK_INTERVAL_SECONDS)
 
         if stop_event.is_set():
             return train_model_cpu, ref_model_cpu, optimizer
 
-        logger.info("🔄 STATE: resume_requested - PAUSE_TRAINING cleared")
+        # Clear the confirmed event for next cycle
+        if self._pause_confirmed is not None:
+            self._pause_confirmed.clear()
+
+        logger.info("🔄 STATE: resume_requested - pause signal cleared")
 
         # Recreate subtensor connection after pause
         logger.info("Recreating subtensor connection after pause...")
@@ -1024,6 +1055,8 @@ def run_training_process(
     wallet_args: dict[str, str],
     monitor_config: dict[str, Any],
     stop_event: multiprocessing.Event,
+    pause_requested: multiprocessing.Event,
+    pause_confirmed: multiprocessing.Event,
     verbosity: int = 1,
 ) -> None:
     """Entry point for training process.
@@ -1041,6 +1074,8 @@ def run_training_process(
         wallet_args: Wallet configuration (name, hotkey, path)
         monitor_config: Monitoring configuration
         stop_event: Event to signal shutdown
+        pause_requested: Event signaling orchestrator requests pause
+        pause_confirmed: Event to confirm pause to orchestrator
         verbosity: CLI verbosity level (0=silent, 1=INFO, >=2=DEBUG)
     """
     # Configure logging for child process
@@ -1068,6 +1103,8 @@ def run_training_process(
             monitor_config=monitor_config,
             train_spec=train_spec,
             ref_spec=ref_spec,
+            pause_requested=pause_requested,
+            pause_confirmed=pause_confirmed,
         )
 
         asyncio.run(service.run(stop_event))

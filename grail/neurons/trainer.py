@@ -52,6 +52,7 @@ ORCHESTRATION_SLEEP_SECONDS = 60
 ORCHESTRATION_ERROR_SLEEP_SECONDS = 30
 
 PAUSE_CONFIRMATION_POLL_SECONDS = 2
+PAUSE_CONFIRMATION_TIMEOUT_SECONDS = 300  # 5 minutes max wait for training to pause
 PROCESS_JOIN_TIMEOUT_SECONDS = 30
 PROCESS_TERMINATE_TIMEOUT_SECONDS = 10
 
@@ -128,6 +129,10 @@ class TrainerNeuron(BaseNeuron):
         self._upload_process: multiprocessing.Process | None = None
         self._stop_event = multiprocessing.Event()
 
+        # IPC events for pause coordination (native timeout support)
+        self._pause_requested = multiprocessing.Event()
+        self._pause_confirmed = multiprocessing.Event()
+
         # Evaluation state
         self._eval_in_progress: bool = False
         self._eval_last_run_window_number: int | None = None
@@ -190,6 +195,8 @@ class TrainerNeuron(BaseNeuron):
                 wallet_args,
                 monitor_config,
                 self._stop_event,
+                self._pause_requested,
+                self._pause_confirmed,
                 self._context.verbosity,
             ),
         )
@@ -355,15 +362,22 @@ class TrainerNeuron(BaseNeuron):
     async def _coordinate_evaluation(self, current_window: int) -> None:
         """Pause training, run evaluation, resume training.
 
+        Uses IPC events for coordination with filesystem markers as backup
+        for crash recovery.
+
         Args:
             current_window: Current window number
         """
         logger.info("🔄 STATE: evaluation_pause_requested (window=%d)", current_window)
+
+        # Signal pause via IPC event (primary) and filesystem marker (backup for crash recovery)
+        self._pause_requested.set()
         self._snapshot_manager.set_pause_flag()
-        logger.info("Set PAUSE_TRAINING flag, waiting for training to pause...")
+        logger.info("Set pause_requested event, waiting for training to pause...")
 
         if not await self._wait_for_training_pause():
             logger.error("Training process failed to pause in time, skipping evaluation")
+            self._pause_requested.clear()
             self._snapshot_manager.clear_pause_flag()
             self.reset_subtensor()  # Reset connection after idle wait period
             return
@@ -373,30 +387,72 @@ class TrainerNeuron(BaseNeuron):
             await self._maybe_run_evaluation(current_window)
             logger.info("🔄 STATE: evaluation_complete - clearing pause flag")
         finally:
+            # Signal resume via IPC event and filesystem marker
+            self._pause_requested.clear()
             self._snapshot_manager.clear_pause_flag()
             # Reset main process subtensor connection after idle period during evaluation
             self.reset_subtensor()
             logger.info("🔄 STATE: evaluation_resume_signaled - training will resume")
 
     async def _wait_for_training_pause(self) -> bool:
-        """Wait for training to confirm pause via snapshot status.
+        """Wait for training to confirm pause via IPC event.
+
+        Uses multiprocessing.Event with native timeout support for reliable
+        coordination. Falls back to checking process liveness and stop_event.
 
         Returns:
-            True if training paused, False if timeout
+            True if training paused successfully, False if timeout/failure
         """
         start_wait = time.time()
+        timeout = PAUSE_CONFIRMATION_TIMEOUT_SECONDS
+
+        # Clear any stale confirmation from previous cycle
+        self._pause_confirmed.clear()
+
+        # Use Event.wait() with timeout in thread pool to avoid blocking event loop
+        loop = asyncio.get_event_loop()
 
         while True:
-            meta = self._snapshot_manager.get_latest_snapshot_metadata()
-            if meta and meta.get("status") == "paused_for_evaluation":
-                logger.info("Confirmed training paused via snapshot status")
+            # Check for shutdown request
+            if self.stop_event.is_set():
+                logger.info("Stop event set during pause wait, aborting")
+                return False
+
+            # Check if training process is still alive
+            if self._training_process and not self._training_process.is_alive():
+                logger.error("Training process died while waiting for pause")
+                return False
+
+            # Check for timeout
+            elapsed = time.time() - start_wait
+            if elapsed > timeout:
+                logger.error(
+                    "Timeout waiting for training to pause (%.1fs > %ds)",
+                    elapsed,
+                    timeout,
+                )
+                return False
+
+            # Wait for pause confirmation with short timeout (non-blocking check)
+            # Using run_in_executor to avoid blocking the asyncio event loop
+            confirmed = await loop.run_in_executor(
+                None,
+                self._pause_confirmed.wait,
+                PAUSE_CONFIRMATION_POLL_SECONDS,  # Short wait, then re-check conditions
+            )
+
+            if confirmed:
+                logger.info(
+                    "Confirmed training paused via IPC event (%.1fs elapsed)",
+                    time.time() - start_wait,
+                )
                 return True
 
             logger.info(
-                "Waiting for training to pause via snapshot status... %.1fs",
-                time.time() - start_wait,
+                "Waiting for training to pause... %.1fs / %ds",
+                elapsed,
+                timeout,
             )
-            await asyncio.sleep(PAUSE_CONFIRMATION_POLL_SECONDS)
 
     async def _maybe_run_evaluation(self, current_window: int) -> bool:
         """Run evaluation if due.
