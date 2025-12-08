@@ -2,8 +2,8 @@
 # Generates 10 samples per problem with temperature sampling
 # Computes pass@1, pass@5
 
-group: hendrycks_math_pass_at_k
-task: hendrycks_math_pass_at_5
+group: hendrycks_math_thinking_pass_at_k
+task: hendrycks_math_thinking_pass_at_5
 dataset_path: EleutherAI/hendrycks_math
 dataset_name: algebra
 output_type: generate_until
