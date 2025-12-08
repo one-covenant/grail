@@ -125,7 +125,7 @@ CHECKPOINT_RETENTION_LIMIT = int(os.getenv("GRAIL_CHECKPOINT_RETENTION_LIMIT", "
 CHECKPOINT_MILESTONE_INTERVAL = int(os.getenv("GRAIL_CHECKPOINT_MILESTONE_INTERVAL", "100"))
 
 # Trainer identity used for checkpoint publication
-TRAINER_UID = 80
+TRAINER_UID = 0
 
 # ────────────────  LOGGING  ────────────────
 

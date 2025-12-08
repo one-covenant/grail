@@ -828,9 +828,6 @@ class TrainingService:
                 self.last_loaded_window,
             )
 
-            # TEST: filter to uid 80 hotkey and choose between all hotkeys
-            trusted_hotkeys = [hk for hk, uid in uid_by_hotkey.items() if uid == 80]
-
             new_groups = await load_grpo_groups(
                 target_data_window,
                 self.config.group_adv_sum_tolerance,
