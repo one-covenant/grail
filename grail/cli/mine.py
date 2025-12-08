@@ -23,6 +23,7 @@ from ..infrastructure.comms import sink_window_inferences
 from ..infrastructure.drand import get_drand_beacon
 from ..shared.constants import (
     BLOCK_TIME_SECONDS,
+    CHALLENGE_K,
     LAYER_INDEX,
     ROLLOUTS_PER_PROBLEM,
     WINDOW_LENGTH,
@@ -721,6 +722,33 @@ async def generate_rollouts_for_window(
                     if successful_rollouts + failed_rollouts > 0:
                         success_rate = successful_rollouts / (successful_rollouts + failed_rollouts)
                         await monitor.log_gauge("mining/success_rate", success_rate)
+
+            # ─────────────────────────────────────────────────────────────────────
+            # COMPLETION LENGTH GATE: Drop entire group if any rollout is too short
+            # ─────────────────────────────────────────────────────────────────────
+            # Validators require at least CHALLENGE_K tokens in the completion region
+            # to perform cryptographic verification (sketch checks at k=16 positions).
+            # If any rollout in the group has completion_length < CHALLENGE_K, the
+            # validator will reject that rollout. Rather than waste bandwidth uploading
+            # a partially valid group, we drop the entire group preemptively.
+            short_rollouts = [
+                (i, r.completion_length)
+                for i, r in enumerate(grpo_rollouts)
+                if r.completion_length < CHALLENGE_K
+            ]
+            if short_rollouts:
+                short_details = ", ".join(f"idx={i}:len={length}" for i, length in short_rollouts)
+                logger.warning(
+                    "Dropping group %d: %d/%d rollouts have completion < %d tokens (%s)",
+                    base_nonce,
+                    len(short_rollouts),
+                    len(grpo_rollouts),
+                    CHALLENGE_K,
+                    short_details,
+                )
+                # Skip packaging this group entirely; continue to next problem
+                timers.update_gen_time_ema(time.time() - gen_start)
+                continue
 
             # Package each rollout with signatures and proofs for validation
             for rollout_idx, rollout in enumerate(grpo_rollouts):
