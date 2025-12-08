@@ -1,6 +1,6 @@
 tag:
   - math_word_problems
-task: aime24_grail
+task: aime24_thinking
 dataset_path: Maxwell-Jia/AIME_2024
 output_type: generate_until
 training_split: train

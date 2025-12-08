@@ -1,5 +1,5 @@
 include: _default_template.yaml
 tag:
   - math_word_problems
-task: hendrycks_math_grail_num_theory
+task: hendrycks_math_thinking_num_theory
 dataset_name: number_theory

@@ -1,6 +1,6 @@
 tag:
   - math_word_problems
-task: gsm8k_grail
+task: gsm8k_thinking
 dataset_path: gsm8k
 dataset_name: main
 output_type: generate_until

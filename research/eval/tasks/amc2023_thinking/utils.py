@@ -1,7 +1,7 @@
-"""AMC 2023 evaluation utilities.
+"""AMC 2023 evaluation utilities for thinking models.
 
-AMC answers are integers (multiple choice A-E corresponds to numeric answers).
-Extracts answers from $...$ format, \\boxed{}, or plain numbers.
+Extracts answers from <SOLUTION>...</SOLUTION> tags and uses robust
+numeric comparison for AMC answers.
 """
 
 import sys
@@ -21,10 +21,10 @@ def process_results(doc: dict, results: list[str]) -> dict[str, int]:
     """Process model output and compare with target answer."""
     response = results[0]
 
-    # Extract answer (no SOLUTION tags for non-thinking model)
+    # Extract answer using cascade (SOLUTION tag first for thinking models)
     answer = extract_answer_cascade(
         response,
-        try_solution_tag=False,
+        try_solution_tag=True,
         try_boxed=True,
         try_dollar=True,
     )

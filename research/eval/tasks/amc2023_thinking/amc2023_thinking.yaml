@@ -1,6 +1,6 @@
 tag:
   - math_word_problems
-task: amc2023_grail
+task: amc2023_thinking
 dataset_path: sparkle-reasoning/amc2023
 output_type: generate_until
 test_split: test
