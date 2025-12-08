@@ -13,6 +13,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from grail.trainer.ipc import create_ipc_channels
 from grail.trainer.snapshot_manager import SnapshotManager
 
 
@@ -81,20 +82,19 @@ class TestSnapshotManager:
             assert not staging_path.exists()
 
     def test_pause_training_flag(self) -> None:
-        """Test PAUSE_TRAINING flag operations."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            manager = SnapshotManager(Path(tmpdir))
+        """Test pause coordination via IPCChannels events."""
+        ipc = create_ipc_channels()
 
-            # Initially no pause flag
-            assert not manager.check_pause_flag()
+        # Initially no pause flag
+        assert not ipc.pause_requested.is_set()
 
-            # Set pause flag
-            manager.set_pause_flag()
-            assert manager.check_pause_flag()
+        # Set pause flag
+        ipc.pause_requested.set()
+        assert ipc.pause_requested.is_set()
 
-            # Clear pause flag
-            manager.clear_pause_flag()
-            assert not manager.check_pause_flag()
+        # Clear pause flag
+        ipc.pause_requested.clear()
+        assert not ipc.pause_requested.is_set()
 
     def test_training_heartbeat(self) -> None:
         """Test training heartbeat updates and age calculation."""
@@ -183,23 +183,26 @@ class TestAsyncTrainerIntegration:
             assert not staging_path.exists()
 
     def test_evaluation_coordination_flow(self) -> None:
-        """Test evaluation coordination flow with pause/resume."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            manager = SnapshotManager(Path(tmpdir))
+        """Test evaluation coordination flow with pause/resume via IPCChannels."""
+        ipc = create_ipc_channels()
 
-            # Simulate main process: set pause flag
-            manager.set_pause_flag()
+        # Simulate main process: request pause
+        ipc.pause_requested.set()
 
-            # Simulate training process: check pause flag
-            assert manager.check_pause_flag()
+        # Simulate training process: check pause flag
+        assert ipc.pause_requested.is_set()
 
-            # Training would save snapshot and wait here
+        # Simulate training process: confirm pause
+        ipc.pause_confirmed.set()
+        assert ipc.pause_confirmed.is_set()
 
-            # Simulate main process: run evaluation, then clear pause
-            manager.clear_pause_flag()
+        # Simulate main process: run evaluation, then clear pause
+        ipc.pause_requested.clear()
+        ipc.pause_confirmed.clear()
 
-            # Training process can resume
-            assert not manager.check_pause_flag()
+        # Training process can resume
+        assert not ipc.pause_requested.is_set()
+        assert not ipc.pause_confirmed.is_set()
 
 
 if __name__ == "__main__":
