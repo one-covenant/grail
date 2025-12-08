@@ -1,4 +1,4 @@
-"""Trainer package: configuration, algorithms, and orchestration service."""
+"""Trainer package: configuration, algorithms, and orchestration."""
 
 from __future__ import annotations
 
@@ -8,5 +8,4 @@ __all__ = [
     "config",
     "data",
     "replay_buffer",
-    "service",
 ]
