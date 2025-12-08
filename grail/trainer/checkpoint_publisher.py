@@ -521,6 +521,12 @@ class CheckpointPublisher:
                 remote_prefix,
             )
 
+            # Cleanup old checkpoints after successful upload (same as publish_checkpoint)
+            try:
+                await self.cleanup_old_checkpoints(target_window)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to perform remote checkpoint cleanup: %s", exc)
+
             return True
 
         except Exception as exc:
