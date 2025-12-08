@@ -33,7 +33,6 @@ class SnapshotManager:
         staging/
             pending/             # Upload worker copies snapshot here
         locks/
-            PAUSE_TRAINING       # Flag: training should pause for evaluation
             TRAINING_HEARTBEAT   # Timestamp file for liveness monitoring
     """
 
@@ -55,7 +54,6 @@ class SnapshotManager:
 
         # Marker file paths
         self._snapshot_ready_marker = self.snapshot_dir / "SNAPSHOT_READY"
-        self._pause_training_marker = self.locks_dir / "PAUSE_TRAINING"
         self._training_heartbeat_file = self.locks_dir / "TRAINING_HEARTBEAT"
 
     def save_snapshot_atomic(
@@ -174,25 +172,6 @@ class SnapshotManager:
         if staging_pending.exists():
             shutil.rmtree(staging_pending)
             logger.debug("Cleaned up staging directory")
-
-    def check_pause_flag(self) -> bool:
-        """Check if training should pause for evaluation.
-
-        Returns:
-            True if PAUSE_TRAINING flag exists
-        """
-        return self._pause_training_marker.exists()
-
-    def set_pause_flag(self) -> None:
-        """Set PAUSE_TRAINING flag to signal training to pause."""
-        self._pause_training_marker.touch()
-        logger.info("Set PAUSE_TRAINING flag")
-
-    def clear_pause_flag(self) -> None:
-        """Clear PAUSE_TRAINING flag to resume training."""
-        if self._pause_training_marker.exists():
-            self._pause_training_marker.unlink()
-            logger.info("Cleared PAUSE_TRAINING flag")
 
     def set_training_heartbeat(self) -> None:
         """Update training heartbeat timestamp for liveness monitoring."""

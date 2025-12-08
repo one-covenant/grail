@@ -372,23 +372,20 @@ class TrainerNeuron(BaseNeuron):
     async def _coordinate_evaluation(self, current_window: int) -> None:
         """Pause training, run evaluation, resume training.
 
-        Uses IPC events for coordination with filesystem markers as backup
-        for crash recovery.
+        Uses IPC events for coordination between main and training processes.
 
         Args:
             current_window: Current window number
         """
         logger.info("🔄 STATE: evaluation_pause_requested (window=%d)", current_window)
 
-        # Signal pause via IPC event (primary) and filesystem marker (backup for crash recovery)
+        # Signal pause via IPC event
         self._ipc.request_pause()
-        self._snapshot_manager.set_pause_flag()
         logger.info("Set pause_requested event, waiting for training to pause...")
 
         if not await self._wait_for_training_pause():
             logger.error("Training process failed to pause in time, skipping evaluation")
             self._ipc.clear_pause()
-            self._snapshot_manager.clear_pause_flag()
             self.reset_subtensor()  # Reset connection after idle wait period
             return
 
@@ -397,9 +394,8 @@ class TrainerNeuron(BaseNeuron):
             await self._maybe_run_evaluation(current_window)
             logger.info("🔄 STATE: evaluation_complete - clearing pause flag")
         finally:
-            # Signal resume via IPC event and filesystem marker
+            # Signal resume via IPC event
             self._ipc.clear_pause()
-            self._snapshot_manager.clear_pause_flag()
             # Reset main process subtensor connection after idle period during evaluation
             self.reset_subtensor()
             logger.info("🔄 STATE: evaluation_resume_signaled - training will resume")

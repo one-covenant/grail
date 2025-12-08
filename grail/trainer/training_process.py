@@ -505,12 +505,8 @@ class TrainingService:
                 # Update heartbeat via shared Value (primary) + filesystem (backup)
                 self._update_heartbeat()
 
-                # Check for pause request via IPC (primary) or filesystem (fallback)
-                pause_requested = (
-                    self._ipc.is_pause_requested()
-                    if self._ipc is not None
-                    else self.snapshot_manager.check_pause_flag()
-                )
+                # Check for pause request via IPC
+                pause_requested = self._ipc.is_pause_requested() if self._ipc else False
                 if pause_requested:
                     train_model, ref_model, optimizer = await self._handle_pause(
                         train_model,
