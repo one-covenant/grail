@@ -150,12 +150,15 @@ async def load_training_artifacts(
     train_spec: ModelLoadSpec,
     ref_spec: ModelLoadSpec,
     checkpoint_manager: Any,
-) -> tuple[Any, Any, Any]:
+    *,
+    load_ref_model: bool = True,
+) -> tuple[Any, Any | None, Any]:
     """Load (train_model, ref_model, tokenizer) per provided specs.
 
     - Trainer tokenizer installs Qwen chat template.
     - Train model loads with eval_mode=False and Flash Attention enabled; Ref model with eval_mode=True.
     - Flash Attention 2 is enabled for training to optimize performance.
+    - Reference model loading can be skipped by setting load_ref_model=False (e.g., when KL is disabled).
     """
     # Build trainer tokenizer with Qwen chat template
     chat_template = build_qwen_chat_template(SYSTEM_PROMPT)
@@ -174,13 +177,15 @@ async def load_training_artifacts(
         )
         tokenizer = get_tokenizer(str(train_ckpt), chat_template=chat_template)
 
-    # Resolve ref source (independent) - no Flash Attention for reference model
-    if ref_spec.mode == "hf":
-        ref_model_id = ref_spec.hf_id or ""
-        ref_model = get_model(ref_model_id, eval_mode=True)
-    else:
-        ref_ckpt = await _resolve_checkpoint(ref_spec, checkpoint_manager)
-        ref_model = get_model(str(ref_ckpt), eval_mode=True)
+    ref_model: Any | None = None
+    if load_ref_model:
+        # Resolve ref source (independent) - no Flash Attention for reference model
+        if ref_spec.mode == "hf":
+            ref_model_id = ref_spec.hf_id or ""
+            ref_model = get_model(ref_model_id, eval_mode=True)
+        else:
+            ref_ckpt = await _resolve_checkpoint(ref_spec, checkpoint_manager)
+            ref_model = get_model(str(ref_ckpt), eval_mode=True)
 
     return train_model, ref_model, tokenizer
 

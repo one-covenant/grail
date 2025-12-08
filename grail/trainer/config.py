@@ -50,6 +50,9 @@ class TrainingConfig:
     # GRPO variant selection
     grpo_variant: str = constants.GRPO_VARIANT
 
+    # Gradient checkpointing for memory efficiency
+    use_gradient_checkpointing: bool = constants.TRAINER_USE_GRADIENT_CHECKPOINTING
+
     # Data loading
     rollouts_per_problem: int = constants.ROLLOUTS_PER_PROBLEM
 
@@ -65,6 +68,13 @@ class TrainingConfig:
     grpo_min_reward_per_token: float = constants.GRPO_MIN_REWARD_PER_TOKEN
     grpo_reward_per_token_drop_quantile: float = constants.GRPO_REWARD_PER_TOKEN_DROP_QUANTILE
 
+    # Replay buffer configuration
+    replay_buffer_enabled: bool = True
+    replay_buffer_max_windows: int = 1  # Store last 1 windows (~6 min of data)
+    replay_buffer_recent_fraction: float = 0.5  # 50% samples from most recent window
+    replay_buffer_decay_factor: float = 0.7  # Exponential decay for older windows
+    replay_buffer_max_groups_per_epoch: int = 64  # Max groups to sample per epoch
+
 
 @dataclass
 class EvalConfig:
@@ -75,7 +85,7 @@ class EvalConfig:
 
     enabled: bool = True
     window_interval: int = 20
-    split: str = "test"  # dataset-backed envs (e.g., GSM8K) #TODO: should be specified per env
+    split: str = "val"  # dataset-backed envs (e.g., GSM8K) #TODO: should be specified per env
     subset_size: int | None = None  # generative envs or capped dataset eval
     seed_base: int = 2025
     batch_size: int = 32  # Conservative for vLLM server: 8 tasks × 5 reps = 40 prompts/batch (prevent queue timeout)
@@ -88,11 +98,11 @@ class EvalConfig:
     # Backend control: "hf" | "vllm" | "sglang"
     backend: str = "vllm"  # Server mode with async API avoids Gloo socket issues
     # sgLang server options (used when backend == "sglang")
-    sglang_host: str = "127.0.0.1"
-    sglang_port: int = 30000
-    sglang_start_server: bool = True  # Server runs in subprocess (avoids Gloo socket issues)
-    sglang_server_timeout_s: float = 120.0
-    sglang_trust_remote_code: bool = False
+    server_host: str = "127.0.0.1"
+    server_port: int = 30000
+    start_server: bool = True  # Server runs in subprocess (avoids Gloo socket issues)
+    server_timeout: float = 120.0
+    server_trust_remote_code: bool = False
     # vLLM server options (used when backend == "vllm")
     # Path to isolated vLLM environment Python executable
     # Override via GRAIL_VLLM_PYTHON env var for custom deployments

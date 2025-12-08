@@ -126,6 +126,27 @@ def get_model(
         model.eval()
         logger.debug("Model set to eval mode")
 
+    # Log model metadata
+    try:
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        model_dtype = model.dtype
+        model_config = model.config
+
+        logger.info(
+            f"✅ Model loaded: {original_model_name} | "
+            f"Params: {total_params:,} (trainable: {trainable_params:,}) | "
+            f"Dtype: {model_dtype} | Device: {device}"
+        )
+        logger.debug(
+            f"Model config: vocab_size={getattr(model_config, 'vocab_size', '?')}, "
+            f"hidden_size={getattr(model_config, 'hidden_size', '?')}, "
+            f"num_hidden_layers={getattr(model_config, 'num_hidden_layers', '?')}, "
+            f"num_attention_heads={getattr(model_config, 'num_attention_heads', '?')}"
+        )
+    except Exception as e:
+        logger.debug(f"Failed to log model metadata: {e}")
+
     return model
 
 

@@ -18,7 +18,10 @@ from grail.cli.mine import (
     upload_inferences_with_metrics,
 )
 from grail.infrastructure.chain import GrailChainManager
-from grail.infrastructure.checkpoints import CheckpointManager, default_checkpoint_cache_root
+from grail.infrastructure.checkpoint_consumer import (
+    CheckpointManager,
+    default_checkpoint_cache_root,
+)
 from grail.infrastructure.credentials import load_r2_credentials
 from grail.model.provider import clear_model_and_tokenizer, get_model, get_tokenizer
 from grail.monitoring import get_monitoring_manager
@@ -140,8 +143,6 @@ class MinerNeuron(BaseNeuron):
 
                     current_block = await subtensor.get_current_block()
                     window_start = self.calculate_window(current_block)
-                    # Miners use the checkpoint published after the previous window finished
-                    checkpoint_window = window_start - WINDOW_LENGTH
 
                     # Set monitoring context for metrics (use block_number for x-axis)
                     if monitor:
@@ -167,7 +168,13 @@ class MinerNeuron(BaseNeuron):
                     # Window is available - reset tracker
                     window_wait_tracker.reset()
 
-                    # Load checkpoint (required - miners always use checkpoints)
+                    # Discover latest ready checkpoint (before current window)
+                    # This allows miners to proceed even if trainer is lagging
+                    checkpoint_window = await checkpoint_manager.get_latest_ready_checkpoint(
+                        window_start
+                    )
+
+                    # Load checkpoint if discovered and different from current
                     if checkpoint_window is not None and checkpoint_window >= 0:
                         if current_checkpoint_window != checkpoint_window:
                             # Time checkpoint download/retrieval
@@ -196,7 +203,13 @@ class MinerNeuron(BaseNeuron):
                                     )
                                     tokenizer = get_tokenizer(str(checkpoint_path))
                                     current_checkpoint_window = checkpoint_window
+
+                                    # Log model configuration details
                                     if torch.cuda.is_available():
+                                        logger.info(
+                                            f"GPU Memory: allocated={torch.cuda.memory_allocated() / 1024**3:.2f}GB, "
+                                            f"reserved={torch.cuda.memory_reserved() / 1024**3:.2f}GB"
+                                        )
                                         torch.cuda.empty_cache()
                                 except Exception:
                                     logger.exception(
@@ -204,12 +217,15 @@ class MinerNeuron(BaseNeuron):
                                         checkpoint_window,
                                     )
                                     raise
-                            elif model is None or tokenizer is None:
-                                logger.error(
-                                    "No checkpoint available and no model loaded, cannot mine"
+                            else:
+                                logger.warning(
+                                    "Checkpoint window %s not available, retaining current model",
+                                    checkpoint_window,
                                 )
-                                await asyncio.sleep(60)
-                                continue
+                    elif model is None or tokenizer is None:
+                        logger.error("No checkpoint available and no model loaded, cannot mine")
+                        await asyncio.sleep(60)
+                        continue
 
                     # Ensure model and tokenizer are loaded before mining
                     if model is None or tokenizer is None:
@@ -244,6 +260,7 @@ class MinerNeuron(BaseNeuron):
                         timers,
                         monitor,
                         self.use_drand,
+                        checkpoint_window,
                     )
 
                     if inferences:

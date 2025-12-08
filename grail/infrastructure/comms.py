@@ -986,14 +986,37 @@ async def list_bucket_files(
     credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = False,
 ) -> list[str]:
-    """List files in bucket with given prefix"""
+    """List files in bucket with given prefix.
+
+    Handles pagination to return all files even when >1000 exist.
+    """
     try:
         client = await _get_cached_client(credentials, use_write)
         bucket_id = get_bucket_id(credentials, use_write)
-        response = await client.list_objects_v2(Bucket=bucket_id, Prefix=prefix)
-        if "Contents" in response:
-            return [obj["Key"] for obj in response["Contents"]]
-        return []
+
+        all_keys: list[str] = []
+        continuation_token: str | None = None
+
+        while True:
+            # Build request parameters
+            params: dict[str, Any] = {"Bucket": bucket_id, "Prefix": prefix}
+            if continuation_token:
+                params["ContinuationToken"] = continuation_token
+
+            response = await client.list_objects_v2(**params)
+
+            if "Contents" in response:
+                all_keys.extend(obj["Key"] for obj in response["Contents"])
+
+            # Check if there are more results
+            if response.get("IsTruncated"):
+                continuation_token = response.get("NextContinuationToken")
+                if not continuation_token:
+                    break  # Safety: shouldn't happen but avoid infinite loop
+            else:
+                break
+
+        return all_keys
     except Exception:
         logger.error("Failed to list bucket files with prefix %s", prefix, exc_info=True)
         return []

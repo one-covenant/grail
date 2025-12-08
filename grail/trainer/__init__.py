@@ -1,11 +1,11 @@
-"""Trainer package: configuration, algorithms, and orchestration service."""
+"""Trainer package: configuration, algorithms, and orchestration."""
 
 from __future__ import annotations
 
 __all__ = [
     "algorithms",
-    "checkpointing",
+    "checkpoint_publisher",
     "config",
     "data",
-    "service",
+    "replay_buffer",
 ]

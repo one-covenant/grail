@@ -19,7 +19,7 @@ import bittensor as bt
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..infrastructure.chain import GrailChainManager
-from ..infrastructure.checkpoints import CheckpointManager
+from ..infrastructure.checkpoint_consumer import CheckpointManager
 from ..infrastructure.credentials import BucketCredentials
 from ..logging_utils import dump_asyncio_stacks
 from ..model.provider import (
@@ -334,14 +334,14 @@ class ValidationService:
     async def _load_checkpoint_for_window(self, target_window: int) -> bool:
         """Load model/tokenizer checkpoint for validation window.
 
+        Uses latest ready checkpoint before target_window to match miner behavior.
+
         Args:
             target_window: Target window to validate
 
         Returns:
             True if checkpoint loaded successfully, False otherwise
         """
-        checkpoint_window = target_window - WINDOW_LENGTH
-
         # Get trainer's bucket for checkpoints
         if self._chain_manager and self._current_checkpoint_id is None:
             trainer_bucket = self._chain_manager.get_bucket(TRAINER_UID)
@@ -353,6 +353,17 @@ class ValidationService:
                     f"⚠️ Trainer UID {TRAINER_UID} bucket not found, using local credentials"
                 )
 
+        # Discover latest ready checkpoint (same logic as miner)
+        checkpoint_window = await self._checkpoint_manager.get_latest_ready_checkpoint(
+            target_window
+        )
+
+        if checkpoint_window is None:
+            logger.warning(
+                f"No ready checkpoint found before window {target_window}, skipping validation"
+            )
+            return False
+
         # Try to get checkpoint
         checkpoint_path = None
         try:
@@ -362,18 +373,17 @@ class ValidationService:
                 else contextlib.nullcontext()
             )
             with timer_ctx:
-                if checkpoint_window >= 0:
-                    checkpoint_path = await self._checkpoint_manager.get_checkpoint(
-                        checkpoint_window
-                    )
+                checkpoint_path = await self._checkpoint_manager.get_checkpoint(checkpoint_window)
         except Exception:
             logger.warning(
-                f"Failed to resolve checkpoint path for target_window={target_window} "
-                f"(ckpt={checkpoint_window})"
+                f"Failed to download checkpoint for window {checkpoint_window} "
+                f"(target_window={target_window})"
             )
 
         if not checkpoint_path:
-            logger.warning(f"No checkpoint available for window {target_window}, skipping")
+            logger.warning(
+                f"Checkpoint {checkpoint_window} not available for window {target_window}, skipping"
+            )
             return False
 
         # Load if new checkpoint or models not loaded

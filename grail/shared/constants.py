@@ -47,7 +47,7 @@ READY_MARKER_UPLOAD_BLOCKS = 1  # ~12 seconds at 12s/block
 TRAINER_LR = float(os.getenv("GRAIL_TRAINER_LR", "1e-6"))
 TRAINER_EPOCHS = int(os.getenv("GRAIL_TRAINER_EPOCHS", "1"))
 TRAINER_BATCH_SIZE = int(os.getenv("GRAIL_TRAINER_BATCH_SIZE", "16"))
-TRAINER_MAX_LENGTH = int(os.getenv("GRAIL_TRAINER_MAX_LENGTH", "2048"))
+TRAINER_MAX_LENGTH = int(os.getenv("GRAIL_TRAINER_MAX_LENGTH", "1024"))
 TRAINER_GRAD_CLIP = float(os.getenv("GRAIL_TRAINER_GRAD_CLIP", "0.5"))
 TRAINER_WARMUP_STEPS = int(os.getenv("GRAIL_TRAINER_WARMUP_STEPS", "10"))
 TRAINER_KL_COEF = float(os.getenv("GRAIL_TRAINER_KL_COEF", "0.02"))
@@ -76,6 +76,13 @@ TRAINER_KL_MAX = float(os.getenv("GRAIL_TRAINER_KL_MAX", "0.2"))
 
 # Flash Attention for training optimization
 TRAINER_USE_FLASH_ATTENTION = os.getenv("GRAIL_TRAINER_USE_FLASH_ATTENTION", "1") == "1"
+
+# Gradient checkpointing for training memory efficiency
+# Reduces activation memory by recomputing on backward pass (~20-30% memory reduction)
+# Trade-off: ~10-15% slower training (recomputation cost), but enables larger batches/longer sequences
+TRAINER_USE_GRADIENT_CHECKPOINTING = (
+    os.getenv("GRAIL_TRAINER_USE_GRADIENT_CHECKPOINTING", "1") == "1"
+)
 
 # Trainer miner trust filtering (weight-based)
 TRAINER_MIN_AGGREGATE_WEIGHT = float(os.getenv("GRAIL_TRAINER_MIN_AGGREGATE_WEIGHT", "0.01"))
@@ -237,6 +244,17 @@ PROOF_POSITION_IMPORTANCE_DECAY = 100.0
 # GRAIL proof version
 GRAIL_PROOF_VERSION = "v1"
 
+# ────────────────  ASYNC TRAINING CONFIGURATION  ────────────────
+
+# Upload worker poll interval (seconds between snapshot checks)
+SNAPSHOT_POLL_INTERVAL_SECONDS = int(os.getenv("GRAIL_SNAPSHOT_POLL_INTERVAL", "30"))
+
+# Training heartbeat timeout for liveness monitoring (15 minutes)
+TRAINING_HEARTBEAT_TIMEOUT_SECONDS = int(os.getenv("GRAIL_TRAINING_HEARTBEAT_TIMEOUT", "900"))
+
+# Upload retry configuration
+UPLOAD_RETRY_MAX_ATTEMPTS = int(os.getenv("GRAIL_UPLOAD_RETRY_MAX_ATTEMPTS", "3"))
+UPLOAD_RETRY_BACKOFF_BASE = int(os.getenv("GRAIL_UPLOAD_RETRY_BACKOFF_BASE", "60"))
 
 # ────────────────  HELPER FUNCTIONS  ────────────────
 
