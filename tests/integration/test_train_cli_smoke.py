@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 import typer
+from click import Command, Context
 
 from grail.cli import train as train_cli
 
@@ -89,13 +90,14 @@ def _fake_run_training_process(
     credentials: Any,
     wallet_args: dict[str, str],
     monitor_config: dict[str, Any],
-    stop_event: multiprocessing.Event,
+    ipc: Any,
+    verbosity: int = 1,
 ) -> None:
     """Simulate the training child process."""
-    _ = (train_spec, ref_spec, config, credentials, wallet_args, monitor_config)
+    _ = (train_spec, ref_spec, config, credentials, wallet_args, monitor_config, verbosity)
     _write_snapshot(snapshot_manager)
     snapshot_manager.set_training_heartbeat()
-    while not stop_event.is_set():
+    while not ipc.stop.is_set():
         snapshot_manager.set_training_heartbeat()
         time.sleep(0.05)
 
@@ -104,19 +106,20 @@ def _fake_run_upload_worker(
     snapshot_manager: Any,
     credentials: Any,
     wallet_args: dict[str, str],
-    stop_event: multiprocessing.Event,
-    poll_interval: int,
+    ipc: Any,
+    poll_interval: int = 30,
+    verbosity: int = 1,
 ) -> None:
     """Simulate upload worker copying a snapshot once."""
-    _ = (credentials, wallet_args, poll_interval)
+    _ = (credentials, wallet_args, poll_interval, verbosity)
     deadline = time.time() + 2
-    while time.time() < deadline and not stop_event.is_set():
+    while time.time() < deadline and not ipc.stop.is_set():
         if snapshot_manager.check_snapshot_ready():
             snapshot_manager.copy_snapshot_to_staging()
             snapshot_manager.cleanup_staging()
             break
         time.sleep(0.05)
-    stop_event.set()
+    ipc.stop.set()
 
 
 async def _fake_initialize_chain_manager(self: Any) -> None:  # pragma: no cover - simple stub
@@ -135,7 +138,7 @@ async def _fast_orchestration_loop(self: Any) -> None:
     snapshot_path = self._snapshot_manager.get_latest_snapshot_path()
     assert snapshot_path is not None and snapshot_path.exists()
 
-    self._stop_event.set()
+    self._ipc.stop.set()
     self.stop_event.set()
 
 
@@ -198,7 +201,11 @@ def test_train_cli_smoke(
         _fast_orchestration_loop,
     )
 
-    train_cli.train()
+    # Create a mock Typer context with parent context for verbosity
+    click_ctx = Context(Command("train"))
+    typer_ctx = typer.Context(click_ctx)
+    typer_ctx.parent = SimpleNamespace(params={"verbose": 1})
+    train_cli.train(ctx=typer_ctx)
 
     # Assertions: snapshot + metadata exist and heartbeat file was written
     snapshot_path = snapshots_dir / "latest"
@@ -226,7 +233,12 @@ def test_train_cli_reports_env_errors(
 
     monkeypatch.setattr("grail.cli.train.parse_train_env", raise_value_error)
 
+    # Create a mock Typer context with parent context for verbosity
+    click_ctx = Context(Command("train"))
+    typer_ctx = typer.Context(click_ctx)
+    typer_ctx.parent = SimpleNamespace(params={"verbose": 1})
+
     with pytest.raises(typer.Exit) as excinfo:
-        train_cli.train()
+        train_cli.train(ctx=typer_ctx)
 
     assert excinfo.value.exit_code == 1
