@@ -1108,6 +1108,36 @@ async def get_file(
         return None
 
 
+async def get_parquet_file(
+    key: str,
+    credentials: BucketCredentials | Bucket | dict | None = None,
+    use_write: bool = False,
+) -> dict[str, Any] | None:
+    """Download and parse Parquet file containing window data.
+
+    Downloads a Parquet file from S3/R2 and deserializes it to a window
+    dictionary with inferences list.
+
+    Args:
+        key: S3/R2 key for the Parquet file
+        credentials: Bucket credentials for authentication
+        use_write: Whether to use write credentials (typically False for reads)
+
+    Returns:
+        Window data dictionary or None if download/parse fails
+    """
+    from .parquet_io import deserialize_parquet_to_window
+
+    try:
+        data = await download_file_chunked(key, credentials=credentials, use_write=use_write)
+        if data:
+            return deserialize_parquet_to_window(data)
+        return None
+    except Exception as e:
+        logger.debug(f"Failed to get parquet file {key}: {e}")
+        return None
+
+
 # --------------------------------------------------------------------------- #
 #                   GRAIL-specific Storage Functions                          #
 # --------------------------------------------------------------------------- #
@@ -1119,8 +1149,14 @@ async def sink_window_inferences(
     inferences: list[dict],
     credentials: BucketCredentials | None = None,
 ) -> None:
-    """Upload window of inferences to S3 with improved logging"""
-    key = f"grail/windows/{wallet.hotkey.ss58_address}-window-{window_start}.json"
+    """Upload window of inferences to S3 in Parquet format.
+
+    Uses Apache Parquet for efficient columnar storage with snappy compression,
+    providing better compression ratios and faster serialization than JSON.
+    """
+    from .parquet_io import serialize_window_to_parquet
+
+    key = f"grail/windows/{wallet.hotkey.ss58_address}-window-{window_start}.parquet"
 
     # Pack all inferences into window data
     window_data = {
@@ -1132,7 +1168,7 @@ async def sink_window_inferences(
         "timestamp": time.time(),
     }
 
-    body = json.dumps(window_data).encode()
+    body = serialize_window_to_parquet(window_data)
     logger.debug(f"[SINK] window={window_start} count={len(inferences)} → key={key}")
 
     success = await upload_file_chunked(key, body, credentials=credentials, use_write=True)

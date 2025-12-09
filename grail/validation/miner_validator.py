@@ -18,7 +18,7 @@ import bittensor as bt
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..infrastructure.chain import GrailChainManager
-from ..infrastructure.comms import get_file
+from ..infrastructure.comms import get_parquet_file
 from ..shared.constants import MIN_ROLLOUT_FILE_SIZE_BYTES, ROLLOUTS_PER_PROBLEM
 from ..shared.digest import compute_completion_digest
 from .context import ValidationContext
@@ -244,12 +244,14 @@ class MinerValidator:
     ) -> dict | None:
         """Fetch and download miner's window file, verifying deadline.
 
+        Fetches Parquet-formatted window files for efficient validation.
+
         Returns:
             Window data dict or None if not found/late/error
         """
         from ..infrastructure.comms import file_exists_with_deadline
 
-        filename = f"grail/windows/{miner_hotkey}-window-{window}.json"
+        filename = f"grail/windows/{miner_hotkey}-window-{window}.parquet"
         miner_bucket = chain_manager.get_bucket_for_hotkey(miner_hotkey)
         bucket_to_use = miner_bucket if miner_bucket else credentials
         uid_str = str(uid) if uid is not None else f"{miner_hotkey[:12]}..."
@@ -283,8 +285,8 @@ class MinerValidator:
         else:
             logger.info(f"📁 Found file for miner {uid_str}")
 
-        # Download file
-        window_data = await get_file(filename, credentials=bucket_to_use, use_write=False)
+        # Download Parquet file
+        window_data = await get_parquet_file(filename, credentials=bucket_to_use, use_write=False)
 
         if not window_data:
             logger.warning(f"Could not download {filename}")

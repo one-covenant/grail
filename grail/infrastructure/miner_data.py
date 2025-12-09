@@ -9,7 +9,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
-from .comms import file_exists, get_file
+from .comms import file_exists, get_parquet_file
 
 if TYPE_CHECKING:
     from ..shared.schemas import BucketCredentials
@@ -26,6 +26,8 @@ async def fetch_miner_window_data(
 ) -> dict | None:
     """Fetch a single miner's window file from their bucket.
 
+    Fetches Parquet-formatted window files for efficient data transfer.
+
     Args:
         miner_hotkey: Miner's hotkey address
         window: Window start block number
@@ -35,7 +37,7 @@ async def fetch_miner_window_data(
     Returns:
         Window data dict with 'inferences' list, or None
     """
-    filename = f"grail/windows/{miner_hotkey}-window-{window}.json"
+    filename = f"grail/windows/{miner_hotkey}-window-{window}.parquet"
 
     # Try to get miner-specific bucket if chain manager available
     bucket_to_use = credentials
@@ -55,8 +57,8 @@ async def fetch_miner_window_data(
             )
             return None
 
-        # Download file
-        window_data = await get_file(filename, credentials=bucket_to_use, use_write=False)
+        # Download Parquet file
+        window_data = await get_parquet_file(filename, credentials=bucket_to_use, use_write=False)
         if not window_data:
             logger.warning(
                 "Could not download %s for miner %s",
