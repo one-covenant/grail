@@ -137,6 +137,7 @@ class TrainerNeuron(BaseNeuron):
         self._eval_last_run_window_number: int | None = None
         self._windows_since_last_eval: int = 0
         self._eval_checkpoint_dir: str | None = None
+        self._last_seen_window: int | None = None  # Track window changes for eval interval
 
     async def run(self) -> None:
         """Run trainer orchestration loop.
@@ -278,12 +279,24 @@ class TrainerNeuron(BaseNeuron):
 
                 current_window = await self._get_current_window()
 
+                # Only count window changes, not loop iterations
+                # A window is ~6 min (30 blocks × 12s), loop runs every 60s
+                window_changed = (
+                    self._last_seen_window is None or current_window != self._last_seen_window
+                )
+                if window_changed:
+                    self._last_seen_window = current_window
+                    self._windows_since_last_eval += 1
+                    logger.debug(
+                        "Window changed to %d, windows_since_last_eval=%d",
+                        current_window,
+                        self._windows_since_last_eval,
+                    )
+
                 if self._should_run_evaluation():
                     logger.info("Evaluation due, coordinating with training process...")
                     await self._coordinate_evaluation(current_window)
                     self._windows_since_last_eval = 0
-                else:
-                    self._windows_since_last_eval += 1
 
                 await asyncio.sleep(ORCHESTRATION_SLEEP_SECONDS)
 
