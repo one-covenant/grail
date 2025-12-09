@@ -3,6 +3,7 @@
 import pytest
 
 from grail.infrastructure.parquet_io import (
+    ParquetError,
     deserialize_parquet_to_window,
     serialize_window_to_parquet,
 )
@@ -218,3 +219,33 @@ class TestParquetSerialization:
         # Assert reasonable compression (allow up to 1.5x for small test data)
         # Real rollout data with long token lists should compress much better
         assert compression_ratio < 1.5
+
+
+class TestParquetErrorHandling:
+    """Test error handling for corrupt/invalid Parquet files."""
+
+    def test_empty_data_raises_error(self) -> None:
+        """Test that empty bytes raises ParquetError."""
+        with pytest.raises(ParquetError, match="Invalid Parquet data"):
+            deserialize_parquet_to_window(b"")
+
+    def test_too_small_data_raises_error(self) -> None:
+        """Test that data smaller than minimum Parquet size raises error."""
+        with pytest.raises(ParquetError, match="Invalid Parquet data"):
+            deserialize_parquet_to_window(b"tiny")
+
+    def test_corrupt_data_raises_error(self) -> None:
+        """Test that corrupt/random bytes raises ParquetError."""
+        with pytest.raises(ParquetError, match="Corrupt Parquet"):
+            deserialize_parquet_to_window(b"not a valid parquet file at all!")
+
+    def test_truncated_parquet_raises_error(self) -> None:
+        """Test that truncated Parquet file raises error."""
+        original = _create_sample_window_data()
+        parquet_bytes = serialize_window_to_parquet(original)
+
+        # Truncate to 50% of original size
+        truncated = parquet_bytes[: len(parquet_bytes) // 2]
+
+        with pytest.raises(ParquetError, match="Corrupt Parquet"):
+            deserialize_parquet_to_window(truncated)

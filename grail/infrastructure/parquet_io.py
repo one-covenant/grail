@@ -17,6 +17,16 @@ import pyarrow.parquet as pq
 
 logger = logging.getLogger(__name__)
 
+# Minimum valid Parquet file size (magic bytes + minimal footer)
+_MIN_PARQUET_SIZE = 12
+
+
+class ParquetError(ValueError):
+    """Raised when Parquet data is invalid or corrupt."""
+
+    pass
+
+
 # --------------------------------------------------------------------------- #
 #                           Schema Definitions                                #
 # --------------------------------------------------------------------------- #
@@ -293,9 +303,18 @@ def deserialize_parquet_to_window(data: bytes) -> dict[str, Any]:
 
     Returns:
         Window dictionary with 'inferences' list and metadata
+
+    Raises:
+        ParquetError: If data is empty, too small, or corrupt
     """
-    buffer = io.BytesIO(data)
-    table = pq.read_table(buffer)
+    if not data or len(data) < _MIN_PARQUET_SIZE:
+        raise ParquetError(f"Invalid Parquet data: {len(data) if data else 0} bytes")
+
+    try:
+        buffer = io.BytesIO(data)
+        table = pq.read_table(buffer)
+    except pa.ArrowException as e:
+        raise ParquetError(f"Corrupt Parquet file: {e}") from e
 
     # Extract window-level metadata
     metadata = table.schema.metadata or {}

@@ -1126,12 +1126,15 @@ async def get_parquet_file(
     Returns:
         Window data dictionary or None if download/parse fails
     """
-    from .parquet_io import deserialize_parquet_to_window
+    from .parquet_io import ParquetError, deserialize_parquet_to_window
 
     try:
         data = await download_file_chunked(key, credentials=credentials, use_write=use_write)
         if data:
             return deserialize_parquet_to_window(data)
+        return None
+    except ParquetError as e:
+        logger.warning(f"Corrupt Parquet file {key}: {e}")
         return None
     except Exception as e:
         logger.debug(f"Failed to get parquet file {key}: {e}")
