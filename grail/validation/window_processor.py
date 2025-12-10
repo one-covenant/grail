@@ -113,6 +113,7 @@ class WindowProcessor:
         # Per-miner timing lists
         miner_seconds_list: list[float] = []
         miner_blocks_list: list[int] = []
+        download_times: list[float] = []
 
         # Process each miner
         for miner_hotkey in miners_to_check:
@@ -150,6 +151,7 @@ class WindowProcessor:
                         text_logs_emitted=text_logs_emitted,
                         heartbeat_callback=heartbeat_callback,
                         deadline_ts=deadline_ts,
+                        download_times=download_times,
                     )
 
                 # Record timing
@@ -257,6 +259,14 @@ class WindowProcessor:
         if miner_seconds_list:
             avg_sec = sum(miner_seconds_list) / len(miner_seconds_list)
             logger.info(f"Avg miner processing: {avg_sec:.2f}s")
+
+        # Log average download time to wandb
+        if download_times and monitor:
+            avg_download = sum(download_times) / len(download_times)
+            try:
+                await monitor.log_gauge("profiling/avg_rollout_download_seconds", avg_download)
+            except Exception:
+                pass
 
         # Return structured results
         return WindowResults(
