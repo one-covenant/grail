@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import random
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any
@@ -128,6 +129,7 @@ class MinerValidator:
         text_logs_emitted: dict[str, int],
         heartbeat_callback: Any = None,
         deadline_ts: float | None = None,
+        download_times: list[float] | None = None,
     ) -> MinerResults:
         """Validate a single miner's window submission.
 
@@ -146,16 +148,20 @@ class MinerValidator:
             text_logs_emitted: Counter of text logs per miner
             heartbeat_callback: Optional callback to update watchdog
             deadline_ts: Upload deadline timestamp (unix seconds)
+            download_times: Optional list to collect download durations
 
         Returns:
             MinerResults with validation outcome and metrics
         """
         uid = uid_by_hotkey.get(miner_hotkey)
 
-        # Step 1: Fetch window file
+        # Step 1: Fetch window file (with timing for aggregation)
+        t0 = time.monotonic()
         file_data = await self._fetch_window_file(
             miner_hotkey, window, credentials, chain_manager, uid, deadline_ts
         )
+        if file_data is not None and download_times is not None:
+            download_times.append(time.monotonic() - t0)
 
         if file_data is None:
             return self._create_not_found_result(miner_hotkey, uid)
@@ -1060,6 +1066,7 @@ class MinerValidator:
         validation_state: dict,
         inferences: list[dict],
         monitor: Any | None,
+        download_seconds: float = 0.0,
     ) -> MinerResults:
         """Create result for successful validation."""
         # Extrapolate from sample
@@ -1143,4 +1150,5 @@ class MinerValidator:
             ),
             digest_counter=digest_counter,
             total_inferences_in_file=total_inferences,
+            download_seconds=download_seconds,
         )
