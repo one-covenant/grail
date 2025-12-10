@@ -1066,7 +1066,6 @@ class MinerValidator:
         validation_state: dict,
         inferences: list[dict],
         monitor: Any | None,
-        download_seconds: float = 0.0,
     ) -> MinerResults:
         """Create result for successful validation."""
         # Extrapolate from sample
@@ -1150,5 +1149,4 @@ class MinerValidator:
             ),
             digest_counter=digest_counter,
             total_inferences_in_file=total_inferences,
-            download_seconds=download_seconds,
         )
