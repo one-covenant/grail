@@ -44,10 +44,12 @@ from typing import Any
 from ..shared.constants import (
     CHECKPOINT_MILESTONE_INTERVAL,
     CHECKPOINT_RETENTION_LIMIT,
+    DELTA_BASE_INTERVAL,
     GRAIL_CHECKPOINT_MOD10,
     WINDOW_LENGTH,
 )
 from . import comms
+from .delta_checkpoint import apply_sparse_delta, compute_weights_hash
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +73,17 @@ class CheckpointMetadata:
     model_name: str = "no_name"
     parent_window: int | None = None
 
+    # Delta checkpoint fields
+    checkpoint_type: str = "FULL"  # "FULL" or "DELTA"
+    base_window: int | None = None  # For DELTA: the FULL checkpoint this is relative to
+    weights_hash: str | None = None  # SHA256 of final weights for verification
+
     def remote_prefix(self) -> str:
         return f"{CHECKPOINT_PREFIX}checkpoint-{self.window}"
+
+    def is_delta(self) -> bool:
+        """Check if this is a delta checkpoint."""
+        return self.checkpoint_type == "DELTA"
 
 
 class CheckpointDownloadError(RuntimeError):
@@ -185,7 +196,23 @@ class CheckpointManager:
 
             try:
                 logger.info("Starting checkpoint download for window %s", window)
-                if metadata is not None and metadata.file_manifest:
+
+                # Handle DELTA checkpoint: download base + delta, then reconstruct
+                if metadata is not None and metadata.is_delta():
+                    logger.info(
+                        "Checkpoint %s is DELTA (base=%s), will reconstruct",
+                        window,
+                        metadata.base_window,
+                    )
+                    reconstructed_dir = await self._handle_delta_checkpoint(
+                        metadata, tmp_dir
+                    )
+                    if reconstructed_dir is None:
+                        raise CheckpointDownloadError(
+                            f"Failed to reconstruct delta checkpoint for window {window}"
+                        )
+                    # tmp_dir now contains the reconstructed full checkpoint
+                elif metadata is not None and metadata.file_manifest:
                     # Preferred path: use manifest for exact file set and integrity checks
                     logger.debug(
                         "Downloading %s files for checkpoint window %s using manifest",
@@ -386,6 +413,9 @@ class CheckpointManager:
             git_commit=payload.get("git_commit", "unknown"),
             created_at=float(payload.get("created_at", 0.0)),
             model_name=payload.get("model_name", "no_name"),
+            checkpoint_type=payload.get("checkpoint_type", "FULL"),
+            base_window=payload.get("base_window"),
+            weights_hash=payload.get("weights_hash"),
         )
         self._metadata_cache[window] = metadata
         return metadata
@@ -471,6 +501,188 @@ class CheckpointManager:
                 return False
         return True
 
+    async def _handle_delta_checkpoint(
+        self,
+        metadata: CheckpointMetadata,
+        tmp_dir: Path,
+    ) -> Path | None:
+        """Handle DELTA checkpoint: download base + delta, reconstruct full checkpoint.
+
+        Args:
+            metadata: Metadata for the delta checkpoint
+            tmp_dir: Temporary directory for the reconstructed checkpoint
+
+        Returns:
+            Path to reconstructed checkpoint, or None if reconstruction failed
+        """
+        if metadata.base_window is None:
+            logger.error("DELTA checkpoint has no base_window specified")
+            return None
+
+        # 1. Ensure base checkpoint is available (recursively handles chained deltas)
+        logger.info("Fetching base checkpoint %s for delta reconstruction", metadata.base_window)
+        base_path = await self.get_checkpoint(metadata.base_window)
+        if base_path is None:
+            logger.error(
+                "Cannot reconstruct delta: base checkpoint %s unavailable",
+                metadata.base_window,
+            )
+            return None
+
+        # 2. Download delta files to a separate temp directory
+        delta_tmp = self.cache_root / f"delta-{metadata.window}.partial"
+        if delta_tmp.exists():
+            shutil.rmtree(delta_tmp, ignore_errors=True)
+        delta_tmp.mkdir(parents=True, exist_ok=True)
+
+        try:
+            # Download all delta files
+            await self._download_files(metadata, delta_tmp)
+
+            # Verify delta file integrity
+            if not await self._verify_integrity(delta_tmp, metadata.file_manifest):
+                raise CheckpointDownloadError(
+                    f"Delta integrity check failed for window {metadata.window}"
+                )
+
+            # 3. Reconstruct full checkpoint
+            return await self._reconstruct_from_delta(
+                base_path,
+                delta_tmp,
+                tmp_dir,
+                metadata,
+            )
+        finally:
+            # Cleanup delta temp directory
+            shutil.rmtree(delta_tmp, ignore_errors=True)
+
+    async def _reconstruct_from_delta(
+        self,
+        base_path: Path,
+        delta_path: Path,
+        output_dir: Path,
+        metadata: CheckpointMetadata,
+    ) -> Path | None:
+        """Reconstruct full checkpoint from base + sparse delta.
+
+        Args:
+            base_path: Path to base checkpoint directory
+            delta_path: Path to delta files directory
+            output_dir: Directory to write reconstructed checkpoint
+            metadata: Metadata for the delta checkpoint
+
+        Returns:
+            Path to reconstructed checkpoint directory, or None on failure
+        """
+        import torch
+        from safetensors.torch import load_file, save_file
+
+        try:
+            # Load base weights
+            base_model_path = base_path / "model.safetensors"
+            if not base_model_path.exists():
+                logger.error("Base checkpoint missing model.safetensors: %s", base_path)
+                return None
+            base_state = load_file(base_model_path)
+
+            # Load sparse delta
+            delta_sparse_path = delta_path / "delta_sparse.safetensors"
+            if not delta_sparse_path.exists():
+                logger.error("Delta checkpoint missing delta_sparse.safetensors: %s", delta_path)
+                return None
+            sparse_tensors = load_file(delta_sparse_path)
+
+            # Load delta metadata for shapes
+            delta_meta_path = delta_path / "delta_metadata.json"
+            if not delta_meta_path.exists():
+                logger.error("Delta checkpoint missing delta_metadata.json: %s", delta_path)
+                return None
+            delta_meta = json.loads(delta_meta_path.read_text())
+            shapes = delta_meta.get("shapes", {})
+
+            logger.info(
+                "Reconstructing checkpoint from base-%s + delta (%.2f%% sparse, %d non-zero params)",
+                metadata.base_window,
+                delta_meta.get("sparsity_ratio", 0) * 100,
+                delta_meta.get("nonzero_params", 0),
+            )
+
+            # Apply sparse delta (float32 computation, bf16 output)
+            reconstructed = apply_sparse_delta(
+                base_state,
+                sparse_tensors,
+                shapes,
+                target_dtype=torch.bfloat16,
+            )
+
+            # Verify hash if available
+            if metadata.weights_hash:
+                actual_hash = compute_weights_hash(reconstructed)
+                if actual_hash != metadata.weights_hash:
+                    logger.error(
+                        "Reconstructed weights hash mismatch: expected %s..., got %s...",
+                        metadata.weights_hash[:16],
+                        actual_hash[:16],
+                    )
+                    raise CheckpointDownloadError(
+                        f"Hash verification failed for reconstructed checkpoint {metadata.window}"
+                    )
+                logger.debug("✅ Weights hash verified for reconstructed checkpoint")
+
+            # Save reconstructed model
+            output_dir.mkdir(parents=True, exist_ok=True)
+            save_file(reconstructed, output_dir / "model.safetensors")
+
+            # Copy non-weight files from base (tokenizer, config, etc.)
+            for f in base_path.iterdir():
+                if f.is_file() and f.name not in (
+                    "model.safetensors",
+                    "metadata.json",
+                    "FULL",
+                    "DELTA",
+                    "manifest.sig",
+                ):
+                    # Skip READY markers
+                    if f.name.startswith("READY"):
+                        continue
+                    shutil.copy(f, output_dir / f.name)
+
+            # Write updated metadata (mark as reconstructed FULL)
+            output_metadata = {
+                "window": metadata.window,
+                "file_manifest": {},  # Will be regenerated
+                "training_config": metadata.training_config,
+                "git_commit": metadata.git_commit,
+                "created_at": metadata.created_at,
+                "model_name": metadata.model_name,
+                "checkpoint_type": "FULL",  # Reconstructed as FULL
+                "reconstructed_from_delta": True,
+                "original_base_window": metadata.base_window,
+            }
+
+            # Build file manifest for reconstructed checkpoint
+            for file_path in output_dir.rglob("*"):
+                if file_path.is_file():
+                    rel_path = str(file_path.relative_to(output_dir))
+                    output_metadata["file_manifest"][rel_path] = hashlib.sha256(
+                        file_path.read_bytes()
+                    ).hexdigest()
+
+            (output_dir / "metadata.json").write_text(
+                json.dumps(output_metadata, ensure_ascii=False, indent=2)
+            )
+
+            logger.info(
+                "✅ Reconstructed checkpoint-%s from base-%s",
+                metadata.window,
+                metadata.base_window,
+            )
+            return output_dir
+
+        except Exception as exc:
+            logger.exception("Failed to reconstruct checkpoint from delta: %s", exc)
+            return None
+
     def _compute_keep_windows(self, current_window: int) -> set[int]:
         keep: set[int] = set()
         if current_window < 0:
@@ -484,6 +696,11 @@ class CheckpointManager:
             window = current_window - idx * WINDOW_LENGTH
             if window >= 0:
                 keep.add(window)
+                # Also keep the base window this delta depends on
+                # Base windows are at DELTA_BASE_INTERVAL boundaries
+                base_window = (window // DELTA_BASE_INTERVAL) * DELTA_BASE_INTERVAL
+                if base_window >= 0:
+                    keep.add(base_window)
 
         # Keep milestones (every CHECKPOINT_MILESTONE_INTERVAL windows)
         interval_blocks = CHECKPOINT_MILESTONE_INTERVAL * WINDOW_LENGTH

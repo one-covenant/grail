@@ -3,7 +3,7 @@
 Runs as separate process that:
 1. Receives snapshot messages from training process via IPC queue
 2. Copies snapshot to staging
-3. Uploads to R2 asynchronously
+3. Uploads to R2 asynchronously (FULL or DELTA based on DELTA_BASE_INTERVAL)
 4. Determines window number after upload completes
 5. Sets READY marker for checkpoint
 """
@@ -20,9 +20,12 @@ from pathlib import Path
 from typing import Any
 
 import bittensor as bt
+import torch
 
 from grail.infrastructure.network import create_subtensor
 from grail.shared.constants import (
+    DELTA_BASE_INTERVAL,
+    DELTA_CHECKPOINT_ENABLED,
     UPLOAD_RETRY_BACKOFF_BASE,
     UPLOAD_RETRY_MAX_ATTEMPTS,
     WINDOW_LENGTH,
@@ -76,13 +79,23 @@ async def upload_worker_loop(
     Window number is determined AFTER upload completes based on current block.
     Creates its own subtensor connection in child process.
 
+    Uploads FULL checkpoints at base intervals (every DELTA_BASE_INTERVAL windows),
+    and sparse DELTA checkpoints for intermediate windows (~99% bandwidth reduction).
+
     Args:
         snapshot_manager: Snapshot manager for staging/cleanup
         checkpoint_publisher: Publisher for R2 uploads
         ipc: IPC channels for coordination
         poll_interval: Seconds between snapshot checks
     """
-    logger.info("Upload worker starting (poll_interval=%ds)", poll_interval)
+    from safetensors.torch import load_file
+
+    logger.info(
+        "Upload worker starting (poll_interval=%ds, delta_enabled=%s, delta_base_interval=%d)",
+        poll_interval,
+        DELTA_CHECKPOINT_ENABLED,
+        DELTA_BASE_INTERVAL,
+    )
 
     # Log subtensor configuration (verify env vars are propagated)
     import os
@@ -100,6 +113,10 @@ async def upload_worker_loop(
 
     # Track last uploaded window to prevent duplicate uploads within same window
     last_uploaded_window = -1
+
+    # Track base checkpoint for delta uploads
+    base_window: int | None = None
+    base_state: dict[str, torch.Tensor] | None = None
 
     while not ipc.stop.is_set():
         try:
@@ -134,19 +151,85 @@ async def upload_worker_loop(
             # Record upload start for timing
             upload_start_time = time.time()
 
-            logger.info(
-                "Starting upload at block %s for checkpoint-%s",
-                upload_start_block,
-                checkpoint_window,
+            # Decide FULL vs DELTA upload
+            # Upload FULL if: delta disabled, no base yet, or at base interval boundary
+            is_base_window = (checkpoint_window % DELTA_BASE_INTERVAL == 0)
+            should_upload_full = (
+                not DELTA_CHECKPOINT_ENABLED
+                or base_window is None
+                or base_state is None
+                or is_base_window
             )
 
-            # Upload to R2 with retry logic
-            success = await _upload_with_retry(
-                staging_path,
-                checkpoint_publisher,
-                checkpoint_window,
-                max_attempts=UPLOAD_RETRY_MAX_ATTEMPTS,
-            )
+            if should_upload_full:
+                logger.info(
+                    "Starting FULL upload at block %s for checkpoint-%s (is_base=%s, has_base=%s)",
+                    upload_start_block,
+                    checkpoint_window,
+                    is_base_window,
+                    base_window is not None,
+                )
+
+                # Upload FULL checkpoint with retry logic
+                success = await _upload_with_retry(
+                    staging_path,
+                    checkpoint_publisher,
+                    checkpoint_window,
+                    max_attempts=UPLOAD_RETRY_MAX_ATTEMPTS,
+                    is_delta=False,
+                )
+
+                if success:
+                    # Cache as new base for future deltas
+                    model_path = staging_path / "model.safetensors"
+                    if model_path.exists():
+                        base_window = checkpoint_window
+                        base_state = load_file(model_path)
+                        logger.info(
+                            "Cached checkpoint-%s as delta base (%d params)",
+                            base_window,
+                            sum(t.numel() for t in base_state.values()),
+                        )
+            else:
+                logger.info(
+                    "Starting DELTA upload at block %s for checkpoint-%s (base=%s)",
+                    upload_start_block,
+                    checkpoint_window,
+                    base_window,
+                )
+
+                # Upload DELTA checkpoint with retry logic
+                success = await _upload_with_retry(
+                    staging_path,
+                    checkpoint_publisher,
+                    checkpoint_window,
+                    max_attempts=UPLOAD_RETRY_MAX_ATTEMPTS,
+                    is_delta=True,
+                    base_window=base_window,
+                    base_state=base_state,
+                )
+
+                # If delta upload fails, fallback to FULL upload
+                if not success:
+                    logger.warning(
+                        "DELTA upload failed, falling back to FULL upload for checkpoint-%s",
+                        checkpoint_window,
+                    )
+                    success = await _upload_with_retry(
+                        staging_path,
+                        checkpoint_publisher,
+                        checkpoint_window,
+                        max_attempts=UPLOAD_RETRY_MAX_ATTEMPTS,
+                        is_delta=False,
+                    )
+
+                    if success:
+                        # Update base after fallback to FULL
+                        model_path = staging_path / "model.safetensors"
+                        if model_path.exists():
+                            base_window = checkpoint_window
+                            base_state = load_file(model_path)
+                            logger.info("Updated base after FULL fallback: checkpoint-%s", base_window)
 
             if not success:
                 logger.error("Upload failed after retries, discarding snapshot")
@@ -165,8 +248,10 @@ async def upload_worker_loop(
             ready_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
             blocks_elapsed = current_block - upload_start_block
 
+            checkpoint_type = "FULL" if should_upload_full else "DELTA"
             logger.info(
-                "Upload completed in %.1fs (%d blocks elapsed): checkpoint-%s ready at window %s",
+                "%s upload completed in %.1fs (%d blocks elapsed): checkpoint-%s ready at window %s",
+                checkpoint_type,
                 upload_duration,
                 blocks_elapsed,
                 checkpoint_window,
@@ -211,6 +296,9 @@ async def _upload_with_retry(
     checkpoint_publisher: CheckpointPublisher,
     target_window: int,
     max_attempts: int = 3,
+    is_delta: bool = False,
+    base_window: int | None = None,
+    base_state: dict[str, torch.Tensor] | None = None,
 ) -> bool:
     """Upload checkpoint with exponential backoff retry.
 
@@ -219,13 +307,24 @@ async def _upload_with_retry(
         checkpoint_publisher: Publisher for R2 uploads
         target_window: Window number to upload to
         max_attempts: Maximum upload attempts
+        is_delta: If True, upload as DELTA checkpoint
+        base_window: For delta: window of the base checkpoint
+        base_state: For delta: state dict of the base checkpoint
 
     Returns:
         True if upload succeeded, False otherwise
     """
+    upload_type = "DELTA" if is_delta else "FULL"
+
     for attempt in range(1, max_attempts + 1):
         try:
-            logger.info("Upload attempt %d/%d for window %s", attempt, max_attempts, target_window)
+            logger.info(
+                "%s upload attempt %d/%d for window %s",
+                upload_type,
+                attempt,
+                max_attempts,
+                target_window,
+            )
 
             # Read metadata from snapshot
             metadata_path = staging_path / "snapshot_metadata.json"
@@ -234,26 +333,40 @@ async def _upload_with_retry(
                 with open(metadata_path, encoding="utf-8") as f:
                     metadata = json.load(f)
 
-            # Upload from staging path to target window
-            success = await checkpoint_publisher.upload_from_staging(
-                staging_path,
-                metadata,
-                target_window,
-            )
+            if is_delta:
+                if base_window is None or base_state is None:
+                    logger.error("Cannot upload delta without base_window and base_state")
+                    return False
+
+                # Upload sparse delta
+                success = await checkpoint_publisher.upload_delta(
+                    staging_path,
+                    metadata,
+                    target_window,
+                    base_window,
+                    base_state,
+                )
+            else:
+                # Upload full checkpoint
+                success = await checkpoint_publisher.upload_from_staging(
+                    staging_path,
+                    metadata,
+                    target_window,
+                )
 
             if success:
-                logger.info("Upload succeeded on attempt %d", attempt)
+                logger.info("%s upload succeeded on attempt %d", upload_type, attempt)
                 return True
             else:
-                logger.warning("Upload returned false on attempt %d", attempt)
+                logger.warning("%s upload returned false on attempt %d", upload_type, attempt)
 
         except Exception as exc:
-            logger.error("Upload attempt %d failed: %s", attempt, exc)
+            logger.error("%s upload attempt %d failed: %s", upload_type, attempt, exc)
 
         # Exponential backoff if not last attempt
         if attempt < max_attempts:
             backoff = UPLOAD_RETRY_BACKOFF_BASE * (2 ** (attempt - 1))
-            logger.info("Retrying upload in %ds", backoff)
+            logger.info("Retrying %s upload in %ds", upload_type, backoff)
             await asyncio.sleep(backoff)
 
     return False

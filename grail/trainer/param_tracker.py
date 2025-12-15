@@ -222,8 +222,8 @@ class ParamChangeTracker:
             Configured ParamChangeTracker
         """
         return cls(
-            measure_interval=getattr(config, "param_change_measure_interval", 4),
-            threshold=getattr(config, "param_change_threshold", 1e-7),
+            measure_interval=getattr(config, "param_change_measure_interval", 100),
+            threshold=getattr(config, "param_change_threshold", 0.0),
             track_per_layer=getattr(config, "param_change_track_per_layer", True),
             track_components=getattr(config, "param_change_track_components", True),
             track_sign_flips=getattr(config, "param_change_track_sign_flips", True),
