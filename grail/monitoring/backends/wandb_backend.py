@@ -22,7 +22,14 @@ from ..base import MetricData, MetricType, MonitoringBackend
 logger = logging.getLogger(__name__)
 
 # Reserved tag keys that should be extracted as x-axis fields, not appended to name
-RESERVED_TAGS = {"epoch", "batch_step", "window_number", "global_step", "block_number"}
+RESERVED_TAGS = {
+    "epoch",
+    "batch_step",
+    "window_number",
+    "global_step",
+    "block_number",
+    "optimizer_step",
+}
 
 # Step metric mappings: prefix -> step_metric
 STEP_METRIC_PREFIXES = {
@@ -30,6 +37,8 @@ STEP_METRIC_PREFIXES = {
     "training/batch/": "batch_step",
     "training/block/": "block_number",
     "training/prefilter/": "block_number",
+    "param_change/": "optimizer_step",
+    "param_change/sparse/": "optimizer_step",
     "eval/": "block_number",
     "mining/": "block_number",
     "validation/": "block_number",
@@ -306,6 +315,7 @@ class WandBBackend(MonitoringBackend):
         self._wandb_module.define_metric("epoch")
         self._wandb_module.define_metric("batch_step")
         self._wandb_module.define_metric("global_step")
+        self._wandb_module.define_metric("optimizer_step")
 
     def _define_metric_families(self) -> None:
         """Define step metrics for different metric families."""
@@ -315,6 +325,9 @@ class WandBBackend(MonitoringBackend):
         # Training metrics use epoch/batch_step for batch-level granularity
         self._wandb_module.define_metric("training/epoch/*", step_metric="epoch")
         self._wandb_module.define_metric("training/batch/*", step_metric="batch_step")
+
+        # Parameter change metrics use optimizer_step for x-axis (separate tab)
+        self._wandb_module.define_metric("param_change/*", step_metric="optimizer_step")
 
         # All other metric families use block_number
         for pattern in BLOCK_NUMBER_METRICS:

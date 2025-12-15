@@ -331,7 +331,7 @@ class TrainerNeuron(BaseNeuron):
         current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
 
         if self._context.monitor:
-            self._context.monitor.set_block_context(current_block, None)
+            self._context.monitor.set_block_context(current_block, current_window)
 
         return current_window
 
@@ -802,7 +802,9 @@ class TrainerNeuron(BaseNeuron):
             eval_reason,
         )
 
-        return await evaluator.run_cycle(plan, start_offset=0, heartbeat=self.heartbeat)
+        return await evaluator.run_cycle(
+            plan, start_offset=0, heartbeat=self.heartbeat, window_number=window_number
+        )
 
     # ────────────────────────────────────────────────────────────────────────────
     # Helper Methods
