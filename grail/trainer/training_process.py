@@ -58,8 +58,8 @@ OPTIMIZER_WEIGHT_DECAY = 0.1
 
 # Scheduler hyperparameters
 TOTAL_TRAINING_WINDOWS = 1000
-WARMUP_FRACTION = 0.05
-SCHEDULER_ETA_MIN = 1e-7
+WARMUP_FRACTION = float(os.getenv("GRAIL_WARMUP_FRACTION", "0.05"))
+SCHEDULER_ETA_MIN = float(os.getenv("GRAIL_SCHEDULER_ETA_MIN", "1e-7"))
 
 # Training loop constants
 PAUSE_CHECK_INTERVAL_SECONDS = 5
@@ -525,14 +525,17 @@ class TrainingService:
                 # Seed RNGs for reproducibility
                 _seed_all(current_window + self.epoch_counter)
 
-                # Get trusted miners
-                trusted_hotkeys = await self._get_trusted_miners()
-                if not trusted_hotkeys:
-                    await asyncio.sleep(NO_MINERS_SLEEP_SECONDS)
-                    continue
+                # Load GRPO groups only if window changed (skip trusted miners query if not needed)
+                target_data_window = current_window - WINDOW_LENGTH
+                if target_data_window != self.last_loaded_window and target_data_window >= 0:
+                    # Get trusted miners only when we need to fetch new data
+                    trusted_hotkeys = await self._get_trusted_miners()
+                    if not trusted_hotkeys:
+                        await asyncio.sleep(NO_MINERS_SLEEP_SECONDS)
+                        continue
 
-                # Load GRPO groups (Replay Buffer)
-                await self._load_grpo_groups(current_window, trusted_hotkeys)
+                    # Load GRPO groups (Replay Buffer)
+                    await self._load_grpo_groups(current_window, trusted_hotkeys)
 
                 # Check if replay buffer has data
                 if self.replay_buffer is not None:
@@ -656,7 +659,17 @@ class TrainingService:
             free_gb, _ = torch.cuda.mem_get_info()
             logger.info("GPU memory freed: %.2f GB available", free_gb / (1024**3))
 
-        # Save current state before pausing
+        # Signal pause confirmed via IPC (primary) BEFORE snapshot save
+        # The GPU is now freed and evaluation can start while we save the snapshot
+        # This prevents the orchestrator from timing out waiting for confirmation
+        if self._ipc is not None:
+            self._ipc.confirm_pause()
+            logger.info("🔄 STATE: pause_confirmed - signaled orchestrator via IPC (GPU freed)")
+        else:
+            logger.info("🔄 STATE: models_on_cpu_waiting - GPU freed (filesystem mode)")
+
+        # Save current state during pause (non-blocking for orchestrator)
+        # This can take 30-90s but evaluation can run in parallel
         self.snapshot_manager.save_snapshot_atomic(
             train_model_cpu,
             self.tokenizer,
@@ -666,13 +679,7 @@ class TrainingService:
                 "status": "paused_for_evaluation",
             },
         )
-
-        # Signal pause confirmed via IPC (primary) - orchestrator is waiting for this
-        if self._ipc is not None:
-            self._ipc.confirm_pause()
-            logger.info("🔄 STATE: pause_confirmed - signaled orchestrator via IPC")
-        else:
-            logger.info("🔄 STATE: models_on_cpu_waiting - snapshot saved (filesystem mode)")
+        logger.info("🔄 STATE: pause_snapshot_saved - snapshot saved during pause")
 
         # Close subtensor connection before long idle period (prevents 10s timeout)
         if self.subtensor:
