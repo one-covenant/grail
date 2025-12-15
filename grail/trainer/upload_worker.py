@@ -90,11 +90,15 @@ async def upload_worker_loop(
     """
     from safetensors.torch import load_file
 
+    delta_base_interval_windows = max(1, int(DELTA_BASE_INTERVAL))
+    base_stride_blocks = delta_base_interval_windows * int(WINDOW_LENGTH)
+
     logger.info(
-        "Upload worker starting (poll_interval=%ds, delta_enabled=%s, delta_base_interval=%d)",
+        "Upload worker starting (poll_interval=%ds, delta_enabled=%s, delta_base_interval_windows=%d, base_stride_blocks=%d)",
         poll_interval,
         DELTA_CHECKPOINT_ENABLED,
-        DELTA_BASE_INTERVAL,
+        delta_base_interval_windows,
+        base_stride_blocks,
     )
 
     # Log subtensor configuration (verify env vars are propagated)
@@ -153,7 +157,7 @@ async def upload_worker_loop(
 
             # Decide FULL vs DELTA upload
             # Upload FULL if: delta disabled, no base yet, or at base interval boundary
-            is_base_window = checkpoint_window % DELTA_BASE_INTERVAL == 0
+            is_base_window = checkpoint_window % base_stride_blocks == 0
             should_upload_full = (
                 not DELTA_CHECKPOINT_ENABLED
                 or base_window is None

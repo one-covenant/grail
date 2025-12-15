@@ -690,13 +690,16 @@ class CheckpointManager:
         keep.update(range(10))
 
         # Keep latest windows up to limit
+        delta_base_interval_windows = max(1, int(DELTA_BASE_INTERVAL))
+        base_stride_blocks = delta_base_interval_windows * int(WINDOW_LENGTH)
+
         for idx in range(self.keep_limit):
             window = current_window - idx * WINDOW_LENGTH
             if window >= 0:
                 keep.add(window)
                 # Also keep the base window this delta depends on
-                # Base windows are at DELTA_BASE_INTERVAL boundaries
-                base_window = (window // DELTA_BASE_INTERVAL) * DELTA_BASE_INTERVAL
+                # Base windows are at DELTA_BASE_INTERVAL (in windows) boundaries.
+                base_window = (window // base_stride_blocks) * base_stride_blocks
                 if base_window >= 0:
                     keep.add(base_window)
 

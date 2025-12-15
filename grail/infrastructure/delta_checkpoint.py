@@ -159,12 +159,17 @@ def compute_weights_hash(state_dict: dict[str, torch.Tensor]) -> str:
 
     for name in sorted(state_dict.keys()):
         tensor = state_dict[name]
-        # Convert to contiguous CPU bytes in a deterministic way
+        # Convert to contiguous CPU bytes in a deterministic way.
+        #
+        # Note: torch.bfloat16 tensors cannot be converted to numpy directly.
+        # We instead reinterpret the underlying storage as uint8 bytes.
         tensor_cpu = tensor.detach().cpu().contiguous()
-        tensor_bytes = tensor_cpu.numpy().tobytes()
+        tensor_bytes = tensor_cpu.view(torch.uint8).numpy().tobytes()
 
         # Hash both name and tensor bytes
         hasher.update(name.encode("utf-8"))
+        hasher.update(str(tensor_cpu.dtype).encode("utf-8"))
+        hasher.update(str(tuple(tensor_cpu.shape)).encode("utf-8"))
         hasher.update(tensor_bytes)
 
     return hasher.hexdigest()

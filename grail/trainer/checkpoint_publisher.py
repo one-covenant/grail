@@ -86,13 +86,16 @@ def _compute_keep_windows(current_window: int) -> set[int]:
         return keep
 
     # Keep only latest N windows (typically 1-3)
+    delta_base_interval_windows = max(1, int(DELTA_BASE_INTERVAL))
+    base_stride_blocks = delta_base_interval_windows * int(WINDOW_LENGTH)
+
     for idx in range(CHECKPOINT_RETENTION_LIMIT):
         window = current_window - idx * WINDOW_LENGTH
         if window >= 0:
             keep.add(window)
             # Also keep the base window this delta depends on
-            # Base windows are at DELTA_BASE_INTERVAL boundaries
-            base_window = (window // DELTA_BASE_INTERVAL) * DELTA_BASE_INTERVAL
+            # Base windows are at DELTA_BASE_INTERVAL (in windows) boundaries.
+            base_window = (window // base_stride_blocks) * base_stride_blocks
             if base_window >= 0:
                 keep.add(base_window)
 
@@ -619,19 +622,10 @@ class CheckpointPublisher:
                     rel_path = str(file_path.relative_to(temp_dir))
                     file_manifest[rel_path] = hashlib.sha256(file_path.read_bytes()).hexdigest()
 
-            # Copy non-weight files from staging (tokenizer, config, etc.)
-            for file_path in staging_path.rglob("*"):
-                if file_path.is_file() and file_path.name not in (
-                    "model.safetensors",
-                    "snapshot_metadata.json",
-                    "metadata.json",
-                    "manifest.sig",
-                ):
-                    rel_path = str(file_path.relative_to(staging_path))
-                    dest_path = temp_dir / rel_path
-                    dest_path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy(file_path, dest_path)
-                    file_manifest[rel_path] = hashlib.sha256(file_path.read_bytes()).hexdigest()
+            # Delta checkpoints intentionally do NOT upload non-weight artifacts
+            # (tokenizer/config/etc.) to keep delta payload minimal. Consumers
+            # reconstruct a full checkpoint directory by copying these artifacts
+            # from the base FULL checkpoint.
 
             # Read training config from snapshot metadata or use defaults
             training_config = snapshot_metadata.get(

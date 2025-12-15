@@ -328,7 +328,7 @@ class TestRetentionPolicy:
 
     def test_compute_keep_windows_includes_base(self, temp_cache: Path) -> None:
         """Test that _compute_keep_windows includes base checkpoints."""
-        from grail.shared.constants import DELTA_BASE_INTERVAL
+        from grail.shared.constants import DELTA_BASE_INTERVAL, WINDOW_LENGTH
 
         manager = CheckpointManager(
             cache_root=temp_cache,
@@ -336,17 +336,17 @@ class TestRetentionPolicy:
             keep_limit=5,
         )
 
-        # Current window is 250, with base interval of 100
+        # Current window is 250 windows (in blocks), with base interval of 100 windows
         # Should keep recent windows AND their base windows
-        current_window = 250
+        current_window = 250 * WINDOW_LENGTH
 
         keep = manager._compute_keep_windows(current_window)
 
         # Should include base windows at 200 and 100 boundaries
         # Assuming DELTA_BASE_INTERVAL = 100
         if DELTA_BASE_INTERVAL == 100:
-            assert 200 in keep, "Base window 200 should be kept"
-            assert 100 in keep, "Base window 100 should be kept"
+            assert 200 * WINDOW_LENGTH in keep, "Base window 200 should be kept"
+            assert 100 * WINDOW_LENGTH in keep, "Base window 100 should be kept"
 
 
 class TestEdgeCases:

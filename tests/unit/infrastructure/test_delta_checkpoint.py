@@ -267,6 +267,16 @@ class TestComputeWeightsHash:
 
         assert hash1 == hash2
 
+    def test_bfloat16_hash_supported(self) -> None:
+        """Test that hashing works for bfloat16 tensors (no numpy conversion error)."""
+        state = {
+            "layer": torch.tensor([1.0, 2.0, 3.0], dtype=torch.bfloat16),
+        }
+
+        digest = compute_weights_hash(state)
+        assert isinstance(digest, str)
+        assert len(digest) == 64
+
     def test_different_states_different_hash(self) -> None:
         """Test that different states produce different hashes."""
         state1 = {"layer": torch.tensor([1.0, 2.0])}
