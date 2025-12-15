@@ -224,7 +224,7 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-extend-exclude = ["scripts"]
+extend-exclude = ["scripts", "research/data/raw"]
 
 [tool.ruff.lint]
 select = [
