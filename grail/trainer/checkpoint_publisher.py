@@ -558,7 +558,7 @@ class CheckpointPublisher:
         target_window: int,
         base_window: int,
         base_state: dict[str, torch.Tensor],
-    ) -> bool:
+    ) -> tuple[bool, dict[str, Any] | None]:
         """Upload sparse delta checkpoint.
 
         Computes sparse delta from base_state to current state, uploads only
@@ -572,7 +572,7 @@ class CheckpointPublisher:
             base_state: State dict of the base checkpoint
 
         Returns:
-            True if upload succeeded, False otherwise
+            (success, info) where info contains delta sparsity and upload size stats.
         """
         from safetensors.torch import load_file, save_file
 
@@ -582,7 +582,7 @@ class CheckpointPublisher:
             model_path = staging_path / "model.safetensors"
             if not model_path.exists():
                 logger.error("No model.safetensors found in staging path: %s", staging_path)
-                return False
+                return False, None
 
             current_state = load_file(model_path)
 
@@ -733,7 +733,7 @@ class CheckpointPublisher:
 
             if not all(results):
                 logger.error("Some delta checkpoint files failed to upload")
-                return False
+                return False, None
 
             throughput_mbps = (total_mb / upload_duration) if upload_duration > 0 else 0
             logger.info(
@@ -750,10 +750,21 @@ class CheckpointPublisher:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to perform remote checkpoint cleanup: %s", exc)
 
-            return True
+            info: dict[str, Any] = {
+                "delta_sparsity_ratio": float(stats.get("sparsity_ratio", 0.0)),
+                "delta_nonzero_params": int(stats.get("nonzero_params", 0)),
+                "delta_total_params": int(stats.get("total_params", 0)),
+                "delta_threshold": float(DELTA_THRESHOLD),
+                "upload_total_bytes": int(total_bytes),
+                "upload_total_mb": float(total_mb),
+                "upload_duration_s": float(upload_duration),
+                "upload_throughput_mbps": float(throughput_mbps),
+            }
+
+            return True, info
 
         except Exception as exc:
             logger.exception("Failed to upload delta checkpoint: %s", exc)
-            return False
+            return False, None
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)

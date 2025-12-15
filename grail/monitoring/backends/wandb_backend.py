@@ -240,7 +240,9 @@ class WandBBackend(MonitoringBackend):
 
     def _setup_worker_directory(self, init_kwargs: dict[str, Any]) -> None:
         """Setup separate directory for worker process to avoid file conflicts."""
-        subprocess_wandb_dir = os.path.join(os.getcwd(), "wandb_training")
+        label = str(self._get_config("wandb_x_label", "worker"))
+        safe_label = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in label)
+        subprocess_wandb_dir = os.path.join(os.getcwd(), f"wandb_{safe_label}")
         try:
             os.makedirs(subprocess_wandb_dir, exist_ok=True)
             init_kwargs["dir"] = subprocess_wandb_dir

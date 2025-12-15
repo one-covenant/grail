@@ -105,12 +105,13 @@ def _fake_run_upload_worker(
     snapshot_manager: Any,
     credentials: Any,
     wallet_args: dict[str, str],
+    monitor_config: dict[str, Any],
     ipc: Any,
     poll_interval: int = 30,
     verbosity: int = 1,
 ) -> None:
     """Simulate upload worker copying a snapshot once."""
-    _ = (credentials, wallet_args, poll_interval, verbosity)
+    _ = (credentials, wallet_args, monitor_config, poll_interval, verbosity)
     deadline = time.time() + 2
     while time.time() < deadline and not ipc.stop.is_set():
         if snapshot_manager.check_snapshot_ready():

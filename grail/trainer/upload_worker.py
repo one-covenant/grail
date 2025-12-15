@@ -71,6 +71,7 @@ async def upload_worker_loop(
     snapshot_manager: SnapshotManager,
     checkpoint_publisher: CheckpointPublisher,
     ipc: IPCChannels,
+    monitor_config: dict[str, Any] | None = None,
     poll_interval: int = 30,
 ) -> None:
     """Main upload worker loop.
@@ -89,6 +90,17 @@ async def upload_worker_loop(
         poll_interval: Seconds between snapshot checks
     """
     from safetensors.torch import load_file
+
+    from grail.monitoring import initialize_subprocess_monitoring
+
+    # Initialize monitoring using the shared helper (consistent with training_process)
+    # Note: We don't pass get_block_context here since subtensor isn't created yet.
+    # Block context will be set in the main loop after subtensor is available.
+    monitor = await initialize_subprocess_monitoring(
+        monitor_config,
+        process_name="upload_worker",
+        test_connection=False,  # Skip test since subtensor not ready yet
+    )
 
     delta_base_interval_windows = max(1, int(DELTA_BASE_INTERVAL))
     base_stride_blocks = delta_base_interval_windows * int(WINDOW_LENGTH)
@@ -136,6 +148,8 @@ async def upload_worker_loop(
             # Determine target window BEFORE copying snapshot
             upload_start_block = await subtensor.get_current_block()
             checkpoint_window = (upload_start_block // WINDOW_LENGTH) * WINDOW_LENGTH
+            if monitor:
+                monitor.set_block_context(upload_start_block, checkpoint_window)
 
             # Skip if we already uploaded to this window
             if checkpoint_window == last_uploaded_window:
@@ -175,7 +189,7 @@ async def upload_worker_loop(
                 )
 
                 # Upload FULL checkpoint with retry logic
-                success = await _upload_with_retry(
+                success, upload_info = await _upload_with_retry(
                     staging_path,
                     checkpoint_publisher,
                     checkpoint_window,
@@ -203,7 +217,7 @@ async def upload_worker_loop(
                 )
 
                 # Upload DELTA checkpoint with retry logic
-                success = await _upload_with_retry(
+                success, upload_info = await _upload_with_retry(
                     staging_path,
                     checkpoint_publisher,
                     checkpoint_window,
@@ -219,7 +233,7 @@ async def upload_worker_loop(
                         "DELTA upload failed, falling back to FULL upload for checkpoint-%s",
                         checkpoint_window,
                     )
-                    success = await _upload_with_retry(
+                    success, upload_info = await _upload_with_retry(
                         staging_path,
                         checkpoint_publisher,
                         checkpoint_window,
@@ -264,6 +278,54 @@ async def upload_worker_loop(
                 ready_window,
             )
 
+            if monitor:
+                monitor.set_block_context(current_block, checkpoint_window)
+                try:
+                    await monitor.log_gauge(
+                        "profiling/upload_worker/upload_duration_s", upload_duration
+                    )
+                    await monitor.log_gauge(
+                        "profiling/upload_worker/checkpoint_window", float(checkpoint_window)
+                    )
+                    await monitor.log_counter(
+                        f"profiling/upload_worker/uploads/{checkpoint_type.lower()}"
+                    )
+                    if isinstance(upload_info, dict):
+                        bytes_total = upload_info.get("upload_total_bytes")
+                        mb_total = upload_info.get("upload_total_mb")
+                        throughput = upload_info.get("upload_throughput_mbps")
+                        if bytes_total is not None:
+                            await monitor.log_gauge(
+                                "profiling/upload_worker/upload_total_bytes",
+                                float(bytes_total),
+                            )
+                        if mb_total is not None:
+                            await monitor.log_gauge(
+                                "profiling/upload_worker/upload_total_mb",
+                                float(mb_total),
+                            )
+                        if throughput is not None:
+                            await monitor.log_gauge(
+                                "profiling/upload_worker/upload_throughput_mbps",
+                                float(throughput),
+                            )
+
+                        # Delta-specific stats (if present)
+                        if checkpoint_type == "DELTA":
+                            for key in (
+                                "delta_sparsity_ratio",
+                                "delta_nonzero_params",
+                                "delta_total_params",
+                                "delta_threshold",
+                            ):
+                                if key in upload_info and upload_info[key] is not None:
+                                    await monitor.log_gauge(
+                                        f"profiling/upload_worker/{key}",
+                                        float(upload_info[key]),
+                                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Failed to log upload worker metrics: %s", exc, exc_info=True)
+
             # Set READY-{ready_window} marker
             try:
                 finalized = await checkpoint_publisher.finalize_checkpoint_ready(
@@ -305,7 +367,7 @@ async def _upload_with_retry(
     is_delta: bool = False,
     base_window: int | None = None,
     base_state: dict[str, torch.Tensor] | None = None,
-) -> bool:
+) -> tuple[bool, dict[str, Any] | None]:
     """Upload checkpoint with exponential backoff retry.
 
     Args:
@@ -318,7 +380,7 @@ async def _upload_with_retry(
         base_state: For delta: state dict of the base checkpoint
 
     Returns:
-        True if upload succeeded, False otherwise
+        (success, info) where info may include bytes/sparsity stats.
     """
     upload_type = "DELTA" if is_delta else "FULL"
 
@@ -342,10 +404,10 @@ async def _upload_with_retry(
             if is_delta:
                 if base_window is None or base_state is None:
                     logger.error("Cannot upload delta without base_window and base_state")
-                    return False
+                    return False, None
 
                 # Upload sparse delta
-                success = await checkpoint_publisher.upload_delta(
+                success, info = await checkpoint_publisher.upload_delta(
                     staging_path,
                     metadata,
                     target_window,
@@ -359,10 +421,17 @@ async def _upload_with_retry(
                     metadata,
                     target_window,
                 )
+                total_bytes = sum(
+                    path.stat().st_size for path in staging_path.rglob("*") if path.is_file()
+                )
+                info = {
+                    "upload_total_bytes": total_bytes,
+                    "upload_total_mb": total_bytes / (1024 * 1024),
+                }
 
             if success:
                 logger.info("%s upload succeeded on attempt %d", upload_type, attempt)
-                return True
+                return True, info
             else:
                 logger.warning("%s upload returned false on attempt %d", upload_type, attempt)
 
@@ -375,13 +444,14 @@ async def _upload_with_retry(
             logger.info("Retrying %s upload in %ds", upload_type, backoff)
             await asyncio.sleep(backoff)
 
-    return False
+    return False, None
 
 
 def run_upload_worker(
     snapshot_manager: SnapshotManager,
     credentials: Any,
     wallet_args: dict[str, str],
+    monitor_config: dict[str, Any] | None,
     ipc: IPCChannels,
     poll_interval: int = 30,
     verbosity: int = 1,
@@ -420,6 +490,7 @@ def run_upload_worker(
                 snapshot_manager,
                 checkpoint_publisher,
                 ipc,
+                monitor_config,
                 poll_interval,
             )
         )
