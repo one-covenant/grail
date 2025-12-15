@@ -37,6 +37,18 @@ services:
       - WANDB_NOTES=${WANDB_NOTES}
       - WANDB_RESUME=${WANDB_RESUME}
       - GRAIL_MONITORING_BACKEND=${GRAIL_MONITORING_BACKEND}
+      # WandB storage: redirect all wandb files to mounted volume (not container layer)
+      - WANDB_DIR=/root/.cache/wandb
+      - WANDB_CACHE_DIR=/root/.cache/wandb
+      - WANDB_DATA_DIR=/root/.cache/wandb
+      # Disable WandB artifacts and code tracking to prevent disk bloat
+      - WANDB_DISABLE_ARTIFACTS=${WANDB_DISABLE_ARTIFACTS:-true}
+      - WANDB_DISABLE_CODE=${WANDB_DISABLE_CODE:-true}
+      - WANDB_SILENT=${WANDB_SILENT:-true}
+      # Disable wandb console output capture (reduces file writes)
+      - WANDB_CONSOLE=off
+      # Disable git info collection
+      - WANDB_DISABLE_GIT=true
       
       # Hugging Face configuration
       - HF_TOKEN=${HF_TOKEN}
@@ -74,6 +86,8 @@ services:
       - validator-cache:/root/.cache
       - validator-data:/app/data
       - validator-logs:/var/log/grail
+      # Mount host /ephemeral (1.5TB) for checkpoints
+      - /ephemeral:/ephemeral
       
     deploy:
       resources:
@@ -99,6 +113,62 @@ services:
       - "com.centurylinklabs.watchtower.enable=true"
       - "com.centurylinklabs.watchtower.stop-signal=SIGTERM"
       - "com.centurylinklabs.watchtower.timeout=120s"
+
+  janitor:
+    image: alpine:3.20
+    container_name: grail-janitor
+    restart: unless-stopped
+    command:
+      - /bin/sh
+      - -lc
+      - >-
+        set -eu;
+        echo "[janitor] started";
+        while true; do
+          TS=$(date '+%Y-%m-%d %H:%M:%S');
+          echo "[${TS}] janitor: running cleanup";
+          W=/root/.cache/wandb;
+          H=/root/.cache/huggingface;
+          L=/var/log/grail;
+          # WandB: aggressively clean all wandb data older than WANDB_MAX_AGE_DAYS
+          if [ -d "$W" ]; then
+            # Clean run directories (wandb/run-*)
+            find "$W" -maxdepth 1 -type d -name "run-*" -mtime +${WANDB_MAX_AGE_DAYS:-7} -exec rm -rf {} + 2>/dev/null || true;
+            # Clean logs directory
+            find "$W/logs" -mindepth 1 -type d -mtime +${WANDB_MAX_AGE_DAYS:-7} -exec rm -rf {} + 2>/dev/null || true;
+            # Clean artifacts recursively (obj/md5/* structure)
+            find "$W/artifacts" -type f -mtime +${WANDB_MAX_AGE_DAYS:-7} -delete 2>/dev/null || true;
+            find "$W/artifacts" -type d -empty -delete 2>/dev/null || true;
+            # Clean tmp directory in artifacts
+            rm -rf "$W/artifacts/tmp"/* 2>/dev/null || true;
+            # Report wandb cache size
+            echo "[${TS}] wandb cache size: $(du -sh $W 2>/dev/null | cut -f1 || echo 'N/A')";
+          fi;
+          # HuggingFace: prune files older than HF_MAX_AGE_DAYS, then empty dirs
+          if [ -d "$H" ]; then
+            find "$H" -type f -mtime +${HF_MAX_AGE_DAYS:-14} -delete 2>/dev/null || true;
+            find "$H" -type d -empty -delete 2>/dev/null || true;
+          fi;
+          # Logs: remove rotated logs older than LOG_MAX_AGE_DAYS (do not truncate active file)
+          if [ -d "$L" ]; then
+            find "$L" -type f -name "*.log.*" -mtime +${LOG_MAX_AGE_DAYS:-14} -delete 2>/dev/null || true;
+          fi;
+          sleep ${JANITOR_INTERVAL_SECONDS:-3600};
+        done
+    environment:
+      - JANITOR_INTERVAL_SECONDS=${JANITOR_INTERVAL_SECONDS:-3600}
+      - WANDB_MAX_AGE_DAYS=${WANDB_MAX_AGE_DAYS:-7}
+      - HF_MAX_AGE_DAYS=${HF_MAX_AGE_DAYS:-14}
+      - LOG_MAX_AGE_DAYS=${LOG_MAX_AGE_DAYS:-14}
+    volumes:
+      - validator-cache:/root/.cache
+      - validator-logs:/var/log/grail
+    depends_on:
+      - validator
+    networks:
+      - grail-network
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
 
   watchtower:
     image: containrrr/watchtower
