@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import tempfile
 from pathlib import Path
 
@@ -191,9 +190,7 @@ class TestApplySparseDelta:
         }
         shapes = {"weight": [2]}
 
-        result = apply_sparse_delta(
-            base_state, sparse_tensors, shapes, target_dtype=torch.bfloat16
-        )
+        result = apply_sparse_delta(base_state, sparse_tensors, shapes, target_dtype=torch.bfloat16)
 
         assert result["weight"].dtype == torch.bfloat16
 
@@ -224,9 +221,9 @@ class TestRoundTrip:
 
         # Verify reconstruction
         for name in current_state:
-            assert torch.allclose(
-                reconstructed[name], current_state[name].float(), atol=1e-6
-            ), f"Mismatch in {name}"
+            assert torch.allclose(reconstructed[name], current_state[name].float(), atol=1e-6), (
+                f"Mismatch in {name}"
+            )
 
     def test_round_trip_with_bf16(self) -> None:
         """Test round-trip with bfloat16 tensors."""
@@ -234,9 +231,7 @@ class TestRoundTrip:
             "weight": torch.randn(16, 16, dtype=torch.bfloat16),
         }
         current_state = {
-            "weight": (base_state["weight"].float() + torch.randn(16, 16) * 0.1).to(
-                torch.bfloat16
-            ),
+            "weight": (base_state["weight"].float() + torch.randn(16, 16) * 0.1).to(torch.bfloat16),
         }
 
         # Compute delta
@@ -337,9 +332,7 @@ class TestEstimateSparseSize:
 
     def test_size_with_different_dtypes(self) -> None:
         """Test size estimation with different dtypes."""
-        size = estimate_sparse_size(
-            1000, index_dtype=torch.int64, value_dtype=torch.float64
-        )
+        size = estimate_sparse_size(1000, index_dtype=torch.int64, value_dtype=torch.float64)
         # 8 bytes per index + 8 bytes per value = 16000 bytes
         assert size == 16000
 
@@ -369,9 +362,7 @@ class TestSafetensorsIntegration:
 
             # Load and apply
             loaded_sparse = load_file(delta_path)
-            reconstructed = apply_sparse_delta(
-                base_state, loaded_sparse, shapes, torch.float32
-            )
+            reconstructed = apply_sparse_delta(base_state, loaded_sparse, shapes, torch.float32)
 
             # Verify reconstruction
             assert torch.allclose(

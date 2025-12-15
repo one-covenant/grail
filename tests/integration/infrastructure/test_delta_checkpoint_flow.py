@@ -13,8 +13,6 @@ import json
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import torch
@@ -330,7 +328,6 @@ class TestRetentionPolicy:
 
     def test_compute_keep_windows_includes_base(self, temp_cache: Path) -> None:
         """Test that _compute_keep_windows includes base checkpoints."""
-        from grail.infrastructure.checkpoint_consumer import CheckpointManager
         from grail.shared.constants import DELTA_BASE_INTERVAL
 
         manager = CheckpointManager(
@@ -355,14 +352,11 @@ class TestRetentionPolicy:
 class TestEdgeCases:
     """Test edge cases for delta checkpoint handling."""
 
-    def test_zero_percent_sparsity(
-        self, sample_model_state: dict[str, torch.Tensor]
-    ) -> None:
+    def test_zero_percent_sparsity(self, sample_model_state: dict[str, torch.Tensor]) -> None:
         """Test handling when all weights change (0% sparsity)."""
         # Completely different state
         different_state = {
-            name: torch.randn_like(tensor)
-            for name, tensor in sample_model_state.items()
+            name: torch.randn_like(tensor) for name, tensor in sample_model_state.items()
         }
 
         sparse_tensors, shapes, stats = compute_sparse_delta(
@@ -374,9 +368,7 @@ class TestEdgeCases:
         assert stats["sparsity_ratio"] == 0.0
         assert stats["nonzero_params"] == stats["total_params"]
 
-    def test_hundred_percent_sparsity(
-        self, sample_model_state: dict[str, torch.Tensor]
-    ) -> None:
+    def test_hundred_percent_sparsity(self, sample_model_state: dict[str, torch.Tensor]) -> None:
         """Test handling when no weights change (100% sparsity)."""
         sparse_tensors, shapes, stats = compute_sparse_delta(
             sample_model_state,
@@ -388,13 +380,9 @@ class TestEdgeCases:
         assert stats["nonzero_params"] == 0
         assert len(sparse_tensors) == 0
 
-    def test_single_param_changed(
-        self, sample_model_state: dict[str, torch.Tensor]
-    ) -> None:
+    def test_single_param_changed(self, sample_model_state: dict[str, torch.Tensor]) -> None:
         """Test handling when only a single parameter changes."""
-        updated = {
-            name: tensor.clone() for name, tensor in sample_model_state.items()
-        }
+        updated = {name: tensor.clone() for name, tensor in sample_model_state.items()}
         # Change single element
         first_key = list(updated.keys())[0]
         updated[first_key][0, 0] += 1.0

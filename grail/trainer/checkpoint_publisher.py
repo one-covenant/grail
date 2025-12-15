@@ -28,9 +28,12 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import bittensor as bt
+
+if TYPE_CHECKING:
+    import torch
 
 from grail.infrastructure.checkpoint_consumer import (
     CHECKPOINT_PREFIX,
@@ -551,7 +554,7 @@ class CheckpointPublisher:
         snapshot_metadata: dict[str, Any],
         target_window: int,
         base_window: int,
-        base_state: dict[str, "torch.Tensor"],
+        base_state: dict[str, torch.Tensor],
     ) -> bool:
         """Upload sparse delta checkpoint.
 
@@ -568,7 +571,6 @@ class CheckpointPublisher:
         Returns:
             True if upload succeeded, False otherwise
         """
-        import torch
         from safetensors.torch import load_file, save_file
 
         temp_dir = Path(tempfile.mkdtemp(prefix=f"delta-{target_window}-"))
@@ -728,9 +730,7 @@ class CheckpointPublisher:
 
             # Upload all delta files
             upload_tasks = [upload_file(path) for path in temp_dir.rglob("*") if path.is_file()]
-            total_bytes = sum(
-                path.stat().st_size for path in temp_dir.rglob("*") if path.is_file()
-            )
+            total_bytes = sum(path.stat().st_size for path in temp_dir.rglob("*") if path.is_file())
             total_mb = total_bytes / (1024 * 1024)
 
             upload_start = time.time()

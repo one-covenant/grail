@@ -153,7 +153,7 @@ async def upload_worker_loop(
 
             # Decide FULL vs DELTA upload
             # Upload FULL if: delta disabled, no base yet, or at base interval boundary
-            is_base_window = (checkpoint_window % DELTA_BASE_INTERVAL == 0)
+            is_base_window = checkpoint_window % DELTA_BASE_INTERVAL == 0
             should_upload_full = (
                 not DELTA_CHECKPOINT_ENABLED
                 or base_window is None
@@ -229,7 +229,9 @@ async def upload_worker_loop(
                         if model_path.exists():
                             base_window = checkpoint_window
                             base_state = load_file(model_path)
-                            logger.info("Updated base after FULL fallback: checkpoint-%s", base_window)
+                            logger.info(
+                                "Updated base after FULL fallback: checkpoint-%s", base_window
+                            )
 
             if not success:
                 logger.error("Upload failed after retries, discarding snapshot")

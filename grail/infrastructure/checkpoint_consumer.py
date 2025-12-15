@@ -204,9 +204,7 @@ class CheckpointManager:
                         window,
                         metadata.base_window,
                     )
-                    reconstructed_dir = await self._handle_delta_checkpoint(
-                        metadata, tmp_dir
-                    )
+                    reconstructed_dir = await self._handle_delta_checkpoint(metadata, tmp_dir)
                     if reconstructed_dir is None:
                         raise CheckpointDownloadError(
                             f"Failed to reconstruct delta checkpoint for window {window}"
