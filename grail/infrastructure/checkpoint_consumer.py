@@ -41,6 +41,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from grail.shared.safetensors_utils import load_model_state_dict
+
 from ..shared.constants import (
     CHECKPOINT_MILESTONE_INTERVAL,
     CHECKPOINT_RETENTION_LIMIT,
@@ -577,11 +579,20 @@ class CheckpointManager:
 
         try:
             # Load base weights
-            base_model_path = base_path / "model.safetensors"
-            if not base_model_path.exists():
-                logger.error("Base checkpoint missing model.safetensors: %s", base_path)
+            try:
+                base_state = load_model_state_dict(base_path)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Failed to load base checkpoint weights from %s: %s",
+                    base_path,
+                    exc,
+                    exc_info=True,
+                )
                 return None
-            base_state = load_file(base_model_path)
+
+            if base_state is None:
+                logger.error("Base checkpoint missing model weights: %s", base_path)
+                return None
 
             # Load sparse delta
             delta_sparse_path = delta_path / "delta_sparse.safetensors"
@@ -635,11 +646,16 @@ class CheckpointManager:
             for f in base_path.iterdir():
                 if f.is_file() and f.name not in (
                     "model.safetensors",
+                    "model.safetensors.index.json",
+                    "model.safetensors.index.json.gz",
                     "metadata.json",
                     "FULL",
                     "DELTA",
                     "manifest.sig",
                 ):
+                    # Skip sharded weight files from the base checkpoint.
+                    if f.name.startswith("model-") and f.name.endswith(".safetensors"):
+                        continue
                     # Skip READY markers
                     if f.name.startswith("READY"):
                         continue

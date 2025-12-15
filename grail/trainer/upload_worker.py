@@ -30,6 +30,7 @@ from grail.shared.constants import (
     UPLOAD_RETRY_MAX_ATTEMPTS,
     WINDOW_LENGTH,
 )
+from grail.shared.safetensors_utils import load_model_state_dict
 from grail.trainer.checkpoint_publisher import CheckpointPublisher
 from grail.trainer.ipc import IPCChannels
 from grail.trainer.snapshot_manager import SnapshotManager
@@ -89,8 +90,6 @@ async def upload_worker_loop(
         ipc: IPC channels for coordination
         poll_interval: Seconds between snapshot checks
     """
-    from safetensors.torch import load_file
-
     from grail.monitoring import initialize_subprocess_monitoring
 
     # Initialize monitoring using the shared helper (consistent with training_process)
@@ -199,13 +198,29 @@ async def upload_worker_loop(
 
                 if success:
                     # Cache as new base for future deltas
-                    model_path = staging_path / "model.safetensors"
-                    if model_path.exists():
+                    try:
+                        loaded_state = load_model_state_dict(staging_path)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "Failed to cache delta base from checkpoint-%s: %s",
+                            checkpoint_window,
+                            exc,
+                        )
+                        loaded_state = None
+
+                    if loaded_state is None:
+                        logger.warning(
+                            "Could not cache delta base for checkpoint-%s: no model weights found in %s",
+                            checkpoint_window,
+                            staging_path,
+                        )
+                    else:
                         base_window = checkpoint_window
-                        base_state = load_file(model_path)
+                        base_state = loaded_state
                         logger.info(
-                            "Cached checkpoint-%s as delta base (%d params)",
+                            "Cached checkpoint-%s as delta base (%d tensors, %d params)",
                             base_window,
+                            len(base_state),
                             sum(t.numel() for t in base_state.values()),
                         )
             else:
@@ -243,12 +258,30 @@ async def upload_worker_loop(
 
                     if success:
                         # Update base after fallback to FULL
-                        model_path = staging_path / "model.safetensors"
-                        if model_path.exists():
+                        try:
+                            loaded_state = load_model_state_dict(staging_path)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "Failed to update delta base after FULL fallback (checkpoint-%s): %s",
+                                checkpoint_window,
+                                exc,
+                            )
+                            loaded_state = None
+
+                        if loaded_state is None:
+                            logger.warning(
+                                "Could not update delta base after FULL fallback (checkpoint-%s): no model weights found in %s",
+                                checkpoint_window,
+                                staging_path,
+                            )
+                        else:
                             base_window = checkpoint_window
-                            base_state = load_file(model_path)
+                            base_state = loaded_state
                             logger.info(
-                                "Updated base after FULL fallback: checkpoint-%s", base_window
+                                "Updated base after FULL fallback: checkpoint-%s (%d tensors, %d params)",
+                                base_window,
+                                len(base_state),
+                                sum(t.numel() for t in base_state.values()),
                             )
 
             if not success:

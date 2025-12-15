@@ -59,6 +59,7 @@ from grail.shared.constants import (
     UPLOAD_TIMEOUT,
     WINDOW_LENGTH,
 )
+from grail.shared.safetensors_utils import load_model_state_dict
 
 logger = logging.getLogger(__name__)
 
@@ -574,17 +575,25 @@ class CheckpointPublisher:
         Returns:
             (success, info) where info contains delta sparsity and upload size stats.
         """
-        from safetensors.torch import load_file, save_file
+        from safetensors.torch import save_file
 
         temp_dir = Path(tempfile.mkdtemp(prefix=f"delta-{target_window}-"))
         try:
             # Load current weights from staging
-            model_path = staging_path / "model.safetensors"
-            if not model_path.exists():
-                logger.error("No model.safetensors found in staging path: %s", staging_path)
+            try:
+                current_state = load_model_state_dict(staging_path)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Failed to load current weights from staging path %s: %s",
+                    staging_path,
+                    exc,
+                    exc_info=True,
+                )
                 return False, None
 
-            current_state = load_file(model_path)
+            if current_state is None:
+                logger.error("No model weights found in staging path: %s", staging_path)
+                return False, None
 
             # Compute sparse delta
             sparse_tensors, shapes, stats = compute_sparse_delta(
