@@ -802,9 +802,24 @@ class CheckpointManager:
 
 
 def default_checkpoint_cache_root() -> Path:
-    """Return default cache directory for checkpoints."""
+    """Return default cache directory for checkpoints.
 
-    base_dir = Path(os.getenv("GRAIL_CACHE_DIR", Path.home() / ".cache/grail"))
+    Reads GRAIL_CACHE_DIR environment variable:
+    - If set and non-empty: use it (with ~ expansion for home directory paths)
+    - If empty or unset: default to ~/.cache/grail
+
+    Recommended for RAM-disk (faster I/O):
+        export GRAIL_CACHE_DIR=/dev/shm/grail
+    """
+    raw_cache_dir = os.getenv("GRAIL_CACHE_DIR", "").strip()
+
+    if raw_cache_dir:
+        # Expand ~ to home directory (Python-level, not shell-level)
+        base_dir = Path(raw_cache_dir).expanduser()
+    else:
+        # Default to ~/.cache/grail
+        base_dir = Path.home() / ".cache" / "grail"
+
     return base_dir / "checkpoints"
 
 
