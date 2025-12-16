@@ -366,7 +366,7 @@ class TrainingService:
         )
 
     async def _upload_initial_checkpoint(self, stop_event: multiprocessing.Event) -> None:
-        """Upload initial checkpoint and wait for miners to download.
+        """Save initial checkpoint and queue for upload worker.
 
         Args:
             stop_event: Event to signal shutdown
@@ -376,28 +376,38 @@ class TrainingService:
         if self.monitor:
             self.monitor.set_block_context(current_block, current_window)
 
-        logger.info(
-            "Saving initial checkpoint for window %s (upload handled by worker)", current_window
-        )
+        logger.info("Saving initial checkpoint for window %s", current_window)
 
-        # Prepare training config for metadata
-        training_config = {
-            "lr": self.config.lr,
-            "seed": current_window,
+        # Prepare snapshot metadata
+        snapshot_metadata = {
+            "epoch": 0,
+            "timestamp": time.time(),
+            "status": "initial_upload",
+            "training_config": {
+                "lr": self.config.lr,
+                "seed": current_window,
+            },
+            "parent_window": max(0, current_window - WINDOW_LENGTH),
         }
 
         # Save initial snapshot
         self.snapshot_manager.save_snapshot_atomic(
             self.train_model,
             self.tokenizer,
-            {
-                "epoch": 0,
-                "timestamp": time.time(),
-                "status": "initial_upload",
-                "training_config": training_config,
-                "parent_window": max(0, current_window - WINDOW_LENGTH),
-            },
+            snapshot_metadata,
         )
+
+        # Queue snapshot for upload worker
+        snapshot_path = self.snapshot_manager.get_latest_snapshot_path()
+        if self._ipc is not None and snapshot_path:
+            self._ipc.queue_snapshot(snapshot_path, snapshot_metadata, current_window)
+            logger.info("Initial checkpoint queued for upload worker (window=%s)", current_window)
+        else:
+            logger.warning(
+                "Could not queue initial checkpoint: ipc=%s, snapshot_path=%s",
+                self._ipc is not None,
+                snapshot_path is not None,
+            )
 
     async def _training_loop(self, stop_event: multiprocessing.Event) -> None:
         """Main continuous training loop.
