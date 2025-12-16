@@ -1083,6 +1083,7 @@ dependencies = [
     { name = "trl" },
     { name = "typer" },
     { name = "wandb" },
+    { name = "zstandard" },
 ]
 
 [package.optional-dependencies]
@@ -1099,7 +1100,6 @@ all = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "seaborn" },
-    { name = "zstandard" },
 ]
 dev = [
     { name = "bittensor-cli" },
@@ -1109,7 +1109,6 @@ dev = [
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
-    { name = "zstandard" },
 ]
 experiments = [
     { name = "jupyter" },
@@ -1178,8 +1177,7 @@ requires-dist = [
     { name = "trl", specifier = ">=0.7.0" },
     { name = "typer", specifier = "==0.16.1" },
     { name = "wandb", specifier = ">=0.21.3" },
-    { name = "zstandard", marker = "extra == 'all'", specifier = ">=0.21.0" },
-    { name = "zstandard", marker = "extra == 'dev'", specifier = ">=0.21.0" },
+    { name = "zstandard", specifier = ">=0.21.0" },
 ]
 provides-extras = ["all", "dev", "experiments", "quantization"]
 
