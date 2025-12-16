@@ -247,7 +247,7 @@ GRAIL_PROOF_VERSION = "v1"
 # ────────────────  PARAMETER CHANGE TRACKING  ────────────────
 
 # Measure parameter changes every N optimizer steps (0 disables tracking)
-PARAM_CHANGE_MEASURE_INTERVAL = int(os.getenv("GRAIL_PARAM_CHANGE_MEASURE_INTERVAL", "100"))
+PARAM_CHANGE_MEASURE_INTERVAL = int(os.getenv("GRAIL_PARAM_CHANGE_MEASURE_INTERVAL", "0"))
 
 # Primary threshold for classifying a parameter as "changed"
 # With small LR (1e-6), weight updates can be very small (1e-9 to 1e-6)
@@ -269,7 +269,7 @@ PARAM_CHANGE_RELATIVE_EPS = float(os.getenv("GRAIL_PARAM_CHANGE_RELATIVE_EPS", "
 # ────────────────  SPARSE QUALITY ANALYSIS  ────────────────
 
 # Enable/disable sparse quality analysis (runs at same interval as param tracking)
-SPARSE_QUALITY_ENABLED = os.getenv("GRAIL_SPARSE_QUALITY_ENABLED", "1") == "1"
+SPARSE_QUALITY_ENABLED = os.getenv("GRAIL_SPARSE_QUALITY_ENABLED", "0") == "1"
 
 # ────────────────  DELTA CHECKPOINT CONFIGURATION  ────────────────
 
