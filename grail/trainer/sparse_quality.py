@@ -268,7 +268,7 @@ class SparseQualityAnalyzer:
         """
         return cls(
             tracker=tracker,
-            enabled=getattr(config, "sparse_quality_enabled", True),
+            enabled=getattr(config, "sparse_quality_enabled", False),
         )
 
     def analyze(
