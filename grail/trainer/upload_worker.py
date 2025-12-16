@@ -350,6 +350,9 @@ async def upload_worker_loop(
                                 "delta_nonzero_params",
                                 "delta_total_params",
                                 "delta_threshold",
+                                "delta_raw_bytes",
+                                "delta_compressed_bytes",
+                                "delta_compression_ratio",
                             ):
                                 if key in upload_info and upload_info[key] is not None:
                                     await monitor.log_gauge(

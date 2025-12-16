@@ -41,6 +41,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import zstandard as zstd
+
 from grail.shared.safetensors_utils import load_model_state_dict
 
 from ..shared.constants import (
@@ -594,8 +596,23 @@ class CheckpointManager:
                 logger.error("Base checkpoint missing model weights: %s", base_path)
                 return None
 
-            # Load sparse delta
+            # Load sparse delta (handle both compressed and uncompressed formats)
             delta_sparse_path = delta_path / "delta_sparse.safetensors"
+            delta_compressed_path = delta_path / "delta_sparse.safetensors.zst"
+
+            if delta_compressed_path.exists():
+                # Decompress zstd-compressed delta
+                logger.debug("Decompressing delta_sparse.safetensors.zst")
+                decompressor = zstd.ZstdDecompressor()
+                compressed_data = delta_compressed_path.read_bytes()
+                decompressed_data = decompressor.decompress(compressed_data)
+                delta_sparse_path.write_bytes(decompressed_data)
+                logger.debug(
+                    "🗜️ Decompressed delta: %.2f MB → %.2f MB",
+                    len(compressed_data) / (1024 * 1024),
+                    len(decompressed_data) / (1024 * 1024),
+                )
+
             if not delta_sparse_path.exists():
                 logger.error("Delta checkpoint missing delta_sparse.safetensors: %s", delta_path)
                 return None

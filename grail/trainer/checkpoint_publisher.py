@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import bittensor as bt
+import zstandard as zstd
 
 if TYPE_CHECKING:
     import torch
@@ -605,12 +606,37 @@ class CheckpointPublisher:
             # Compute hash of current state (for consumer verification)
             weights_hash = compute_weights_hash(current_state)
 
-            # Save sparse delta to temp directory
+            # Save sparse delta to temp directory and compress with zstd
+            delta_safetensors_path = temp_dir / "delta_sparse.safetensors"
             if sparse_tensors:
-                save_file(sparse_tensors, temp_dir / "delta_sparse.safetensors")
+                save_file(sparse_tensors, delta_safetensors_path)
             else:
                 # No changes - create empty safetensors file
-                save_file({}, temp_dir / "delta_sparse.safetensors")
+                save_file({}, delta_safetensors_path)
+
+            # Compress safetensors with zstd for bandwidth reduction
+            raw_bytes = delta_safetensors_path.read_bytes()
+            delta_raw_size = len(raw_bytes)
+
+            compressor = zstd.ZstdCompressor(level=3)  # Level 3: good balance of speed/ratio
+            compressed_bytes = compressor.compress(raw_bytes)
+            delta_compressed_size = len(compressed_bytes)
+
+            # Write compressed file and remove original
+            delta_compressed_path = temp_dir / "delta_sparse.safetensors.zst"
+            delta_compressed_path.write_bytes(compressed_bytes)
+            delta_safetensors_path.unlink()
+
+            compression_ratio = (
+                delta_raw_size / delta_compressed_size if delta_compressed_size > 0 else 1.0
+            )
+            logger.info(
+                "🗜️ Delta compression: %.2f MB → %.2f MB (%.1fx ratio, %.1f%% reduction)",
+                delta_raw_size / (1024 * 1024),
+                delta_compressed_size / (1024 * 1024),
+                compression_ratio,
+                (1 - delta_compressed_size / delta_raw_size) * 100 if delta_raw_size > 0 else 0,
+            )
 
             # Save delta metadata
             delta_meta = {
@@ -764,6 +790,9 @@ class CheckpointPublisher:
                 "delta_nonzero_params": int(stats.get("nonzero_params", 0)),
                 "delta_total_params": int(stats.get("total_params", 0)),
                 "delta_threshold": float(DELTA_THRESHOLD),
+                "delta_raw_bytes": int(delta_raw_size),
+                "delta_compressed_bytes": int(delta_compressed_size),
+                "delta_compression_ratio": float(compression_ratio),
                 "upload_total_bytes": int(total_bytes),
                 "upload_total_mb": float(total_mb),
                 "upload_duration_s": float(upload_duration),
