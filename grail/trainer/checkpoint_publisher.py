@@ -200,18 +200,25 @@ def _parse_checkpoint_inventory(keys: list[str]) -> tuple[list[int], list[int], 
     return all_windows_sorted, full_windows_sorted, delta_windows_sorted
 
 
-async def _fetch_delta_base_window(
+async def _fetch_delta_anchor_window(
     delta_window: int,
     credentials: Any,
 ) -> int | None:
-    """Fetch the base_window a delta checkpoint depends on.
+    """Fetch the anchor_window a delta checkpoint depends on for recovery.
+
+    For chained deltas, each delta has:
+    - prev_window: immediate predecessor (for computing the delta)
+    - anchor_window: nearest FULL checkpoint (for recovery/reconstruction)
+
+    This function retrieves the anchor_window, which is the FULL checkpoint
+    that must be retained for this delta to be usable.
 
     Args:
         delta_window: The delta checkpoint window
         credentials: R2 credentials
 
     Returns:
-        The base_window from metadata, or None if unavailable
+        The anchor_window from metadata, or None if unavailable
     """
     from grail.infrastructure.comms import download_file
 
@@ -224,7 +231,7 @@ async def _fetch_delta_base_window(
         )
         if metadata_bytes:
             metadata = json.loads(metadata_bytes.decode("utf-8"))
-            return metadata.get("base_window")
+            return metadata.get("anchor_window")
     except Exception as exc:
         logger.warning("Failed to read metadata for delta %d: %s", delta_window, exc)
     return None
@@ -261,27 +268,35 @@ async def _compute_keep_windows(
 
     keep: set[int] = set()
 
-    # Keep latest N FULL checkpoints
+    # Keep latest N FULL checkpoints (anchors)
     keep.update(full_windows[:BASE_CHECKPOINT_RETENTION_LIMIT])
 
-    # Keep latest M DELTA checkpoints and their bases
+    # Keep latest M DELTA checkpoints and their anchor checkpoints
     deltas_to_keep = delta_windows[:DELTA_CHECKPOINT_RETENTION_LIMIT]
     keep.update(deltas_to_keep)
 
-    base_windows = await asyncio.gather(
-        *(_fetch_delta_base_window(delta_window, credentials) for delta_window in deltas_to_keep)
+    # Fetch anchor_window for each retained delta (the FULL checkpoint it depends on)
+    anchor_windows = await asyncio.gather(
+        *(
+            _fetch_delta_anchor_window(delta_window, credentials)
+            for delta_window in deltas_to_keep
+        )
     )
-    for delta_window, base_window in zip(deltas_to_keep, base_windows, strict=False):
-        if base_window is not None:
-            keep.add(int(base_window))
-            logger.debug("Keeping base %d (required by delta %d)", base_window, delta_window)
+    for delta_window, anchor_window in zip(deltas_to_keep, anchor_windows, strict=False):
+        if anchor_window is not None:
+            keep.add(int(anchor_window))
+            logger.debug(
+                "Keeping anchor %d (required by delta %d)", anchor_window, delta_window
+            )
             continue
 
         # Fallback: keep nearest FULL checkpoint before this delta
         for full_window in full_windows:
             if full_window < delta_window:
                 keep.add(full_window)
-                logger.debug("Keeping fallback base %d for delta %d", full_window, delta_window)
+                logger.debug(
+                    "Keeping fallback anchor %d for delta %d", full_window, delta_window
+                )
                 break
 
     logger.info(
@@ -785,20 +800,26 @@ class CheckpointPublisher:
         staging_path: Path,
         snapshot_metadata: dict[str, Any],
         target_window: int,
-        base_window: int,
-        base_state: dict[str, torch.Tensor],
+        prev_window: int,
+        prev_state: dict[str, torch.Tensor],
+        anchor_window: int,
     ) -> UploadResult:
-        """Upload sparse delta checkpoint.
+        """Upload sparse delta checkpoint (chained).
 
-        Computes sparse delta from base_state to current state, uploads only
-        non-zero differences in COO format for ~99% bandwidth reduction.
+        Computes sparse delta from prev_state (immediate predecessor) to current
+        state, uploads only non-zero differences in COO format.
+
+        For chained deltas:
+        - prev_window/prev_state: The checkpoint this delta is computed against
+        - anchor_window: The nearest FULL checkpoint for recovery metadata
 
         Args:
             staging_path: Path to staging directory containing current checkpoint
             snapshot_metadata: Metadata from snapshot (epoch, timestamp, metrics)
             target_window: The window number to publish this delta to
-            base_window: The window of the FULL checkpoint this delta is relative to
-            base_state: State dict of the base checkpoint
+            prev_window: The window of the previous checkpoint (chained predecessor)
+            prev_state: State dict of the previous checkpoint
+            anchor_window: The nearest FULL checkpoint for recovery
 
         Returns:
             UploadResult with timing, size, and delta-specific metrics.
@@ -829,30 +850,11 @@ class CheckpointPublisher:
             if current_state is None:
                 raise UploadError(f"No model weights found in staging path: {staging_path}")
 
-            # Log input state dtypes for debugging precision issues
-            current_sample_dtype = None
-            base_sample_dtype = None
-            for name in list(current_state.keys())[:1]:
-                current_sample_dtype = current_state[name].dtype
-            for name in list(base_state.keys())[:1]:
-                base_sample_dtype = base_state[name].dtype
-
-            logger.info(
-                "[upload_delta] Computing delta: target_window=%s, base_window=%s, "
-                "current_params=%d, current_dtype=%s, base_params=%d, base_dtype=%s",
-                target_window,
-                base_window,
-                len(current_state),
-                current_sample_dtype,
-                len(base_state),
-                base_sample_dtype,
-            )
-
-            # Compute sparse update (stores actual values at changed positions)
+            # Compute sparse delta (chained: relative to prev checkpoint)
             compute_start = time.time()
             sparse_tensors, shapes, stats = compute_sparse_delta(
                 current_state,
-                base_state,
+                prev_state,
                 threshold=DELTA_THRESHOLD,
             )
 
@@ -900,11 +902,12 @@ class CheckpointPublisher:
                 (1 - delta_compressed_size / delta_raw_size) * 100 if delta_raw_size > 0 else 0,
             )
 
-            # Save delta metadata
+            # Save delta metadata (includes prev_window for chain verification)
             delta_meta = {
                 "format": "sparse_coo",
                 "threshold": DELTA_THRESHOLD,
-                "base_window": base_window,
+                "prev_window": prev_window,
+                "anchor_window": anchor_window,
                 "shapes": shapes,
                 **stats,
             }
@@ -953,7 +956,8 @@ class CheckpointPublisher:
                 created_at=snapshot_metadata.get("timestamp", time.time()),
                 model_name="async_trainer_snapshot",
                 checkpoint_type="DELTA",
-                base_window=base_window,
+                prev_window=prev_window,
+                anchor_window=anchor_window,
                 weights_hash=weights_hash,
             )
 
@@ -979,9 +983,10 @@ class CheckpointPublisher:
             remote_prefix = f"{CHECKPOINT_PREFIX}checkpoint-{target_window}"
 
             logger.info(
-                "Uploading delta checkpoint to %s (base=%d, sparsity=%.2f%%, %d non-zero params)",
+                "Uploading delta checkpoint to %s (prev=%d, anchor=%d, sparsity=%.2f%%, %d non-zero params)",
                 remote_prefix,
-                base_window,
+                prev_window,
+                anchor_window,
                 stats["sparsity_ratio"] * 100,
                 stats["nonzero_params"],
             )

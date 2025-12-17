@@ -126,6 +126,7 @@ class ValidationService:
         self._last_copycat_interval_id: int = -1
         self._windows_processed_since_start: int = 0
         self._current_checkpoint_id: str | None = None
+        self._current_checkpoint_window: int | None = None  # Track window for fast path
 
         # Rolling histories for miner selection and availability
         self._selection_history: deque[set[str]] = deque(maxlen=WEIGHT_ROLLING_WINDOWS)
@@ -334,7 +335,8 @@ class ValidationService:
     async def _load_checkpoint_for_window(self, target_window: int) -> bool:
         """Load model/tokenizer checkpoint for validation window.
 
-        Uses latest ready checkpoint before target_window to match miner behavior.
+        Uses unified load_or_update_model for fast path (in-place delta) and
+        slow path (full disk load) with automatic fallback.
 
         Args:
             target_window: Target window to validate
@@ -342,7 +344,7 @@ class ValidationService:
         Returns:
             True if checkpoint loaded successfully, False otherwise
         """
-        # Get trainer's bucket for checkpoints
+        # Get trainer's bucket for checkpoints (one-time setup)
         if self._chain_manager and self._current_checkpoint_id is None:
             trainer_bucket = self._chain_manager.get_bucket(TRAINER_UID)
             if trainer_bucket:
@@ -353,93 +355,68 @@ class ValidationService:
                     f"⚠️ Trainer UID {TRAINER_UID} bucket not found, using local credentials"
                 )
 
-        # Discover latest ready checkpoint (same logic as miner)
-        checkpoint_window = await self._checkpoint_manager.get_latest_ready_checkpoint(
-            target_window
+        # Unified checkpoint loading (fast path + slow path with fallback)
+        timer_ctx = (
+            self._monitor.timer("profiling/checkpoint_load")
+            if self._monitor
+            else contextlib.nullcontext()
         )
+        with timer_ctx:
+            result, checkpoint_path = await self._checkpoint_manager.load_or_update_model(
+                target_window, self._model, self._current_checkpoint_window
+            )
 
-        if checkpoint_window is None:
+        if not result.success:
             logger.warning(
-                f"No ready checkpoint found before window {target_window}, skipping validation"
+                f"No checkpoint available for window {target_window}, skipping validation"
             )
             return False
 
-        # Try to get checkpoint
-        checkpoint_path = None
-        try:
-            timer_ctx = (
-                self._monitor.timer("profiling/checkpoint_download")
-                if self._monitor
-                else contextlib.nullcontext()
-            )
-            with timer_ctx:
-                checkpoint_path = await self._checkpoint_manager.get_checkpoint(checkpoint_window)
-        except Exception:
-            logger.warning(
-                f"Failed to download checkpoint for window {checkpoint_window} "
-                f"(target_window={target_window})"
-            )
+        # Fast path: model already updated in-place
+        if result.is_fast_path:
+            self._current_checkpoint_window = result.window
+            self._current_checkpoint_id = f"inplace-{result.window}"
+            logger.info(f"⚡ Validator model updated in-place to window {result.window}")
+            return True
 
-        if not checkpoint_path:
-            logger.warning(
-                f"Checkpoint {checkpoint_window} not available for window {target_window}, skipping"
-            )
-            return False
-
-        # Load if new checkpoint or models not loaded
-        if (
-            str(checkpoint_path) != self._current_checkpoint_id
-            or self._model is None
-            or self._tokenizer is None
-        ):
+        # Slow path: load from disk
+        if checkpoint_path is not None:
             try:
                 logger.info(
                     f"🚀 Loading checkpoint for validation window {target_window} "
                     f"from {checkpoint_path}"
                 )
-                # Time model loading (can be slow: GPU transfer, safetensors load)
-                timer_ctx = (
-                    self._monitor.timer("profiling/checkpoint_load")
-                    if self._monitor
-                    else contextlib.nullcontext()
+                self._model, self._tokenizer = clear_model_and_tokenizer(
+                    self._model, self._tokenizer
                 )
-                with timer_ctx:
-                    # Pre-load cleanup to prevent VRAM growth
-                    self._model, self._tokenizer = clear_model_and_tokenizer(
-                        self._model, self._tokenizer
-                    )
-                    self._model = get_model(
-                        str(checkpoint_path),
-                        device=None,
-                        eval_mode=True,
-                        checkpoint_window=checkpoint_window,
-                    )
-                    # Do not inject chat template; rely on checkpoint/tokenizer config
-                    self._tokenizer = get_tokenizer(str(checkpoint_path))
-                    self._current_checkpoint_id = str(checkpoint_path)
+                self._model = get_model(str(checkpoint_path), device=None, eval_mode=True)
+                self._tokenizer = get_tokenizer(str(checkpoint_path))
+                self._current_checkpoint_id = str(checkpoint_path)
+                self._current_checkpoint_window = result.window
 
-                # Log tokenizer version information for debugging
-                try:
-                    import tokenizers  # type: ignore
-                    import transformers
-
-                    logger.info(
-                        "VALIDATOR TOKENIZER INFO: transformers=%s, "
-                        "tokenizers=%s, name_or_path=%s, checkpoint=%s",
-                        transformers.__version__,
-                        tokenizers.__version__,
-                        getattr(self._tokenizer, "name_or_path", "unknown"),
-                        str(checkpoint_path),
-                    )
-                except Exception as e:
-                    logger.debug("Failed to log tokenizer version info: %s", e)
-
+                self._log_tokenizer_info(checkpoint_path)
                 return True
             except Exception:
                 logger.exception(f"Failed to load checkpoint for window {target_window}")
                 return False
 
         return True
+
+    def _log_tokenizer_info(self, checkpoint_path: Any) -> None:
+        """Log tokenizer version information for debugging."""
+        try:
+            import tokenizers  # type: ignore
+            import transformers
+
+            logger.info(
+                "VALIDATOR TOKENIZER INFO: transformers=%s, tokenizers=%s, name_or_path=%s, checkpoint=%s",
+                transformers.__version__,
+                tokenizers.__version__,
+                getattr(self._tokenizer, "name_or_path", "unknown"),
+                str(checkpoint_path),
+            )
+        except Exception as e:
+            logger.debug("Failed to log tokenizer version info: %s", e)
 
     async def _process_window(
         self,
