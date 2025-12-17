@@ -275,7 +275,7 @@ SPARSE_QUALITY_ENABLED = os.getenv("GRAIL_SPARSE_QUALITY_ENABLED", "0") == "1"
 
 # Upload FULL checkpoint every N windows (deltas for intermediate windows)
 # Set to 1 to disable delta uploads (all FULL checkpoints)
-DELTA_BASE_INTERVAL = int(os.getenv("GRAIL_DELTA_BASE_INTERVAL", "100"))
+DELTA_BASE_INTERVAL = int(os.getenv("GRAIL_DELTA_BASE_INTERVAL", "10"))
 
 # Threshold for sparse delta (0 = keep all non-zero deltas)
 DELTA_THRESHOLD = float(os.getenv("GRAIL_DELTA_THRESHOLD", "0.0"))
