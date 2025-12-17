@@ -11,6 +11,7 @@ from .manager import (
     MonitoringManager,
     get_monitoring_manager,
     initialize_monitoring,
+    initialize_subprocess_monitoring,
 )  # noqa: F401
 
 __all__ = [
@@ -20,5 +21,6 @@ __all__ = [
     "MonitoringManager",
     "get_monitoring_manager",
     "initialize_monitoring",
+    "initialize_subprocess_monitoring",
     "MonitoringConfig",
 ]

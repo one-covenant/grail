@@ -244,6 +244,45 @@ PROOF_POSITION_IMPORTANCE_DECAY = 100.0
 # GRAIL proof version
 GRAIL_PROOF_VERSION = "v1"
 
+# ────────────────  PARAMETER CHANGE TRACKING  ────────────────
+
+# Measure parameter changes every N optimizer steps (0 disables tracking)
+PARAM_CHANGE_MEASURE_INTERVAL = int(os.getenv("GRAIL_PARAM_CHANGE_MEASURE_INTERVAL", "0"))
+
+# Primary threshold for classifying a parameter as "changed"
+# With small LR (1e-6), weight updates can be very small (1e-9 to 1e-6)
+# Use 1e-10 as floor to catch all meaningful changes
+PARAM_CHANGE_THRESHOLD = float(os.getenv("GRAIL_PARAM_CHANGE_THRESHOLD", "0.0"))
+
+# Enable per-layer sparsity breakdown
+PARAM_CHANGE_TRACK_PER_LAYER = os.getenv("GRAIL_PARAM_CHANGE_TRACK_PER_LAYER", "1") == "1"
+
+# Enable per-component breakdown (q_proj, v_proj, gate_proj, etc.)
+PARAM_CHANGE_TRACK_COMPONENTS = os.getenv("GRAIL_PARAM_CHANGE_TRACK_COMPONENTS", "1") == "1"
+
+# Enable sign flip tracking (detects oscillation/instability)
+PARAM_CHANGE_TRACK_SIGN_FLIPS = os.getenv("GRAIL_PARAM_CHANGE_TRACK_SIGN_FLIPS", "1") == "1"
+
+# Epsilon for relative delta computation to avoid division by zero
+PARAM_CHANGE_RELATIVE_EPS = float(os.getenv("GRAIL_PARAM_CHANGE_RELATIVE_EPS", "1e-10"))
+
+# ────────────────  SPARSE QUALITY ANALYSIS  ────────────────
+
+# Enable/disable sparse quality analysis (runs at same interval as param tracking)
+SPARSE_QUALITY_ENABLED = os.getenv("GRAIL_SPARSE_QUALITY_ENABLED", "0") == "1"
+
+# ────────────────  DELTA CHECKPOINT CONFIGURATION  ────────────────
+
+# Upload FULL checkpoint every N windows (deltas for intermediate windows)
+# Set to 1 to disable delta uploads (all FULL checkpoints)
+DELTA_BASE_INTERVAL = int(os.getenv("GRAIL_DELTA_BASE_INTERVAL", "10"))
+
+# Threshold for sparse delta (0 = keep all non-zero deltas)
+DELTA_THRESHOLD = float(os.getenv("GRAIL_DELTA_THRESHOLD", "0.0"))
+
+# Enable/disable delta checkpoint uploads (fallback to full if disabled)
+DELTA_CHECKPOINT_ENABLED = os.getenv("GRAIL_DELTA_CHECKPOINT_ENABLED", "1") == "1"
+
 # ────────────────  ASYNC TRAINING CONFIGURATION  ────────────────
 
 # Upload worker poll interval (seconds between snapshot checks)

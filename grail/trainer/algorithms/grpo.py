@@ -40,6 +40,14 @@ from grail.trainer.metrics import (
     TaskReplicateResult,
     derive_k_values,
 )
+from grail.trainer.param_tracker import (
+    ParamChangeTracker,
+    log_param_change_metrics,
+)
+from grail.trainer.sparse_quality import (
+    SparseQualityAnalyzer,
+    log_sparse_quality_metrics,
+)
 
 from .base import TrainingAlgorithm
 
@@ -1056,6 +1064,26 @@ class GRPOAlgorithm(TrainingAlgorithm):
 
             self.config = TC(grpo_variant=grpo_variant or "grpo")
 
+        # Optimizer step counter for parameter change tracking
+        self.optimizer_step_count: int = 0
+
+        # Parameter change tracker (memory-safe, CPU-offloaded)
+        self.param_tracker = ParamChangeTracker.from_config(self.config)
+        if self.param_tracker.is_enabled():
+            logger.info(
+                "Parameter change tracking enabled: measure every %d optimizer steps, "
+                "threshold=%.0e, per_layer=%s, components=%s",
+                self.param_tracker.measure_interval,
+                self.param_tracker.threshold,
+                self.param_tracker.track_per_layer,
+                self.param_tracker.track_components,
+            )
+
+        # Sparse quality analyzer (uses param_tracker's snapshot, runs at same interval)
+        self.sparse_analyzer = SparseQualityAnalyzer.from_config(self.param_tracker, self.config)
+        if self.sparse_analyzer.enabled:
+            logger.info("Sparse quality analysis enabled (runs with param tracking)")
+
         # Persistent adaptive KL controller across epochs/windows
         self.kl_controller: AdaptiveKLController = AdaptiveKLController(
             initial=self.config.kl_coef,
@@ -1967,6 +1995,40 @@ class GRPOAlgorithm(TrainingAlgorithm):
 
                 # Standard optimizer step in fp32
                 optimizer.step()
+                self.optimizer_step_count += 1
+
+                # Parameter change tracking: measure diff between step t and step t-k
+                # Snapshot persists across k steps, then we measure and update snapshot
+                if (
+                    self.param_tracker.is_enabled()
+                    and self.optimizer_step_count % self.param_tracker.measure_interval == 0
+                ):
+                    # If we have a snapshot from k steps ago, compute metrics
+                    if self.param_tracker.has_snapshot():
+                        # Basic param change metrics
+                        try:
+                            param_metrics = self.param_tracker.compute_metrics(model)
+                            await log_param_change_metrics(
+                                param_metrics, monitor, self.optimizer_step_count
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("Failed to compute param change metrics: %s", exc)
+
+                        # Sparse quality analysis (uses same snapshot)
+                        if self.sparse_analyzer.enabled:
+                            try:
+                                sparse_metrics = self.sparse_analyzer.analyze(
+                                    model, input_ids_tensor, attention_mask_tensor
+                                )
+                                await log_sparse_quality_metrics(
+                                    sparse_metrics, monitor, self.optimizer_step_count
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning("Failed to compute sparse quality metrics: %s", exc)
+
+                    # Capture new snapshot for next k-step measurement
+                    self.param_tracker.clear_snapshot()
+                    self.param_tracker.capture_snapshot(model)
 
                 logger.info(f"Optimizer step completed. Current KL coef: {current_kl_coef}")
 
@@ -2008,6 +2070,37 @@ class GRPOAlgorithm(TrainingAlgorithm):
             )
             if not (torch.isnan(final_grad_norm) or torch.isinf(final_grad_norm)):
                 optimizer.step()
+                self.optimizer_step_count += 1
+
+                # Parameter change tracking at epoch end (same logic as main loop)
+                if (
+                    self.param_tracker.is_enabled()
+                    and self.optimizer_step_count % self.param_tracker.measure_interval == 0
+                ):
+                    if self.param_tracker.has_snapshot():
+                        try:
+                            param_metrics = self.param_tracker.compute_metrics(model)
+                            await log_param_change_metrics(
+                                param_metrics, monitor, self.optimizer_step_count
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("Failed to compute param change metrics: %s", exc)
+
+                        # Sparse quality analysis (uses same snapshot)
+                        if self.sparse_analyzer.enabled:
+                            try:
+                                sparse_metrics = self.sparse_analyzer.analyze(
+                                    model, input_ids_tensor, attention_mask_tensor
+                                )
+                                await log_sparse_quality_metrics(
+                                    sparse_metrics, monitor, self.optimizer_step_count
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning("Failed to compute sparse quality metrics: %s", exc)
+
+                    self.param_tracker.clear_snapshot()
+                    self.param_tracker.capture_snapshot(model)
+
                 batch_metrics = self._finalize_actual_batch_metrics(
                     actual_batch_tracker,
                     final_grad_norm.item(),

@@ -36,7 +36,7 @@ from grail.infrastructure.checkpoint_consumer import (
 )
 from grail.infrastructure.network import create_subtensor
 from grail.model.train_loading import ModelLoadSpec, load_training_artifacts
-from grail.monitoring import get_monitoring_manager, initialize_monitoring
+from grail.monitoring import initialize_subprocess_monitoring
 from grail.shared.constants import NETUID, WINDOW_LENGTH, is_kl_enabled
 from grail.trainer.algorithms import GRPOAlgorithm, TrainingAlgorithm
 from grail.trainer.algorithms.grpo import load_grpo_groups
@@ -58,8 +58,8 @@ OPTIMIZER_WEIGHT_DECAY = 0.1
 
 # Scheduler hyperparameters
 TOTAL_TRAINING_WINDOWS = 1000
-WARMUP_FRACTION = 0.05
-SCHEDULER_ETA_MIN = 1e-7
+WARMUP_FRACTION = float(os.getenv("GRAIL_WARMUP_FRACTION", "0.05"))
+SCHEDULER_ETA_MIN = float(os.getenv("GRAIL_SCHEDULER_ETA_MIN", "1e-7"))
 
 # Training loop constants
 PAUSE_CHECK_INTERVAL_SECONDS = 5
@@ -308,103 +308,23 @@ class TrainingService:
 
         This is called AFTER models and chain manager are initialized to avoid
         resource contention during WandB connection.
+
+        Uses the shared `initialize_subprocess_monitoring` helper for consistent
+        behavior across all subprocesses (training, upload worker, etc.).
         """
-        if not self.monitor_config:
-            logger.info("No monitoring config provided, skipping monitoring setup")
-            return
 
-        # FIRST: Test direct WandB connection (bypasses monitoring class)
-        import os
+        async def get_block_context() -> tuple[int, int]:
+            """Get current block and window for monitoring context."""
+            current_block = await self.subtensor.get_current_block()
+            current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
+            return current_block, current_window
 
-        os.environ["WANDB_DISABLE_SERVICE"] = "false"  # Ensure service is enabled
-        os.environ["WANDB_SERVICE"] = ""  # Clear any inherited service path
-        try:
-            backend_type = self.monitor_config.get("backend_type", "wandb")
-            init_config = {k: v for k, v in self.monitor_config.items() if k != "backend_type"}
-
-            logger.debug(
-                "Initializing monitoring: backend_type=%s run_name=%s run_id=%s entity=%s project=%s mode=%s",
-                backend_type,
-                init_config.get("run_name"),
-                init_config.get("run_id"),
-                init_config.get("entity"),
-                init_config.get("project"),
-                init_config.get("mode"),
-            )
-            logger.debug(
-                "Full init_config keys received in training process: %s", list(init_config.keys())
-            )
-            # Verify critical parameters are present
-            if not init_config.get("entity"):
-                logger.warning("⚠️  WandB entity not set in training process - will use default")
-            if not init_config.get("project"):
-                logger.warning("⚠️  WandB project not set in training process - will use default")
-
-            if "run_id" in init_config:
-                logger.info(
-                    "Resuming W&B run %s in training process for multi-process logging",
-                    init_config["run_id"],
-                )
-
-            initialize_monitoring(backend_type=backend_type, **init_config)
-            self.monitor = get_monitoring_manager()
-            logger.info("Monitoring initialized in training process")
-
-            # Actually start the WandB run (connects to API, resumes run)
-            # This is critical - without this, the run is not actually initialized
-            run_name = init_config.get("run_name")
-            if run_name:
-                logger.info("Starting WandB run: %s", run_name)
-                start_time = time.time()
-                try:
-                    actual_run_id = await self.monitor.start_run(run_name, init_config)
-                    start_duration = time.time() - start_time
-                    logger.info(
-                        "✅ WandB run started successfully in %.1fs (run_id=%s)",
-                        start_duration,
-                        actual_run_id,
-                    )
-                except Exception as start_exc:
-                    start_duration = time.time() - start_time
-                    logger.error(
-                        "❌ Failed to start WandB run after %.1fs: %s",
-                        start_duration,
-                        start_exc,
-                    )
-                    logger.info(
-                        "Hint: Increase WANDB_INIT_TIMEOUT (current: %s) if shared mode workers timeout",
-                        init_config.get("init_timeout", "120"),
-                    )
-                    # Continue without monitoring
-                    return
-
-            # Test WandB metric logging with a simple gauge
-            if self.monitor and run_name:
-                logger.info("Testing WandB metric logging...")
-                test_start = time.time()
-                try:
-                    # Set current block context so metric appears in WandB properly
-                    current_block = await self.subtensor.get_current_block()
-                    current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
-                    self.monitor.set_block_context(current_block, current_window)
-                    await self.monitor.log_gauge("training_process/connection_test", 1.0)
-                    await self.monitor.flush_metrics()
-                    test_duration = time.time() - test_start
-                    logger.info(
-                        "✅ WandB metric logging successful in %.3fs",
-                        test_duration,
-                    )
-                except Exception as test_exc:
-                    test_duration = time.time() - test_start
-                    logger.warning(
-                        "⚠️  WandB metric logging test failed after %.3fs: %s (training will continue)",
-                        test_duration,
-                        test_exc,
-                    )
-
-        except Exception as exc:
-            logger.warning("Failed to initialize monitoring in training process: %s", exc)
-            self.monitor = None
+        self.monitor = await initialize_subprocess_monitoring(
+            self.monitor_config,
+            process_name="training_process",
+            test_connection=True,
+            get_block_context=get_block_context,
+        )
 
     def _create_optimizer(self) -> torch.optim.Optimizer:
         """Create AdamW optimizer with configured hyperparameters.
@@ -446,7 +366,7 @@ class TrainingService:
         )
 
     async def _upload_initial_checkpoint(self, stop_event: multiprocessing.Event) -> None:
-        """Upload initial checkpoint and wait for miners to download.
+        """Save initial checkpoint and queue for upload worker.
 
         Args:
             stop_event: Event to signal shutdown
@@ -456,28 +376,38 @@ class TrainingService:
         if self.monitor:
             self.monitor.set_block_context(current_block, current_window)
 
-        logger.info(
-            "Saving initial checkpoint for window %s (upload handled by worker)", current_window
-        )
+        logger.info("Saving initial checkpoint for window %s", current_window)
 
-        # Prepare training config for metadata
-        training_config = {
-            "lr": self.config.lr,
-            "seed": current_window,
+        # Prepare snapshot metadata
+        snapshot_metadata = {
+            "epoch": 0,
+            "timestamp": time.time(),
+            "status": "initial_upload",
+            "training_config": {
+                "lr": self.config.lr,
+                "seed": current_window,
+            },
+            "parent_window": max(0, current_window - WINDOW_LENGTH),
         }
 
         # Save initial snapshot
         self.snapshot_manager.save_snapshot_atomic(
             self.train_model,
             self.tokenizer,
-            {
-                "epoch": 0,
-                "timestamp": time.time(),
-                "status": "initial_upload",
-                "training_config": training_config,
-                "parent_window": max(0, current_window - WINDOW_LENGTH),
-            },
+            snapshot_metadata,
         )
+
+        # Queue snapshot for upload worker
+        snapshot_path = self.snapshot_manager.get_latest_snapshot_path()
+        if self._ipc is not None and snapshot_path:
+            self._ipc.queue_snapshot(snapshot_path, snapshot_metadata, current_window)
+            logger.info("Initial checkpoint queued for upload worker (window=%s)", current_window)
+        else:
+            logger.warning(
+                "Could not queue initial checkpoint: ipc=%s, snapshot_path=%s",
+                self._ipc is not None,
+                snapshot_path is not None,
+            )
 
     async def _training_loop(self, stop_event: multiprocessing.Event) -> None:
         """Main continuous training loop.
@@ -525,14 +455,17 @@ class TrainingService:
                 # Seed RNGs for reproducibility
                 _seed_all(current_window + self.epoch_counter)
 
-                # Get trusted miners
-                trusted_hotkeys = await self._get_trusted_miners()
-                if not trusted_hotkeys:
-                    await asyncio.sleep(NO_MINERS_SLEEP_SECONDS)
-                    continue
+                # Load GRPO groups only if window changed (skip trusted miners query if not needed)
+                target_data_window = current_window - WINDOW_LENGTH
+                if target_data_window != self.last_loaded_window and target_data_window >= 0:
+                    # Get trusted miners only when we need to fetch new data
+                    trusted_hotkeys = await self._get_trusted_miners()
+                    if not trusted_hotkeys:
+                        await asyncio.sleep(NO_MINERS_SLEEP_SECONDS)
+                        continue
 
-                # Load GRPO groups (Replay Buffer)
-                await self._load_grpo_groups(current_window, trusted_hotkeys)
+                    # Load GRPO groups (Replay Buffer)
+                    await self._load_grpo_groups(current_window, trusted_hotkeys)
 
                 # Check if replay buffer has data
                 if self.replay_buffer is not None:
@@ -656,7 +589,17 @@ class TrainingService:
             free_gb, _ = torch.cuda.mem_get_info()
             logger.info("GPU memory freed: %.2f GB available", free_gb / (1024**3))
 
-        # Save current state before pausing
+        # Signal pause confirmed via IPC (primary) BEFORE snapshot save
+        # The GPU is now freed and evaluation can start while we save the snapshot
+        # This prevents the orchestrator from timing out waiting for confirmation
+        if self._ipc is not None:
+            self._ipc.confirm_pause()
+            logger.info("🔄 STATE: pause_confirmed - signaled orchestrator via IPC (GPU freed)")
+        else:
+            logger.info("🔄 STATE: models_on_cpu_waiting - GPU freed (filesystem mode)")
+
+        # Save current state during pause (non-blocking for orchestrator)
+        # This can take 30-90s but evaluation can run in parallel
         self.snapshot_manager.save_snapshot_atomic(
             train_model_cpu,
             self.tokenizer,
@@ -666,13 +609,7 @@ class TrainingService:
                 "status": "paused_for_evaluation",
             },
         )
-
-        # Signal pause confirmed via IPC (primary) - orchestrator is waiting for this
-        if self._ipc is not None:
-            self._ipc.confirm_pause()
-            logger.info("🔄 STATE: pause_confirmed - signaled orchestrator via IPC")
-        else:
-            logger.info("🔄 STATE: models_on_cpu_waiting - snapshot saved (filesystem mode)")
+        logger.info("🔄 STATE: pause_snapshot_saved - snapshot saved during pause")
 
         # Close subtensor connection before long idle period (prevents 10s timeout)
         if self.subtensor:

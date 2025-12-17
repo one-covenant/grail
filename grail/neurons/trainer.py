@@ -182,7 +182,7 @@ class TrainerNeuron(BaseNeuron):
     def _start_training_process(self) -> None:
         """Spawn training process for continuous training."""
         wallet_args = self._serialize_wallet()
-        monitor_config = self._prepare_monitor_config()
+        monitor_config = self._prepare_monitor_config(subprocess_label="training_process")
 
         self._training_process = multiprocessing.Process(
             target=run_training_process,
@@ -204,6 +204,7 @@ class TrainerNeuron(BaseNeuron):
     def _start_upload_worker(self) -> None:
         """Spawn upload worker process for async uploads."""
         wallet_args = self._serialize_wallet()
+        monitor_config = self._prepare_monitor_config(subprocess_label="upload_worker")
 
         self._upload_process = multiprocessing.Process(
             target=run_upload_worker,
@@ -211,6 +212,7 @@ class TrainerNeuron(BaseNeuron):
                 self._snapshot_manager,
                 self._context.credentials,
                 wallet_args,
+                monitor_config,
                 self._ipc,
                 SNAPSHOT_POLL_INTERVAL_SECONDS,
                 self._context.verbosity,
@@ -331,7 +333,7 @@ class TrainerNeuron(BaseNeuron):
         current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
 
         if self._context.monitor:
-            self._context.monitor.set_block_context(current_block, None)
+            self._context.monitor.set_block_context(current_block, current_window)
 
         return current_window
 
@@ -802,7 +804,9 @@ class TrainerNeuron(BaseNeuron):
             eval_reason,
         )
 
-        return await evaluator.run_cycle(plan, start_offset=0, heartbeat=self.heartbeat)
+        return await evaluator.run_cycle(
+            plan, start_offset=0, heartbeat=self.heartbeat, window_number=window_number
+        )
 
     # ────────────────────────────────────────────────────────────────────────────
     # Helper Methods
@@ -820,7 +824,7 @@ class TrainerNeuron(BaseNeuron):
             "path": self._context.wallet.path,
         }
 
-    def _prepare_monitor_config(self) -> dict[str, Any]:
+    def _prepare_monitor_config(self, *, subprocess_label: str) -> dict[str, Any]:
         """Prepare monitoring config for child process.
 
         Returns:
@@ -843,11 +847,14 @@ class TrainerNeuron(BaseNeuron):
             elif "Null" in backend_class_name:
                 monitor_config["backend_type"] = "null"
 
-            # If using shared mode, training subprocess is a worker (not primary)
+            # If using shared mode, subprocess is a worker (not primary)
             if monitor_config.get("wandb_shared_mode"):
                 monitor_config["wandb_x_primary"] = False
-                monitor_config["wandb_x_label"] = "training_process"
-                logger.debug("Training subprocess will use shared mode as worker")
+                monitor_config["wandb_x_label"] = subprocess_label
+                logger.debug(
+                    "Subprocess %s will use WandB shared mode as worker",
+                    subprocess_label,
+                )
         else:
             # Fallback to manager config if backend doesn't have config
             monitor_config = self._context.monitor._config.copy()
@@ -859,8 +866,9 @@ class TrainerNeuron(BaseNeuron):
             if wandb_run and hasattr(wandb_run, "id"):
                 monitor_config["run_id"] = wandb_run.id
                 logger.info(
-                    "Passing W&B run ID %s to training process for multi-process logging",
+                    "Passing W&B run ID %s to %s for multi-process logging",
                     wandb_run.id,
+                    subprocess_label,
                 )
 
         # Debug log to verify config contents

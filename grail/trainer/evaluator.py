@@ -185,13 +185,23 @@ class EvaluatorService:
         start_offset: int = 0,
         wallet: Any | None = None,
         heartbeat: Callable[[], None] | None = None,
+        window_number: int | None = None,
     ) -> dict[str, float]:
-        """Run an evaluation cycle from the given offset. Returns summary metrics."""
+        """Run an evaluation cycle from the given offset. Returns summary metrics.
+
+        Args:
+            plan: Evaluation plan with task IDs and seeds
+            start_offset: Offset to start from (for resumption)
+            wallet: Optional wallet for credentials
+            heartbeat: Optional heartbeat callback
+            window_number: Current window number for context tracking
+        """
         aggregator = EvalAggregator(report_ks=self._cfg.report_ks)
 
         total_ids = len(plan.ids)
         batch_size = self._cfg.batch_size
         t0 = time.monotonic()
+        self._current_window_number = window_number
 
         # Progress bar for evaluation
         with Progress(

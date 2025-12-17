@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from typing import Any
 
@@ -410,3 +411,150 @@ async def shutdown_monitoring() -> None:
     if _monitoring_manager:
         await _monitoring_manager.shutdown()
         _monitoring_manager = None
+
+
+async def initialize_subprocess_monitoring(
+    monitor_config: dict[str, Any] | None,
+    process_name: str,
+    *,
+    test_connection: bool = True,
+    get_block_context: Callable[[], Awaitable[tuple[int, int]]] | None = None,
+) -> MonitoringManager | None:
+    """Initialize monitoring for a subprocess with robust error handling.
+
+    This is a modular helper for child processes (training, upload worker, etc.)
+    to initialize shared-mode W&B monitoring with consistent behavior.
+
+    Args:
+        monitor_config: Monitoring configuration dict containing:
+            - backend_type: "wandb" or "null" (default: "wandb")
+            - run_name: Name of the run
+            - run_id: W&B run ID for shared-mode attachment
+            - entity: W&B entity
+            - project: W&B project
+            - Other backend-specific config
+        process_name: Name of the subprocess for logging (e.g., "training_process", "upload_worker")
+        test_connection: If True, log a test gauge to verify W&B connection
+        get_block_context: Optional async callable returning (block, window) for context.
+            If provided and test_connection is True, sets block context before test.
+
+    Returns:
+        MonitoringManager if successfully initialized, None otherwise.
+
+    Example:
+        monitor = await initialize_subprocess_monitoring(
+            monitor_config,
+            "upload_worker",
+            test_connection=True,
+        )
+        if monitor:
+            monitor.set_block_context(block, window)
+            await monitor.log_gauge("my_metric", 1.0)
+    """
+    import os
+    import time
+
+    if not monitor_config:
+        logger.info("[%s] No monitoring config provided, skipping monitoring setup", process_name)
+        return None
+
+    # Configure W&B environment for shared-mode
+    os.environ["WANDB_DISABLE_SERVICE"] = "false"
+    os.environ["WANDB_SERVICE"] = ""
+
+    try:
+        backend_type = monitor_config.get("backend_type", "wandb")
+        init_config = {k: v for k, v in monitor_config.items() if k != "backend_type"}
+
+        # Log initialization details
+        logger.debug(
+            "[%s] Initializing monitoring: backend_type=%s run_name=%s run_id=%s entity=%s project=%s mode=%s",
+            process_name,
+            backend_type,
+            init_config.get("run_name"),
+            init_config.get("run_id"),
+            init_config.get("entity"),
+            init_config.get("project"),
+            init_config.get("mode"),
+        )
+
+        # Log resume info if attaching to existing run
+        if "run_id" in init_config:
+            logger.info(
+                "[%s] Attaching to W&B run %s for multi-process logging",
+                process_name,
+                init_config["run_id"],
+            )
+
+        # Validate critical parameters
+        if not init_config.get("entity"):
+            logger.warning("[%s] W&B entity not set - will use default", process_name)
+        if not init_config.get("project"):
+            logger.warning("[%s] W&B project not set - will use default", process_name)
+
+        # Initialize backend and manager
+        initialize_monitoring(backend_type=backend_type, **init_config)
+        monitor = get_monitoring_manager()
+        logger.info("[%s] Monitoring manager initialized", process_name)
+
+        # Start the W&B run (connects to API, resumes existing run)
+        run_name = init_config.get("run_name")
+        if run_name:
+            logger.info("[%s] Starting W&B run: %s", process_name, run_name)
+            start_time = time.time()
+            try:
+                actual_run_id = await monitor.start_run(run_name, init_config)
+                start_duration = time.time() - start_time
+                logger.info(
+                    "[%s] ✅ W&B run started in %.1fs (run_id=%s)",
+                    process_name,
+                    start_duration,
+                    actual_run_id,
+                )
+            except Exception as start_exc:
+                start_duration = time.time() - start_time
+                logger.error(
+                    "[%s] ❌ Failed to start W&B run after %.1fs: %s",
+                    process_name,
+                    start_duration,
+                    start_exc,
+                )
+                logger.info(
+                    "[%s] Hint: Increase WANDB_INIT_TIMEOUT (current: %s) if shared mode workers timeout",
+                    process_name,
+                    init_config.get("init_timeout", "120"),
+                )
+                return None
+
+        # Test connection with a gauge metric
+        if test_connection and run_name:
+            logger.debug("[%s] Testing W&B metric logging...", process_name)
+            test_start = time.time()
+            try:
+                # Set block context if callback provided
+                if get_block_context is not None:
+                    block, window = await get_block_context()
+                    monitor.set_block_context(block, window)
+
+                await monitor.log_gauge(f"{process_name}/connection_test", 1.0)
+                await monitor.flush_metrics()
+                test_duration = time.time() - test_start
+                logger.info(
+                    "[%s] ✅ W&B connection test passed in %.3fs",
+                    process_name,
+                    test_duration,
+                )
+            except Exception as test_exc:
+                test_duration = time.time() - test_start
+                logger.warning(
+                    "[%s] ⚠️ W&B connection test failed after %.3fs: %s (continuing anyway)",
+                    process_name,
+                    test_duration,
+                    test_exc,
+                )
+
+        return monitor
+
+    except Exception as exc:
+        logger.warning("[%s] Failed to initialize monitoring: %s", process_name, exc)
+        return None

@@ -27,18 +27,29 @@ import os
 import shutil
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import bittensor as bt
+import zstandard as zstd
+
+if TYPE_CHECKING:
+    import torch
 
 from grail.infrastructure.checkpoint_consumer import (
     CHECKPOINT_PREFIX,
     CheckpointMetadata,
 )
 from grail.infrastructure.comms import delete_prefix, get_file_size, upload_file_chunked
+from grail.infrastructure.delta_checkpoint import (
+    compute_sparse_delta,
+    compute_weights_hash,
+)
 from grail.shared.constants import (
     CHECKPOINT_RETENTION_LIMIT,
+    DELTA_BASE_INTERVAL,
+    DELTA_THRESHOLD,
     TRAINER_BATCH_SIZE,
     TRAINER_ENTROPY_COEF,
     TRAINER_EPOCHS,
@@ -50,15 +61,124 @@ from grail.shared.constants import (
     UPLOAD_TIMEOUT,
     WINDOW_LENGTH,
 )
+from grail.shared.safetensors_utils import load_model_state_dict
 
 logger = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Upload Result Types
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class UploadError(Exception):
+    """Raised when a checkpoint upload operation fails."""
+
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class UploadTiming:
+    """Granular timing breakdown for upload operations.
+
+    All times are in seconds. Fields are optional since FULL and DELTA
+    uploads have different timing characteristics.
+    """
+
+    # Delta-specific timings
+    load_state_s: float = 0.0
+    compute_delta_s: float = 0.0
+    compression_s: float = 0.0
+
+    # FULL-specific timings
+    prep_metadata_s: float = 0.0
+
+    # Common timings
+    network_upload_s: float = 0.0
+    cleanup_s: float = 0.0
+
+    @property
+    def total_s(self) -> float:
+        """Total time across all phases."""
+        return (
+            self.load_state_s
+            + self.compute_delta_s
+            + self.compression_s
+            + self.prep_metadata_s
+            + self.network_upload_s
+            + self.cleanup_s
+        )
+
+    def to_dict(self) -> dict[str, float]:
+        """Convert to dict for logging/metrics."""
+        return {
+            "timing_load_state_s": self.load_state_s,
+            "timing_compute_delta_s": self.compute_delta_s,
+            "timing_compression_s": self.compression_s,
+            "timing_prep_metadata_s": self.prep_metadata_s,
+            "timing_network_upload_s": self.network_upload_s,
+            "timing_cleanup_s": self.cleanup_s,
+            "timing_total_s": self.total_s,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class UploadResult:
+    """Result of a successful checkpoint upload operation.
+
+    Returned by upload_from_staging() and upload_delta() on success.
+    For failures, UploadError is raised instead.
+    """
+
+    timing: UploadTiming
+    total_bytes: int
+    total_mb: float
+    throughput_mbps: float
+
+    # Delta-specific fields (None for FULL uploads)
+    sparsity_ratio: float | None = None
+    nonzero_params: int | None = None
+    total_params: int | None = None
+    delta_threshold: float | None = None
+    delta_raw_bytes: int | None = None
+    delta_compressed_bytes: int | None = None
+    compression_ratio: float | None = None
+
+    @property
+    def is_delta(self) -> bool:
+        """True if this result is from a delta upload."""
+        return self.sparsity_ratio is not None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for logging/metrics."""
+        result: dict[str, Any] = {
+            "upload_total_bytes": self.total_bytes,
+            "upload_total_mb": self.total_mb,
+            "upload_throughput_mbps": self.throughput_mbps,
+            **self.timing.to_dict(),
+        }
+        # Add delta-specific fields if present
+        if self.is_delta:
+            result.update(
+                {
+                    "delta_sparsity_ratio": self.sparsity_ratio,
+                    "delta_nonzero_params": self.nonzero_params,
+                    "delta_total_params": self.total_params,
+                    "delta_threshold": self.delta_threshold,
+                    "delta_raw_bytes": self.delta_raw_bytes,
+                    "delta_compressed_bytes": self.delta_compressed_bytes,
+                    "delta_compression_ratio": self.compression_ratio,
+                }
+            )
+        return result
 
 
 def _compute_keep_windows(current_window: int) -> set[int]:
     """Calculate which checkpoint windows should be retained.
 
-    Retention policy (simplified to avoid S3 pagination issues):
+    Retention policy:
     - Keep only latest N windows (CHECKPOINT_RETENTION_LIMIT)
+    - Also keep base checkpoints that delta checkpoints depend on
     - No bootstrap checkpoint retention (removes 0-9)
     - No milestone retention (keeps total R2 objects under 1000)
 
@@ -76,10 +196,18 @@ def _compute_keep_windows(current_window: int) -> set[int]:
         return keep
 
     # Keep only latest N windows (typically 1-3)
+    delta_base_interval_windows = max(1, int(DELTA_BASE_INTERVAL))
+    base_stride_blocks = delta_base_interval_windows * int(WINDOW_LENGTH)
+
     for idx in range(CHECKPOINT_RETENTION_LIMIT):
         window = current_window - idx * WINDOW_LENGTH
         if window >= 0:
             keep.add(window)
+            # Also keep the base window this delta depends on
+            # Base windows are at DELTA_BASE_INTERVAL (in windows) boundaries.
+            base_window = (window // base_stride_blocks) * base_stride_blocks
+            if base_window >= 0:
+                keep.add(base_window)
 
     return keep
 
@@ -388,7 +516,7 @@ class CheckpointPublisher:
         staging_path: Path,
         snapshot_metadata: dict[str, Any],
         target_window: int,
-    ) -> bool:
+    ) -> UploadResult:
         """Upload pre-serialized checkpoint from staging directory.
 
         Used by upload worker to upload snapshots that have already been
@@ -400,10 +528,19 @@ class CheckpointPublisher:
             target_window: The window number to publish this checkpoint to
 
         Returns:
-            True if upload succeeded, False otherwise
+            UploadResult with timing and size metrics.
+
+        Raises:
+            UploadError: If the upload fails.
         """
+        # Timing breakdown for granular metrics
+        prep_metadata_s = 0.0
+        network_upload_s = 0.0
+        cleanup_s = 0.0
+
         try:
             # Build file manifest from existing files
+            prep_start = time.time()
             file_manifest: dict[str, str] = {}
             for file_path in staging_path.rglob("*"):
                 if file_path.is_file() and file_path.name != "snapshot_metadata.json":
@@ -456,6 +593,7 @@ class CheckpointPublisher:
             canonical_metadata = json.dumps(metadata_dict, sort_keys=True, separators=(",", ":"))
             signature = self.wallet.hotkey.sign(data=canonical_metadata).hex()
             (staging_path / "manifest.sig").write_text(signature)
+            prep_metadata_s = time.time() - prep_start
 
             # Upload to target window location
             remote_prefix = f"{CHECKPOINT_PREFIX}checkpoint-{target_window}"
@@ -504,31 +642,342 @@ class CheckpointPublisher:
             )
             total_mb = total_bytes / (1024 * 1024)
 
-            upload_start = time.time()
+            network_start = time.time()
             results = await asyncio.gather(*upload_tasks)
-            upload_duration = time.time() - upload_start
+            network_upload_s = time.time() - network_start
 
             if not all(results):
-                logger.error("Some checkpoint files failed to upload from staging")
-                return False
+                raise UploadError("Some checkpoint files failed to upload from staging")
 
-            throughput_mbps = (total_mb / upload_duration) if upload_duration > 0 else 0
+            throughput_mbps = (total_mb / network_upload_s) if network_upload_s > 0 else 0.0
             logger.info(
                 "Uploaded %.1f MB in %.1fs (%.1f MB/s) to %s",
                 total_mb,
-                upload_duration,
+                network_upload_s,
                 throughput_mbps,
                 remote_prefix,
             )
 
             # Cleanup old checkpoints after successful upload (same as publish_checkpoint)
+            cleanup_start = time.time()
             try:
                 await self.cleanup_old_checkpoints(target_window)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to perform remote checkpoint cleanup: %s", exc)
+            cleanup_s = time.time() - cleanup_start
 
-            return True
+            # Build result with timing breakdown
+            timing = UploadTiming(
+                prep_metadata_s=prep_metadata_s,
+                network_upload_s=network_upload_s,
+                cleanup_s=cleanup_s,
+            )
 
+            logger.info(
+                "⏱️ FULL upload timing breakdown: prep=%.1fs, network=%.1fs, cleanup=%.1fs (total=%.1fs)",
+                timing.prep_metadata_s,
+                timing.network_upload_s,
+                timing.cleanup_s,
+                timing.total_s,
+            )
+
+            return UploadResult(
+                timing=timing,
+                total_bytes=int(total_bytes),
+                total_mb=float(total_mb),
+                throughput_mbps=float(throughput_mbps),
+            )
+
+        except UploadError:
+            # Re-raise UploadError as-is
+            raise
         except Exception as exc:
             logger.exception("Failed to upload checkpoint from staging: %s", exc)
-            return False
+            raise UploadError(f"FULL upload failed: {exc}") from exc
+
+    async def upload_delta(
+        self,
+        staging_path: Path,
+        snapshot_metadata: dict[str, Any],
+        target_window: int,
+        base_window: int,
+        base_state: dict[str, torch.Tensor],
+    ) -> UploadResult:
+        """Upload sparse delta checkpoint.
+
+        Computes sparse delta from base_state to current state, uploads only
+        non-zero differences in COO format for ~99% bandwidth reduction.
+
+        Args:
+            staging_path: Path to staging directory containing current checkpoint
+            snapshot_metadata: Metadata from snapshot (epoch, timestamp, metrics)
+            target_window: The window number to publish this delta to
+            base_window: The window of the FULL checkpoint this delta is relative to
+            base_state: State dict of the base checkpoint
+
+        Returns:
+            UploadResult with timing, size, and delta-specific metrics.
+
+        Raises:
+            UploadError: If the upload fails.
+        """
+        from safetensors.torch import save_file
+
+        temp_dir = Path(tempfile.mkdtemp(prefix=f"delta-{target_window}-"))
+
+        # Timing breakdown for granular metrics
+        load_state_s = 0.0
+        compute_delta_s = 0.0
+        compression_s = 0.0
+        network_upload_s = 0.0
+        cleanup_s = 0.0
+
+        try:
+            # Load current weights from staging
+            load_start = time.time()
+            try:
+                current_state = load_model_state_dict(staging_path)
+            except Exception as exc:
+                raise UploadError(f"Failed to load weights from {staging_path}: {exc}") from exc
+            load_state_s = time.time() - load_start
+
+            if current_state is None:
+                raise UploadError(f"No model weights found in staging path: {staging_path}")
+
+            # Compute sparse delta
+            compute_start = time.time()
+            sparse_tensors, shapes, stats = compute_sparse_delta(
+                current_state,
+                base_state,
+                threshold=DELTA_THRESHOLD,
+            )
+
+            # Compute hash of current state (for consumer verification)
+            weights_hash = compute_weights_hash(current_state)
+            compute_delta_s = time.time() - compute_start
+
+            # Save sparse delta to temp directory and compress with zstd
+            compress_start = time.time()
+            delta_safetensors_path = temp_dir / "delta_sparse.safetensors"
+            if sparse_tensors:
+                save_file(sparse_tensors, delta_safetensors_path)
+            else:
+                # No changes - create empty safetensors file
+                save_file({}, delta_safetensors_path)
+
+            # Compress safetensors with zstd for bandwidth reduction
+            raw_bytes = delta_safetensors_path.read_bytes()
+            delta_raw_size = len(raw_bytes)
+
+            compressor = zstd.ZstdCompressor(level=3)  # Level 3: good balance of speed/ratio
+            compressed_bytes = compressor.compress(raw_bytes)
+            delta_compressed_size = len(compressed_bytes)
+            compression_s = time.time() - compress_start
+
+            # Write compressed file and remove original
+            delta_compressed_path = temp_dir / "delta_sparse.safetensors.zst"
+            delta_compressed_path.write_bytes(compressed_bytes)
+            delta_safetensors_path.unlink()
+
+            compression_ratio = (
+                delta_raw_size / delta_compressed_size if delta_compressed_size > 0 else 1.0
+            )
+            logger.info(
+                "🗜️ Delta compression: %.2f MB → %.2f MB (%.1fx ratio, %.1f%% reduction)",
+                delta_raw_size / (1024 * 1024),
+                delta_compressed_size / (1024 * 1024),
+                compression_ratio,
+                (1 - delta_compressed_size / delta_raw_size) * 100 if delta_raw_size > 0 else 0,
+            )
+
+            # Save delta metadata
+            delta_meta = {
+                "format": "sparse_coo",
+                "threshold": DELTA_THRESHOLD,
+                "base_window": base_window,
+                "shapes": shapes,
+                **stats,
+            }
+            (temp_dir / "delta_metadata.json").write_text(
+                json.dumps(delta_meta, ensure_ascii=False, indent=2)
+            )
+
+            # Build file manifest for delta files
+            file_manifest: dict[str, str] = {}
+            for file_path in temp_dir.rglob("*"):
+                if file_path.is_file():
+                    rel_path = str(file_path.relative_to(temp_dir))
+                    file_manifest[rel_path] = hashlib.sha256(file_path.read_bytes()).hexdigest()
+
+            # Delta checkpoints intentionally do NOT upload non-weight artifacts
+            # (tokenizer/config/etc.) to keep delta payload minimal. Consumers
+            # reconstruct a full checkpoint directory by copying these artifacts
+            # from the base FULL checkpoint.
+
+            # Read training config from snapshot metadata or use defaults
+            training_config = snapshot_metadata.get(
+                "training_config",
+                {
+                    "lr": TRAINER_LR,
+                    "epochs": TRAINER_EPOCHS,
+                    "batch_size": TRAINER_BATCH_SIZE,
+                    "max_length": TRAINER_MAX_LENGTH,
+                    "grad_clip": TRAINER_GRAD_CLIP,
+                    "warmup_steps": TRAINER_WARMUP_STEPS,
+                    "kl_coef": TRAINER_KL_COEF,
+                    "entropy_coef": TRAINER_ENTROPY_COEF,
+                },
+            )
+
+            # Create metadata with delta-specific fields
+            parent_window = snapshot_metadata.get("parent_window")
+            if parent_window is None:
+                parent_window = max(0, target_window - WINDOW_LENGTH)
+
+            metadata = CheckpointMetadata(
+                window=target_window,
+                parent_window=parent_window,
+                file_manifest=file_manifest,
+                training_config=training_config,
+                git_commit=os.getenv("GIT_COMMIT", "unknown"),
+                created_at=snapshot_metadata.get("timestamp", time.time()),
+                model_name="async_trainer_snapshot",
+                checkpoint_type="DELTA",
+                base_window=base_window,
+                weights_hash=weights_hash,
+            )
+
+            config_hash = hashlib.sha256(
+                json.dumps(training_config, sort_keys=True).encode()
+            ).hexdigest()
+
+            metadata_dict = {**metadata.__dict__, "config_hash": config_hash}
+
+            # Save metadata to temp directory
+            metadata_path = temp_dir / "metadata.json"
+            metadata_path.write_text(json.dumps(metadata_dict, ensure_ascii=False, indent=2))
+
+            # Sign metadata
+            canonical_metadata = json.dumps(metadata_dict, sort_keys=True, separators=(",", ":"))
+            signature = self.wallet.hotkey.sign(data=canonical_metadata).hex()
+            (temp_dir / "manifest.sig").write_text(signature)
+
+            # Write DELTA marker file
+            (temp_dir / "DELTA").write_text("")
+
+            # Upload to target window location
+            remote_prefix = f"{CHECKPOINT_PREFIX}checkpoint-{target_window}"
+
+            logger.info(
+                "Uploading delta checkpoint to %s (base=%d, sparsity=%.2f%%, %d non-zero params)",
+                remote_prefix,
+                base_window,
+                stats["sparsity_ratio"] * 100,
+                stats["nonzero_params"],
+            )
+
+            semaphore = asyncio.Semaphore(4)
+
+            async def upload_file(path: Path) -> bool:
+                async with semaphore:
+                    rel_path = path.relative_to(temp_dir)
+                    remote_key = f"{remote_prefix}/{rel_path}"
+                    try:
+                        upload_timeout = UPLOAD_TIMEOUT
+                        file_size_mb = path.stat().st_size / (1024 * 1024)
+                        logger.debug(
+                            "Uploading delta %s (%.2f MB) with timeout=%ds",
+                            rel_path,
+                            file_size_mb,
+                            upload_timeout,
+                        )
+                        return await upload_file_chunked(
+                            remote_key,
+                            path.read_bytes(),
+                            credentials=self.credentials,
+                            use_write=True,
+                            upload_timeout=upload_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error(
+                            "Delta upload TIMEOUT for %s (exceeds %s seconds)",
+                            rel_path,
+                            UPLOAD_TIMEOUT,
+                        )
+                        return False
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error("Failed to upload delta %s: %s", rel_path, exc)
+                        return False
+
+            # Upload all delta files
+            upload_tasks = [upload_file(path) for path in temp_dir.rglob("*") if path.is_file()]
+            total_bytes = sum(path.stat().st_size for path in temp_dir.rglob("*") if path.is_file())
+            total_mb = total_bytes / (1024 * 1024)
+
+            network_start = time.time()
+            results = await asyncio.gather(*upload_tasks)
+            network_upload_s = time.time() - network_start
+
+            if not all(results):
+                raise UploadError("Some delta checkpoint files failed to upload")
+
+            throughput_mbps = (total_mb / network_upload_s) if network_upload_s > 0 else 0.0
+            logger.info(
+                "Uploaded delta %.2f MB in %.1fs (%.1f MB/s) to %s",
+                total_mb,
+                network_upload_s,
+                throughput_mbps,
+                remote_prefix,
+            )
+
+            # Cleanup old checkpoints after successful upload
+            cleanup_start = time.time()
+            try:
+                await self.cleanup_old_checkpoints(target_window)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to perform remote checkpoint cleanup: %s", exc)
+            cleanup_s = time.time() - cleanup_start
+
+            # Build result with timing breakdown
+            timing = UploadTiming(
+                load_state_s=load_state_s,
+                compute_delta_s=compute_delta_s,
+                compression_s=compression_s,
+                network_upload_s=network_upload_s,
+                cleanup_s=cleanup_s,
+            )
+
+            logger.info(
+                "⏱️ Delta upload timing breakdown: load=%.1fs, compute=%.1fs, compress=%.1fs, "
+                "network=%.1fs, cleanup=%.1fs (total=%.1fs)",
+                timing.load_state_s,
+                timing.compute_delta_s,
+                timing.compression_s,
+                timing.network_upload_s,
+                timing.cleanup_s,
+                timing.total_s,
+            )
+
+            return UploadResult(
+                timing=timing,
+                total_bytes=int(total_bytes),
+                total_mb=float(total_mb),
+                throughput_mbps=float(throughput_mbps),
+                # Delta-specific fields
+                sparsity_ratio=float(stats.get("sparsity_ratio", 0.0)),
+                nonzero_params=int(stats.get("nonzero_params", 0)),
+                total_params=int(stats.get("total_params", 0)),
+                delta_threshold=float(DELTA_THRESHOLD),
+                delta_raw_bytes=int(delta_raw_size),
+                delta_compressed_bytes=int(delta_compressed_size),
+                compression_ratio=float(compression_ratio),
+            )
+
+        except UploadError:
+            # Re-raise UploadError as-is
+            raise
+        except Exception as exc:
+            logger.exception("Failed to upload delta checkpoint: %s", exc)
+            raise UploadError(f"Delta upload failed: {exc}") from exc
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)

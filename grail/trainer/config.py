@@ -75,6 +75,17 @@ class TrainingConfig:
     replay_buffer_decay_factor: float = 0.7  # Exponential decay for older windows
     replay_buffer_max_groups_per_epoch: int = 64  # Max groups to sample per epoch
 
+    # Parameter change tracking configuration
+    param_change_measure_interval: int = constants.PARAM_CHANGE_MEASURE_INTERVAL
+    param_change_threshold: float = constants.PARAM_CHANGE_THRESHOLD
+    param_change_track_per_layer: bool = constants.PARAM_CHANGE_TRACK_PER_LAYER
+    param_change_track_components: bool = constants.PARAM_CHANGE_TRACK_COMPONENTS
+    param_change_track_sign_flips: bool = constants.PARAM_CHANGE_TRACK_SIGN_FLIPS
+    param_change_relative_eps: float = constants.PARAM_CHANGE_RELATIVE_EPS
+
+    # Sparse quality analysis (runs at same interval as param tracking)
+    sparse_quality_enabled: bool = constants.SPARSE_QUALITY_ENABLED
+
 
 @dataclass
 class EvalConfig:

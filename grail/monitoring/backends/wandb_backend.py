@@ -22,7 +22,14 @@ from ..base import MetricData, MetricType, MonitoringBackend
 logger = logging.getLogger(__name__)
 
 # Reserved tag keys that should be extracted as x-axis fields, not appended to name
-RESERVED_TAGS = {"epoch", "batch_step", "window_number", "global_step", "block_number"}
+RESERVED_TAGS = {
+    "epoch",
+    "batch_step",
+    "window_number",
+    "global_step",
+    "block_number",
+    "optimizer_step",
+}
 
 # Step metric mappings: prefix -> step_metric
 STEP_METRIC_PREFIXES = {
@@ -30,6 +37,8 @@ STEP_METRIC_PREFIXES = {
     "training/batch/": "batch_step",
     "training/block/": "block_number",
     "training/prefilter/": "block_number",
+    "param_change/": "optimizer_step",
+    "param_change/sparse/": "optimizer_step",
     "eval/": "block_number",
     "mining/": "block_number",
     "validation/": "block_number",
@@ -231,7 +240,9 @@ class WandBBackend(MonitoringBackend):
 
     def _setup_worker_directory(self, init_kwargs: dict[str, Any]) -> None:
         """Setup separate directory for worker process to avoid file conflicts."""
-        subprocess_wandb_dir = os.path.join(os.getcwd(), "wandb_training")
+        label = str(self._get_config("wandb_x_label", "worker"))
+        safe_label = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in label)
+        subprocess_wandb_dir = os.path.join(os.getcwd(), f"wandb_{safe_label}")
         try:
             os.makedirs(subprocess_wandb_dir, exist_ok=True)
             init_kwargs["dir"] = subprocess_wandb_dir
@@ -306,6 +317,7 @@ class WandBBackend(MonitoringBackend):
         self._wandb_module.define_metric("epoch")
         self._wandb_module.define_metric("batch_step")
         self._wandb_module.define_metric("global_step")
+        self._wandb_module.define_metric("optimizer_step")
 
     def _define_metric_families(self) -> None:
         """Define step metrics for different metric families."""
@@ -315,6 +327,9 @@ class WandBBackend(MonitoringBackend):
         # Training metrics use epoch/batch_step for batch-level granularity
         self._wandb_module.define_metric("training/epoch/*", step_metric="epoch")
         self._wandb_module.define_metric("training/batch/*", step_metric="batch_step")
+
+        # Parameter change metrics use optimizer_step for x-axis (separate tab)
+        self._wandb_module.define_metric("param_change/*", step_metric="optimizer_step")
 
         # All other metric families use block_number
         for pattern in BLOCK_NUMBER_METRICS:
