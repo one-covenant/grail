@@ -474,6 +474,13 @@ class CheckpointManager:
             if not key or not key.startswith(prefix_dir) or key.endswith("/"):
                 return
             rel = key[len(prefix_dir) :]
+
+            # Strip .gz extension from filename since download_file_chunked auto-decompresses
+            # This ensures config.json.gz is saved as config.json (decompressed)
+            if rel.endswith(".gz"):
+                rel = rel[:-3]
+                logger.debug("Stripping .gz from filename: %s -> %s", key, rel)
+
             data = await comms.download_file_chunked(
                 key, credentials=self.credentials, use_write=False
             )
@@ -517,17 +524,33 @@ class CheckpointManager:
         Returns:
             Path to reconstructed checkpoint, or None if reconstruction failed
         """
+        logger.info(
+            "[_handle_delta_checkpoint] Processing DELTA checkpoint: "
+            "window=%s, base_window=%s, weights_hash=%s...",
+            metadata.window,
+            metadata.base_window,
+            metadata.weights_hash[:16] if metadata.weights_hash else "None",
+        )
+
         if metadata.base_window is None:
-            logger.error("DELTA checkpoint has no base_window specified")
+            logger.error(
+                "[_handle_delta_checkpoint] DELTA checkpoint has no base_window specified: window=%s",
+                metadata.window,
+            )
             return None
 
         # 1. Ensure base checkpoint is available (recursively handles chained deltas)
-        logger.info("Fetching base checkpoint %s for delta reconstruction", metadata.base_window)
+        logger.info(
+            "[_handle_delta_checkpoint] Fetching base checkpoint %s for delta reconstruction",
+            metadata.base_window,
+        )
         base_path = await self.get_checkpoint(metadata.base_window)
         if base_path is None:
             logger.error(
-                "Cannot reconstruct delta: base checkpoint %s unavailable",
+                "[_handle_delta_checkpoint] Cannot reconstruct delta: "
+                "base checkpoint %s unavailable | target_window=%s",
                 metadata.base_window,
+                metadata.window,
             )
             return None
 
@@ -627,18 +650,20 @@ class CheckpointManager:
             shapes = delta_meta.get("shapes", {})
 
             logger.info(
-                "Reconstructing checkpoint from base-%s + delta (%.2f%% sparse, %d non-zero params)",
+                "Reconstructing checkpoint from base-%s (%.2f%% sparse, %d changed params)",
                 metadata.base_window,
                 delta_meta.get("sparsity_ratio", 0) * 100,
                 delta_meta.get("nonzero_params", 0),
             )
 
-            # Apply sparse delta (float32 computation, bf16 output)
+            # Apply sparse update (direct value replacement, no arithmetic)
+            # Use base_state's dtype to preserve consistency
+            sample_dtype = next(iter(base_state.values())).dtype
             reconstructed = apply_sparse_delta(
                 base_state,
                 sparse_tensors,
                 shapes,
-                target_dtype=torch.bfloat16,
+                target_dtype=sample_dtype,
             )
 
             # Verify hash if available
@@ -646,14 +671,19 @@ class CheckpointManager:
                 actual_hash = compute_weights_hash(reconstructed)
                 if actual_hash != metadata.weights_hash:
                     logger.error(
-                        "Reconstructed weights hash mismatch: expected %s..., got %s...",
-                        metadata.weights_hash[:16],
-                        actual_hash[:16],
+                        "[_reconstruct_from_delta] HASH VERIFICATION FAILED: "
+                        "window=%s | expected=%s | actual=%s",
+                        metadata.window,
+                        metadata.weights_hash,
+                        actual_hash,
                     )
                     raise CheckpointDownloadError(
-                        f"Hash verification failed for reconstructed checkpoint {metadata.window}"
+                        f"Hash verification failed for checkpoint {metadata.window}"
                     )
-                logger.debug("✅ Weights hash verified for reconstructed checkpoint")
+                logger.info(
+                    "✅ Hash verified for checkpoint-%s",
+                    metadata.window,
+                )
 
             # Save reconstructed model
             output_dir.mkdir(parents=True, exist_ok=True)
