@@ -248,20 +248,30 @@ async def upload_worker_loop(
                     if loaded_state is not None:
                         base_window = checkpoint_window
                         base_state = loaded_state
+
+                        # Log cached state dtype for debugging precision issues
+                        sample_dtype = None
+                        for name in list(base_state.keys())[:1]:
+                            sample_dtype = base_state[name].dtype
+
                         logger.info(
-                            "Cached checkpoint-%s as delta base (%d tensors, %d params)",
+                            "[upload_worker] Cached checkpoint-%s as delta BASE: "
+                            "tensors=%d, params=%d, sample_dtype=%s "
+                            "(this will be used as base for computing next delta)",
                             base_window,
                             len(base_state),
                             sum(t.numel() for t in base_state.values()),
+                            sample_dtype,
                         )
                     else:
                         logger.warning(
-                            "Could not cache delta base for checkpoint-%s: no model weights found",
+                            "[upload_worker] Could not cache delta base for checkpoint-%s: "
+                            "no model weights found",
                             checkpoint_window,
                         )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
-                        "Failed to cache delta base from checkpoint-%s: %s",
+                        "[upload_worker] Failed to cache delta base from checkpoint-%s: %s",
                         checkpoint_window,
                         exc,
                     )
