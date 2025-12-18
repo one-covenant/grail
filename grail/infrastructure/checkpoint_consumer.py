@@ -46,8 +46,8 @@ import zstandard as zstd
 from grail.shared.safetensors_utils import load_model_state_dict
 
 from ..shared.constants import (
+    BASE_CHECKPOINT_RETENTION_LIMIT,
     CHECKPOINT_MILESTONE_INTERVAL,
-    CHECKPOINT_RETENTION_LIMIT,
     DELTA_BASE_INTERVAL,
     GRAIL_CHECKPOINT_MOD10,
     WINDOW_LENGTH,
@@ -115,7 +115,7 @@ class CheckpointManager:
         *,
         cache_root: Path,
         credentials: Any | None,
-        keep_limit: int = CHECKPOINT_RETENTION_LIMIT,
+        keep_limit: int = BASE_CHECKPOINT_RETENTION_LIMIT,
     ) -> None:
         self.cache_root = cache_root.expanduser().resolve()
         self.cache_root.mkdir(parents=True, exist_ok=True)
