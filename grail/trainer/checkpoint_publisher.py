@@ -45,8 +45,8 @@ from grail.infrastructure.delta_checkpoint import (
     compute_weights_hash,
 )
 from grail.shared.constants import (
-    CHECKPOINT_RETENTION_LIMIT,
-    DELTA_BASE_INTERVAL,
+    BASE_CHECKPOINT_RETENTION_LIMIT,
+    DELTA_CHECKPOINT_RETENTION_LIMIT,
     DELTA_THRESHOLD,
     TRAINER_BATCH_SIZE,
     TRAINER_ENTROPY_COEF,
@@ -171,41 +171,125 @@ class UploadResult:
         return result
 
 
-def _compute_keep_windows(current_window: int) -> set[int]:
-    """Calculate which checkpoint windows should be retained.
-
-    Retention policy:
-    - Keep only latest N windows (CHECKPOINT_RETENTION_LIMIT)
-    - Also keep base checkpoints that delta checkpoints depend on
-    - No bootstrap checkpoint retention (removes 0-9)
-    - No milestone retention (keeps total R2 objects under 1000)
-
-    This ensures list_objects_v2 never needs pagination, avoiding
-    stale client issues with aiobotocore cached connections.
+def _parse_checkpoint_inventory(keys: list[str]) -> tuple[list[int], list[int], list[int]]:
+    """Parse checkpoint keys into checkpoint inventory lists.
 
     Args:
-        current_window: Current window number
+        keys: List of S3 keys from checkpoint prefix
+
+    Returns:
+        Tuple of (all_windows, full_windows, delta_windows), each sorted descending (newest first)
+    """
+    delta_windows_set: set[int] = set()
+    all_windows: set[int] = set()
+
+    for key in keys:
+        try:
+            parts = key.split("/")
+            if len(parts) >= 3 and parts[2].startswith("checkpoint-"):
+                window = int(parts[2].split("-", 1)[1])
+                all_windows.add(window)
+                if len(parts) >= 4 and parts[3] == "DELTA":
+                    delta_windows_set.add(window)
+        except (IndexError, ValueError):
+            continue
+
+    all_windows_sorted = sorted(all_windows, reverse=True)
+    full_windows_sorted = sorted(all_windows - delta_windows_set, reverse=True)
+    delta_windows_sorted = sorted(delta_windows_set, reverse=True)
+    return all_windows_sorted, full_windows_sorted, delta_windows_sorted
+
+
+async def _fetch_delta_base_window(
+    delta_window: int,
+    credentials: Any,
+) -> int | None:
+    """Fetch the base_window a delta checkpoint depends on.
+
+    Args:
+        delta_window: The delta checkpoint window
+        credentials: R2 credentials
+
+    Returns:
+        The base_window from metadata, or None if unavailable
+    """
+    from grail.infrastructure.comms import download_file
+
+    metadata_key = f"{CHECKPOINT_PREFIX}checkpoint-{delta_window}/metadata.json"
+    try:
+        metadata_bytes = await download_file(
+            metadata_key,
+            credentials=credentials,
+            use_write=True,
+        )
+        if metadata_bytes:
+            metadata = json.loads(metadata_bytes.decode("utf-8"))
+            return metadata.get("base_window")
+    except Exception as exc:
+        logger.warning("Failed to read metadata for delta %d: %s", delta_window, exc)
+    return None
+
+
+async def _compute_keep_windows(
+    inventory: tuple[list[int], list[int], list[int]],
+    credentials: Any,
+) -> set[int]:
+    """Calculate which checkpoint windows to retain with DELTA dependency tracking.
+
+    Retention policy:
+    - Keep latest BASE_CHECKPOINT_RETENTION_LIMIT FULL checkpoints
+    - Keep latest DELTA_CHECKPOINT_RETENTION_LIMIT DELTA checkpoints
+    - ALWAYS keep any FULL checkpoint that a retained DELTA depends on
+
+    Args:
+        inventory: Parsed checkpoint inventory (all_windows, full_windows, delta_windows)
+        credentials: R2 credentials for querying checkpoint metadata
 
     Returns:
         Set of window numbers to retain
     """
+    _, full_windows, delta_windows = inventory
+
+    if not full_windows and not delta_windows:
+        return set()
+
+    logger.debug(
+        "Checkpoint retention: %d FULL, %d DELTA found",
+        len(full_windows),
+        len(delta_windows),
+    )
+
     keep: set[int] = set()
-    if current_window < 0:
-        return keep
 
-    # Keep only latest N windows (typically 1-3)
-    delta_base_interval_windows = max(1, int(DELTA_BASE_INTERVAL))
-    base_stride_blocks = delta_base_interval_windows * int(WINDOW_LENGTH)
+    # Keep latest N FULL checkpoints
+    keep.update(full_windows[:BASE_CHECKPOINT_RETENTION_LIMIT])
 
-    for idx in range(CHECKPOINT_RETENTION_LIMIT):
-        window = current_window - idx * WINDOW_LENGTH
-        if window >= 0:
-            keep.add(window)
-            # Also keep the base window this delta depends on
-            # Base windows are at DELTA_BASE_INTERVAL (in windows) boundaries.
-            base_window = (window // base_stride_blocks) * base_stride_blocks
-            if base_window >= 0:
-                keep.add(base_window)
+    # Keep latest M DELTA checkpoints and their bases
+    deltas_to_keep = delta_windows[:DELTA_CHECKPOINT_RETENTION_LIMIT]
+    keep.update(deltas_to_keep)
+
+    base_windows = await asyncio.gather(
+        *(_fetch_delta_base_window(delta_window, credentials) for delta_window in deltas_to_keep)
+    )
+    for delta_window, base_window in zip(deltas_to_keep, base_windows, strict=False):
+        if base_window is not None:
+            keep.add(int(base_window))
+            logger.debug("Keeping base %d (required by delta %d)", base_window, delta_window)
+            continue
+
+        # Fallback: keep nearest FULL checkpoint before this delta
+        for full_window in full_windows:
+            if full_window < delta_window:
+                keep.add(full_window)
+                logger.debug("Keeping fallback base %d for delta %d", full_window, delta_window)
+                break
+
+    logger.info(
+        "Retention: keeping %d checkpoints (%d FULL, %d DELTA)",
+        len(keep),
+        sum(1 for w in keep if w in full_windows),
+        sum(1 for w in keep if w in delta_windows),
+    )
 
     return keep
 
@@ -243,42 +327,63 @@ class CheckpointPublisher:
         This is a write operation that should only be called by the trainer after
         publishing new checkpoints. Miners and validators should never call this.
 
+        Uses separate retention limits for BASE (FULL) and DELTA checkpoints:
+        - BASE_CHECKPOINT_RETENTION_LIMIT: How many FULL checkpoints to keep
+        - DELTA_CHECKPOINT_RETENTION_LIMIT: How many DELTA checkpoints to keep
+        - ALWAYS keeps any BASE checkpoint that a retained DELTA depends on
+
+        This prevents orphaned deltas whose base was deleted.
+
         Args:
             current_window: Current window number
         """
         from grail.infrastructure.comms import list_bucket_files
 
-        # Calculate windows to keep
-        keep_windows = _compute_keep_windows(current_window)
-
-        # Get list of remote windows
+        # List remote checkpoint keys once (fail-safe: empty means "skip cleanup")
         keys = await list_bucket_files(
             CHECKPOINT_PREFIX,
             credentials=self.credentials,
             use_write=True,
         )
+        if not keys:
+            logger.warning(
+                "Checkpoint cleanup skipped: failed to list remote checkpoints (prefix=%s)",
+                CHECKPOINT_PREFIX,
+            )
+            return
 
-        remote_windows: set[int] = set()
-        for key in keys:
-            try:
-                parts = key.split("/")
-                if len(parts) >= 3:
-                    checkpoint_segment = parts[2]
-                    if checkpoint_segment.startswith("checkpoint-"):
-                        window = int(checkpoint_segment.split("-", 1)[1])
-                        remote_windows.add(window)
-            except (IndexError, ValueError):
-                continue
+        inventory = _parse_checkpoint_inventory(keys)
+        remote_windows, _, _ = inventory
+
+        # Calculate windows to keep with proper dependency tracking
+        keep_windows = await _compute_keep_windows(inventory, self.credentials)
+        if not keep_windows:
+            logger.warning(
+                "Checkpoint cleanup skipped: keep set is empty (current_window=%d). "
+                "This is a safety guard against accidental mass deletion.",
+                current_window,
+            )
+            return
 
         # Delete windows outside retention policy
+        deleted_count = 0
         for window in remote_windows:
             if window not in keep_windows:
                 prefix = f"{CHECKPOINT_PREFIX}checkpoint-{window}"
                 logger.info("Deleting remote checkpoint prefix %s", prefix)
                 try:
                     await delete_prefix(prefix, credentials=self.credentials, use_write=True)
+                    deleted_count += 1
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Failed to delete remote checkpoint %s: %s", prefix, exc)
+
+        if deleted_count > 0:
+            logger.info(
+                "Checkpoint cleanup complete: deleted %d, kept %d (current_window=%d)",
+                deleted_count,
+                len(keep_windows),
+                current_window,
+            )
 
     async def finalize_checkpoint_ready(
         self,
