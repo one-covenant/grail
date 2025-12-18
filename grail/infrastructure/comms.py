@@ -404,19 +404,20 @@ async def upload_file_chunked(
     data: bytes,
     chunk_size: int | None = None,
     max_retries: int = 3,
-    compress: bool = True,
+    compress: bool = False,
     credentials: BucketCredentials | None = None,
     use_write: bool = False,
     upload_timeout: float = UPLOAD_TIMEOUT,
 ) -> bool:
-    """Upload file in chunks optimized for H100 high-bandwidth - 100MB chunks with compression
+    """Upload file in chunks optimized for H100 high-bandwidth - 100MB chunks.
 
     Args:
         key: S3 object key
         data: File data to upload
         chunk_size: Size of each chunk (adaptive if None)
         max_retries: Max retry attempts per chunk (default: 3)
-        compress: Whether to compress JSON files (default: True)
+        compress: Whether to compress JSON files (default: False, disabled due to
+            negligible bandwidth savings and download path complexity)
         credentials: R2 credentials
         use_write: Whether to use write credentials
         upload_timeout: Timeout in seconds per chunk upload (default: 600s/10min)
@@ -425,7 +426,10 @@ async def upload_file_chunked(
         True if upload succeeded, False otherwise
     """
 
-    # Compress small JSON only; skip binaries/large files
+    # NOTE: JSON gzip compression disabled by default. The bandwidth savings are
+    # negligible (<0.01% of total upload for typical checkpoints) and it adds
+    # complexity to download paths (handling .gz vs non-.gz filenames).
+    # Model weights use zstandard compression which provides the real savings.
     if compress and key.endswith(".json") and len(data) < 10 * 1024 * 1024:
         original_size = len(data)
         data = gzip.compress(data, compresslevel=6)
