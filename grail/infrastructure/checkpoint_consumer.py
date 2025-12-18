@@ -599,7 +599,6 @@ class CheckpointManager:
         Returns:
             Path to reconstructed checkpoint directory, or None on failure
         """
-        import torch
         from safetensors.torch import load_file, save_file
 
         try:
