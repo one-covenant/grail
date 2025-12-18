@@ -145,9 +145,10 @@ class TrainerNeuron(BaseNeuron):
         Lifecycle:
         1. Start watchdog for liveness monitoring
         2. Initialize chain manager
-        3. Spawn training and upload worker processes
-        4. Enter orchestration loop (monitor health, coordinate evaluation)
-        5. Gracefully shutdown on exit
+        3. Request pause (if evaluation enabled) to prevent training before first eval
+        4. Spawn training and upload worker processes
+        5. Enter orchestration loop (first iteration runs initial evaluation)
+        6. Gracefully shutdown on exit
         """
         self.start_watchdog(
             timeout_seconds=WATCHDOG_TIMEOUT_SECONDS,
@@ -159,6 +160,14 @@ class TrainerNeuron(BaseNeuron):
         logger.info("Main process will not use GPU (training process owns GPU)")
 
         try:
+            # Request pause BEFORE starting training to ensure initial evaluation runs first.
+            # Training will see this flag when it enters its loop and confirm pause.
+            # The orchestration loop's first iteration will then run evaluation immediately
+            # since _coordinate_evaluation() will see pause already confirmed.
+            if self._eval_cfg.enabled:
+                self._ipc.request_pause()
+                logger.info("Pause requested before training start (initial evaluation pending)")
+
             logger.info("Starting async training and upload worker processes...")
             self._start_training_process()
             self._start_upload_worker()
