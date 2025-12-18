@@ -9,9 +9,8 @@ Tests:
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
-import pytest
 import torch
 
 from grail.infrastructure.checkpoint_consumer import CheckpointMetadata
@@ -20,7 +19,6 @@ from grail.infrastructure.delta_checkpoint import (
     compute_sparse_delta,
     compute_weights_hash,
 )
-
 
 # ============================================================================
 # Tests for Chained Delta Precision (bit-exact bf16 reconstruction)

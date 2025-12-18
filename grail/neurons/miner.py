@@ -247,7 +247,7 @@ class MinerNeuron(BaseNeuron):
                         timers,
                         monitor,
                         self.use_drand,
-                        checkpoint_window,
+                        current_checkpoint_window,
                     )
 
                     if inferences:

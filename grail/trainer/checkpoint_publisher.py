@@ -277,26 +277,19 @@ async def _compute_keep_windows(
 
     # Fetch anchor_window for each retained delta (the FULL checkpoint it depends on)
     anchor_windows = await asyncio.gather(
-        *(
-            _fetch_delta_anchor_window(delta_window, credentials)
-            for delta_window in deltas_to_keep
-        )
+        *(_fetch_delta_anchor_window(delta_window, credentials) for delta_window in deltas_to_keep)
     )
     for delta_window, anchor_window in zip(deltas_to_keep, anchor_windows, strict=False):
         if anchor_window is not None:
             keep.add(int(anchor_window))
-            logger.debug(
-                "Keeping anchor %d (required by delta %d)", anchor_window, delta_window
-            )
+            logger.debug("Keeping anchor %d (required by delta %d)", anchor_window, delta_window)
             continue
 
         # Fallback: keep nearest FULL checkpoint before this delta
         for full_window in full_windows:
             if full_window < delta_window:
                 keep.add(full_window)
-                logger.debug(
-                    "Keeping fallback anchor %d for delta %d", full_window, delta_window
-                )
+                logger.debug("Keeping fallback anchor %d for delta %d", full_window, delta_window)
                 break
 
     logger.info(

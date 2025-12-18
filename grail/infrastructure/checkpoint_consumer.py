@@ -510,7 +510,6 @@ class CheckpointManager:
         metadata: CheckpointMetadata,
     ) -> None:
         """Write cached checkpoint synchronously (called from thread)."""
-        import torch
         from safetensors.torch import save_file
 
         tmp_dir = output_dir.parent / f"{output_dir.name}.partial"
@@ -1016,7 +1015,6 @@ class CheckpointManager:
             Path to reconstructed checkpoint directory, or None on failure
         """
         import torch
-        from safetensors.torch import save_file
 
         try:
             # Load anchor weights
