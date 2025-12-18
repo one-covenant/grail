@@ -107,7 +107,7 @@ def apply_sparse_delta(
     base_state: dict[str, torch.Tensor],
     sparse_tensors: dict[str, torch.Tensor],
     shapes: dict[str, list[int]],
-    target_dtype: torch.dtype = torch.bfloat16,
+    target_dtype: torch.dtype | None = None,
 ) -> dict[str, torch.Tensor]:
     """Reconstruct full state by replacing values at changed positions.
 
@@ -118,12 +118,16 @@ def apply_sparse_delta(
         base_state: Base model state dict
         sparse_tensors: Sparse update with {name}.indices and {name}.values
         shapes: Original shapes for each parameter
-        target_dtype: Output dtype (typically bfloat16)
+        target_dtype: Output dtype. If None, preserves dtype from base_state.
 
     Returns:
         Reconstructed state dict with full weights
     """
     result: dict[str, torch.Tensor] = {}
+
+    # Infer dtype from base_state if not specified
+    if target_dtype is None:
+        target_dtype = next(iter(base_state.values())).dtype
 
     for name, base_tensor in base_state.items():
         indices_key = f"{name}.indices"
