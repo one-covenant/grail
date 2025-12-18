@@ -243,10 +243,12 @@ async def _compute_keep_windows(
 ) -> set[int]:
     """Calculate which checkpoint windows to retain with DELTA dependency tracking.
 
-    Retention policy:
-    - Keep latest BASE_CHECKPOINT_RETENTION_LIMIT FULL checkpoints
-    - Keep latest DELTA_CHECKPOINT_RETENTION_LIMIT DELTA checkpoints
-    - ALWAYS keep any FULL checkpoint that a retained DELTA depends on
+    For chained deltas, we need to keep entire chains from anchor (FULL) to tip.
+    This function combines two strategies:
+
+    1. Chain-based retention: Keep current anchor + chain, previous anchor + chain
+       (from shared retention_utils)
+    2. Dependency-based retention: Ensure any retained DELTA has its anchor FULL
 
     Args:
         inventory: Parsed checkpoint inventory (all_windows, full_windows, delta_windows)
@@ -255,7 +257,9 @@ async def _compute_keep_windows(
     Returns:
         Set of window numbers to retain
     """
-    _, full_windows, delta_windows = inventory
+    from grail.shared.retention_utils import compute_retention_windows
+
+    all_windows, full_windows, delta_windows = inventory
 
     if not full_windows and not delta_windows:
         return set()
@@ -266,16 +270,20 @@ async def _compute_keep_windows(
         len(delta_windows),
     )
 
-    keep: set[int] = set()
+    # Get current window (newest in inventory)
+    current_window = max(all_windows) if all_windows else 0
 
-    # Keep latest N FULL checkpoints (anchors)
+    # Start with chain-based retention (keeps entire chains for reconstruction)
+    keep = compute_retention_windows(current_window)
+
+    # Also keep latest N FULL checkpoints (anchors) as additional safety margin
     keep.update(full_windows[:BASE_CHECKPOINT_RETENTION_LIMIT])
 
-    # Keep latest M DELTA checkpoints and their anchor checkpoints
+    # Also keep latest M DELTA checkpoints
     deltas_to_keep = delta_windows[:DELTA_CHECKPOINT_RETENTION_LIMIT]
     keep.update(deltas_to_keep)
 
-    # Fetch anchor_window for each retained delta (the FULL checkpoint it depends on)
+    # Ensure any retained DELTA has its anchor FULL kept
     anchor_windows = await asyncio.gather(
         *(_fetch_delta_anchor_window(delta_window, credentials) for delta_window in deltas_to_keep)
     )
@@ -1089,3 +1097,155 @@ class CheckpointPublisher:
             raise UploadError(f"Delta upload failed: {exc}") from exc
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+    async def upload_full_background(
+        self,
+        staging_path: Path,
+        target_window: int,
+    ) -> None:
+        """Upload FULL checkpoint in background (non-blocking, fire-and-forget).
+
+        This is called at anchor windows while DELTA upload proceeds synchronously.
+        FULL checkpoints serve as bootstrap anchors for new miners joining the network.
+
+        Unlike upload_from_staging, this method:
+        - Does not raise exceptions (logs errors instead)
+        - Does not block the caller
+        - Skips cleanup (DELTA upload handles that)
+
+        Args:
+            staging_path: Path to staged snapshot (already uploaded as DELTA)
+            target_window: Window number to upload FULL checkpoint to
+        """
+        try:
+            # Build file manifest from existing files
+            file_manifest: dict[str, str] = {}
+            for file_path in staging_path.rglob("*"):
+                if file_path.is_file() and file_path.name != "snapshot_metadata.json":
+                    rel_path = str(file_path.relative_to(staging_path))
+                    file_manifest[rel_path] = hashlib.sha256(file_path.read_bytes()).hexdigest()
+
+            # Read snapshot metadata
+            snapshot_metadata_path = staging_path / "snapshot_metadata.json"
+            if snapshot_metadata_path.exists():
+                snapshot_metadata = json.loads(snapshot_metadata_path.read_text())
+            else:
+                snapshot_metadata = {}
+
+            # Read training config
+            training_config = snapshot_metadata.get(
+                "training_config",
+                {
+                    "lr": TRAINER_LR,
+                    "epochs": TRAINER_EPOCHS,
+                    "batch_size": TRAINER_BATCH_SIZE,
+                    "max_length": TRAINER_MAX_LENGTH,
+                    "grad_clip": TRAINER_GRAD_CLIP,
+                    "warmup_steps": TRAINER_WARMUP_STEPS,
+                    "kl_coef": TRAINER_KL_COEF,
+                    "entropy_coef": TRAINER_ENTROPY_COEF,
+                },
+            )
+
+            # Create metadata for FULL checkpoint
+            parent_window = snapshot_metadata.get("parent_window")
+            if parent_window is None:
+                parent_window = max(0, target_window - WINDOW_LENGTH)
+
+            metadata = CheckpointMetadata(
+                window=target_window,
+                parent_window=parent_window,
+                file_manifest=file_manifest,
+                training_config=training_config,
+                git_commit=os.getenv("GIT_COMMIT", "unknown"),
+                created_at=snapshot_metadata.get("timestamp", time.time()),
+                model_name="async_trainer_snapshot",
+                checkpoint_type="FULL",  # Explicitly mark as FULL
+            )
+
+            config_hash = hashlib.sha256(
+                json.dumps(training_config, sort_keys=True).encode()
+            ).hexdigest()
+
+            metadata_dict = {**metadata.__dict__, "config_hash": config_hash}
+
+            # Create temp directory for background upload metadata
+            temp_dir = Path(tempfile.mkdtemp(prefix=f"full-bg-{target_window}-"))
+
+            try:
+                # Copy model files to temp directory
+                for file_path in staging_path.rglob("*"):
+                    if file_path.is_file() and file_path.name != "snapshot_metadata.json":
+                        rel_path = file_path.relative_to(staging_path)
+                        dest_path = temp_dir / rel_path
+                        dest_path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(file_path, dest_path)
+
+                # Write metadata
+                metadata_path = temp_dir / "metadata.json"
+                metadata_path.write_text(json.dumps(metadata_dict, ensure_ascii=False, indent=2))
+
+                # Sign metadata
+                canonical_metadata = json.dumps(
+                    metadata_dict, sort_keys=True, separators=(",", ":")
+                )
+                signature = self.wallet.hotkey.sign(data=canonical_metadata).hex()
+                (temp_dir / "manifest.sig").write_text(signature)
+
+                # Write FULL marker
+                (temp_dir / "FULL").touch()
+
+                # Upload to R2
+                remote_prefix = f"{CHECKPOINT_PREFIX}checkpoint-{target_window}"
+
+                semaphore = asyncio.Semaphore(4)
+
+                async def upload_file(path: Path) -> bool:
+                    async with semaphore:
+                        rel_path = path.relative_to(temp_dir)
+                        remote_key = f"{remote_prefix}/{rel_path}"
+                        try:
+                            return await upload_file_chunked(
+                                remote_key,
+                                path.read_bytes(),
+                                credentials=self.credentials,
+                                use_write=True,
+                                upload_timeout=UPLOAD_TIMEOUT,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug(
+                                "Background FULL upload file failed: %s: %s", rel_path, exc
+                            )
+                            return False
+
+                upload_tasks = [upload_file(path) for path in temp_dir.rglob("*") if path.is_file()]
+                results = await asyncio.gather(*upload_tasks)
+
+                if all(results):
+                    total_mb = sum(p.stat().st_size for p in temp_dir.rglob("*") if p.is_file()) / (
+                        1024 * 1024
+                    )
+                    logger.info(
+                        "✅ Background FULL upload completed: checkpoint-%s (%.1f MB)",
+                        target_window,
+                        total_mb,
+                    )
+                else:
+                    failed_count = sum(1 for r in results if not r)
+                    logger.warning(
+                        "Background FULL upload partially failed: checkpoint-%s (%d/%d files failed)",
+                        target_window,
+                        failed_count,
+                        len(results),
+                    )
+
+            finally:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+        except Exception as exc:
+            # Background task - log error but don't propagate
+            logger.warning(
+                "Background FULL upload failed for checkpoint-%s: %s",
+                target_window,
+                exc,
+            )

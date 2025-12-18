@@ -72,6 +72,36 @@ async def _wait_for_snapshot(
         return None
 
 
+async def _upload_full_background(
+    staging_path: Path,
+    checkpoint_publisher: CheckpointPublisher,
+    target_window: int,
+) -> None:
+    """Upload FULL checkpoint in background (non-blocking).
+
+    This runs as a fire-and-forget task at anchor windows while DELTA upload
+    proceeds synchronously. FULL checkpoints serve as bootstrap anchors for
+    new miners joining the network.
+
+    Args:
+        staging_path: Path to staged snapshot
+        checkpoint_publisher: Publisher for R2 uploads
+        target_window: Window number to upload
+    """
+    try:
+        logger.info("Background FULL upload starting for checkpoint-%s", target_window)
+        await checkpoint_publisher.upload_full_background(staging_path, target_window)
+        logger.info("Background FULL upload completed for checkpoint-%s", target_window)
+    except Exception as exc:
+        # Background task - log error but don't propagate
+        # Next anchor window will retry, and DELTA chain remains valid
+        logger.warning(
+            "Background FULL upload failed for checkpoint-%s: %s (DELTA chain unaffected)",
+            target_window,
+            exc,
+        )
+
+
 async def upload_worker_loop(
     snapshot_manager: SnapshotManager,
     checkpoint_publisher: CheckpointPublisher,
@@ -175,14 +205,15 @@ async def upload_worker_loop(
             # Record upload start for timing
             upload_start_time = time.time()
 
-            # Decide FULL vs DELTA upload
-            # Upload FULL if: delta disabled, no prev yet, or at anchor interval boundary
+            # Decide upload strategy:
+            # - FULL-only: When delta disabled or no prev_state (initial/restart)
+            # - DELTA (+ FULL background at anchors): Normal operation
             is_anchor_window = checkpoint_window % base_stride_blocks == 0
-            should_upload_full = (
-                not DELTA_CHECKPOINT_ENABLED
-                or prev_window is None
-                or prev_state is None
-                or is_anchor_window
+            should_upload_full_only = (
+                not DELTA_CHECKPOINT_ENABLED or prev_window is None or prev_state is None
+            )
+            should_upload_full_background = (
+                is_anchor_window and not should_upload_full_only  # Only if we're doing DELTA
             )
 
             # Attempt upload with retry logic
@@ -190,12 +221,12 @@ async def upload_worker_loop(
             did_fallback_to_full = False
 
             try:
-                if should_upload_full:
+                if should_upload_full_only:
+                    # Initial window or no prev_state: FULL only (sync)
                     logger.info(
-                        "Starting FULL upload at block %s for checkpoint-%s (is_anchor=%s, has_prev=%s)",
+                        "Starting FULL-only upload at block %s for checkpoint-%s (has_prev=%s)",
                         upload_start_block,
                         checkpoint_window,
-                        is_anchor_window,
                         prev_window is not None,
                     )
 
@@ -207,12 +238,14 @@ async def upload_worker_loop(
                         is_delta=False,
                     )
                 else:
+                    # Normal operation: DELTA (sync), optionally FULL (background)
                     logger.info(
-                        "Starting DELTA upload at block %s for checkpoint-%s (prev=%s, anchor=%s)",
+                        "Starting DELTA upload at block %s for checkpoint-%s (prev=%s, anchor=%s, bg_full=%s)",
                         upload_start_block,
                         checkpoint_window,
                         prev_window,
                         anchor_window,
+                        should_upload_full_background,
                     )
 
                     try:
@@ -226,6 +259,21 @@ async def upload_worker_loop(
                             prev_state=prev_state,
                             anchor_window=anchor_window,
                         )
+
+                        # Start background FULL upload at anchor windows (non-blocking)
+                        if should_upload_full_background:
+                            logger.info(
+                                "Starting background FULL upload for anchor checkpoint-%s",
+                                checkpoint_window,
+                            )
+                            asyncio.create_task(
+                                _upload_full_background(
+                                    staging_path,
+                                    checkpoint_publisher,
+                                    checkpoint_window,
+                                )
+                            )
+
                     except UploadError:
                         # Delta upload failed, fallback to FULL upload
                         logger.warning(
@@ -253,8 +301,13 @@ async def upload_worker_loop(
                 if loaded_state is not None:
                     prev_window = checkpoint_window
                     prev_state = loaded_state
-                    # Update anchor only on FULL uploads
-                    if should_upload_full or did_fallback_to_full:
+                    # Update anchor on FULL uploads (including background FULL at anchors)
+                    is_new_anchor = (
+                        should_upload_full_only
+                        or did_fallback_to_full
+                        or should_upload_full_background
+                    )
+                    if is_new_anchor:
                         anchor_window = checkpoint_window
                         logger.info(
                             "Cached checkpoint-%s as new anchor (%d tensors, %d params)",
@@ -293,7 +346,10 @@ async def upload_worker_loop(
             blocks_elapsed = current_block - upload_start_block
 
             # Determine actual checkpoint type (may have fallen back to FULL)
-            checkpoint_type = "FULL" if (should_upload_full or did_fallback_to_full) else "DELTA"
+            # Note: background FULL is logged separately, primary upload determines type
+            checkpoint_type = (
+                "FULL" if (should_upload_full_only or did_fallback_to_full) else "DELTA"
+            )
             logger.info(
                 "%s upload completed in %.1fs (%d blocks elapsed): checkpoint-%s ready at window %s",
                 checkpoint_type,

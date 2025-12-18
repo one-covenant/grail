@@ -47,10 +47,7 @@ from grail.shared.safetensors_utils import load_model_state_dict
 
 from ..shared.constants import (
     BASE_CHECKPOINT_RETENTION_LIMIT,
-    CHECKPOINT_MILESTONE_INTERVAL,
-    DELTA_BASE_INTERVAL,
     GRAIL_CHECKPOINT_MOD10,
-    WINDOW_LENGTH,
 )
 from . import comms
 from .delta_checkpoint import apply_sparse_delta, compute_weights_hash
@@ -304,8 +301,6 @@ class CheckpointManager:
         Returns:
             True if delta was applied successfully, False if fallback to full load needed
         """
-        import torch
-
         # Validate inputs
         if target_window <= current_window:
             logger.debug(
@@ -358,7 +353,7 @@ class CheckpointManager:
             # Get model's current state dict (on device)
             current_state = model.state_dict()
 
-            # Apply delta in float32, cast back to bf16
+            # Apply delta - dtype is inferred from current_state
             logger.debug(
                 "Applying delta: %.2f%% sparse, %d params changed",
                 delta_info.get("sparsity_ratio", 0) * 100,
@@ -369,7 +364,7 @@ class CheckpointManager:
                 current_state,
                 sparse_tensors,
                 shapes,
-                target_dtype=torch.bfloat16,
+                target_dtype=None,  # Infer from current_state
             )
 
             # Verify hash if available
@@ -851,13 +846,24 @@ class CheckpointManager:
 
         base_path, delta_chain = chain
 
-        logger.info(
-            "Built delta chain: base=%s (cached=%s), chain_length=%d, target=%s",
-            delta_chain[0].prev_window if delta_chain else "N/A",
-            base_path is not None,
-            len(delta_chain),
-            metadata.window,
-        )
+        # Log recovery mode when catching up multiple missed windows
+        if len(delta_chain) > 1:
+            first_delta = delta_chain[0]
+            last_delta = delta_chain[-1]
+            logger.info(
+                "🔄 Recovery mode: catching up %d missed windows (%s -> %s)",
+                len(delta_chain),
+                first_delta.prev_window,
+                last_delta.window,
+            )
+        else:
+            logger.info(
+                "Built delta chain: base=%s (cached=%s), chain_length=%d, target=%s",
+                delta_chain[0].prev_window if delta_chain else "N/A",
+                base_path is not None,
+                len(delta_chain),
+                metadata.window,
+            )
 
         if base_path is None:
             logger.error("Cannot find base checkpoint for chain reconstruction")
@@ -882,8 +888,6 @@ class CheckpointManager:
         Returns:
             Path to reconstructed checkpoint, or None on failure
         """
-        import torch
-
         try:
             # Download and load delta
             delta_data = await self._download_and_load_delta(delta_metadata)
@@ -906,12 +910,12 @@ class CheckpointManager:
                 delta_info.get("sparsity_ratio", 0) * 100,
             )
 
-            # Apply delta (float32 computation, bf16 output)
+            # Apply delta - dtype is inferred from prev_state
             reconstructed = apply_sparse_delta(
                 prev_state,
                 sparse_tensors,
                 shapes,
-                target_dtype=torch.bfloat16,
+                target_dtype=None,  # Infer from prev_state
             )
 
             # Verify hash
@@ -1014,8 +1018,6 @@ class CheckpointManager:
         Returns:
             Path to reconstructed checkpoint directory, or None on failure
         """
-        import torch
-
         try:
             # Load anchor weights
             current_state = load_model_state_dict(anchor_path)
@@ -1040,12 +1042,12 @@ class CheckpointManager:
 
                 sparse_tensors, shapes, delta_info = delta_data
 
-                # Apply sparse delta and cast to bf16 (bit-exact as analyzed)
+                # Apply sparse delta - dtype is inferred from current_state
                 current_state = apply_sparse_delta(
                     current_state,
                     sparse_tensors,
                     shapes,
-                    target_dtype=torch.bfloat16,
+                    target_dtype=None,  # Infer from current_state
                 )
 
                 logger.debug(
@@ -1229,6 +1231,9 @@ class CheckpointManager:
     def _compute_keep_windows(self, current_window: int) -> set[int]:
         """Calculate which checkpoint windows should be retained.
 
+        Delegates to the shared retention utility for consistent behavior
+        between publisher (remote cleanup) and consumer (local cache cleanup).
+
         For chained deltas, we must keep the entire chain from the current
         anchor (FULL) to now, plus the previous anchor for miners catching up.
 
@@ -1243,44 +1248,9 @@ class CheckpointManager:
         Returns:
             Set of window numbers to retain
         """
-        keep: set[int] = set()
-        if current_window < 0:
-            return keep
+        from grail.shared.retention_utils import compute_retention_windows
 
-        # Always keep windows 0-9 (bootstrap)
-        keep.update(range(10))
-
-        # Calculate current anchor (last FULL boundary)
-        delta_base_interval_windows = max(1, int(DELTA_BASE_INTERVAL))
-        anchor_stride = delta_base_interval_windows * int(WINDOW_LENGTH)
-        current_anchor = (current_window // anchor_stride) * anchor_stride
-
-        # Keep all windows from current anchor to now (the active chain)
-        w = current_anchor
-        while w <= current_window:
-            keep.add(w)
-            w += WINDOW_LENGTH
-
-        # Keep previous anchor for miners still catching up
-        prev_anchor = current_anchor - anchor_stride
-        if prev_anchor >= 0:
-            keep.add(prev_anchor)
-            # Also keep the chain from previous anchor to current anchor
-            # This allows miners who were on the old chain to transition
-            w = prev_anchor
-            while w < current_anchor:
-                keep.add(w)
-                w += WINDOW_LENGTH
-
-        # Keep milestones (every CHECKPOINT_MILESTONE_INTERVAL windows)
-        interval_blocks = CHECKPOINT_MILESTONE_INTERVAL * WINDOW_LENGTH
-        if interval_blocks > 0:
-            milestone = (current_window // interval_blocks) * interval_blocks
-            while milestone >= 0:
-                keep.add(milestone)
-                milestone -= interval_blocks
-
-        return keep
+        return compute_retention_windows(current_window)
 
     async def get_latest_ready_checkpoint(self, before_window: int) -> int | None:
         """Find the latest checkpoint that became READY before the given window.
