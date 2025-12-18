@@ -29,13 +29,11 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import bittensor as bt
+import torch
 import zstandard as zstd
-
-if TYPE_CHECKING:
-    import torch
 
 from grail.infrastructure.checkpoint_consumer import (
     CHECKPOINT_PREFIX,
@@ -457,38 +455,20 @@ class CheckpointPublisher:
                 rel_path = str(local_path.relative_to(temp_dir))
                 remote_key = f"{remote_prefix}/{rel_path}"
 
-                # Only small JSON files (<10MB) are compressed; check for .gz version accordingly
-                is_small_json = remote_key.endswith(".json") and expected_size < 10 * 1024 * 1024
-                if is_small_json:
-                    remote_key = remote_key + ".gz"
-
                 remote_size = await get_file_size(
                     remote_key, credentials=self.credentials, use_write=True
                 )
                 if remote_size is None:
                     logger.error("Failed to verify uploaded file (not found): %s", rel_path)
                     return False
-                # For compressed JSON, we can't verify exact size due to compression
-                if is_small_json:
-                    if remote_size <= 0:
-                        logger.error(
-                            "Invalid size for compressed file %s: remote=%d bytes",
-                            rel_path,
-                            remote_size,
-                        )
-                        return False
-                    logger.debug(
-                        "✅ Verified compressed JSON file %s: %d bytes", rel_path, remote_size
+                if remote_size != expected_size:
+                    logger.error(
+                        "Size mismatch for %s: local=%d bytes, remote=%d bytes",
+                        rel_path,
+                        expected_size,
+                        remote_size,
                     )
-                else:
-                    if remote_size != expected_size:
-                        logger.error(
-                            "Size mismatch for %s: local=%d bytes, remote=%d bytes",
-                            rel_path,
-                            expected_size,
-                            remote_size,
-                        )
-                        return False
+                    return False
             logger.info("✅ All checkpoint files verified successfully")
 
             # NOTE: READY marker is NOT added here to ensure determinism
@@ -744,7 +724,26 @@ class CheckpointPublisher:
             if current_state is None:
                 raise UploadError(f"No model weights found in staging path: {staging_path}")
 
-            # Compute sparse delta
+            # Log input state dtypes for debugging precision issues
+            current_sample_dtype = None
+            base_sample_dtype = None
+            for name in list(current_state.keys())[:1]:
+                current_sample_dtype = current_state[name].dtype
+            for name in list(base_state.keys())[:1]:
+                base_sample_dtype = base_state[name].dtype
+
+            logger.info(
+                "[upload_delta] Computing delta: target_window=%s, base_window=%s, "
+                "current_params=%d, current_dtype=%s, base_params=%d, base_dtype=%s",
+                target_window,
+                base_window,
+                len(current_state),
+                current_sample_dtype,
+                len(base_state),
+                base_sample_dtype,
+            )
+
+            # Compute sparse update (stores actual values at changed positions)
             compute_start = time.time()
             sparse_tensors, shapes, stats = compute_sparse_delta(
                 current_state,
@@ -752,8 +751,14 @@ class CheckpointPublisher:
                 threshold=DELTA_THRESHOLD,
             )
 
-            # Compute hash of current state (for consumer verification)
+            # Hash current_state directly - since we store actual values (not deltas),
+            # the consumer's reconstruction will be identical to current_state.
             weights_hash = compute_weights_hash(current_state)
+            logger.info(
+                "[upload_delta] Hash computed: window=%s, hash=%s...",
+                target_window,
+                weights_hash[:16],
+            )
             compute_delta_s = time.time() - compute_start
 
             # Save sparse delta to temp directory and compress with zstd
