@@ -250,7 +250,8 @@ class GRAILVerifier:
         validator_sketch = torch.dot(validator_buckets.to(torch.int32), r_vec.to(torch.int32))
         validator_sketch_val = int(validator_sketch.item()) % PRIME_Q
 
-        sketch_diff = abs(validator_sketch_val - miner_commitment["sketch"])
+        miner_sketch_val = miner_commitment["sketch"]
+        sketch_diff = abs(validator_sketch_val - miner_sketch_val)
         mod_diff = min(sketch_diff, PRIME_Q - sketch_diff)  # Modular distance
         is_valid = mod_diff <= tolerance
 
@@ -259,6 +260,51 @@ class GRAILVerifier:
             "sketch_valid": is_valid,
             "sketch_tolerance": tolerance,
             "overall_valid": is_valid,
+            "validator_sketch": validator_sketch_val,
+            "miner_sketch": miner_sketch_val,
+            "position": position,
         }
+
+        if not is_valid:
+            # Detailed logging for failed verification
+            # Sample first few bucket values for debugging
+            sample_validator_values = (
+                validator_values[:5].tolist()
+                if len(validator_values) >= 5
+                else validator_values.tolist()
+            )
+            sample_validator_buckets = (
+                validator_buckets[:5].tolist()
+                if len(validator_buckets) >= 5
+                else validator_buckets.tolist()
+            )
+            sample_indices = (
+                miner_indices[:5].tolist() if len(miner_indices) >= 5 else miner_indices.tolist()
+            )
+
+            logger.warning(
+                "[verify_commitment] SKETCH MISMATCH: position=%d | "
+                "validator_sketch=%d | miner_sketch=%d | diff=%d | tolerance=%d | "
+                "sample_indices=%s | sample_values=%s | sample_buckets=%s | "
+                "hidden_norm=%.4f | hidden_dtype=%s | "
+                "This may indicate model weight differences between miner and validator",
+                position,
+                validator_sketch_val,
+                miner_sketch_val,
+                mod_diff,
+                tolerance,
+                sample_indices,
+                [f"{v:.4f}" for v in sample_validator_values],
+                sample_validator_buckets,
+                float(validator_hidden.norm().item()),
+                validator_hidden.dtype,
+            )
+        else:
+            logger.debug(
+                "[verify_commitment] OK: position=%d | diff=%d | tolerance=%d",
+                position,
+                mod_diff,
+                tolerance,
+            )
 
         return is_valid, diagnostics
