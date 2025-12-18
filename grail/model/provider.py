@@ -59,6 +59,7 @@ def get_model(
     use_safetensors: bool = True,
     eval_mode: bool = True,
     use_flash_attention: bool = False,
+    checkpoint_window: int | None = None,
 ) -> Any:
     """Load model with consistent configuration.
 
@@ -69,9 +70,11 @@ def get_model(
         eval_mode: Whether to set model to eval() mode
         use_flash_attention: Whether to use Flash Attention 2 (requires flash-attn package).
                             Only enabled for training, not for evaluation/inference.
+        checkpoint_window: Optional checkpoint window number. If not provided, will be
+                          extracted from metadata.json or parsed from the path.
 
     Returns:
-        Configured model instance with preserved original name
+        Configured model instance with preserved original name and checkpoint_window attribute
     """
     logger.debug(f"Loading model: {model_name}")
 
@@ -82,6 +85,7 @@ def get_model(
 
     # Check if this is a local checkpoint path with metadata
     original_model_name = model_name
+    resolved_checkpoint_window = checkpoint_window
     model_path = Path(model_name)
     if model_path.exists() and model_path.is_dir():
         metadata_file = model_path / "metadata.json"
@@ -89,9 +93,23 @@ def get_model(
             try:
                 metadata = json.loads(metadata_file.read_text())
                 original_model_name = metadata.get("model_name", model_name)
-                logger.debug(f"Found checkpoint: {original_model_name}")
+                # Extract checkpoint_window from metadata if not explicitly provided
+                if resolved_checkpoint_window is None and "window" in metadata:
+                    resolved_checkpoint_window = int(metadata["window"])
+                logger.debug(
+                    f"Found checkpoint: {original_model_name}, window={resolved_checkpoint_window}"
+                )
             except Exception as e:
                 logger.debug(f"Failed to read checkpoint metadata: {e}")
+
+        # Fallback: parse checkpoint-{window} from path if still not set
+        if resolved_checkpoint_window is None and "checkpoint-" in model_name:
+            try:
+                checkpoint_segment = model_name.split("checkpoint-")[-1].split("/")[0]
+                resolved_checkpoint_window = int(checkpoint_segment)
+                logger.debug(f"Parsed checkpoint window from path: {resolved_checkpoint_window}")
+            except (ValueError, IndexError):
+                pass
 
     # Configure attention implementation
     attn_implementation = None
@@ -117,6 +135,9 @@ def get_model(
 
     # Preserve original model name for GRAIL proof validation
     model.name_or_path = original_model_name
+
+    # Store checkpoint window for validation (avoids parsing path strings)
+    model.grail_checkpoint_window = resolved_checkpoint_window
 
     # Move to device
     model = model.to(device)

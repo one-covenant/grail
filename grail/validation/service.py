@@ -408,7 +408,12 @@ class ValidationService:
                     self._model, self._tokenizer = clear_model_and_tokenizer(
                         self._model, self._tokenizer
                     )
-                    self._model = get_model(str(checkpoint_path), device=None, eval_mode=True)
+                    self._model = get_model(
+                        str(checkpoint_path),
+                        device=None,
+                        eval_mode=True,
+                        checkpoint_window=checkpoint_window,
+                    )
                     # Do not inject chat template; rely on checkpoint/tokenizer config
                     self._tokenizer = get_tokenizer(str(checkpoint_path))
                     self._current_checkpoint_id = str(checkpoint_path)

@@ -191,7 +191,7 @@ class MinerNeuron(BaseNeuron):
 
                             if checkpoint_path is not None:
                                 logger.info(
-                                    "🔁 Loading checkpoint for window %s from %s",
+                                    "[miner] Loading checkpoint for window %s from %s",
                                     checkpoint_window,
                                     checkpoint_path,
                                 )
@@ -199,7 +199,10 @@ class MinerNeuron(BaseNeuron):
                                     # Pre-load cleanup to prevent VRAM growth when swapping
                                     model, tokenizer = clear_model_and_tokenizer(model, tokenizer)
                                     model = get_model(
-                                        str(checkpoint_path), device=None, eval_mode=True
+                                        str(checkpoint_path),
+                                        device=None,
+                                        eval_mode=True,
+                                        checkpoint_window=checkpoint_window,
                                     )
                                     tokenizer = get_tokenizer(str(checkpoint_path))
                                     current_checkpoint_window = checkpoint_window
@@ -207,20 +210,28 @@ class MinerNeuron(BaseNeuron):
                                     # Log model configuration details
                                     if torch.cuda.is_available():
                                         logger.info(
+                                            f"[miner] Checkpoint loaded successfully: "
+                                            f"window={checkpoint_window}, "
                                             f"GPU Memory: allocated={torch.cuda.memory_allocated() / 1024**3:.2f}GB, "
                                             f"reserved={torch.cuda.memory_reserved() / 1024**3:.2f}GB"
                                         )
                                         torch.cuda.empty_cache()
                                 except Exception:
                                     logger.exception(
-                                        "Failed to load checkpoint for window %s",
+                                        "[miner] FAILED to load checkpoint for window %s from %s. "
+                                        "Check logs above for hash verification or reconstruction errors.",
                                         checkpoint_window,
+                                        checkpoint_path,
                                     )
                                     raise
                             else:
                                 logger.warning(
-                                    "Checkpoint window %s not available, retaining current model",
+                                    "[miner] Checkpoint window %s NOT AVAILABLE (get_checkpoint returned None). "
+                                    "This may be due to: (1) checkpoint not published yet, "
+                                    "(2) download failure, (3) hash verification failure during delta reconstruction. "
+                                    "Retaining current model (window=%s)",
                                     checkpoint_window,
+                                    current_checkpoint_window,
                                 )
                     elif model is None or tokenizer is None:
                         logger.error("No checkpoint available and no model loaded, cannot mine")

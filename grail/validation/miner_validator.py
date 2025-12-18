@@ -180,17 +180,8 @@ class MinerValidator:
             inferences, miner_hotkey, window_rand, validator_wallet, total_inferences
         )
 
-        # Extract validator's checkpoint window from model path (if available)
-        validator_checkpoint_window = None
-        if hasattr(model, "name_or_path"):
-            model_path = str(model.name_or_path)
-            # Parse checkpoint-{window} from path like "/cache/checkpoints/checkpoint-1000"
-            if "checkpoint-" in model_path:
-                try:
-                    checkpoint_segment = model_path.split("checkpoint-")[-1].split("/")[0]
-                    validator_checkpoint_window = int(checkpoint_segment)
-                except (ValueError, IndexError):
-                    pass
+        # Extract validator's checkpoint window from model attribute (set by get_model())
+        validator_checkpoint_window = getattr(model, "grail_checkpoint_window", None)
 
         # Step 4: Validate selected rollouts
         validation_state = await self._validate_rollouts(
@@ -464,7 +455,13 @@ class MinerValidator:
                     miner_checkpoint = inference.get("checkpoint_window")
                     if miner_checkpoint != validator_checkpoint_window:
                         logger.warning(
-                            "Checkpoint mismatch: miner=%s, validator=%s (uid=%s, window=%s)",
+                            "[miner_validator] CHECKPOINT MISMATCH: "
+                            "miner_checkpoint=%s, validator_checkpoint=%s | "
+                            "uid=%s | window=%s | "
+                            "This indicates miner is using a different model checkpoint than validator. "
+                            "Possible causes: (1) miner failed to download checkpoint, "
+                            "(2) hash verification failed during delta reconstruction, "
+                            "(3) network sync issue",
                             miner_checkpoint,
                             validator_checkpoint_window,
                             uid_str,
@@ -489,6 +486,15 @@ class MinerValidator:
                 # Extract commit data
                 commit_data = inference["commit"]
                 rollout_meta = commit_data.get("rollout", {})
+
+                # Propagate checkpoint identifier into the commit for downstream
+                # validators (e.g., proof validator) without affecting signature
+                # verification (signature binding only uses model.name + layer_index).
+                miner_checkpoint_window = inference.get("checkpoint_window")
+                if miner_checkpoint_window is not None:
+                    model_info = commit_data.get("model")
+                    if isinstance(model_info, dict) and "checkpoint_window" not in model_info:
+                        model_info["checkpoint_window"] = miner_checkpoint_window
 
                 # Reward validation is now handled by RewardValidator in the pipeline
 
