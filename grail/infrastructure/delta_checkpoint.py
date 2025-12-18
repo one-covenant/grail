@@ -237,6 +237,210 @@ def verify_weights_hash(
     return matches
 
 
+def compare_state_dicts_detailed(
+    expected: dict[str, torch.Tensor],
+    actual: dict[str, torch.Tensor],
+    max_diff_params_to_log: int = 10,
+) -> dict[str, Any]:
+    """Compare two state dicts in detail to diagnose hash mismatches.
+
+    This function identifies exactly which parameters differ, the magnitude
+    of differences, and whether they appear to be floating-point precision errors.
+
+    Args:
+        expected: Expected model state dict (from publisher/trainer)
+        actual: Actual model state dict (reconstructed on miner/validator)
+        max_diff_params_to_log: Maximum number of differing parameters to log in detail
+
+    Returns:
+        Dict with comparison results:
+        - mismatched_params: List of parameter names that differ
+        - missing_in_actual: Parameters in expected but not in actual
+        - missing_in_expected: Parameters in actual but not in expected
+        - diff_stats: Per-parameter difference statistics
+        - likely_fp_error: Whether differences appear to be FP precision issues
+    """
+    result: dict[str, Any] = {
+        "mismatched_params": [],
+        "missing_in_actual": [],
+        "missing_in_expected": [],
+        "diff_stats": {},
+        "likely_fp_error": True,  # Assume FP error unless proven otherwise
+        "total_params_checked": 0,
+        "total_elements_compared": 0,
+        "total_elements_different": 0,
+    }
+
+    # Check for missing parameters
+    expected_keys = set(expected.keys())
+    actual_keys = set(actual.keys())
+    result["missing_in_actual"] = list(expected_keys - actual_keys)
+    result["missing_in_expected"] = list(actual_keys - expected_keys)
+
+    if result["missing_in_actual"]:
+        logger.error(
+            "[compare_state_dicts] MISSING PARAMS in actual: %s",
+            result["missing_in_actual"][:5],
+        )
+        result["likely_fp_error"] = False
+
+    if result["missing_in_expected"]:
+        logger.warning(
+            "[compare_state_dicts] EXTRA PARAMS in actual: %s",
+            result["missing_in_expected"][:5],
+        )
+
+    # Compare common parameters
+    common_keys = expected_keys & actual_keys
+    diff_params_logged = 0
+
+    for name in sorted(common_keys):
+        exp_tensor = expected[name]
+        act_tensor = actual[name]
+        result["total_params_checked"] += 1
+
+        # Check shape mismatch
+        if exp_tensor.shape != act_tensor.shape:
+            logger.error(
+                "[compare_state_dicts] SHAPE MISMATCH: %s | expected=%s, actual=%s",
+                name,
+                exp_tensor.shape,
+                act_tensor.shape,
+            )
+            result["mismatched_params"].append(name)
+            result["likely_fp_error"] = False
+            continue
+
+        # Check dtype mismatch (warning only, convert for comparison)
+        if exp_tensor.dtype != act_tensor.dtype:
+            logger.warning(
+                "[compare_state_dicts] DTYPE MISMATCH: %s | expected=%s, actual=%s",
+                name,
+                exp_tensor.dtype,
+                act_tensor.dtype,
+            )
+
+        # Compare values in float32 for precision
+        exp_f32 = exp_tensor.float().flatten()
+        act_f32 = act_tensor.float().flatten()
+        result["total_elements_compared"] += exp_f32.numel()
+
+        # Compute differences
+        diff = (exp_f32 - act_f32).abs()
+        nonzero_diff_mask = diff > 0
+        num_different = nonzero_diff_mask.sum().item()
+
+        if num_different > 0:
+            result["mismatched_params"].append(name)
+            result["total_elements_different"] += num_different
+
+            # Compute statistics for differing elements
+            diff_values = diff[nonzero_diff_mask]
+            max_diff = diff_values.max().item()
+            mean_diff = diff_values.mean().item()
+            median_diff = diff_values.median().item()
+
+            # Check if differences are consistent with FP precision errors
+            # bfloat16 has ~7 bits of mantissa, so max relative error ~1e-2
+            # float16 has ~10 bits of mantissa, so max relative error ~1e-3
+            exp_abs = exp_f32[nonzero_diff_mask].abs()
+            relative_diff = (diff_values / (exp_abs + 1e-12)).max().item()
+
+            stats = {
+                "num_different": num_different,
+                "total_elements": exp_f32.numel(),
+                "percent_different": 100.0 * num_different / exp_f32.numel(),
+                "max_abs_diff": max_diff,
+                "mean_abs_diff": mean_diff,
+                "median_abs_diff": median_diff,
+                "max_relative_diff": relative_diff,
+                "expected_dtype": str(exp_tensor.dtype),
+                "actual_dtype": str(act_tensor.dtype),
+            }
+            result["diff_stats"][name] = stats
+
+            # Log detailed info for first few mismatched params
+            if diff_params_logged < max_diff_params_to_log:
+                # Find indices of largest differences
+                top_diff_indices = diff.topk(min(5, num_different)).indices.tolist()
+                top_diffs = []
+                for idx in top_diff_indices:
+                    top_diffs.append(
+                        {
+                            "idx": idx,
+                            "expected": exp_f32[idx].item(),
+                            "actual": act_f32[idx].item(),
+                            "diff": diff[idx].item(),
+                        }
+                    )
+
+                logger.warning(
+                    "[compare_state_dicts] PARAM DIFFERS: %s | "
+                    "different=%d/%d (%.4f%%) | "
+                    "max_diff=%.6e | mean_diff=%.6e | max_rel_diff=%.6e | "
+                    "dtype: expected=%s actual=%s",
+                    name,
+                    num_different,
+                    exp_f32.numel(),
+                    stats["percent_different"],
+                    max_diff,
+                    mean_diff,
+                    relative_diff,
+                    exp_tensor.dtype,
+                    act_tensor.dtype,
+                )
+                logger.warning(
+                    "[compare_state_dicts] %s top differences: %s",
+                    name,
+                    top_diffs,
+                )
+                diff_params_logged += 1
+
+            # Check if this looks like FP precision error
+            # Large absolute differences (>1.0) or high relative differences (>10%)
+            # suggest something other than FP rounding
+            if max_diff > 1.0 or relative_diff > 0.1:
+                result["likely_fp_error"] = False
+
+    # Summary logging
+    if result["mismatched_params"]:
+        logger.error(
+            "[compare_state_dicts] SUMMARY: %d/%d params differ | "
+            "%d/%d elements differ (%.4f%%) | "
+            "likely_fp_precision_error=%s | "
+            "missing_in_actual=%d | missing_in_expected=%d",
+            len(result["mismatched_params"]),
+            result["total_params_checked"],
+            result["total_elements_different"],
+            result["total_elements_compared"],
+            100.0 * result["total_elements_different"] / max(1, result["total_elements_compared"]),
+            result["likely_fp_error"],
+            len(result["missing_in_actual"]),
+            len(result["missing_in_expected"]),
+        )
+
+        if result["likely_fp_error"]:
+            logger.error(
+                "[compare_state_dicts] DIAGNOSIS: Differences appear to be floating-point "
+                "precision errors, likely from bfloat16<->float32 conversions during "
+                "delta computation/reconstruction. Consider using float32 throughout "
+                "or accepting small precision loss."
+            )
+        else:
+            logger.error(
+                "[compare_state_dicts] DIAGNOSIS: Differences are TOO LARGE to be FP precision. "
+                "This suggests a bug in delta computation/application, wrong base checkpoint, "
+                "or data corruption."
+            )
+    else:
+        logger.info(
+            "[compare_state_dicts] All %d params match exactly",
+            result["total_params_checked"],
+        )
+
+    return result
+
+
 def estimate_sparse_size(
     nonzero_params: int,
     index_dtype: torch.dtype = torch.int32,
