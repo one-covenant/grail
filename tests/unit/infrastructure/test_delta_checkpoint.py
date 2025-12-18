@@ -87,13 +87,14 @@ class TestComputeSparseDelta:
             "layer.weight": torch.tensor([1.0001, 2.0, 3.5, 4.0]),  # Only 3.5 is significant
         }
 
-        # With threshold 0.01, only the 0.5 delta should be captured
+        # With threshold 0.01, only the change at index 2 should be captured
         sparse_tensors, shapes, stats = compute_sparse_delta(
             current_state, base_state, threshold=0.01
         )
 
         assert sparse_tensors["layer.weight.indices"].shape[0] == 1
-        assert sparse_tensors["layer.weight.values"].item() == pytest.approx(0.5)
+        # Now stores actual value (3.5), not the delta (0.5)
+        assert sparse_tensors["layer.weight.values"].item() == pytest.approx(3.5)
 
     def test_multidimensional_tensors(self) -> None:
         """Test delta computation on 2D tensors."""
@@ -115,42 +116,43 @@ class TestComputeSparseDelta:
         indices = sparse_tensors["weight.indices"]
         assert indices.tolist() == [0, 6, 11]  # Flat indices
 
-    def test_float32_precision(self) -> None:
-        """Test that deltas are computed in float32 for precision."""
+    def test_preserves_original_dtype(self) -> None:
+        """Test that values preserve the original dtype."""
         # Use bfloat16 tensors
         base_state = {
             "weight": torch.tensor([1.0, 2.0], dtype=torch.bfloat16),
         }
         current_state = {
-            "weight": torch.tensor([1.0001, 2.0001], dtype=torch.bfloat16),
+            "weight": torch.tensor([1.5, 2.5], dtype=torch.bfloat16),
         }
 
         sparse_tensors, shapes, stats = compute_sparse_delta(current_state, base_state)
 
-        # Values should be float32
+        # Values should preserve original dtype (bfloat16)
         if sparse_tensors:
             for key in sparse_tensors:
                 if "values" in key:
-                    assert sparse_tensors[key].dtype == torch.float32
+                    assert sparse_tensors[key].dtype == torch.bfloat16
 
 
 class TestApplySparseDelta:
     """Tests for apply_sparse_delta function."""
 
-    def test_basic_delta_application(self) -> None:
-        """Test applying sparse delta to base state."""
+    def test_basic_value_replacement(self) -> None:
+        """Test replacing values at specified indices."""
         base_state = {
             "layer.weight": torch.tensor([1.0, 2.0, 3.0, 4.0]),
         }
+        # Values are the NEW values to place at indices, not deltas
         sparse_tensors = {
             "layer.weight.indices": torch.tensor([0, 2], dtype=torch.int32),
-            "layer.weight.values": torch.tensor([0.5, -0.5], dtype=torch.float32),
+            "layer.weight.values": torch.tensor([9.0, 7.0], dtype=torch.float32),
         }
         shapes = {"layer.weight": [4]}
 
         result = apply_sparse_delta(base_state, sparse_tensors, shapes, torch.float32)
 
-        expected = torch.tensor([1.5, 2.0, 2.5, 4.0])
+        expected = torch.tensor([9.0, 2.0, 7.0, 4.0])
         assert torch.allclose(result["layer.weight"], expected)
 
     def test_empty_sparse_delta(self) -> None:
@@ -164,10 +166,11 @@ class TestApplySparseDelta:
         assert torch.allclose(result["layer.weight"], base_state["layer.weight"])
 
     def test_multidimensional_reconstruction(self) -> None:
-        """Test reconstruction of 2D tensors from flat sparse delta."""
+        """Test reconstruction of 2D tensors from flat sparse values."""
         base_state = {
             "weight": torch.zeros(2, 3),
         }
+        # Values are the actual values to place at those flat indices
         sparse_tensors = {
             "weight.indices": torch.tensor([0, 5], dtype=torch.int32),  # (0,0) and (1,2)
             "weight.values": torch.tensor([1.0, 2.0], dtype=torch.float32),
@@ -186,7 +189,7 @@ class TestApplySparseDelta:
         }
         sparse_tensors = {
             "weight.indices": torch.tensor([0], dtype=torch.int32),
-            "weight.values": torch.tensor([0.5], dtype=torch.float32),
+            "weight.values": torch.tensor([5.0], dtype=torch.float32),
         }
         shapes = {"weight": [2]}
 
