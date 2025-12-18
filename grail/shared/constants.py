@@ -121,8 +121,13 @@ GRPO_RANKING_REWARD_WEIGHT = float(os.getenv("GRAIL_GRPO_RANKING_REWARD_WEIGHT",
 GRPO_RANKING_VARIANCE_WEIGHT = float(os.getenv("GRAIL_GRPO_RANKING_VARIANCE_WEIGHT", "0.3"))
 
 # Checkpoint retention controls
-CHECKPOINT_RETENTION_LIMIT = int(os.getenv("GRAIL_CHECKPOINT_RETENTION_LIMIT", "3"))
 CHECKPOINT_MILESTONE_INTERVAL = int(os.getenv("GRAIL_CHECKPOINT_MILESTONE_INTERVAL", "100"))
+
+# R2 retention limits (used by checkpoint_publisher for trainer uploads)
+# BASE: complete model weights (~14GB); DELTA: sparse diffs that depend on a BASE
+# DELTA_RETENTION should be > DELTA_BASE_INTERVAL to prevent orphaned deltas
+BASE_CHECKPOINT_RETENTION_LIMIT = int(os.getenv("GRAIL_BASE_CHECKPOINT_RETENTION_LIMIT", "3"))
+DELTA_CHECKPOINT_RETENTION_LIMIT = int(os.getenv("GRAIL_DELTA_CHECKPOINT_RETENTION_LIMIT", "15"))
 
 # Trainer identity used for checkpoint publication
 TRAINER_UID = 0
@@ -282,6 +287,17 @@ DELTA_THRESHOLD = float(os.getenv("GRAIL_DELTA_THRESHOLD", "0.0"))
 
 # Enable/disable delta checkpoint uploads (fallback to full if disabled)
 DELTA_CHECKPOINT_ENABLED = os.getenv("GRAIL_DELTA_CHECKPOINT_ENABLED", "1") == "1"
+
+# ──────────────── INVARIANT VALIDATION ────────────────────────────────────────
+# Ensure DELTA_CHECKPOINT_RETENTION_LIMIT >= DELTA_BASE_INTERVAL
+# This guarantees that retained deltas always have their base checkpoint available.
+# If violated, deltas can become orphaned when their base is deleted.
+assert DELTA_CHECKPOINT_RETENTION_LIMIT >= DELTA_BASE_INTERVAL, (
+    f"DELTA_CHECKPOINT_RETENTION_LIMIT ({DELTA_CHECKPOINT_RETENTION_LIMIT}) must be >= "
+    f"DELTA_BASE_INTERVAL ({DELTA_BASE_INTERVAL}) to prevent orphaned delta checkpoints. "
+    f"Deltas are created every DELTA_BASE_INTERVAL windows, so we must keep at least that many "
+    f"to ensure validators can reconstruct recent checkpoints."
+)
 
 # ────────────────  ASYNC TRAINING CONFIGURATION  ────────────────
 
