@@ -235,31 +235,69 @@ class InferenceServerManager(ABC):
         proc: subprocess.Popen[bytes] | None,
         wait_for_gpu: bool = True,
     ) -> None:
-        """Terminate subprocess gracefully and optionally wait for GPU memory release."""
+        """Terminate subprocess and all children, optionally wait for GPU memory release.
+
+        Uses process group kill to ensure vLLM/SGLang worker processes are terminated.
+        These workers hold GPU memory and must be killed for clean shutdown.
+        """
         if proc is None:
             logger.debug("_terminate_process: proc is None, skipping")
             return
 
         import asyncio
+        import signal
         import time
 
-        logger.info("_terminate_process: sending SIGTERM to pid=%s", proc.pid)
+        pid = proc.pid
+        logger.info("_terminate_process: terminating process group for pid=%s", pid)
+
         try:
-            proc.terminate()
+            # Get process group ID (same as pid when start_new_session=True)
             try:
-                logger.debug("_terminate_process: waiting for process to exit (timeout=10s)...")
+                pgid = os.getpgid(pid)
+            except ProcessLookupError:
+                logger.info("Process %s already exited, skipping termination", pid)
+                return
+
+            # Send SIGTERM to entire process group (including vLLM worker children)
+            logger.info("_terminate_process: sending SIGTERM to process group pgid=%s", pgid)
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except ProcessLookupError:
+                logger.info("Process group %s already exited", pgid)
+                return
+
+            # Wait for parent process to exit
+            try:
+                logger.debug("_terminate_process: waiting for process group to exit (timeout=10s)")
                 proc.wait(timeout=10)
-                logger.info("Server process terminated (pid=%s)", proc.pid)
+                logger.info("Server process group terminated (pgid=%s)", pgid)
             except subprocess.TimeoutExpired:
-                logger.warning("Process didn't exit gracefully, force killing pid=%s", proc.pid)
-                proc.kill()
-                logger.debug(
-                    "_terminate_process: waiting for killed process to exit (timeout=5s)..."
-                )
-                proc.wait(timeout=5)
-                logger.info("Process killed and reaped (pid=%s)", proc.pid)
+                # Force kill entire process group
+                logger.warning("Process group didn't exit gracefully, force killing pgid=%s", pgid)
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass  # Already dead
+                logger.debug("_terminate_process: waiting for killed process group (timeout=5s)")
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    logger.error("Failed to kill process group pgid=%s", pgid)
+                logger.info("Process group killed (pgid=%s)", pgid)
+
         except Exception as exc:
-            logger.warning("Error terminating process: %s", exc)
+            logger.warning("Error terminating process group: %s", exc)
+            # Fallback to simple process termination
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
 
         # Wait for GPU memory release if requested
         if wait_for_gpu and torch.cuda.is_available():
@@ -391,6 +429,7 @@ class VLLMServerManager(InferenceServerManager):
                 stderr=stderr_target,
                 text=False,
                 env=popen_env,
+                start_new_session=True,  # Create process group for clean shutdown of all workers
             )
             logger.info(
                 "Launched vLLM server: pid=%s host=%s port=%s",
@@ -611,7 +650,7 @@ class SGLangServerManager(InferenceServerManager):
             popen_env = os.environ.copy()
             if self._config.env:
                 popen_env.update(self._config.env)
-                logger.info("vLLM server using custom environment: %s", self._config.env)
+                logger.info("SGLang server using custom environment: %s", self._config.env)
 
             self._process = subprocess.Popen(
                 cmd,
@@ -619,6 +658,7 @@ class SGLangServerManager(InferenceServerManager):
                 stderr=stderr_target,
                 text=False,
                 env=popen_env,
+                start_new_session=True,  # Create process group for clean shutdown of all workers
             )
             logger.info(
                 "Launched SGLang server: pid=%s host=%s port=%s",

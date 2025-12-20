@@ -722,12 +722,19 @@ class TrainerNeuron(BaseNeuron):
                 server_model_name=server.model_name,
             )
 
-            metrics = await self._run_evaluation_cycle(
-                plan=plan,
-                window_number=window_number,
-                env_factory=env_factory,
-                evaluator=evaluator,
-            )
+            try:
+                metrics = await self._run_evaluation_cycle(
+                    plan=plan,
+                    window_number=window_number,
+                    env_factory=env_factory,
+                    evaluator=evaluator,
+                )
+            finally:
+                # Explicitly shutdown evaluator before server context exits
+                # to ensure all resources are released before vLLM process is killed
+                evaluator.shutdown()
+                del tokenizer
+                gc.collect()
 
         logger.info("Server shutdown complete")
         return metrics
