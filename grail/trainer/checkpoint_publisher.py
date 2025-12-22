@@ -35,17 +35,23 @@ import bittensor as bt
 import torch
 import zstandard as zstd
 
-from grail.infrastructure.checkpoint_consumer import (
-    CHECKPOINT_PREFIX,
-    CheckpointMetadata,
-)
+from grail.infrastructure.checkpoint_consumer import CheckpointMetadata
 from grail.infrastructure.comms import delete_prefix, get_file_size, upload_file_chunked
 from grail.infrastructure.delta_checkpoint import (
     compute_sparse_delta,
     compute_weights_hash,
 )
+from grail.shared.checkpoint_paths import (
+    checkpoint_delta_prefix,
+    checkpoint_full_prefix,
+    checkpoint_ready_marker_key,
+    checkpoint_window_prefix,
+)
 from grail.shared.constants import (
     BASE_CHECKPOINT_RETENTION_LIMIT,
+    CHECKPOINT_PREFIX,
+    CHECKPOINT_TYPE_DELTA,
+    CHECKPOINT_TYPE_FULL,
     DELTA_CHECKPOINT_RETENTION_LIMIT,
     DELTA_THRESHOLD,
     TRAINER_BATCH_SIZE,
@@ -222,7 +228,11 @@ async def _fetch_delta_anchor_window(
     """
     from grail.infrastructure.comms import download_file
 
-    metadata_key = f"{CHECKPOINT_PREFIX}checkpoint-{delta_window}/metadata.json"
+    # Delta checkpoints store their metadata under the DELTA sub-prefix so they can
+    # coexist with a FULL checkpoint at the same window.
+    from grail.shared.checkpoint_paths import checkpoint_delta_metadata_key
+
+    metadata_key = checkpoint_delta_metadata_key(delta_window)
     try:
         metadata_bytes = await download_file(
             metadata_key,
@@ -381,11 +391,11 @@ class CheckpointPublisher:
             )
             return
 
-        # Delete windows outside retention policy
+        # Delete windows outside retention policy (deletes entire window including DELTA/FULL)
         deleted_count = 0
         for window in remote_windows:
             if window not in keep_windows:
-                prefix = f"{CHECKPOINT_PREFIX}checkpoint-{window}"
+                prefix = checkpoint_window_prefix(window)
                 logger.info("Deleting remote checkpoint prefix %s", prefix)
                 try:
                     await delete_prefix(prefix, credentials=self.credentials, use_write=True)
@@ -418,7 +428,7 @@ class CheckpointPublisher:
         Returns:
             True if marker was added successfully, False otherwise
         """
-        ready_key = f"{CHECKPOINT_PREFIX}checkpoint-{checkpoint_window}/READY-{ready_window}"
+        ready_key = checkpoint_ready_marker_key(checkpoint_window, ready_window)
 
         try:
             await upload_file_chunked(
@@ -500,6 +510,7 @@ class CheckpointPublisher:
                 git_commit=os.getenv("GIT_COMMIT", "unknown"),
                 created_at=time.time(),
                 model_name=model_name,
+                checkpoint_type=CHECKPOINT_TYPE_FULL,
             )
 
             metadata_dict = {**metadata.__dict__, "config_hash": config_hash}
@@ -510,7 +521,11 @@ class CheckpointPublisher:
             signature = self.wallet.hotkey.sign(data=canonical_metadata).hex()
             (temp_dir / "manifest.sig").write_text(signature)
 
-            remote_prefix = f"{CHECKPOINT_PREFIX}checkpoint-{target_window}"
+            # Write FULL marker file
+            (temp_dir / "FULL").touch()
+
+            # Upload to FULL subdir
+            remote_prefix = checkpoint_full_prefix(target_window)
             semaphore = asyncio.Semaphore(4)
 
             async def upload_file(path: Path) -> bool:
@@ -678,6 +693,7 @@ class CheckpointPublisher:
                 git_commit=os.getenv("GIT_COMMIT", "unknown"),
                 created_at=snapshot_metadata.get("timestamp", time.time()),
                 model_name="async_trainer_snapshot",
+                checkpoint_type=CHECKPOINT_TYPE_FULL,
             )
 
             config_hash = hashlib.sha256(
@@ -694,12 +710,15 @@ class CheckpointPublisher:
             canonical_metadata = json.dumps(metadata_dict, sort_keys=True, separators=(",", ":"))
             signature = self.wallet.hotkey.sign(data=canonical_metadata).hex()
             (staging_path / "manifest.sig").write_text(signature)
+
+            # Write FULL marker file
+            (staging_path / "FULL").touch()
             prep_metadata_s = time.time() - prep_start
 
-            # Upload to target window location
-            remote_prefix = f"{CHECKPOINT_PREFIX}checkpoint-{target_window}"
+            # Upload to FULL subdir
+            remote_prefix = checkpoint_full_prefix(target_window)
 
-            logger.info("Uploading checkpoint from staging to %s", remote_prefix)
+            logger.info("Uploading FULL checkpoint from staging to %s", remote_prefix)
 
             semaphore = asyncio.Semaphore(4)
 
@@ -956,7 +975,7 @@ class CheckpointPublisher:
                 git_commit=os.getenv("GIT_COMMIT", "unknown"),
                 created_at=snapshot_metadata.get("timestamp", time.time()),
                 model_name="async_trainer_snapshot",
-                checkpoint_type="DELTA",
+                checkpoint_type=CHECKPOINT_TYPE_DELTA,
                 prev_window=prev_window,
                 anchor_window=anchor_window,
                 weights_hash=weights_hash,
@@ -980,8 +999,8 @@ class CheckpointPublisher:
             # Write DELTA marker file
             (temp_dir / "DELTA").write_text("")
 
-            # Upload to target window location
-            remote_prefix = f"{CHECKPOINT_PREFIX}checkpoint-{target_window}"
+            # Upload to DELTA subdir
+            remote_prefix = checkpoint_delta_prefix(target_window)
 
             logger.info(
                 "Uploading delta checkpoint to %s (prev=%d, anchor=%d, sparsity=%.2f%%, %d non-zero params)",
@@ -1102,7 +1121,7 @@ class CheckpointPublisher:
         self,
         staging_path: Path,
         target_window: int,
-    ) -> None:
+    ) -> bool:
         """Upload FULL checkpoint in background (non-blocking, fire-and-forget).
 
         This is called at anchor windows while DELTA upload proceeds synchronously.
@@ -1160,7 +1179,7 @@ class CheckpointPublisher:
                 git_commit=os.getenv("GIT_COMMIT", "unknown"),
                 created_at=snapshot_metadata.get("timestamp", time.time()),
                 model_name="async_trainer_snapshot",
-                checkpoint_type="FULL",  # Explicitly mark as FULL
+                checkpoint_type=CHECKPOINT_TYPE_FULL,
             )
 
             config_hash = hashlib.sha256(
@@ -1195,8 +1214,8 @@ class CheckpointPublisher:
                 # Write FULL marker
                 (temp_dir / "FULL").touch()
 
-                # Upload to R2
-                remote_prefix = f"{CHECKPOINT_PREFIX}checkpoint-{target_window}"
+                # Upload to FULL subdir
+                remote_prefix = checkpoint_full_prefix(target_window)
 
                 semaphore = asyncio.Semaphore(4)
 
@@ -1230,6 +1249,7 @@ class CheckpointPublisher:
                         target_window,
                         total_mb,
                     )
+                    return True
                 else:
                     failed_count = sum(1 for r in results if not r)
                     logger.warning(
@@ -1238,6 +1258,7 @@ class CheckpointPublisher:
                         failed_count,
                         len(results),
                     )
+                    return False
 
             finally:
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1249,3 +1270,4 @@ class CheckpointPublisher:
                 target_window,
                 exc,
             )
+            return False
