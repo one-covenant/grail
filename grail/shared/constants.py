@@ -276,6 +276,23 @@ PARAM_CHANGE_RELATIVE_EPS = float(os.getenv("GRAIL_PARAM_CHANGE_RELATIVE_EPS", "
 # Enable/disable sparse quality analysis (runs at same interval as param tracking)
 SPARSE_QUALITY_ENABLED = os.getenv("GRAIL_SPARSE_QUALITY_ENABLED", "0") == "1"
 
+# ────────────────  CHECKPOINT PATH CONFIGURATION  ────────────────
+
+# R2 bucket prefix for all checkpoints
+CHECKPOINT_PREFIX = "grail/checkpoints/"
+
+# Subdirectory names for checkpoint types
+# At anchor windows, both DELTA and FULL coexist under:
+#   checkpoint-{window}/DELTA/  (sparse delta for caught-up consumers)
+#   checkpoint-{window}/FULL/   (full weights for new joiners)
+CHECKPOINT_SUBDIR_DELTA = "DELTA"
+CHECKPOINT_SUBDIR_FULL = "FULL"
+
+# Checkpoint type identifiers (used in metadata.json)
+CHECKPOINT_TYPE_DELTA = "DELTA"
+CHECKPOINT_TYPE_FULL = "FULL"
+
+
 # ────────────────  DELTA CHECKPOINT CONFIGURATION  ────────────────
 
 # Upload FULL checkpoint every N windows (deltas for intermediate windows)
