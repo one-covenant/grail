@@ -45,16 +45,25 @@ import zstandard as zstd
 
 from grail.shared.safetensors_utils import load_model_state_dict
 
+from ..shared.checkpoint_paths import (
+    checkpoint_delta_metadata_key,
+    checkpoint_delta_prefix,
+    checkpoint_full_metadata_key,
+    checkpoint_full_prefix,
+    checkpoint_window_prefix,
+    parse_window_from_prefix,
+)
 from ..shared.constants import (
     BASE_CHECKPOINT_RETENTION_LIMIT,
+    CHECKPOINT_PREFIX,
+    CHECKPOINT_TYPE_DELTA,
+    CHECKPOINT_TYPE_FULL,
     GRAIL_CHECKPOINT_MOD10,
 )
 from . import comms
 from .delta_checkpoint import apply_sparse_delta, compute_weights_hash
 
 logger = logging.getLogger(__name__)
-
-CHECKPOINT_PREFIX = "grail/checkpoints/"
 
 
 # --------------------------------------------------------------------------- #
@@ -75,17 +84,24 @@ class CheckpointMetadata:
     parent_window: int | None = None
 
     # Delta checkpoint fields (chained deltas)
-    checkpoint_type: str = "FULL"  # "FULL" or "DELTA"
+    checkpoint_type: str = CHECKPOINT_TYPE_FULL  # "FULL" or "DELTA"
     prev_window: int | None = None  # For DELTA: immediate predecessor checkpoint (chained)
     anchor_window: int | None = None  # For DELTA: nearest FULL checkpoint for recovery
     weights_hash: str | None = None  # SHA256 of final weights for verification
 
     def remote_prefix(self) -> str:
-        return f"{CHECKPOINT_PREFIX}checkpoint-{self.window}"
+        """Get the remote R2 prefix for this checkpoint.
+
+        DELTA checkpoints live under a dedicated sub-prefix so they can coexist
+        with a FULL anchor checkpoint at the same window.
+        """
+        if self.is_delta():
+            return checkpoint_delta_prefix(self.window)
+        return checkpoint_full_prefix(self.window)
 
     def is_delta(self) -> bool:
         """Check if this is a delta checkpoint."""
-        return self.checkpoint_type == "DELTA"
+        return self.checkpoint_type == CHECKPOINT_TYPE_DELTA
 
 
 class CheckpointDownloadError(RuntimeError):
@@ -133,7 +149,8 @@ class CheckpointManager:
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self.credentials = credentials
         self.keep_limit = max(1, keep_limit)
-        self._metadata_cache: dict[int, CheckpointMetadata] = {}
+        # Cache FULL and DELTA metadata separately per window.
+        self._metadata_cache: dict[tuple[int, str], CheckpointMetadata] = {}
         self._download_locks: dict[int, asyncio.Lock] = {}
         self._fallback_attempted: set[int] = set()
 
@@ -587,18 +604,10 @@ class CheckpointManager:
         )
         windows: set[int] = set()
         for key in keys:
-            # Keys look like: grail/checkpoints/checkpoint-<window>/...
-            # Extract window from the checkpoint-<window> segment
-            try:
-                # Split into parts: ['grail', 'checkpoints', 'checkpoint-<window>', ...]
-                parts = key.split("/")
-                if len(parts) >= 3:
-                    checkpoint_segment = parts[2]  # 'checkpoint-<window>'
-                    if checkpoint_segment.startswith("checkpoint-"):
-                        window = int(checkpoint_segment.split("-", 1)[1])
-                        windows.add(window)
-            except (IndexError, ValueError):
-                continue
+            # Extract window number using shared utility
+            window = parse_window_from_prefix(key)
+            if window is not None:
+                windows.add(window)
         return sorted(windows)
 
     async def _get_checkpoint_ready_window(self, checkpoint_window: int) -> int | None:
@@ -612,7 +621,7 @@ class CheckpointManager:
         """
         try:
             # List files in checkpoint directory
-            prefix = f"{CHECKPOINT_PREFIX}checkpoint-{checkpoint_window}/"
+            prefix = checkpoint_window_prefix(checkpoint_window) + "/"
             keys = await comms.list_bucket_files(
                 prefix,
                 credentials=self.credentials,
@@ -679,10 +688,23 @@ class CheckpointManager:
     # --------------------------- Internal helpers --------------------------- #
 
     async def _fetch_metadata(self, window: int) -> CheckpointMetadata | None:
-        if window in self._metadata_cache:
-            return self._metadata_cache[window]
+        """Fetch checkpoint metadata, preferring DELTA when available.
 
-        remote_key = f"{CHECKPOINT_PREFIX}checkpoint-{window}/metadata.json"
+        This enables continuously running miners/validators to use the delta fast-path
+        even at anchor windows (where both FULL and DELTA may exist).
+        """
+        metadata = await self._fetch_delta_metadata(window)
+        if metadata is not None:
+            return metadata
+        return await self._fetch_full_metadata(window)
+
+    async def _fetch_delta_metadata(self, window: int) -> CheckpointMetadata | None:
+        """Fetch DELTA checkpoint metadata from DELTA subdir."""
+        cache_key = (window, CHECKPOINT_TYPE_DELTA)
+        if cache_key in self._metadata_cache:
+            return self._metadata_cache[cache_key]
+
+        remote_key = checkpoint_delta_metadata_key(window)
         payload = await comms.get_file(remote_key, credentials=self.credentials, use_write=False)
         if not payload:
             return None
@@ -694,12 +716,38 @@ class CheckpointManager:
             git_commit=payload.get("git_commit", "unknown"),
             created_at=float(payload.get("created_at", 0.0)),
             model_name=payload.get("model_name", "no_name"),
-            checkpoint_type=payload.get("checkpoint_type", "FULL"),
+            checkpoint_type=payload.get("checkpoint_type", CHECKPOINT_TYPE_DELTA),
             prev_window=payload.get("prev_window"),
             anchor_window=payload.get("anchor_window"),
             weights_hash=payload.get("weights_hash"),
         )
-        self._metadata_cache[window] = metadata
+        self._metadata_cache[cache_key] = metadata
+        return metadata
+
+    async def _fetch_full_metadata(self, window: int) -> CheckpointMetadata | None:
+        """Fetch FULL checkpoint metadata from FULL subdir."""
+        cache_key = (window, CHECKPOINT_TYPE_FULL)
+        if cache_key in self._metadata_cache:
+            return self._metadata_cache[cache_key]
+
+        remote_key = checkpoint_full_metadata_key(window)
+        payload = await comms.get_file(remote_key, credentials=self.credentials, use_write=False)
+        if not payload:
+            return None
+
+        metadata = CheckpointMetadata(
+            window=payload.get("window", window),
+            file_manifest=payload.get("file_manifest", {}),
+            training_config=payload.get("training_config", {}),
+            git_commit=payload.get("git_commit", "unknown"),
+            created_at=float(payload.get("created_at", 0.0)),
+            model_name=payload.get("model_name", "no_name"),
+            checkpoint_type=payload.get("checkpoint_type", CHECKPOINT_TYPE_FULL),
+            prev_window=payload.get("prev_window"),
+            anchor_window=payload.get("anchor_window"),
+            weights_hash=payload.get("weights_hash"),
+        )
+        self._metadata_cache[cache_key] = metadata
         return metadata
 
     async def _load_manifest(self, checkpoint_dir: Path) -> dict[str, str] | None:
@@ -740,8 +788,11 @@ class CheckpointManager:
 
         Used when metadata.json is missing or incomplete. Skips integrity
         verification and simply mirrors the prefix into tmp_dir.
+
+        Tries FULL subdir first (for bootstrap), then DELTA subdir.
         """
-        prefix_dir = f"{CHECKPOINT_PREFIX}checkpoint-{window}/"
+        # Try FULL first (for new joiners), then DELTA
+        prefix_dir = checkpoint_full_prefix(window) + "/"
         keys = await comms.list_bucket_files(
             prefix_dir, credentials=self.credentials, use_write=False
         )
@@ -986,7 +1037,20 @@ class CheckpointManager:
                 except Exception:
                     pass  # Continue walking if cache check fails
 
-            prev_meta = await self._fetch_metadata(current.prev_window)
+            # Prefer stopping at a FULL anchor when available (anchor windows may also
+            # have a DELTA published for sequential, in-place updates).
+            prev_meta: CheckpointMetadata | None = None
+            try:
+                from grail.shared.retention_utils import is_anchor_window
+
+                if is_anchor_window(current.prev_window):
+                    prev_meta = await self._fetch_full_metadata(current.prev_window)
+            except Exception:
+                prev_meta = None
+
+            if prev_meta is None:
+                # Normal case: prefer DELTA for intermediate windows, fallback to FULL.
+                prev_meta = await self._fetch_metadata(current.prev_window)
             if prev_meta is None:
                 logger.error("Cannot fetch metadata for chain link %s", current.prev_window)
                 return None
