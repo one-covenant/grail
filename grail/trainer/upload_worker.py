@@ -15,6 +15,8 @@ import json
 import logging
 import multiprocessing
 import queue
+import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -76,7 +78,7 @@ async def _upload_full_background(
     staging_path: Path,
     checkpoint_publisher: CheckpointPublisher,
     target_window: int,
-) -> None:
+) -> bool:
     """Upload FULL checkpoint in background (non-blocking).
 
     This runs as a fire-and-forget task at anchor windows while DELTA upload
@@ -90,8 +92,15 @@ async def _upload_full_background(
     """
     try:
         logger.info("Background FULL upload starting for checkpoint-%s", target_window)
-        await checkpoint_publisher.upload_full_background(staging_path, target_window)
-        logger.info("Background FULL upload completed for checkpoint-%s", target_window)
+        ok = await checkpoint_publisher.upload_full_background(staging_path, target_window)
+        if ok:
+            logger.info("Background FULL upload completed for checkpoint-%s", target_window)
+        else:
+            logger.warning(
+                "Background FULL upload did not complete cleanly for checkpoint-%s",
+                target_window,
+            )
+        return ok
     except Exception as exc:
         # Background task - log error but don't propagate
         # Next anchor window will retry, and DELTA chain remains valid
@@ -100,6 +109,10 @@ async def _upload_full_background(
             target_window,
             exc,
         )
+        return False
+    finally:
+        # This path is a dedicated copy created by the upload worker; it is safe to remove.
+        shutil.rmtree(staging_path, ignore_errors=True)
 
 
 async def upload_worker_loop(
@@ -266,13 +279,39 @@ async def upload_worker_loop(
                                 "Starting background FULL upload for anchor checkpoint-%s",
                                 checkpoint_window,
                             )
-                            asyncio.create_task(
+                            # Copy staging synchronously to avoid a race with snapshot_manager.cleanup_staging()
+                            bg_dir = Path(tempfile.mkdtemp(prefix=f"bg-full-{checkpoint_window}-"))
+                            shutil.copytree(staging_path, bg_dir, dirs_exist_ok=True)
+
+                            bg_task = asyncio.create_task(
                                 _upload_full_background(
-                                    staging_path,
+                                    bg_dir,
                                     checkpoint_publisher,
                                     checkpoint_window,
                                 )
                             )
+
+                            checkpoint_window_for_task = checkpoint_window
+
+                            def _on_bg_done(
+                                task: asyncio.Task[bool],
+                                *,
+                                _checkpoint_window: int = checkpoint_window_for_task,
+                            ) -> None:
+                                nonlocal anchor_window
+                                try:
+                                    ok = task.result()
+                                except Exception:  # noqa: BLE001
+                                    ok = False
+                                if ok:
+                                    # Only advance the anchor after we know the FULL upload succeeded.
+                                    anchor_window = _checkpoint_window
+                                    logger.info(
+                                        "✅ Background FULL anchor confirmed for checkpoint-%s",
+                                        _checkpoint_window,
+                                    )
+
+                            bg_task.add_done_callback(_on_bg_done)
 
                     except UploadError:
                         # Delta upload failed, fallback to FULL upload
@@ -302,11 +341,7 @@ async def upload_worker_loop(
                     prev_window = checkpoint_window
                     prev_state = loaded_state
                     # Update anchor on FULL uploads (including background FULL at anchors)
-                    is_new_anchor = (
-                        should_upload_full_only
-                        or did_fallback_to_full
-                        or should_upload_full_background
-                    )
+                    is_new_anchor = should_upload_full_only or did_fallback_to_full
                     if is_new_anchor:
                         anchor_window = checkpoint_window
                         logger.info(
