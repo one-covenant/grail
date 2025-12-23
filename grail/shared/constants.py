@@ -121,7 +121,7 @@ GRPO_RANKING_REWARD_WEIGHT = float(os.getenv("GRAIL_GRPO_RANKING_REWARD_WEIGHT",
 GRPO_RANKING_VARIANCE_WEIGHT = float(os.getenv("GRAIL_GRPO_RANKING_VARIANCE_WEIGHT", "0.3"))
 
 # Checkpoint retention controls
-CHECKPOINT_MILESTONE_INTERVAL = int(os.getenv("GRAIL_CHECKPOINT_MILESTONE_INTERVAL", "100"))
+CHECKPOINT_MILESTONE_INTERVAL = int(os.getenv("GRAIL_CHECKPOINT_MILESTONE_INTERVAL", "0"))
 
 # R2 retention limits (used by checkpoint_publisher for trainer uploads)
 # BASE: complete model weights (~14GB); DELTA: sparse diffs that depend on a BASE
