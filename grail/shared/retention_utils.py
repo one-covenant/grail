@@ -14,6 +14,13 @@ from grail.shared.constants import (
     WINDOW_LENGTH,
 )
 
+SAFETY_MARGIN_WINDOWS = 5
+
+
+def _anchor_stride() -> int:
+    """Calculate the anchor stride (blocks between FULL checkpoints)."""
+    return max(1, int(DELTA_BASE_INTERVAL)) * int(WINDOW_LENGTH)
+
 
 def compute_retention_windows(
     current_window: int,
@@ -39,45 +46,30 @@ def compute_retention_windows(
     Returns:
         Set of window numbers to retain
     """
-    keep: set[int] = set()
     if current_window < 0:
-        return keep
+        return set()
 
-    # Always keep bootstrap windows
-    for i in range(bootstrap_windows):
-        keep.add(i * WINDOW_LENGTH)
+    keep: set[int] = set()
+    stride = _anchor_stride()
 
-    # Calculate anchor stride (blocks between FULL checkpoints)
-    delta_base_interval_windows = max(1, int(DELTA_BASE_INTERVAL))
-    anchor_stride = delta_base_interval_windows * int(WINDOW_LENGTH)
+    # Bootstrap windows (0 to N, capped at current)
+    keep.update(
+        w for w in range(0, bootstrap_windows * WINDOW_LENGTH, WINDOW_LENGTH) if w <= current_window
+    )
 
-    # Calculate current anchor (last FULL boundary)
-    current_anchor = (current_window // anchor_stride) * anchor_stride
+    # Current anchor with safety margin, and all windows from there to now
+    current_anchor = (current_window // stride) * stride - SAFETY_MARGIN_WINDOWS * WINDOW_LENGTH
+    keep.update(range(current_anchor, current_window + 1, WINDOW_LENGTH))
 
-    # Keep all windows from current anchor to now (the active chain)
-    w = current_anchor
-    while w <= current_window:
-        keep.add(w)
-        w += WINDOW_LENGTH
-
-    # Keep previous anchor and its chain (for miners catching up)
-    prev_anchor = current_anchor - anchor_stride
+    # Previous anchor chain (for miners catching up)
+    prev_anchor = current_anchor - stride
     if prev_anchor >= 0:
-        keep.add(prev_anchor)
-        # Keep entire chain from previous anchor to current anchor
-        w = prev_anchor
-        while w < current_anchor:
-            keep.add(w)
-            w += WINDOW_LENGTH
+        keep.update(range(prev_anchor, current_anchor, WINDOW_LENGTH))
 
-    # Keep milestone checkpoints (long-term preservation)
+    # Milestone checkpoints (long-term preservation)
     if CHECKPOINT_MILESTONE_INTERVAL > 0:
-        interval_blocks = CHECKPOINT_MILESTONE_INTERVAL * WINDOW_LENGTH
-        if interval_blocks > 0:
-            milestone = (current_window // interval_blocks) * interval_blocks
-            while milestone >= 0:
-                keep.add(milestone)
-                milestone -= interval_blocks
+        interval = CHECKPOINT_MILESTONE_INTERVAL * WINDOW_LENGTH
+        keep.update(range(0, current_window + 1, interval))
 
     return keep
 
@@ -91,9 +83,8 @@ def get_anchor_window(target_window: int) -> int:
     Returns:
         The anchor window number
     """
-    delta_base_interval_windows = max(1, int(DELTA_BASE_INTERVAL))
-    anchor_stride = delta_base_interval_windows * int(WINDOW_LENGTH)
-    return (target_window // anchor_stride) * anchor_stride
+    stride = _anchor_stride()
+    return (target_window // stride) * stride
 
 
 def is_anchor_window(window: int) -> bool:
@@ -105,6 +96,4 @@ def is_anchor_window(window: int) -> bool:
     Returns:
         True if this window is an anchor window
     """
-    delta_base_interval_windows = max(1, int(DELTA_BASE_INTERVAL))
-    anchor_stride = delta_base_interval_windows * int(WINDOW_LENGTH)
-    return window % anchor_stride == 0
+    return window % _anchor_stride() == 0
