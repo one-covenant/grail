@@ -36,16 +36,21 @@ from trl import GRPOConfig, GRPOTrainer
 sys.stdout = open(sys.stdout.fileno(), mode="w", buffering=1)
 sys.stderr = open(sys.stderr.fileno(), mode="w", buffering=1)
 
+# Determine project root dynamically (research/trl/ -> project root)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", ".."))
+
 # Load environment from .env for WandB
-load_dotenv("/root/grail/.env")
+load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
 
-sys.path.append("/root/grail")
+sys.path.insert(0, _PROJECT_ROOT)
 
-# GRAIL imports - reuse task sources and validation logic (after sys.path.append)
+# GRAIL imports - reuse task sources and validation logic (after sys.path modification)
 from grail.environments.math_hendrycks_env import _math_answers_equal  # noqa: E402
 from grail.environments.providers import GSM8KTaskSource, MATHTaskSource  # noqa: E402
 from grail.shared.chat_templates import build_qwen_chat_template  # noqa: E402
 from grail.trainer.metrics import KMetricsAggregator, TaskReplicateResult  # noqa: E402
+from grail.trainer.analysis import AnalysisConfig, ModelAnalysisManager  # noqa: E402
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -169,9 +174,7 @@ SYSTEM_PROMPT = (
     f"Then, provide your solution between {SOLUTION_START}{SOLUTION_END}."
 )
 
-QWEN_CHAT_TEMPLATE = build_qwen_chat_template(
-    system_prompt=SYSTEM_PROMPT, reasoning_start=REASONING_START
-)
+QWEN_CHAT_TEMPLATE = build_qwen_chat_template(system_prompt=SYSTEM_PROMPT)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -983,6 +986,82 @@ class VLLMEvalCallback(TrainerCallback):
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# SPARSITY ANALYSIS CALLBACK (Parameter Change Tracking)
+# ════════════════════════════════════════════════════════════════════════════
+class SparsityCallback(TrainerCallback):
+    """Minimal callback for parameter change ratio and gradient tracking.
+
+    Uses on_optimizer_step which is called after optimizer.step() but BEFORE
+    zero_grad(), so gradients are still available. See:
+    /home/ubuntu/grail/.venv/lib/python3.11/site-packages/transformers/trainer.py:2740-2752
+    """
+
+    def __init__(self, analyzer: ModelAnalysisManager):
+        self.analyzer = analyzer
+
+    def on_optimizer_step(self, args: Any, state: Any, control: Any, **kwargs: Any) -> None:
+        """Called after optimizer.step() but before zero_grad() - gradients available."""
+        model = kwargs.get("model")
+        if model is None:
+            return
+
+        # Avoid duplicate WandB logs in distributed runs.
+        is_world_process_zero = getattr(state, "is_world_process_zero", True)
+        if not is_world_process_zero:
+            return
+
+        optimizer = kwargs.get("optimizer")
+        inputs = kwargs.get("inputs")
+
+        # Run analysis manager (computes metrics only at configured interval).
+        try:
+            analysis_metrics = self.analyzer.on_optimizer_step(
+                model=model,
+                inputs=inputs,
+                optimizer=optimizer,
+            )
+        except Exception:
+            return
+
+        # Log only at analysis measurement steps to match AnalysisConfig.interval.
+        is_measurement_step = (self.analyzer.step_count % self.analyzer.config.interval) == 0
+        if not (analysis_metrics or is_measurement_step):
+            return
+
+        metrics: dict[str, float] = dict(analysis_metrics)
+
+        # Capture gradient statistics (available here, before zero_grad) but only at measurement steps.
+        if is_measurement_step:
+            grad_norm = self._compute_gradient_norm(model)
+            if grad_norm is not None:
+                metrics["param_change/gradient_norm"] = grad_norm
+
+        if not metrics:
+            return
+
+        # Log to WandB.
+        # Note: state.global_step is incremented AFTER on_optimizer_step, so use +1.
+        try:
+            import wandb
+
+            if wandb.run:
+                step = int(state.global_step) + 1
+                wandb.log({f"sparsity/{k}": v for k, v in metrics.items()}, step=step)
+        except Exception:
+            pass
+
+    def _compute_gradient_norm(self, model: Any) -> float | None:
+        """Compute total gradient norm across all parameters."""
+        total_norm_sq = 0.0
+        count = 0
+        for p in model.parameters():
+            if p.grad is not None:
+                total_norm_sq += p.grad.norm(2).item() ** 2
+                count += 1
+        return (total_norm_sq**0.5) if count > 0 else None
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # MAIN TRAINING
 # ════════════════════════════════════════════════════════════════════════════
 def parse_args() -> argparse.Namespace:
@@ -1178,6 +1257,17 @@ def main() -> None:
 
     print(f"\n🏋️  Training with GRPO on {adapter.name.upper()}...")
 
+    # Initialize sparsity analysis (parameter change tracking only)
+    sparsity_config = AnalysisConfig(
+        interval=100,
+        param_change_enabled=True,
+        sparse_quality_enabled=False,
+        snapshot_dtype="bfloat16",
+    )
+    sparsity_analyzer = ModelAnalysisManager.create(sparsity_config)
+    sparsity_callback = SparsityCallback(sparsity_analyzer)
+    print(f"  ✓ Sparsity analysis enabled (interval={sparsity_config.interval})")
+
     # Initialize evaluation callback
     vllm_eval_callback = VLLMEvalCallback(
         adapter=adapter,
@@ -1193,7 +1283,7 @@ def main() -> None:
         args=grpo_config,
         train_dataset=train_ds,
         processing_class=tokenizer,
-        callbacks=[vllm_eval_callback],
+        callbacks=[vllm_eval_callback, sparsity_callback],
     )
 
     # Initialize WandB explicitly before baseline eval (GRPOTrainer does it lazily in .train())
