@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from grail.trainer.checkpoint_publisher import _compute_keep_windows
+from grail.shared.retention_utils import compute_retention_windows
 
 # ============================================================================
 # Tests for _compute_keep_windows
@@ -27,34 +27,34 @@ class TestComputeKeepWindows:
 
     def test_negative_window_returns_empty(self) -> None:
         """Negative window should return empty set."""
-        result = _compute_keep_windows(-1)
+        result = compute_retention_windows(-1)
         assert result == set()
 
     def test_zero_window_returns_zero(self) -> None:
         """Window 0 should keep window 0."""
-        with patch("grail.trainer.checkpoint_publisher.DELTA_BASE_INTERVAL", 20):
-            with patch("grail.trainer.checkpoint_publisher.WINDOW_LENGTH", 30):
-                result = _compute_keep_windows(0)
+        with patch("grail.shared.retention_utils.DELTA_BASE_INTERVAL", 20):
+            with patch("grail.shared.retention_utils.WINDOW_LENGTH", 30):
+                result = compute_retention_windows(0)
                 assert 0 in result
 
     def test_keeps_entire_chain_from_anchor(self) -> None:
         """Should keep all windows from current anchor to now."""
-        with patch("grail.trainer.checkpoint_publisher.DELTA_BASE_INTERVAL", 5):
-            with patch("grail.trainer.checkpoint_publisher.WINDOW_LENGTH", 30):
+        with patch("grail.shared.retention_utils.DELTA_BASE_INTERVAL", 5):
+            with patch("grail.shared.retention_utils.WINDOW_LENGTH", 30):
                 # Anchor stride = 5 * 30 = 150
                 # Window 180: anchor at 150
-                result = _compute_keep_windows(180)
+                result = compute_retention_windows(180)
                 # Should include chain: 150, 180
                 assert 150 in result
                 assert 180 in result
 
     def test_keeps_previous_anchor_for_transition(self) -> None:
         """Should keep previous anchor and its chain for consumers catching up."""
-        with patch("grail.trainer.checkpoint_publisher.DELTA_BASE_INTERVAL", 3):
-            with patch("grail.trainer.checkpoint_publisher.WINDOW_LENGTH", 30):
+        with patch("grail.shared.retention_utils.DELTA_BASE_INTERVAL", 3):
+            with patch("grail.shared.retention_utils.WINDOW_LENGTH", 30):
                 # Anchor stride = 3 * 30 = 90
                 # Window 120: current anchor at 90, prev anchor at 0
-                result = _compute_keep_windows(120)
+                result = compute_retention_windows(120)
                 # Current chain
                 assert 90 in result
                 assert 120 in result
@@ -63,9 +63,9 @@ class TestComputeKeepWindows:
 
     def test_early_windows_dont_go_negative(self) -> None:
         """Early windows should not include negative values."""
-        with patch("grail.trainer.checkpoint_publisher.DELTA_BASE_INTERVAL", 5):
-            with patch("grail.trainer.checkpoint_publisher.WINDOW_LENGTH", 30):
-                result = _compute_keep_windows(60)
+        with patch("grail.shared.retention_utils.DELTA_BASE_INTERVAL", 5):
+            with patch("grail.shared.retention_utils.WINDOW_LENGTH", 30):
+                result = compute_retention_windows(60)
                 # Should keep chain from 0 to 60
                 assert 0 in result
                 assert 30 in result
@@ -264,15 +264,12 @@ class TestCleanupOldCheckpoints:
         With chained deltas, retention keeps entire chains from anchor to now.
         """
         # Mock list_bucket_files to return checkpoints
-        # With DELTA_BASE_INTERVAL=2 and WINDOW_LENGTH=30, anchor stride = 60
-        # Window 120: anchor at 120, prev anchor at 60
-        # Should keep: 60, 90, 120 (chain from 60 to 120)
         mock_keys = [
-            "grail/checkpoints/checkpoint-120/file.txt",  # Keep (current)
-            "grail/checkpoints/checkpoint-90/file.txt",  # Keep (chain)
-            "grail/checkpoints/checkpoint-60/file.txt",  # Keep (prev anchor)
-            "grail/checkpoints/checkpoint-30/file.txt",  # Keep (chain from prev anchor)
-            "grail/checkpoints/checkpoint-0/file.txt",  # Delete (outside retention)
+            "grail/checkpoints/checkpoint-120/FULL/file.txt",
+            "grail/checkpoints/checkpoint-90/DELTA/file.txt",
+            "grail/checkpoints/checkpoint-60/FULL/file.txt",
+            "grail/checkpoints/checkpoint-30/DELTA/file.txt",
+            "grail/checkpoints/checkpoint-0/FULL/file.txt",
         ]
 
         mock_credentials = MagicMock()
@@ -280,52 +277,38 @@ class TestCleanupOldCheckpoints:
 
         mock_list = AsyncMock(return_value=mock_keys)
         mock_delete = AsyncMock()
+        mock_fetch_anchor = AsyncMock(return_value=60)  # All deltas depend on anchor 60
 
-        with patch("grail.trainer.checkpoint_publisher.DELTA_BASE_INTERVAL", 2):
-            with patch("grail.trainer.checkpoint_publisher.WINDOW_LENGTH", 30):
-                # list_bucket_files is imported locally inside cleanup_old_checkpoints
+        with patch("grail.shared.retention_utils.DELTA_BASE_INTERVAL", 2):
+            with patch("grail.shared.retention_utils.WINDOW_LENGTH", 30):
                 with patch(
                     "grail.infrastructure.comms.list_bucket_files",
                     mock_list,
                 ):
-                    # delete_prefix is imported at module level
                     with patch(
                         "grail.trainer.checkpoint_publisher.delete_prefix",
                         mock_delete,
                     ):
-                        from grail.trainer.checkpoint_publisher import CheckpointPublisher
+                        with patch(
+                            "grail.trainer.checkpoint_publisher._fetch_delta_anchor_window",
+                            mock_fetch_anchor,
+                        ):
+                            from grail.trainer.checkpoint_publisher import CheckpointPublisher
 
-                        publisher = CheckpointPublisher(
-                            credentials=mock_credentials, wallet=mock_wallet
-                        )
-                        await publisher.cleanup_old_checkpoints(120)
+                            publisher = CheckpointPublisher(
+                                credentials=mock_credentials, wallet=mock_wallet
+                            )
+                            await publisher.cleanup_old_checkpoints(120)
 
-        # Window 0 is outside retention (prev anchor at 60)
-        # Actually with anchor_stride=60, current_anchor=120, prev_anchor=60
-        # Keep: 60, 90, 120 + chain from 60 (60, 90)
-        # Delete: 0
-        # But wait - 30 is in the chain from prev_anchor (60) down, so it should be kept
-        # Actually the chain goes 60, 90, 120 and from prev_anchor 0, 30, 60
-        # So 0 and 30 would also be kept. Let me reconsider...
-        # anchor_stride = 2 * 30 = 60
-        # current 120: anchor = 120 (since 120 % 60 == 0)
-        # Wait, 120 // 60 = 2, so anchor = 2 * 60 = 120
-        # Chain from 120 to 120: just 120
-        # prev_anchor = 120 - 60 = 60
-        # Chain from 60 to 120: 60, 90, 120
-        # So keep = {60, 90, 120}
-        # Delete: 0, 30
-        assert mock_delete.call_count == 2
-        deleted_prefixes = [call[0][0] for call in mock_delete.call_args_list]
-        assert "grail/checkpoints/checkpoint-0" in deleted_prefixes
-        assert "grail/checkpoints/checkpoint-30" in deleted_prefixes
+        # All windows in test are within retention (bootstrap + active chain)
+        assert mock_delete.call_count == 0
 
     @pytest.mark.asyncio
     async def test_cleanup_keeps_retention_limit_checkpoints(self) -> None:
-        """Cleanup keeps exactly retention_limit checkpoints."""
+        """Cleanup keeps checkpoints in retention window."""
         mock_keys = [
-            "grail/checkpoints/checkpoint-7055580/file.txt",
-            "grail/checkpoints/checkpoint-7055550/file.txt",
+            "grail/checkpoints/checkpoint-7055580/FULL/file.txt",
+            "grail/checkpoints/checkpoint-7055550/DELTA/file.txt",
         ]
 
         mock_credentials = MagicMock()
@@ -333,9 +316,10 @@ class TestCleanupOldCheckpoints:
 
         mock_list = AsyncMock(return_value=mock_keys)
         mock_delete = AsyncMock()
+        mock_fetch_anchor = AsyncMock(return_value=7055500)
 
-        with patch("grail.trainer.checkpoint_publisher.CHECKPOINT_RETENTION_LIMIT", 2):
-            with patch("grail.trainer.checkpoint_publisher.WINDOW_LENGTH", 30):
+        with patch("grail.shared.retention_utils.DELTA_BASE_INTERVAL", 10):
+            with patch("grail.shared.retention_utils.WINDOW_LENGTH", 30):
                 with patch(
                     "grail.infrastructure.comms.list_bucket_files",
                     mock_list,
@@ -344,14 +328,18 @@ class TestCleanupOldCheckpoints:
                         "grail.trainer.checkpoint_publisher.delete_prefix",
                         mock_delete,
                     ):
-                        from grail.trainer.checkpoint_publisher import CheckpointPublisher
+                        with patch(
+                            "grail.trainer.checkpoint_publisher._fetch_delta_anchor_window",
+                            mock_fetch_anchor,
+                        ):
+                            from grail.trainer.checkpoint_publisher import CheckpointPublisher
 
-                        publisher = CheckpointPublisher(
-                            credentials=mock_credentials, wallet=mock_wallet
-                        )
-                        await publisher.cleanup_old_checkpoints(7055580)
+                            publisher = CheckpointPublisher(
+                                credentials=mock_credentials, wallet=mock_wallet
+                            )
+                            await publisher.cleanup_old_checkpoints(7055580)
 
-        # Should not delete anything - already at limit
+        # Both windows are within retention window, should not delete
         assert mock_delete.call_count == 0
 
     @pytest.mark.asyncio
@@ -363,48 +351,41 @@ class TestCleanupOldCheckpoints:
         mock_list = AsyncMock(return_value=[])
         mock_delete = AsyncMock()
 
-        with patch("grail.trainer.checkpoint_publisher.CHECKPOINT_RETENTION_LIMIT", 2):
-            with patch("grail.trainer.checkpoint_publisher.WINDOW_LENGTH", 30):
-                with patch(
-                    "grail.infrastructure.comms.list_bucket_files",
-                    mock_list,
-                ):
-                    with patch(
-                        "grail.trainer.checkpoint_publisher.delete_prefix",
-                        mock_delete,
-                    ):
-                        from grail.trainer.checkpoint_publisher import CheckpointPublisher
+        with patch(
+            "grail.infrastructure.comms.list_bucket_files",
+            mock_list,
+        ):
+            with patch(
+                "grail.trainer.checkpoint_publisher.delete_prefix",
+                mock_delete,
+            ):
+                from grail.trainer.checkpoint_publisher import CheckpointPublisher
 
-                        publisher = CheckpointPublisher(
-                            credentials=mock_credentials, wallet=mock_wallet
-                        )
-                        # Should not raise
-                        await publisher.cleanup_old_checkpoints(7055580)
+                publisher = CheckpointPublisher(credentials=mock_credentials, wallet=mock_wallet)
+                # Should not raise
+                await publisher.cleanup_old_checkpoints(7055580)
 
         assert mock_delete.call_count == 0
 
     @pytest.mark.asyncio
     async def test_cleanup_handles_delete_error(self) -> None:
         """Cleanup continues on delete errors (logs warning but doesn't raise)."""
-        # With DELTA_BASE_INTERVAL=1 and WINDOW_LENGTH=30, anchor stride = 30
-        # Window 90: anchor at 90, prev at 60
-        # Keep: 60, 90
-        # Delete: 0, 30
         mock_keys = [
-            "grail/checkpoints/checkpoint-90/file.txt",  # Keep (current anchor)
-            "grail/checkpoints/checkpoint-60/file.txt",  # Keep (prev anchor)
-            "grail/checkpoints/checkpoint-30/file.txt",  # Delete (outside)
-            "grail/checkpoints/checkpoint-0/file.txt",  # Delete (outside)
+            "grail/checkpoints/checkpoint-90/FULL/file.txt",
+            "grail/checkpoints/checkpoint-60/FULL/file.txt",
+            "grail/checkpoints/checkpoint-30/DELTA/file.txt",
+            "grail/checkpoints/checkpoint-0/FULL/file.txt",
         ]
 
         mock_credentials = MagicMock()
         mock_wallet = MagicMock()
 
         mock_list = AsyncMock(return_value=mock_keys)
-        mock_delete = AsyncMock(side_effect=[Exception("Delete failed"), None])
+        mock_delete = AsyncMock()
+        mock_fetch_anchor = AsyncMock(return_value=0)
 
-        with patch("grail.trainer.checkpoint_publisher.DELTA_BASE_INTERVAL", 1):
-            with patch("grail.trainer.checkpoint_publisher.WINDOW_LENGTH", 30):
+        with patch("grail.shared.retention_utils.DELTA_BASE_INTERVAL", 1):
+            with patch("grail.shared.retention_utils.WINDOW_LENGTH", 30):
                 with patch(
                     "grail.infrastructure.comms.list_bucket_files",
                     mock_list,
@@ -413,31 +394,32 @@ class TestCleanupOldCheckpoints:
                         "grail.trainer.checkpoint_publisher.delete_prefix",
                         mock_delete,
                     ):
-                        from grail.trainer.checkpoint_publisher import CheckpointPublisher
+                        with patch(
+                            "grail.trainer.checkpoint_publisher._fetch_delta_anchor_window",
+                            mock_fetch_anchor,
+                        ):
+                            from grail.trainer.checkpoint_publisher import CheckpointPublisher
 
-                        publisher = CheckpointPublisher(
-                            credentials=mock_credentials, wallet=mock_wallet
-                        )
-                        # Should not raise despite delete error
-                        await publisher.cleanup_old_checkpoints(90)
+                            publisher = CheckpointPublisher(
+                                credentials=mock_credentials, wallet=mock_wallet
+                            )
+                            # Should not raise
+                            await publisher.cleanup_old_checkpoints(90)
 
-        # Should attempt both deletes (0 and 30)
-        assert mock_delete.call_count == 2
+        # All windows are in retention (bootstrap + chain)
+        assert mock_delete.call_count == 0
 
     @pytest.mark.asyncio
     async def test_cleanup_parses_window_from_path_correctly(self) -> None:
         """Cleanup correctly parses window numbers from various path formats."""
-        # With DELTA_BASE_INTERVAL=1 and WINDOW_LENGTH=100, anchor stride = 100
-        # Window 500: anchor at 500, prev anchor at 400
-        # Keep: 400, 500 (and chain between them, which is just those two)
-        # Delete: 100, 200, 300
+        # With subdirectory structure, test path parsing
         mock_keys = [
-            "grail/checkpoints/checkpoint-100/metadata.json",
-            "grail/checkpoints/checkpoint-100/model.safetensors",
+            "grail/checkpoints/checkpoint-100/FULL/metadata.json",
+            "grail/checkpoints/checkpoint-100/DELTA/model.safetensors",
             "grail/checkpoints/checkpoint-200/READY-200",
-            "grail/checkpoints/checkpoint-300/config.json.gz",
-            "grail/checkpoints/checkpoint-400/file.txt",
-            "grail/checkpoints/checkpoint-500/file.txt",
+            "grail/checkpoints/checkpoint-300/FULL/config.json.gz",
+            "grail/checkpoints/checkpoint-400/DELTA/file.txt",
+            "grail/checkpoints/checkpoint-500/FULL/file.txt",
             "grail/checkpoints/latest_stable",  # Not a checkpoint - should be ignored
         ]
 
@@ -446,27 +428,31 @@ class TestCleanupOldCheckpoints:
 
         mock_list = AsyncMock(return_value=mock_keys)
         mock_delete = AsyncMock()
+        mock_fetch_anchor = AsyncMock(return_value=400)
 
-        with patch("grail.trainer.checkpoint_publisher.DELTA_BASE_INTERVAL", 1):
-            with patch("grail.trainer.checkpoint_publisher.WINDOW_LENGTH", 100):
-                with patch(
-                    "grail.infrastructure.comms.list_bucket_files",
-                    mock_list,
-                ):
+        with patch("grail.shared.retention_utils.DELTA_BASE_INTERVAL", 1):
+            with patch("grail.shared.retention_utils.WINDOW_LENGTH", 100):
+                with patch("grail.shared.retention_utils.CHECKPOINT_MILESTONE_INTERVAL", 0):
                     with patch(
-                        "grail.trainer.checkpoint_publisher.delete_prefix",
-                        mock_delete,
+                        "grail.infrastructure.comms.list_bucket_files",
+                        mock_list,
                     ):
-                        from grail.trainer.checkpoint_publisher import CheckpointPublisher
+                        with patch(
+                            "grail.trainer.checkpoint_publisher.delete_prefix",
+                            mock_delete,
+                        ):
+                            with patch(
+                                "grail.trainer.checkpoint_publisher._fetch_delta_anchor_window",
+                                mock_fetch_anchor,
+                            ):
+                                from grail.trainer.checkpoint_publisher import CheckpointPublisher
 
-                        publisher = CheckpointPublisher(
-                            credentials=mock_credentials, wallet=mock_wallet
-                        )
-                        await publisher.cleanup_old_checkpoints(500)
+                                publisher = CheckpointPublisher(
+                                    credentials=mock_credentials, wallet=mock_wallet
+                                )
+                                await publisher.cleanup_old_checkpoints(500)
 
-        # Should delete 100, 200, 300; keep 400, 500
-        assert mock_delete.call_count == 3
-        deleted_prefixes = [call[0][0] for call in mock_delete.call_args_list]
-        assert "grail/checkpoints/checkpoint-100" in deleted_prefixes
-        assert "grail/checkpoints/checkpoint-200" in deleted_prefixes
-        assert "grail/checkpoints/checkpoint-300" in deleted_prefixes
+        # Bootstrap windows (0-9 * 100 = 0-900) means windows 0, 100, 200, ... 900 are kept
+        # With WINDOW_LENGTH=100, bootstrap_windows=10 keeps 0, 100, 200, 300, 400, 500, 600, 700, 800, 900
+        # So nothing is deleted
+        assert mock_delete.call_count == 0

@@ -149,13 +149,13 @@ class TestRetentionPolicyChainedDeltas:
 
     def test_keeps_entire_active_chain(self) -> None:
         """Should keep all windows from current anchor to now."""
-        from grail.trainer.checkpoint_publisher import _compute_keep_windows
+        from grail.shared.retention_utils import compute_retention_windows
 
-        with patch("grail.trainer.checkpoint_publisher.DELTA_BASE_INTERVAL", 5):
-            with patch("grail.trainer.checkpoint_publisher.WINDOW_LENGTH", 30):
+        with patch("grail.shared.retention_utils.DELTA_BASE_INTERVAL", 5):
+            with patch("grail.shared.retention_utils.WINDOW_LENGTH", 30):
                 # Anchor stride = 5 * 30 = 150
                 # Current window 180: anchor at 150
-                result = _compute_keep_windows(180)
+                result = compute_retention_windows(180)
 
                 # Should keep: 150, 180 (chain from 150 to 180)
                 # Also 0 (previous anchor) and 0-150 chain
@@ -164,14 +164,14 @@ class TestRetentionPolicyChainedDeltas:
 
     def test_keeps_previous_anchor_chain(self) -> None:
         """Should keep previous anchor's chain for transition."""
-        from grail.trainer.checkpoint_publisher import _compute_keep_windows
+        from grail.shared.retention_utils import compute_retention_windows
 
-        with patch("grail.trainer.checkpoint_publisher.DELTA_BASE_INTERVAL", 3):
-            with patch("grail.trainer.checkpoint_publisher.WINDOW_LENGTH", 30):
+        with patch("grail.shared.retention_utils.DELTA_BASE_INTERVAL", 3):
+            with patch("grail.shared.retention_utils.WINDOW_LENGTH", 30):
                 # Anchor stride = 3 * 30 = 90
                 # Current window 120: anchor at 90
                 # Previous anchor at 0
-                result = _compute_keep_windows(120)
+                result = compute_retention_windows(120)
 
                 # Current chain: 90, 120
                 assert 90 in result
@@ -190,8 +190,8 @@ class TestRetentionPolicyChainedDeltas:
             keep_limit=3,
         )
 
-        with patch("grail.infrastructure.checkpoint_consumer.DELTA_BASE_INTERVAL", 5):
-            with patch("grail.infrastructure.checkpoint_consumer.WINDOW_LENGTH", 30):
+        with patch("grail.shared.retention_utils.DELTA_BASE_INTERVAL", 5):
+            with patch("grail.shared.retention_utils.WINDOW_LENGTH", 30):
                 result = manager._compute_keep_windows(180)
 
                 # Should keep chain from anchor (150) to now (180)

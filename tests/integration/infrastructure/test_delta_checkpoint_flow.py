@@ -297,7 +297,7 @@ class TestCheckpointMetadata:
             window=110,
             file_manifest={},
             checkpoint_type="DELTA",
-            base_window=100,
+            anchor_window=100,
             weights_hash="abc123",
         )
         assert delta_metadata.is_delta()
@@ -308,7 +308,7 @@ class TestCheckpointMetadata:
             window=110,
             file_manifest={"delta_sparse.safetensors": "hash123"},
             checkpoint_type="DELTA",
-            base_window=100,
+            anchor_window=100,
             weights_hash="abcdef1234567890",
         )
 
@@ -319,7 +319,7 @@ class TestCheckpointMetadata:
         # Deserialize
         loaded = json.loads(json_str)
         assert loaded["checkpoint_type"] == "DELTA"
-        assert loaded["base_window"] == 100
+        assert loaded["anchor_window"] == 100
         assert loaded["weights_hash"] == "abcdef1234567890"
 
 
