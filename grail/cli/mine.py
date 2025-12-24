@@ -431,7 +431,10 @@ def package_rollout_data(
     Returns:
         Signed dictionary ready to upload for validation
     """
-    rollout_nonce = base_nonce * 10 + rollout_idx
+    # CRITICAL: Use ROLLOUTS_PER_PROBLEM (16) as multiplier to avoid nonce collisions
+    # Old formula (base_nonce * 10) caused duplicates when rollout_idx >= 10
+    # e.g., problem 14 rollout 10 = 150, problem 15 rollout 0 = 150 (collision!)
+    rollout_nonce = base_nonce * ROLLOUTS_PER_PROBLEM + rollout_idx
 
     # Sign commit binding (tokens, randomness, model, layer, commitments)
     from ..protocol.signatures import sign_commit_binding
@@ -539,6 +542,9 @@ async def generate_rollouts_for_window(
     monitor: Any | None,
     use_drand: bool,
     checkpoint_window: int,
+    *,
+    problem_offset: int = 0,
+    max_problems: int = 0,
 ) -> list[dict]:
     """Generate as many GRPO rollouts as safely possible within a window.
 
@@ -559,11 +565,31 @@ async def generate_rollouts_for_window(
         timers: EMA-based timing estimates for safety.
         monitor: Optional monitoring client for metrics.
         use_drand: Whether drand was used in randomness generation.
-        checkpoint_window: The checkpoint window used for this generation
+        checkpoint_window: The checkpoint window used for this generation.
+        problem_offset: Starting problem index for this worker (default: 0).
+            Used in parallel mining to assign non-overlapping problem ranges.
+        max_problems: Maximum number of problems to generate (default: 0 = unlimited).
+            When 0, generates until time runs out. Used in parallel mining.
 
     Returns:
         List of signed rollout data ready for upload.
     """
+    # Read problem offset/max from environment (worker mode support)
+    # Environment variables take precedence over function args for subprocess isolation
+    env_problem_offset = int(os.getenv("GRAIL_PROBLEM_OFFSET", str(problem_offset)))
+    env_max_problems = int(os.getenv("GRAIL_MAX_PROBLEMS", str(max_problems)))
+
+    # Use env values if set, otherwise use function args
+    effective_offset = env_problem_offset
+    effective_max = env_max_problems
+
+    if effective_offset > 0 or effective_max > 0:
+        logger.info(
+            "Worker mode: problem_offset=%d, max_problems=%s",
+            effective_offset,
+            effective_max if effective_max > 0 else "unlimited",
+        )
+
     # Window generation state and metrics
     inferences: list[dict] = []
     start_time = time.time()
@@ -598,6 +624,14 @@ async def generate_rollouts_for_window(
             logger.info("Window %s has ended, moving to next window", window_start)
             break
 
+        # Check max_problems limit (for worker mode)
+        if effective_max > 0 and problem_count >= effective_max:
+            logger.info(
+                "Stopping generation: reached max_problems limit (%d)",
+                effective_max,
+            )
+            break
+
         blocks_remaining = (window_start + WINDOW_LENGTH) - current_block
         needed_blocks = timers.blocks_needed_for_next_gen()
         if blocks_remaining <= needed_blocks:
@@ -619,9 +653,13 @@ async def generate_rollouts_for_window(
             problem_count += 1
             inference_count += 1
 
+            # Apply problem offset for parallel mining coordination
+            # Each GPU worker gets a unique range: GPU0=[0-11], GPU1=[12-23], etc.
+            problem_index = effective_offset + (problem_count - 1)
+
             logger.info(
                 "⚡ Generating GRPO rollouts for problem %s (block %s/%s)...",
-                problem_count,
+                problem_index,
                 current_block,
                 window_start + WINDOW_LENGTH - 1,
             )
@@ -635,7 +673,6 @@ async def generate_rollouts_for_window(
                 )
 
             # Deterministically derive environment seed from miner+window+index
-            problem_index = max(0, problem_count - 1)
             seed_int = derive_env_seed(wallet.hotkey.ss58_address, window_block_hash, problem_index)
             # Use deterministic problem index as rollout_group identifier
             base_nonce = problem_index

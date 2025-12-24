@@ -32,35 +32,55 @@ load_dotenv("/root/grail/.env")  # Load WandB API key and project
 sys.path.append("/root/grail")
 
 
-# ────────────────  HYPERPARAMETERS (from GRAIL config)  ────────────────
+# ────────────────  HYPERPARAMETERS (from .env GRAIL config)  ────────────────
 @dataclass
 class Config:
+    # Model (from GRAIL_TRAIN_MODEL_ID)
     model_id: str = "Qwen/Qwen2.5-1.5B-Instruct"
-    lr: float = 2e-6
-    epochs: int = 2
-    batch_size: int = 8  # 16 groups (prompts) per step
-    grad_accum_steps: int = 32
-    max_length: int = 1536
+    # Learning rate (from GRAIL_TRAINER_LR)
+    lr: float = 3e-6
+    # Epochs per window (from GRAIL_TRAINER_EPOCHS)
+    epochs: int = 1
+    # Batch size (from GRAIL_TRAINER_BATCH_SIZE)
+    batch_size: int = 4
+    # Gradient accumulation (from GRAIL_TRAINER_GRAD_ACCUM_STEPS)
+    grad_accum_steps: int = 128
+    # Max sequence length (from GRAIL_TRAINER_MAX_LENGTH)
+    max_length: int = 2048
+    # Gradient clipping (from GRAIL_TRAINER_GRAD_CLIP)
     grad_clip: float = 1.0
+    # Warmup steps (from GRAIL_TRAINER_WARMUP_STEPS)
     warmup_steps: int = 50
+    # KL coefficient (from GRAIL_TRAINER_KL_COEF)
     kl_coef: float = 0.0
+    # Entropy coefficient (from GRAIL_TRAINER_ENTROPY_COEF)
     entropy_coef: float = 0.0005
+    # PPO clip epsilon (standard GRAIL values)
     ppo_clip_eps: float = 0.2
     ppo_clip_eps_upper: float = 0.28
+    # Importance sampling ratio max (from GRAIL_TRAINER_IS_RATIO_MAX)
     is_ratio_max: float = 2.5
+    # Log-ratio clamp (from GRAIL_TRAINER_LOGRATIO_CLAMP)
     logratio_clamp: float = 0.92
+    # Dataset sampling
     num_train_samples: int | None = None  # None = use all training samples
     num_eval_samples: int | None = None  # None = use all test samples
+    # Rollouts per problem (matches GRAIL default)
     rollouts_per_problem: int = 16
+    # Generation parameters
     temperature: float = 0.7
     top_p: float = 0.95
     top_k: int = 50
-    max_new_tokens: int = 512
+    # Max completion tokens (from GRPO_MAX_COMPLETION_TOKENS)
+    max_new_tokens: int = 1024
+    # Evaluation config
     eval_replicates: int = 5
     report_ks: tuple = (1, 5, 10)
     # Evaluation optimization (for multi-GPU with 8 A100s)
     eval_batch_size: int = 128  # Large batch for parallel generation
     eval_num_workers: int = 4  # Dataloader workers
+    # Max groups for GRPO (from GRPO_MAX_GROUPS)
+    max_groups: int = 128
 
 
 cfg = Config()
@@ -511,29 +531,43 @@ def main() -> None:
         wandb.login(key=wandb_api_key)
         print(f"  ✓ WandB logged in (project: {os.getenv('WANDB_PROJECT', 'grail')})")
 
+    # Calculate max_prompt_length: total max_length minus max_completion_tokens
+    max_prompt_length = cfg.max_length - cfg.max_new_tokens  # 2048 - 1024 = 1024
+
     grpo_config = GRPOConfig(
         output_dir="./outputs/trl_gsm8k",
+        # Learning rate (GRAIL_TRAINER_LR=3e-6)
         learning_rate=cfg.lr,
+        # Epochs (GRAIL_TRAINER_EPOCHS=1)
         num_train_epochs=cfg.epochs,
+        # Batch size (GRAIL_TRAINER_BATCH_SIZE=4)
         per_device_train_batch_size=cfg.batch_size,
+        # Gradient accumulation (GRAIL_TRAINER_GRAD_ACCUM_STEPS=128)
         gradient_accumulation_steps=cfg.grad_accum_steps,
+        # Gradient clipping (GRAIL_TRAINER_GRAD_CLIP=1.0)
         max_grad_norm=cfg.grad_clip,
+        # Warmup steps (GRAIL_TRAINER_WARMUP_STEPS=50)
         warmup_steps=cfg.warmup_steps,
-        beta=cfg.kl_coef,  # Beta is KL coefficient in GRPO
-        epsilon=cfg.ppo_clip_eps,  # PPO epsilon
-        epsilon_high=cfg.ppo_clip_eps_upper,  # Upper PPO epsilon
-        max_prompt_length=512,  # Reasonable prompt limit
-        max_completion_length=cfg.max_new_tokens,  # Max new tokens
+        # KL coefficient (GRAIL_TRAINER_KL_COEF=0.0)
+        beta=cfg.kl_coef,
+        # PPO clip epsilon
+        epsilon=cfg.ppo_clip_eps,
+        epsilon_high=cfg.ppo_clip_eps_upper,
+        # Max prompt length (derived from GRAIL_TRAINER_MAX_LENGTH - GRPO_MAX_COMPLETION_TOKENS)
+        max_prompt_length=max_prompt_length,
+        # Max completion tokens (GRPO_MAX_COMPLETION_TOKENS=1024)
+        max_completion_length=cfg.max_new_tokens,
+        # Generation parameters
         temperature=cfg.temperature,
         top_p=cfg.top_p,
-        top_k=cfg.top_k,  # Match loop.py: 50 highest probability tokens
-        repetition_penalty=1.1,  # Match loop.py: penalize repeating tokens
-        num_generations=16,  # group size: 16 completions per prompt
-        generation_batch_size=16,  # 64 prompts per generation batch
+        top_k=cfg.top_k,
+        repetition_penalty=1.1,
+        # Group size: 16 completions per prompt (rollouts_per_problem)
+        num_generations=cfg.rollouts_per_problem,
+        generation_batch_size=16,
         steps_per_generation=None,
         logging_steps=1,
-        # Enable logging a small sample of (prompt, completion) pairs each logging step.
-        # Prints to console if `rich` is installed and logs a WandB table named "completions".
+        # Enable logging a sample of (prompt, completion) pairs each logging step
         log_completions=True,
         num_completions_to_print=1,
         wandb_log_unique_prompts=True,
@@ -541,14 +575,16 @@ def main() -> None:
         bf16=True,
         report_to=["wandb"],
         eval_strategy="no",  # Disable TRL's internal eval (using VLLMEvalCallback instead)
-        run_name="trl_gsm8k_grpo_qwen15b_g16x16_vllm",
-        loss_type="dapo",  # Match config.py GRPO_VARIANT
+        run_name="trl_gsm8k_grpo_qwen15b_env_matched",
+        # Loss type (GRAIL_GRPO_VARIANT=dapo)
+        loss_type="dapo",
         # vLLM configuration for offloading generation to separate GPUs
         use_vllm=True,
         vllm_mode="server",
         vllm_server_base_url="http://127.0.0.1:8000",
-        vllm_importance_sampling_correction=False,  # Correct for vLLM/training distribution mismatch
-        vllm_importance_sampling_cap=2.0,  # Cap importance sampling ratio for stability
+        # Importance sampling (GRAIL_TRAINER_IS_RATIO_MAX=2.5)
+        vllm_importance_sampling_correction=False,
+        vllm_importance_sampling_cap=cfg.is_ratio_max,
     )
 
     # Reward function wrapper

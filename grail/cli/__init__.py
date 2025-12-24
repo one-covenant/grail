@@ -329,6 +329,7 @@ def _register_subcommands() -> None:
         "grail.cli.mine",
         "grail.cli.validate",
         "grail.cli.train",
+        "grail.cli.parallel_miner",
     ):
         module = importlib.import_module(mod_name)
         register: Callable[[typer.Typer], None] | None = getattr(module, "register", None)
