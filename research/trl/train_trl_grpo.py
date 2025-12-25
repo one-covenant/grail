@@ -50,7 +50,11 @@ from grail.environments.math_hendrycks_env import _math_answers_equal  # noqa: E
 from grail.environments.providers import GSM8KTaskSource, MATHTaskSource  # noqa: E402
 from grail.shared.chat_templates import build_qwen_chat_template  # noqa: E402
 from grail.trainer.metrics import KMetricsAggregator, TaskReplicateResult  # noqa: E402
-from grail.trainer.analysis import AnalysisConfig, ModelAnalysisManager  # noqa: E402
+from grail.trainer.analysis import (  # noqa: E402
+    AnalysisConfig,
+    ModelAnalysisManager,
+    GradientSparsityMetrics,
+)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -998,6 +1002,7 @@ class SparsityCallback(TrainerCallback):
 
     def __init__(self, analyzer: ModelAnalysisManager):
         self.analyzer = analyzer
+        self._wandb_configured = False
 
     def on_optimizer_step(self, args: Any, state: Any, control: Any, **kwargs: Any) -> None:
         """Called after optimizer.step() but before zero_grad() - gradients available."""
@@ -1039,14 +1044,22 @@ class SparsityCallback(TrainerCallback):
         if not metrics:
             return
 
-        # Log to WandB.
-        # Note: state.global_step is incremented AFTER on_optimizer_step, so use +1.
+        # Log to WandB with custom x-axis (optimizer_step).
         try:
             import wandb
 
             if wandb.run:
-                step = int(state.global_step) + 1
-                wandb.log({f"sparsity/{k}": v for k, v in metrics.items()}, step=step)
+                # Configure custom x-axis on first call
+                if not self._wandb_configured:
+                    wandb.define_metric("optimizer_step")
+                    wandb.define_metric("sparsity/*", step_metric="optimizer_step")
+                    self._wandb_configured = True
+
+                # Log with our own step counter
+                optimizer_step = self.analyzer.step_count
+                wandb_data = {"optimizer_step": optimizer_step}
+                wandb_data.update({f"sparsity/{k}": v for k, v in metrics.items()})
+                wandb.log(wandb_data)
         except Exception:
             pass
 
@@ -1257,14 +1270,23 @@ def main() -> None:
 
     print(f"\n🏋️  Training with GRPO on {adapter.name.upper()}...")
 
-    # Initialize sparsity analysis (parameter change tracking only)
+    # Initialize sparsity analysis (parameter change tracking + gradient sparsity)
     sparsity_config = AnalysisConfig(
-        interval=100,
+        interval=1,
         param_change_enabled=True,
         sparse_quality_enabled=False,
         snapshot_dtype="bfloat16",
+        gradient_enabled=True,  # Enable gradient analysis
     )
     sparsity_analyzer = ModelAnalysisManager.create(sparsity_config)
+    
+    # Add gradient sparsity metric
+    gradient_sparsity = GradientSparsityMetrics(
+        thresholds=[0.0, 1e-8, 1e-6, 1e-4],
+        track_per_layer=False,
+    )
+    sparsity_analyzer.add_metric(gradient_sparsity)
+    
     sparsity_callback = SparsityCallback(sparsity_analyzer)
     print(f"  ✓ Sparsity analysis enabled (interval={sparsity_config.interval})")
 
