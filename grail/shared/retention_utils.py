@@ -58,7 +58,7 @@ def compute_retention_windows(
     )
 
     # Current anchor with safety margin, and all windows from there to now
-    current_anchor = (current_window // stride) * stride - SAFETY_MARGIN_WINDOWS * WINDOW_LENGTH
+    current_anchor = max(0, (current_window // stride) * stride - SAFETY_MARGIN_WINDOWS * WINDOW_LENGTH)
     keep.update(range(current_anchor, current_window + 1, WINDOW_LENGTH))
 
     # Previous anchor chain (for miners catching up)
