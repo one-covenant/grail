@@ -210,14 +210,17 @@ class MinerNeuron(BaseNeuron):
                                 )
                                 raise
                     elif model is None or tokenizer is None:
-                        logger.error("No checkpoint available and no model loaded, cannot mine")
-                        await asyncio.sleep(60)
+                        # No checkpoint and no model - skip this window, wait for next
+                        logger.warning(
+                            "No checkpoint for window %s, waiting for next window", window_start
+                        )
+                        last_window_start = window_start
                         continue
 
-                    # Ensure model and tokenizer are loaded before mining
+                    # Safety check: ensure model and tokenizer are loaded before mining
                     if model is None or tokenizer is None:
                         logger.error("Model or tokenizer not loaded, cannot mine")
-                        await asyncio.sleep(30)
+                        last_window_start = window_start  # Prevent infinite loop
                         continue
 
                     logger.info(

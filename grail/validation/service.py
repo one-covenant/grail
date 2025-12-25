@@ -233,7 +233,11 @@ class ValidationService:
                 # Load checkpoint for this window
                 checkpoint_loaded = await self._load_checkpoint_for_window(target_window)
                 if not checkpoint_loaded:
-                    await asyncio.sleep(30)
+                    # No checkpoint available - skip this window, wait for next
+                    logger.warning(
+                        "No checkpoint for window %s, waiting for next window", target_window
+                    )
+                    self._last_processed_window = target_window
                     continue
 
                 # Cleanup old checkpoints
