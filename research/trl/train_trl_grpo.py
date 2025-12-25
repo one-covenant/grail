@@ -85,11 +85,11 @@ class Config:
     # Gradient clipping threshold (GRAIL_TRAINER_GRAD_CLIP, constants.py default: 0.5)
     grad_clip: float = 1.0
     # Warmup steps for LR scheduler (GRAIL_TRAINER_WARMUP_STEPS, constants.py default: 10)
-    warmup_steps: int = 50
+    warmup_steps: int = 20
     # Total training windows (GRAIL_TRAINER_TOTAL_WINDOWS) - controls iteration count
     # Each optimizer step = 32 groups × 16 rollouts = 512 samples
     # total_optimizer_steps calculated below based on total_windows
-    total_steps: int = 400
+    total_steps: int = 100
 
     # ────────────────────────────────────────────────────────────────────────
     # GRPO Loss Configuration (from grail/trainer/algorithms/grpo.py)
@@ -98,31 +98,22 @@ class Config:
     kl_coef: float = 0.0
     # Entropy coefficient for exploration (GRAIL_TRAINER_ENTROPY_COEF, constants.py default: 0.001)
     # Note: TRL may not support entropy regularization directly
-    entropy_coef: float = 0.0005
+    entropy_coef: float = 0.0
     # PPO clip epsilon lower bound (TRAINER_PPO_CLIP_EPS, constants.py default: 0.2)
-    ppo_clip_eps: float = 0.2
+    epsilon: float = 0.2
     # PPO clip epsilon upper bound - DAPO-style asymmetric clipping
-    # (TRAINER_PPO_CLIP_EPS_UPPER, constants.py default: 0.28)
-    ppo_clip_eps_upper: float = 0.28
+    # (TRAINER_epsilon_UPPER, constants.py default: 0.28)
+    epsilon_high: float = 0.28
     # Importance sampling ratio ceiling (GRAIL_TRAINER_IS_RATIO_MAX, constants.py default: 10.0)
     # Prevents training instability from extreme ratios
     is_ratio_max: float = 2.5
-    # Log-ratio clamp for numerical stability (GRAIL_TRAINER_LOGRATIO_CLAMP, constants.py default: 5.0)
-    # ln(2.5) ≈ 0.916 → aligned with IS_RATIO_MAX
-    logratio_clamp: float = 0.92
-    # Advantage clipping percentile (GRAIL_TRAINER_ADV_CLIP_PERCENTILE, constants.py default: 99.0)
-    # Note: TRL handles advantage normalization differently
-    adv_clip_percentile: float = 99.0
-    # Group advantage sum tolerance (GRAIL_TRAINER_GROUP_ADV_SUM_TOL, constants.py default: 0.01)
-    # Note: TRL doesn't use group validation, but kept for reference
-    group_adv_sum_tol: float = 0.01
     # GRPO loss variant (GRAIL_GRPO_VARIANT, constants.py default: "dapo")
     # Options: 'grpo', 'bnpo', 'dapo', 'dr_grpo'
     grpo_variant: str = "dapo"
     # Importance sampling level (GRAIL_IMPORTANCE_SAMPLING_LEVEL, constants.py default: "sequence")
     # Options: 'sequence' (one ratio per sequence), 'token' (per-token ratios)
     # Note: TRL uses token-level IS by default when using vLLM
-    importance_sampling_level: str = "sequence"
+    importance_sampling_level: str = "token"
 
     # ────────────────────────────────────────────────────────────────────────
     # GRPO Data Configuration (from grail/shared/constants.py)
@@ -130,7 +121,7 @@ class Config:
     # Groups per optimizer step = effective_batch / rollouts_per_problem = 512 / 16 = 32
     max_groups: int = 32
     # Max completion tokens (GRPO_MAX_COMPLETION_TOKENS, constants.py default: 1024)
-    max_new_tokens: int = 1024
+    max_new_tokens: int = 2048
     # Rollouts per problem (ROLLOUTS_PER_PROBLEM, constants.py: 16)
     rollouts_per_problem: int = 16
 
@@ -1121,12 +1112,11 @@ def main() -> None:
     print(f"  {'Total Steps':<40} {cfg.total_steps:<15} GRAIL_TRAINER_TOTAL_STEPS")
     print(f"  {'KL Coefficient':<40} {cfg.kl_coef:<15} GRAIL_TRAINER_KL_COEF")
     print(f"  {'Entropy Coefficient':<40} {cfg.entropy_coef:<15} GRAIL_TRAINER_ENTROPY_COEF")
-    print(f"  {'PPO Clip Epsilon':<40} {cfg.ppo_clip_eps:<15} TRAINER_PPO_CLIP_EPS")
+    print(f"  {'PPO Clip Epsilon':<40} {cfg.epsilon:<15} TRAINER_PPO_CLIP_EPS")
     print(
-        f"  {'PPO Clip Epsilon Upper':<40} {cfg.ppo_clip_eps_upper:<15} TRAINER_PPO_CLIP_EPS_UPPER"
+        f"  {'PPO Clip Epsilon Upper':<40} {cfg.epsilon_high:<15} TRAINER_PPO_CLIP_EPS_UPPER"
     )
     print(f"  {'IS Ratio Max':<40} {cfg.is_ratio_max:<15} GRAIL_TRAINER_IS_RATIO_MAX")
-    print(f"  {'Log-Ratio Clamp':<40} {cfg.logratio_clamp:<15} GRAIL_TRAINER_LOGRATIO_CLAMP")
     print(f"  {'GRPO Variant':<40} {cfg.grpo_variant:<15} GRAIL_GRPO_VARIANT")
     print(f"  {'IS Level':<40} {cfg.importance_sampling_level:<15} GRAIL_IMPORTANCE_SAMPLING_LEVEL")
     print(f"  {'Max Groups':<40} {cfg.max_groups:<15} GRPO_MAX_GROUPS")
@@ -1198,7 +1188,7 @@ def main() -> None:
         # ─────────────────────────────────────────────────────────────────────
         learning_rate=cfg.lr,  # GRAIL_TRAINER_LR
         warmup_steps=cfg.warmup_steps,  # GRAIL_TRAINER_WARMUP_STEPS
-        lr_scheduler_type="cosine",  # Cosine annealing (matches grail/neurons/trainer.py)
+        lr_scheduler_type="constant",  #  constant
         # Use max_steps to control iterations (matching GRAIL_TRAINER_TOTAL_WINDOWS)
         # num_train_epochs is ignored when max_steps is set
         num_train_epochs=cfg.epochs,
@@ -1210,11 +1200,20 @@ def main() -> None:
         gradient_accumulation_steps=cfg.grad_accum_steps,  # GRAIL_TRAINER_GRAD_ACCUM_STEPS
         max_grad_norm=cfg.grad_clip,  # GRAIL_TRAINER_GRAD_CLIP
         # ─────────────────────────────────────────────────────────────────────
+        # Optimizer Configuration (AdamW defaults)
+        # ─────────────────────────────────────────────────────────────────────
+        optim="adamw_torch",  # Optimizer type (default PyTorch AdamW)
+        adam_beta1=0.9,  # Beta1 momentum (default: 0.9)
+        adam_beta2=0.999,  # Beta2 momentum (default: 0.999)
+        adam_epsilon=1e-8,  # Numerical stability (default: 1e-8)
+        weight_decay=0.0,  # L2 regularization (default: 0.0)
+        # ─────────────────────────────────────────────────────────────────────
         # GRPO Loss Configuration (matching grail/trainer/algorithms/grpo.py)
         # ─────────────────────────────────────────────────────────────────────
+        num_iterations=16,  # Number of training updates on generated rollouts (μ in GRPO)
         beta=cfg.kl_coef,  # GRAIL_TRAINER_KL_COEF (KL divergence coefficient)
-        epsilon=cfg.ppo_clip_eps,  # TRAINER_PPO_CLIP_EPS (lower clip bound)
-        epsilon_high=cfg.ppo_clip_eps_upper,  # TRAINER_PPO_CLIP_EPS_UPPER (DAPO asymmetric)
+        epsilon=cfg.epsilon,  # TRAINER_PPO_CLIP_EPS (lower clip bound)
+        epsilon_high=cfg.epsilon_high,  # TRAINER_PPO_CLIP_EPS_UPPER (DAPO asymmetric)
         loss_type=cfg.grpo_variant,  # GRAIL_GRPO_VARIANT ("dapo")
         # ─────────────────────────────────────────────────────────────────────
         # Sequence Length (matching GRAIL trainer config)
@@ -1245,7 +1244,7 @@ def main() -> None:
         num_completions_to_print=1,
         wandb_log_unique_prompts=True,
         save_strategy="steps",
-        save_steps=40,
+        save_steps=25,
         bf16=True,
         report_to=["wandb"],
         eval_strategy="no",
@@ -1274,6 +1273,7 @@ def main() -> None:
     sparsity_config = AnalysisConfig(
         interval=1,
         param_change_enabled=True,
+        param_change_thresholds=[0.0],  # Only track exact zero weight deltas
         sparse_quality_enabled=False,
         snapshot_dtype="bfloat16",
         gradient_enabled=True,  # Enable gradient analysis
@@ -1282,7 +1282,7 @@ def main() -> None:
     
     # Add gradient sparsity metric
     gradient_sparsity = GradientSparsityMetrics(
-        thresholds=[0.0, 1e-8, 1e-6, 1e-4],
+        thresholds=[0.0],  # Only track exact zero gradients
         track_per_layer=False,
     )
     sparsity_analyzer.add_metric(gradient_sparsity)
