@@ -201,7 +201,8 @@ GRAIL_BURN_PERCENTAGE = 80.0
 
 # Maximum unique rollouts per miner that count toward weight allocation.
 # Miners are rewarded proportionally to how close they are to this cap.
-UNIQUE_ROLLOUTS_CAP = 5120
+# This cap covers the full 12-window rolling period (5120 per window × 12 windows).
+UNIQUE_ROLLOUTS_CAP = 61440
 
 # ────────────────  MINER SAMPLING (VALIDATION COST CONTROL)  ────────────────
 
