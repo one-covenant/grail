@@ -92,12 +92,12 @@ class ParameterChangeMetrics(MetricComputer):
         """Initialize parameter change metric computer.
 
         Args:
-            thresholds: Sparsity thresholds to analyze (default: [1e-8, 1e-6, 1e-4])
+            thresholds: Sparsity thresholds to analyze (default: [0.0])
             track_per_layer: Compute per-layer statistics
             track_components: Compute per-component statistics (attention, MLP, etc.)
             track_sign_flips: Track parameters that changed sign
         """
-        self.thresholds = thresholds if thresholds is not None else [1e-8, 1e-6, 1e-4]
+        self.thresholds = thresholds if thresholds is not None else [0.0]
         self.track_per_layer = track_per_layer
         self.track_components = track_components
         self.track_sign_flips = track_sign_flips
