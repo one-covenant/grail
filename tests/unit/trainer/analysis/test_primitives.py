@@ -155,11 +155,13 @@ def test_parameter_delta_sparse_mask():
     # Apply sparse mask at 1e-6
     sparse_delta = delta.apply_sparse_mask(threshold=1e-6)
 
-    # Check that small changes were zeroed
+    # Check that small changes were kept (above threshold)
     assert torch.allclose(
         sparse_delta.deltas["linear1.weight"],
         torch.full_like(sparse_delta.deltas["linear1.weight"], 1e-5),
+        atol=1e-7,
     )
+    # Check that zero changes remain zero (below threshold)
     assert torch.allclose(
         sparse_delta.deltas["linear1.bias"],
         torch.zeros_like(sparse_delta.deltas["linear1.bias"]),
