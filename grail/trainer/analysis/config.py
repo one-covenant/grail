@@ -56,13 +56,13 @@ class AnalysisConfig:
 
     # Parameter change analysis
     param_change_enabled: bool = True
-    param_change_thresholds: list[float] = field(default_factory=lambda: [1e-8, 1e-6, 1e-4])
+    param_change_thresholds: list[float] = field(default_factory=lambda: [0.0])
     param_change_per_layer: bool = False
     param_change_track_components: bool = False
 
     # Sparse quality analysis
     sparse_quality_enabled: bool = True
-    sparse_quality_thresholds: list[float] = field(default_factory=lambda: [1e-8, 1e-6, 1e-4])
+    sparse_quality_thresholds: list[float] = field(default_factory=lambda: [0.0])
     sparse_quality_include_random: bool = True
 
     # Gradient analysis (future)

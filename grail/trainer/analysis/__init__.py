@@ -40,6 +40,7 @@ from grail.trainer.analysis.config import AnalysisConfig
 from grail.trainer.analysis.manager import ModelAnalysisManager
 from grail.trainer.analysis.metrics import (
     AnalysisContext,
+    GradientSparsityMetrics,
     MetricComputer,
     ParameterChangeMetrics,
     SparseQualityMetrics,
@@ -58,6 +59,7 @@ __all__ = [
     "AnalysisContext",
     "ParameterChangeMetrics",
     "SparseQualityMetrics",
+    "GradientSparsityMetrics",
 ]
 
 __version__ = "1.0.0"
