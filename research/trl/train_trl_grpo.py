@@ -1282,7 +1282,7 @@ def main() -> None:
     
     # Add gradient sparsity metric
     gradient_sparsity = GradientSparsityMetrics(
-        thresholds=[0.0],  # Only track exact zero gradients
+        thresholds=[0.0, 1e-8, 1e-16, 1e-20],  # Only track exact zero gradients
         track_per_layer=False,
     )
     sparsity_analyzer.add_metric(gradient_sparsity)
