@@ -399,6 +399,10 @@ class CheckpointManager:
             # Load reconstructed weights back into model
             model.load_state_dict(reconstructed, strict=True)
 
+            # Update the checkpoint window attribute for validation
+            # (This attribute is normally set by get_model() during slow path)
+            model.grail_checkpoint_window = target_window
+
             logger.info(
                 "✅ Fast path complete: model updated to window %s in-place",
                 target_window,
