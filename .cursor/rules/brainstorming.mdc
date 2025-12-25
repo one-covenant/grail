@@ -1,0 +1,6 @@
+---
+alwaysApply: false
+---
+- Brainstorm different solution approaches before proposing code changes, ensuring they align with best practices.
+- For each option, clearly document the potential solution and its trade-offs in a well-written format.
+- Keep the comparison concise and clear so collaborators can decide quickly.

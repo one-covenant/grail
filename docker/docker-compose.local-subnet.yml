@@ -88,9 +88,6 @@ services:
       BT_WALLET_COLD: Alice
       BT_WALLET_HOT: M1
       # Model / app config
-      GRAIL_MODEL_NAME: ${GRAIL_MODEL_NAME:-Qwen/Qwen2-0.5B-Instruct}
-      GRAIL_MAX_NEW_TOKENS: ${GRAIL_MAX_NEW_TOKENS:-100}
-      GRAIL_ROLLOUTS_PER_PROBLEM: ${GRAIL_ROLLOUTS_PER_PROBLEM:-4}
       GRAIL_MONITORING_BACKEND: ${GRAIL_MONITORING_BACKEND:-wandb}
       # WandB / monitoring
       WANDB_MODE: ${WANDB_MODE:-offline}
@@ -148,9 +145,6 @@ services:
       BT_WALLET_COLD: Alice
       BT_WALLET_HOT: M2
       # Model / app config
-      GRAIL_MODEL_NAME: ${GRAIL_MODEL_NAME:-Qwen/Qwen2-0.5B-Instruct}
-      GRAIL_MAX_NEW_TOKENS: ${GRAIL_MAX_NEW_TOKENS:-100}
-      GRAIL_ROLLOUTS_PER_PROBLEM: ${GRAIL_ROLLOUTS_PER_PROBLEM:-4}
       GRAIL_MONITORING_BACKEND: ${GRAIL_MONITORING_BACKEND:-wandb}
       # WandB / monitoring
       WANDB_MODE: ${WANDB_MODE:-offline}
@@ -212,9 +206,6 @@ services:
       BT_WALLET_COLD: Alice
       BT_WALLET_HOT: default  # Owner hotkey acts as validator
       # Model / app config
-      GRAIL_MODEL_NAME: ${GRAIL_MODEL_NAME:-Qwen/Qwen2-0.5B-Instruct}
-      GRAIL_MAX_NEW_TOKENS: ${GRAIL_MAX_NEW_TOKENS:-100}
-      GRAIL_ROLLOUTS_PER_PROBLEM: ${GRAIL_ROLLOUTS_PER_PROBLEM:-4}
       GRAIL_MONITORING_BACKEND: ${GRAIL_MONITORING_BACKEND:-wandb}
       # WandB / monitoring
       WANDB_MODE: ${WANDB_MODE:-offline}

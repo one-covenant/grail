@@ -1,0 +1,5 @@
+1. get the cursor rules
+2. get the .env file
+3. install uv then all packages using uv
+4. extract all the files from the zip file
+5. if you wanna use grafana you need to addd the address of this server to the grafana firewall etc

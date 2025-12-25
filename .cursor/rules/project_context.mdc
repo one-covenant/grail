@@ -1,0 +1,91 @@
+---
+description: Summarized, always-on project context and standards for grail
+alwaysApply: true
+---
+
+## Project Overview
+
+GRAIL (Guaranteed Rollout Authenticity via Inference Ledger) enables cryptographically verifiable post-training for language models. Miners generate rollouts; validators verify and score using the GRAIL protocol on a Bittensor subnet.
+
+## Core Requirements
+
+**Functional**:
+- GRAIL protocol (prover/verifier) binding rollouts to model identity and inputs
+- GRPO-style rollouts with token ids/logprobs for verification (start with SAT environment)
+- Public randomness derivation (drand + chain/window context) for deterministic, auditable challenges
+- Object storage (R2/S3) with dual-credential model (write private, read public)
+- Validate, score, set weights on-chain over windows using unique/valid/successful rollout metrics
+- Typer CLI: `grail mine`, `grail validate`, `grail train`
+
+**Non-Functional**:
+- Python 3.10 or later; seed `random`, `numpy`, `torch` for determinism
+- Reproducibility: manage deps with `uv` (pin exact versions); use `safetensors`
+- Reliability: timeouts on all network calls; avoid blocking event loop; handle transient failures
+- Security: never log secrets; load config via environment; HTTPS with cert verification
+- Observability: W&B logging; optional Grafana/Loki via Promtail
+- Concurrency: `asyncio` for IO; `aiobotocore`/`botocore` for object storage
+
+## Code Standards & CI
+
+- Style: PEP 8, max 100 cols; full type hints; mypy-strict friendly
+- Logging: `logging.getLogger(__name__)`; structured context, never secrets
+- Imports: explicit, ordered (stdlib, third-party, local); use relative imports within `grail`
+- Exception handling: specific errors only; keep try blocks to 1–5 lines; < 10% of functions
+- Functions: target 5–20 lines; > 25 lines require refactoring justification
+- CI: `uv run ruff check .` and `uv run ruff format --check .` must pass
+- Before commit: `uv sync --all-extras`, format/lint fixes, verify `pyproject.toml` aligned
+
+## Stack & Key Dependencies
+
+| Category | Tools |
+|----------|-------|
+| Build/Deps | `uv`, `pyproject.toml` (pin exact versions) |
+| Style | Ruff (lint + format), PEP 8 |
+| ML/Models | `torch`, `transformers`, `safetensors` |
+| Utilities | `numpy`, `typer`, `rich`, `python-dotenv`, `requests` |
+| Storage | `aiobotocore`, `botocore` (prefer over direct boto3) |
+| Integration | `bittensor`, `huggingface_hub`, `datasets` |
+| Discouraged | Alternate ML stacks, extra tokenizers, new HTTP clients, `pickle` for untrusted data |
+
+## Key Paths
+
+| Purpose | Path |
+|---------|------|
+| Protocol | `grail/grail.py` |
+| Environments | `grail/environments/` (e.g., `sat.py`, `gsm8k_env.py`) |
+| Rollout Gen | `grail/mining/engine.py` |
+| Randomness/Chain | `grail/infrastructure/drand.py`, `grail/infrastructure/chain.py` |
+| Storage/Comms | `grail/infrastructure/comms.py`, `grail/infrastructure/credentials.py` |
+| Validation | `grail/validation/service.py`, `grail/validation/pipeline.py` |
+| CLI | `grail/cli/` (mine.py, validate.py, train.py) |
+
+## Example CLI Pattern
+
+```python
+import logging
+from typing import Optional
+import typer
+
+logger = logging.getLogger(__name__)
+app = typer.Typer()
+
+@app.command()
+def mine(window: Optional[int] = typer.Option(None, help="Window to target")) -> None:
+    logger.info("Starting miner", extra={"window": window})
+    # start mining loop...
+
+if __name__ == "__main__":
+    app()
+```
+
+## Dependency Management (uv)
+
+```bash
+uv add package==X.Y.Z
+uv add --dev package==X.Y.Z
+uv lock && uv sync --all-extras
+```
+
+## Rule Intent
+
+Keep responses aligned with verifiable inference first, reproducibility and security by default, and clear CLI-driven workflows. Proposals should fit this stack and standards unless strong justification is provided.

@@ -1,0 +1,70 @@
+---
+description: Concise, consistent code rules with minimal try/except usage
+alwaysApply: true
+---
+
+# Concise Code & Exceptions
+
+## Keep Code Small and Focused
+- Single responsibility functions (target 5–20 lines)
+- Clear, descriptive names; prefer early returns over nesting
+- DRY: extract repeated logic into utilities/components
+
+## Exceptions: Minimal and Specific
+- Catch specific errors only; avoid broad `except Exception`
+- Keep try blocks tiny (1–5 lines) around the throwing call
+- No silent failures; log with context and re-raise when you can’t handle
+- Prefer context managers (`with`) over try/finally for resources
+
+### Good
+```python
+try:
+    data = json.loads(response_text)
+except json.JSONDecodeError as e:
+    logger.error("Invalid JSON", extra={"error": str(e)})
+    raise ValueError(f"Invalid API response: {e}")
+
+with open(file_path) as f:
+    return f.read()
+```
+
+### Avoid
+```python
+try:
+    # many unrelated lines
+    ...
+except Exception:
+    pass
+```
+
+## Conciseness Defaults
+- Use built-ins and stdlib first (comprehensions, `pathlib`, `dataclasses`)
+- Always add type hints for public functions; follow PEP 8
+- Use `logging.getLogger(__name__)` not `print`; include structured context
+- Async: `asyncio` with timeouts; avoid blocking in async code
+- Manage resources with `with` (files, connections, locks)
+- Place imports at the top of files; order: stdlib, third-party, local; avoid inline imports
+- Don't lint files unless you're explicitly asked to.
+
+## Review Gates
+- Functions > 25 lines: refactor or justify
+- Try blocks > 5 lines or broad catches: refactor
+- Aim: < 10% of functions use try/except; zero bare `except:`
+
+## Examples
+```python
+def load_config(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        logger.error("Config missing", extra={"path": str(path)})
+        raise
+    except json.JSONDecodeError as e:
+        logger.error("Config invalid JSON", extra={"path": str(path), "error": str(e)})
+        raise ValueError(f"Invalid JSON in {path}: {e}")
+
+def process_user(user_data: dict[str, Any]) -> Optional[User]:
+    if not user_data or not user_data.get("email"):
+        return None
+    return User(**user_data)
+```

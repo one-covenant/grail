@@ -1,0 +1,7 @@
+---
+alwaysApply: false
+---
+- Primary: fully satisfy the stated task requirements and constraints.
+- Secondary: minimize lines of code and scope of changes.
+- Prefer small, targeted edits; reuse existing code and patterns; avoid rewrites.
+- When trade-offs arise, prioritize correctness/spec over minimality and note the rationale.

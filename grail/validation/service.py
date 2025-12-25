@@ -366,10 +366,11 @@ class ValidationService:
                     checkpoint_path = await self._checkpoint_manager.get_checkpoint(
                         checkpoint_window
                     )
-        except Exception:
+        except Exception as exc:
             logger.warning(
                 f"Failed to resolve checkpoint path for target_window={target_window} "
-                f"(ckpt={checkpoint_window})"
+                f"(ckpt={checkpoint_window}): {exc}",
+                exc_info=True,
             )
 
         if not checkpoint_path:
