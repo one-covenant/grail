@@ -15,6 +15,8 @@ import json
 import logging
 import multiprocessing
 import queue
+import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -70,6 +72,47 @@ async def _wait_for_snapshot(
     except queue.Empty:
         # Timeout - return None to re-check stop_event
         return None
+
+
+async def _upload_full_background(
+    staging_path: Path,
+    checkpoint_publisher: CheckpointPublisher,
+    target_window: int,
+) -> bool:
+    """Upload FULL checkpoint in background (non-blocking).
+
+    This runs as a fire-and-forget task at anchor windows while DELTA upload
+    proceeds synchronously. FULL checkpoints serve as bootstrap anchors for
+    new miners joining the network.
+
+    Args:
+        staging_path: Path to staged snapshot
+        checkpoint_publisher: Publisher for R2 uploads
+        target_window: Window number to upload
+    """
+    try:
+        logger.info("Background FULL upload starting for checkpoint-%s", target_window)
+        ok = await checkpoint_publisher.upload_full_background(staging_path, target_window)
+        if ok:
+            logger.info("Background FULL upload completed for checkpoint-%s", target_window)
+        else:
+            logger.warning(
+                "Background FULL upload did not complete cleanly for checkpoint-%s",
+                target_window,
+            )
+        return ok
+    except Exception as exc:
+        # Background task - log error but don't propagate
+        # Next anchor window will retry, and DELTA chain remains valid
+        logger.warning(
+            "Background FULL upload failed for checkpoint-%s: %s (DELTA chain unaffected)",
+            target_window,
+            exc,
+        )
+        return False
+    finally:
+        # This path is a dedicated copy created by the upload worker; it is safe to remove.
+        shutil.rmtree(staging_path, ignore_errors=True)
 
 
 async def upload_worker_loop(
@@ -133,9 +176,12 @@ async def upload_worker_loop(
     # Track last uploaded window to prevent duplicate uploads within same window
     last_uploaded_window = -1
 
-    # Track base checkpoint for delta uploads
-    base_window: int | None = None
-    base_state: dict[str, torch.Tensor] | None = None
+    # Track for chained deltas:
+    # - prev_window/prev_state: immediate predecessor (for delta computation)
+    # - anchor_window: nearest FULL checkpoint (for recovery metadata)
+    prev_window: int | None = None
+    prev_state: dict[str, torch.Tensor] | None = None
+    anchor_window: int | None = None
 
     while not ipc.stop.is_set():
         try:
@@ -172,14 +218,15 @@ async def upload_worker_loop(
             # Record upload start for timing
             upload_start_time = time.time()
 
-            # Decide FULL vs DELTA upload
-            # Upload FULL if: delta disabled, no base yet, or at base interval boundary
-            is_base_window = checkpoint_window % base_stride_blocks == 0
-            should_upload_full = (
-                not DELTA_CHECKPOINT_ENABLED
-                or base_window is None
-                or base_state is None
-                or is_base_window
+            # Decide upload strategy:
+            # - FULL-only: When delta disabled or no prev_state (initial/restart)
+            # - DELTA (+ FULL background at anchors): Normal operation
+            is_anchor_window = checkpoint_window % base_stride_blocks == 0
+            should_upload_full_only = (
+                not DELTA_CHECKPOINT_ENABLED or prev_window is None or prev_state is None
+            )
+            should_upload_full_background = (
+                is_anchor_window and not should_upload_full_only  # Only if we're doing DELTA
             )
 
             # Attempt upload with retry logic
@@ -187,13 +234,13 @@ async def upload_worker_loop(
             did_fallback_to_full = False
 
             try:
-                if should_upload_full:
+                if should_upload_full_only:
+                    # Initial window or no prev_state: FULL only (sync)
                     logger.info(
-                        "Starting FULL upload at block %s for checkpoint-%s (is_base=%s, has_base=%s)",
+                        "Starting FULL-only upload at block %s for checkpoint-%s (has_prev=%s)",
                         upload_start_block,
                         checkpoint_window,
-                        is_base_window,
-                        base_window is not None,
+                        prev_window is not None,
                     )
 
                     upload_result = await _upload_with_retry(
@@ -204,11 +251,14 @@ async def upload_worker_loop(
                         is_delta=False,
                     )
                 else:
+                    # Normal operation: DELTA (sync), optionally FULL (background)
                     logger.info(
-                        "Starting DELTA upload at block %s for checkpoint-%s (base=%s)",
+                        "Starting DELTA upload at block %s for checkpoint-%s (prev=%s, anchor=%s, bg_full=%s)",
                         upload_start_block,
                         checkpoint_window,
-                        base_window,
+                        prev_window,
+                        anchor_window,
+                        should_upload_full_background,
                     )
 
                     try:
@@ -218,9 +268,51 @@ async def upload_worker_loop(
                             checkpoint_window,
                             max_attempts=UPLOAD_RETRY_MAX_ATTEMPTS,
                             is_delta=True,
-                            base_window=base_window,
-                            base_state=base_state,
+                            prev_window=prev_window,
+                            prev_state=prev_state,
+                            anchor_window=anchor_window,
                         )
+
+                        # Start background FULL upload at anchor windows (non-blocking)
+                        if should_upload_full_background:
+                            logger.info(
+                                "Starting background FULL upload for anchor checkpoint-%s",
+                                checkpoint_window,
+                            )
+                            # Copy staging synchronously to avoid a race with snapshot_manager.cleanup_staging()
+                            bg_dir = Path(tempfile.mkdtemp(prefix=f"bg-full-{checkpoint_window}-"))
+                            shutil.copytree(staging_path, bg_dir, dirs_exist_ok=True)
+
+                            bg_task = asyncio.create_task(
+                                _upload_full_background(
+                                    bg_dir,
+                                    checkpoint_publisher,
+                                    checkpoint_window,
+                                )
+                            )
+
+                            checkpoint_window_for_task = checkpoint_window
+
+                            def _on_bg_done(
+                                task: asyncio.Task[bool],
+                                *,
+                                _checkpoint_window: int = checkpoint_window_for_task,
+                            ) -> None:
+                                nonlocal anchor_window
+                                try:
+                                    ok = task.result()
+                                except Exception:  # noqa: BLE001
+                                    ok = False
+                                if ok:
+                                    # Only advance the anchor after we know the FULL upload succeeded.
+                                    anchor_window = _checkpoint_window
+                                    logger.info(
+                                        "✅ Background FULL anchor confirmed for checkpoint-%s",
+                                        _checkpoint_window,
+                                    )
+
+                            bg_task.add_done_callback(_on_bg_done)
+
                     except UploadError:
                         # Delta upload failed, fallback to FULL upload
                         logger.warning(
@@ -241,40 +333,40 @@ async def upload_worker_loop(
                 snapshot_manager.cleanup_staging()
                 continue
 
-            # Cache base state for future deltas (after FULL upload or fallback)
-            if should_upload_full or did_fallback_to_full:
-                try:
-                    loaded_state = load_model_state_dict(staging_path)
-                    if loaded_state is not None:
-                        base_window = checkpoint_window
-                        base_state = loaded_state
-
-                        # Log cached state dtype for debugging precision issues
-                        sample_dtype = None
-                        for name in list(base_state.keys())[:1]:
-                            sample_dtype = base_state[name].dtype
-
+            # Cache state for next delta (after ANY successful upload)
+            # For chained deltas, we need to cache after every upload, not just FULL
+            try:
+                loaded_state = load_model_state_dict(staging_path)
+                if loaded_state is not None:
+                    prev_window = checkpoint_window
+                    prev_state = loaded_state
+                    # Update anchor on FULL uploads (including background FULL at anchors)
+                    is_new_anchor = should_upload_full_only or did_fallback_to_full
+                    if is_new_anchor:
+                        anchor_window = checkpoint_window
                         logger.info(
-                            "[upload_worker] Cached checkpoint-%s as delta BASE: "
-                            "tensors=%d, params=%d, sample_dtype=%s "
-                            "(this will be used as base for computing next delta)",
-                            base_window,
-                            len(base_state),
-                            sum(t.numel() for t in base_state.values()),
-                            sample_dtype,
+                            "Cached checkpoint-%s as new anchor (%d tensors, %d params)",
+                            anchor_window,
+                            len(prev_state),
+                            sum(t.numel() for t in prev_state.values()),
                         )
                     else:
-                        logger.warning(
-                            "[upload_worker] Could not cache delta base for checkpoint-%s: "
-                            "no model weights found",
-                            checkpoint_window,
+                        logger.info(
+                            "Cached checkpoint-%s as prev for chained delta (%d tensors)",
+                            prev_window,
+                            len(prev_state),
                         )
-                except Exception as exc:  # noqa: BLE001
+                else:
                     logger.warning(
-                        "[upload_worker] Failed to cache delta base from checkpoint-%s: %s",
+                        "Could not cache checkpoint-%s: no model weights found",
                         checkpoint_window,
-                        exc,
                     )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to cache checkpoint-%s: %s",
+                    checkpoint_window,
+                    exc,
+                )
 
             upload_duration = time.time() - upload_start_time
 
@@ -289,7 +381,10 @@ async def upload_worker_loop(
             blocks_elapsed = current_block - upload_start_block
 
             # Determine actual checkpoint type (may have fallen back to FULL)
-            checkpoint_type = "FULL" if (should_upload_full or did_fallback_to_full) else "DELTA"
+            # Note: background FULL is logged separately, primary upload determines type
+            checkpoint_type = (
+                "FULL" if (should_upload_full_only or did_fallback_to_full) else "DELTA"
+            )
             logger.info(
                 "%s upload completed in %.1fs (%d blocks elapsed): checkpoint-%s ready at window %s",
                 checkpoint_type,
@@ -363,8 +458,9 @@ async def _upload_with_retry(
     target_window: int,
     max_attempts: int = 3,
     is_delta: bool = False,
-    base_window: int | None = None,
-    base_state: dict[str, torch.Tensor] | None = None,
+    prev_window: int | None = None,
+    prev_state: dict[str, torch.Tensor] | None = None,
+    anchor_window: int | None = None,
 ) -> UploadResult:
     """Upload checkpoint with exponential backoff retry.
 
@@ -374,8 +470,9 @@ async def _upload_with_retry(
         target_window: Window number to upload to
         max_attempts: Maximum upload attempts
         is_delta: If True, upload as DELTA checkpoint
-        base_window: For delta: window of the base checkpoint
-        base_state: For delta: state dict of the base checkpoint
+        prev_window: For delta: window of the previous checkpoint (chained)
+        prev_state: For delta: state dict of the previous checkpoint
+        anchor_window: For delta: window of the nearest FULL checkpoint
 
     Returns:
         UploadResult with timing and size metrics.
@@ -404,16 +501,19 @@ async def _upload_with_retry(
                     metadata = json.load(f)
 
             if is_delta:
-                if base_window is None or base_state is None:
-                    raise UploadError("Cannot upload delta without base_window and base_state")
+                if prev_window is None or prev_state is None or anchor_window is None:
+                    raise UploadError(
+                        "Cannot upload delta without prev_window, prev_state, and anchor_window"
+                    )
 
-                # Upload sparse delta
+                # Upload sparse delta (chained: relative to prev, with anchor for recovery)
                 result = await checkpoint_publisher.upload_delta(
                     staging_path,
                     metadata,
                     target_window,
-                    base_window,
-                    base_state,
+                    prev_window,
+                    prev_state,
+                    anchor_window,
                 )
             else:
                 # Upload full checkpoint
