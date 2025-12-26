@@ -109,11 +109,17 @@ class GradientSparsityMetrics(MetricComputer):
         total_elements = all_grads_tensor.numel()
         for threshold in self.thresholds:
             small_count = (all_grads_tensor.abs() <= threshold).sum().item()
+            dense_count = total_elements - small_count
             sparsity = small_count / total_elements
             thresh_str = f"{threshold:.0e}"
 
             metrics[f"gradient/sparsity_at_{thresh_str}"] = sparsity
             metrics[f"gradient/dense_ratio_at_{thresh_str}"] = 1.0 - sparsity
+
+            # Additional count-based metrics
+            metrics[f"gradient/sparse_count_at_{thresh_str}"] = small_count
+            metrics[f"gradient/dense_count_at_{thresh_str}"] = dense_count
+
 
         # Per-layer analysis (optional)
         if self.track_per_layer:
