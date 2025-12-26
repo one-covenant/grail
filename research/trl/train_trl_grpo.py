@@ -1139,10 +1139,11 @@ def main() -> None:
             attn_implementation="flash_attention_2",
         )
     except (ImportError, RuntimeError) as e:
-        print(f"⚠️  Flash Attention 2 unavailable ({type(e).__name__}), using default")
+        print(f"⚠️  Flash Attention 2 unavailable ({type(e).__name__}), using SDPA")
         model = AutoModelForCausalLM.from_pretrained(
             cfg.model_id,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=torch.float32,  # FP32 master weights, AMP handles FP16 casting
+            attn_implementation="sdpa",
         )
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_id)
@@ -1245,7 +1246,7 @@ def main() -> None:
         wandb_log_unique_prompts=True,
         save_strategy="steps",
         save_steps=25,
-        bf16=True,
+        fp16=True,
         report_to=["wandb"],
         eval_strategy="no",
         run_name=f"trl_{adapter.name}_grpo_qwen15b_grail_matched_final",
@@ -1282,7 +1283,7 @@ def main() -> None:
     
     # Add gradient sparsity metric
     gradient_sparsity = GradientSparsityMetrics(
-        thresholds=[0.0, 1e-8, 1e-16, 1e-20],  # Only track exact zero gradients
+        thresholds=[0.0, 10, 1, 1e-4, 1e-8, 1e-16, 1e-20],  # Only track exact zero gradients
         track_per_layer=False,
     )
     sparsity_analyzer.add_metric(gradient_sparsity)
