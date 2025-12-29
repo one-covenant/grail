@@ -226,7 +226,7 @@ async def _fetch_delta_anchor_window(
     Returns:
         The anchor_window from metadata, or None if unavailable
     """
-    from grail.infrastructure.comms import download_file
+    from grail.infrastructure.comms import download_file_chunked
 
     # Delta checkpoints store their metadata under the DELTA sub-prefix so they can
     # coexist with a FULL checkpoint at the same window.
@@ -234,7 +234,7 @@ async def _fetch_delta_anchor_window(
 
     metadata_key = checkpoint_delta_metadata_key(delta_window)
     try:
-        metadata_bytes = await download_file(
+        metadata_bytes = await download_file_chunked(
             metadata_key,
             credentials=credentials,
             use_write=True,
