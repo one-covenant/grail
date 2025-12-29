@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""TRL GRPO training script with factory pattern for GSM8K and MATH datasets.
+"""TRL GRPO training script with factory pattern for GSM8K, MATH, and MBPP datasets.
 
-Supports both datasets with exact parity to GRAIL environment implementations:
+Supports three datasets with exact parity to GRAIL environment implementations:
 - GSM8K: Grade school math (7,473 train / 1,319 test)
 - MATH: Hendrycks MATH benchmark (7,000 train / 500 val / 5,000 test)
+- MBPP: Python code generation (374 train / 90 validation / 500 test)
 
 Usage:
     python train_trl_grpo.py --dataset gsm8k
     python train_trl_grpo.py --dataset math
+    python train_trl_grpo.py --dataset mbpp
 """
 
 from __future__ import annotations
@@ -47,7 +49,12 @@ sys.path.insert(0, _PROJECT_ROOT)
 
 # GRAIL imports - reuse task sources and validation logic (after sys.path modification)
 from grail.environments.math_hendrycks_env import _math_answers_equal  # noqa: E402
-from grail.environments.providers import GSM8KTaskSource, MATHTaskSource  # noqa: E402
+from grail.environments.providers import (  # noqa: E402
+    GSM8KTaskSource,
+    MATHTaskSource,
+    MBPPTaskSource,
+)
+from grail.environments.execution import check_code_executes  # noqa: E402
 from grail.shared.chat_templates import build_qwen_chat_template  # noqa: E402
 from grail.trainer.metrics import KMetricsAggregator, TaskReplicateResult  # noqa: E402
 from grail.trainer.analysis import (  # noqa: E402
@@ -81,7 +88,7 @@ class Config:
     # Effective batch = batch_size × grad_accum_steps = 4 × 128 = 512
     grad_accum_steps: int = 128
     # Max sequence length (GRAIL_TRAINER_MAX_LENGTH, constants.py default: 2048)
-    max_length: int = 2048
+    max_length: int = 4096
     # Gradient clipping threshold (GRAIL_TRAINER_GRAD_CLIP, constants.py default: 0.5)
     grad_clip: float = 1.0
     # Warmup steps for LR scheduler (GRAIL_TRAINER_WARMUP_STEPS, constants.py default: 10)
@@ -226,19 +233,32 @@ class DatasetAdapter(abc.ABC):
         ...
 
     @abc.abstractmethod
-    def parse_gold_answer(self, raw_answer: str) -> str:
-        """Extract gold answer from dataset format."""
+    def parse_gold_answer(self, raw_answer: Any) -> Any:
+        """Extract gold answer from dataset format.
+
+        Notes:
+            - For GSM8K/MATH this is typically a string.
+            - For MBPP this may be structured data (e.g., dict with tests).
+        """
         ...
 
     @abc.abstractmethod
-    def validate_answer(self, predicted: str, gold: str) -> bool:
+    def validate_answer(self, predicted: str, gold: Any) -> bool:
         """Check if predicted answer matches gold."""
         ...
 
     @abc.abstractmethod
-    def compute_reward(self, completion: str, gold_answer: str) -> float:
+    def compute_reward(self, completion: str, gold_answer: Any) -> float:
         """Compute total reward for completion."""
         ...
+
+    def get_gold_data(self, sample: dict[str, Any]) -> Any:
+        """Get gold answer data from sample for evaluation.
+
+        Override in subclass if answer format differs from answer_field.
+        Default: return sample[answer_field]
+        """
+        return sample.get(self.answer_field, "")
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -525,6 +545,216 @@ class MATHAdapter(DatasetAdapter):
         return correctness + answer_format + thinking + no_trailing
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# MBPP (Python Code) Adapter
+# ────────────────────────────────────────────────────────────────────────────
+class MBPPAdapter(DatasetAdapter):
+    """MBPP dataset adapter for Python code generation.
+
+    Uses GRAIL's MBPPTaskSource and execution engine to validate code
+    by running test cases in a sandboxed subprocess.
+    """
+
+    def __init__(self) -> None:
+        self._train_source = MBPPTaskSource(split="train")
+        self._eval_source = MBPPTaskSource(split="validation")
+
+    @property
+    def name(self) -> str:
+        return "mbpp"
+
+    @property
+    def question_field(self) -> str:
+        return "question"
+
+    @property
+    def answer_field(self) -> str:
+        # Note: This returns "test_list" for API compatibility but actual
+        # gold data is a dict containing test_list, test_setup_code, test_imports.
+        # Use get_gold_data() for evaluation to get the full dict.
+        return "test_list"
+
+    def get_gold_data(self, sample: dict[str, Any]) -> dict[str, Any]:
+        """Get full test data dict for MBPP sample (used for evaluation).
+
+        Unlike answer_field which returns just the field name, this returns
+        the complete dict needed for code execution.
+        """
+        return {
+            "test_list": sample.get("test_list", []),
+            "test_setup_code": sample.get("test_setup_code", ""),
+            "test_imports": sample.get("test_imports", []),
+        }
+
+    @property
+    def correctness_weight(self) -> float:
+        return 0.7  # MBPP uses 0.7 for correctness (test pass rate)
+
+    @property
+    def success_threshold(self) -> float:
+        return 0.7  # Success if correctness achieved
+
+    def load_train_data(self) -> list[dict[str, Any]]:
+        """Load MBPP training data (374 samples)."""
+        self._train_source._ensure_dataset()
+        assert self._train_source._data is not None
+        data = []
+        for sample in self._train_source._data:
+            data.append({
+                "question": sample["text"],
+                "test_list": sample["test_list"],
+                "test_setup_code": sample["test_setup_code"],
+                "test_imports": sample["test_imports"],
+                "reference_solution": sample["code"],
+            })
+        return data
+
+    def load_eval_data(self) -> list[dict[str, Any]]:
+        """Load MBPP validation data (90 samples)."""
+        self._eval_source._ensure_dataset()
+        assert self._eval_source._data is not None
+        data = []
+        for sample in self._eval_source._data:
+            data.append({
+                "question": sample["text"],
+                "test_list": sample["test_list"],
+                "test_setup_code": sample["test_setup_code"],
+                "test_imports": sample["test_imports"],
+                "reference_solution": sample["code"],
+            })
+        return data
+
+    def parse_gold_answer(self, raw_answer: Any) -> Any:
+        """For MBPP, return test_list as-is (used for validation)."""
+        return raw_answer
+
+    def validate_answer(self, predicted: str, test_data: dict[str, Any]) -> bool:
+        """Validate MBPP answer by executing code against test cases.
+
+        Args:
+            predicted: Generated Python code
+            test_data: Dict with test_list, test_setup_code, test_imports
+
+        Returns:
+            True if all tests pass
+        """
+        if not predicted or not isinstance(test_data, dict):
+            return False
+
+        test_list = test_data.get("test_list", [])
+        if not test_list:
+            return False
+
+        # Prepare test cases with setup code and imports
+        test_setup = test_data.get("test_setup_code", "")
+        test_imports = test_data.get("test_imports", [])
+
+        setup_code = "\n".join(test_imports) if test_imports else ""
+        if test_setup:
+            setup_code += f"\n{test_setup}"
+
+        # Prepend setup to each test
+        test_cases = []
+        for test in test_list:
+            if setup_code:
+                test_cases.append(f"{setup_code}\n{test}")
+            else:
+                test_cases.append(test)
+
+        # Execute tests
+        result = check_code_executes(predicted, test_cases, timeout=5.0)
+        return result["status"] == "all_passed"
+
+    def _parse_completion(self, text: str) -> dict[str, Any]:
+        """Parse completion for thinking/solution tags and code extraction."""
+        flags = re.DOTALL | re.IGNORECASE
+        has_thinking = bool(
+            re.search(rf"<{REASONING_START_TOKEN}>.*?</{REASONING_END_TOKEN}>", text, flags)
+        )
+        solution_match = re.search(
+            rf"<{SOLUTION_START_TOKEN}>\s*(.+?)\s*</{SOLUTION_END_TOKEN}>", text, flags
+        )
+
+        code = ""
+        has_solution = bool(solution_match)
+        syntax_valid = False
+        trailing = 0
+
+        if solution_match:
+            code = solution_match.group(1).strip()
+            trailing = len(text) - solution_match.end()
+
+            # Check syntax validity
+            if code:
+                try:
+                    compile(code, "<string>", "exec")
+                    syntax_valid = True
+                except SyntaxError:
+                    syntax_valid = False
+
+        return {
+            "code": code,
+            "has_thinking": has_thinking,
+            "has_solution": has_solution,
+            "syntax_valid": syntax_valid,
+            "trailing": trailing,
+        }
+
+    def compute_reward(self, completion: str, test_data: Any) -> float:
+        """Compute MBPP reward (matching PythonCodeEnv weights).
+
+        Components:
+        - Correctness (0.7): Test pass rate
+        - Syntax (0.1): Code compiles
+        - Format (0.1): Has solution tags + minimal trailing
+        - Thinking (0.1): Has thinking block
+
+        Args:
+            completion: Model completion
+            test_data: Dict with test_list, test_setup_code, test_imports
+
+        Returns:
+            Total reward (0.0 to 1.0)
+        """
+        parsed = self._parse_completion(completion)
+
+        # Correctness: execute code and compute test pass rate
+        correctness = 0.0
+        if parsed["code"] and isinstance(test_data, dict):
+            test_list = test_data.get("test_list", [])
+            if test_list:
+                test_setup = test_data.get("test_setup_code", "")
+                test_imports = test_data.get("test_imports", [])
+
+                setup_code = "\n".join(test_imports) if test_imports else ""
+                if test_setup:
+                    setup_code += f"\n{test_setup}"
+
+                test_cases = []
+                for test in test_list:
+                    if setup_code:
+                        test_cases.append(f"{setup_code}\n{test}")
+                    else:
+                        test_cases.append(test)
+
+                # Execute and get pass rate
+                result = check_code_executes(parsed["code"], test_cases, timeout=5.0)
+                if result["total"] > 0:
+                    pass_rate = result["passed"] / result["total"]
+                    correctness = 0.7 * pass_rate
+
+        # Syntax validity
+        syntax = 0.1 if parsed["syntax_valid"] else 0.0
+
+        # Solution format (has solution + minimal trailing)
+        solution_format = 0.1 if (parsed["has_solution"] and parsed["trailing"] < 50) else 0.0
+
+        # Thinking format
+        thinking = 0.1 if parsed["has_thinking"] else 0.0
+
+        return correctness + syntax + solution_format + thinking
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # FACTORY FUNCTION
 # ════════════════════════════════════════════════════════════════════════════
@@ -532,7 +762,7 @@ def get_dataset_adapter(dataset_name: str) -> DatasetAdapter:
     """Factory function to get dataset adapter by name.
 
     Args:
-        dataset_name: 'gsm8k' or 'math'
+        dataset_name: 'gsm8k', 'math', or 'mbpp'
 
     Returns:
         DatasetAdapter instance
@@ -543,6 +773,7 @@ def get_dataset_adapter(dataset_name: str) -> DatasetAdapter:
     adapters: dict[str, type[DatasetAdapter]] = {
         "gsm8k": GSM8KAdapter,
         "math": MATHAdapter,
+        "mbpp": MBPPAdapter,
     }
 
     if dataset_name.lower() not in adapters:
@@ -572,14 +803,14 @@ class TrainingPassAtKTracker:
     def __init__(
         self,
         adapter: DatasetAdapter,
-        prompt_to_answer: dict[str, str],
+        prompt_to_answer: dict[str, Any],
         report_ks: tuple[int, ...] = (1, 5, 10),
     ) -> None:
         """Initialize the tracker.
 
         Args:
             adapter: Dataset adapter for reward computation and success threshold
-            prompt_to_answer: Mapping from prompt text to gold answer
+            prompt_to_answer: Mapping from prompt text to gold answer data
             report_ks: Tuple of k values for pass@k metrics
         """
         self._adapter = adapter
@@ -616,8 +847,12 @@ class TrainingPassAtKTracker:
         self,
         prompts: list[str],
         kwargs: dict[str, Any],
-    ) -> list[str]:
-        """Extract gold answers from kwargs or prompt mapping."""
+    ) -> list[Any]:
+        """Extract gold answers from kwargs or prompt mapping.
+
+        Returns:
+            List of gold answers - can be strings (gsm8k/math) or dicts (mbpp)
+        """
         if "gold_answer" in kwargs and kwargs["gold_answer"]:
             return kwargs["gold_answer"]
         if "metadatas" in kwargs and kwargs["metadatas"]:
@@ -627,9 +862,14 @@ class TrainingPassAtKTracker:
     def _compute_rewards(
         self,
         completions: list[str],
-        gold_answers: list[str],
+        gold_answers: list[Any],
     ) -> list[float]:
-        """Compute reward for each completion."""
+        """Compute reward for each completion.
+
+        Args:
+            completions: Model completions
+            gold_answers: Gold data (strings for math, dicts for mbpp)
+        """
         return [
             self._adapter.compute_reward(c, g)
             for c, g in zip(completions, gold_answers, strict=False)
@@ -699,7 +939,7 @@ def prepare_train_dataset(adapter: DatasetAdapter, tokenizer: PreTrainedTokenize
         tokenizer: Tokenizer for chat template formatting
 
     Returns:
-        HuggingFace Dataset with 'prompt' and 'gold_answer' columns
+        HuggingFace Dataset with 'prompt' and metadata columns
     """
     raw_data = adapter.load_train_data()
 
@@ -717,12 +957,21 @@ def prepare_train_dataset(adapter: DatasetAdapter, tokenizer: PreTrainedTokenize
             tokenize=False,
             add_generation_prompt=True,
         )
-        formatted.append(
-            {
-                "prompt": prompt,
-                "gold_answer": sample[adapter.answer_field],
+
+        # For MBPP, store full test data dict; for others, store answer string
+        if adapter.name == "mbpp":
+            gold_data = {
+                "test_list": sample.get("test_list", []),
+                "test_setup_code": sample.get("test_setup_code", ""),
+                "test_imports": sample.get("test_imports", []),
             }
-        )
+        else:
+            gold_data = sample[adapter.answer_field]
+
+        formatted.append({
+            "prompt": prompt,
+            "gold_answer": gold_data,
+        })
 
     print(f"  Training dataset ({adapter.name}): {len(formatted)} samples")
     return Dataset.from_list(formatted)
@@ -825,7 +1074,8 @@ class VLLMEvalCallback(TrainerCallback):
 
                 # Get questions using adapter's field name
                 batch_questions = [s[self.adapter.question_field] for s in batch]
-                batch_golds = [s[self.adapter.answer_field] for s in batch]
+                # Use get_gold_data() for proper data extraction (esp. MBPP dict)
+                batch_golds = [self.adapter.get_gold_data(s) for s in batch]
 
                 # Expand: each question gets N replicates
                 tasks_to_generate = []
@@ -860,10 +1110,17 @@ class VLLMEvalCallback(TrainerCallback):
                         c_display = (
                             completion[:300] + "..." if len(completion) > 300 else completion
                         )
+                        # Handle both string (math/gsm8k) and dict (mbpp) gold answers
+                        if isinstance(gold, str):
+                            gold_display = gold[:50] + "..." if len(gold) > 50 else gold
+                        else:
+                            # MBPP: show test count instead of raw dict
+                            test_count = len(gold.get("test_list", [])) if isinstance(gold, dict) else 0
+                            gold_display = f"[{test_count} test cases]"
                         print(f"\n  Sample {i + 1}:")
                         print(f"    Question: {q_display}")
                         print(f"    Completion: {c_display}")
-                        print(f"    Reward: {reward:.3f} | Gold: {gold[:50]}...")
+                        print(f"    Reward: {reward:.3f} | Gold: {gold_display}")
                     print("  ━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
                 # Compute rewards and aggregate
@@ -1070,12 +1327,14 @@ class SparsityCallback(TrainerCallback):
 # ════════════════════════════════════════════════════════════════════════════
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="TRL GRPO training with GSM8K or MATH dataset")
+    parser = argparse.ArgumentParser(
+        description="TRL GRPO training with GSM8K, MATH, or MBPP dataset"
+    )
     parser.add_argument(
         "--dataset",
         type=str,
         default="gsm8k",
-        choices=["gsm8k", "math"],
+        choices=["gsm8k", "math", "mbpp"],
         help="Dataset to use for training (default: gsm8k)",
     )
     parser.add_argument(
@@ -1168,6 +1427,12 @@ def main() -> None:
 
     # Calculate max_prompt_length (GRAIL_TRAINER_MAX_LENGTH - GRPO_MAX_COMPLETION_TOKENS)
     max_prompt_length = cfg.max_length - cfg.max_new_tokens
+    if max_prompt_length <= 0:
+        raise ValueError(
+            "Invalid length config: max_length must be > max_new_tokens so prompts aren't "
+            "truncated to empty. "
+            f"Got max_length={cfg.max_length}, max_new_tokens={cfg.max_new_tokens}."
+        )
 
     # Calculate training schedule
     # Each optimizer step = generation_batch_size = effective_batch = 512 samples
