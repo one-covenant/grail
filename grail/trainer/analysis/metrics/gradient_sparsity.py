@@ -120,7 +120,6 @@ class GradientSparsityMetrics(MetricComputer):
             metrics[f"gradient/sparse_count_at_{thresh_str}"] = small_count
             metrics[f"gradient/dense_count_at_{thresh_str}"] = dense_count
 
-
         # Per-layer analysis (optional)
         if self.track_per_layer:
             for name, grad_list in layer_grads.items():
