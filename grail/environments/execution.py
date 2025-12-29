@@ -25,6 +25,7 @@ import signal
 import sys
 import tempfile
 import warnings
+from multiprocessing.connection import Connection
 from typing import Any
 
 
@@ -35,7 +36,7 @@ def _suppress_execution_sandbox_noise() -> None:
 
     The execution sandbox spawns child processes that produce harmless but
     noisy error messages during cleanup:
-    - EOFError in multiprocessing logging queue monitor threads
+    - EOFError in multiprocessing logging queue monitor threads (legacy Manager-based IPC)
     - TemporaryDirectory cleanup TypeError when os.unlink is disabled
     - asyncio "Task was destroyed" warnings for websocket connections
 
@@ -258,61 +259,6 @@ def reliability_guard(max_memory_bytes: int = 2 * 1024**3) -> None:
     builtins.__import__ = _safe_import
 
 
-def unsafe_execute(code: str, timeout: float, result: list[dict[str, Any]]) -> None:
-    """Execute code in isolated context with safety guards.
-
-    This function runs in a separate process and should not be called directly.
-    Use execute_code() instead.
-
-    Args:
-        code: Python code string to execute
-        timeout: Maximum execution time in seconds
-        result: Shared list to store execution result
-    """
-    # Suppress all stderr output from this child process to reduce noise
-    # This catches Python internal errors (thread crashes, atexit failures, etc.)
-    _suppress_child_process_stderr()
-
-    # Create tempdir in parent scope to ensure cleanup works
-    import os
-    import shutil
-    import tempfile
-
-    # Save original rmtree before reliability_guard disables it
-    _original_rmtree = shutil.rmtree
-
-    tmpdir = tempfile.mkdtemp()
-    old_cwd = os.getcwd()
-
-    try:
-        os.chdir(tmpdir)
-
-        # Apply security restrictions AFTER changing directory
-        reliability_guard()
-
-        # Suppress all IO
-        with swallow_io():
-            try:
-                with time_limit(timeout):
-                    # Execute code in isolated namespace
-                    exec_globals: dict[str, Any] = {}
-                    exec(code, exec_globals)
-                result.append({"status": "success", "error": None})
-            except TimeoutException:
-                result.append({"status": "timeout", "error": "Execution timed out"})
-            except SyntaxError as e:
-                result.append({"status": "syntax_error", "error": str(e)})
-            except Exception as e:
-                result.append({"status": "runtime_error", "error": f"{type(e).__name__}: {e}"})
-    finally:
-        # Clean up using saved original function
-        try:
-            os.chdir(old_cwd)
-            _original_rmtree(tmpdir, ignore_errors=True)
-        except Exception:
-            pass  # Best effort cleanup
-
-
 def _suppress_child_process_stderr() -> None:
     """Redirect stderr to /dev/null to suppress expected sandbox cleanup noise.
 
@@ -352,13 +298,19 @@ def execute_code(code: str, timeout: float = 5.0) -> dict[str, Any]:
         >>> result['status']
         'timeout'
     """
-    manager = multiprocessing.Manager()
-    result = manager.list()
+    # Use Pipe instead of Manager/Queue to avoid:
+    # 1. Manager's QueueListener logging noise (EOFError on cleanup)
+    # 2. Queue import issues after reliability_guard blocks multiprocessing
+    # Pipe uses simple file descriptors that work even after import blocking
+    parent_conn, child_conn = multiprocessing.Pipe(duplex=False)
 
     try:
-        # Spawn separate process for isolation
-        process = multiprocessing.Process(target=unsafe_execute, args=(code, timeout, result))
+        process = multiprocessing.Process(
+            target=_unsafe_execute_with_pipe,
+            args=(code, timeout, child_conn),
+        )
         process.start()
+        child_conn.close()  # Close child end in parent
 
         # Wait for completion with grace period
         process.join(timeout=timeout + 1.0)
@@ -369,18 +321,104 @@ def execute_code(code: str, timeout: float = 5.0) -> dict[str, Any]:
             process.join()
             return {"status": "timeout", "error": "Execution timed out"}
 
-        # Check if process crashed or was killed
-        if not result:
-            return {"status": "process_error", "error": "Process terminated unexpectedly"}
-
-        return dict(result[0])
-    finally:
-        # Always shutdown manager to release file descriptors and server process
-        # Suppress any cleanup errors - they are harmless but noisy
+        # Read result from pipe.
+        #
+        # Even after join(), allow a small grace window for the child to flush
+        # the final send into the pipe under heavy scheduling pressure.
         try:
-            manager.shutdown()
+            if parent_conn.poll(timeout=1.0):
+                return parent_conn.recv()
+        except EOFError:
+            # Child died after closing the pipe without sending a result
+            pass
+
+        exit_code = process.exitcode
+        return {
+            "status": "process_error",
+            "error": f"Process terminated unexpectedly (exit_code={exit_code})",
+        }
+    finally:
+        try:
+            parent_conn.close()
         except Exception:
-            pass  # Best effort cleanup - may fail if already in bad state
+            pass
+
+
+def _unsafe_execute_with_pipe(
+    code: str,
+    timeout: float,
+    result_conn: Connection,
+) -> None:
+    """Execute code in sandbox and send result via pipe.
+    
+    Uses Pipe instead of Queue because:
+    1. Pipe.send() uses simple pickle + file descriptor write
+    2. Works even after reliability_guard blocks multiprocessing imports
+    3. No background threads that produce cleanup noise
+    """
+    # Ensure modules used by Connection.send() are imported BEFORE the sandbox
+    # import hook blocks "multiprocessing.*" imports.
+    #
+    # Connection.send() uses multiprocessing's ForkingPickler internally.
+    import multiprocessing.reduction  # noqa: F401
+    import pickle  # noqa: F401
+
+    # Suppress stderr for this child process first
+    _suppress_child_process_stderr()
+    
+    # Store send/close callables BEFORE reliability_guard blocks imports.
+    send_result = result_conn.send
+    close_conn = result_conn.close
+    
+    # Create tempdir and do all setup before security lockdown
+    tmpdir = tempfile.mkdtemp()
+    old_cwd = os.getcwd()
+    
+    # Store original functions before reliability_guard disables them
+    import shutil
+    _original_rmtree = shutil.rmtree
+    
+    # Change to temp directory
+    os.chdir(tmpdir)
+    
+    try:
+        # Apply security restrictions
+        reliability_guard()
+        
+        # Now execute the code with IO suppression and timeout
+        result: dict[str, Any]
+        with swallow_io():
+            try:
+                with time_limit(timeout):
+                    exec_globals: dict[str, Any] = {}
+                    exec(code, exec_globals)
+                result = {"status": "success", "error": None}
+            except TimeoutException:
+                result = {"status": "timeout", "error": "Execution timed out"}
+            except SyntaxError as e:
+                result = {"status": "syntax_error", "error": str(e)}
+            except Exception as e:
+                result = {"status": "runtime_error", "error": f"{type(e).__name__}: {e}"}
+    except Exception as e:
+        result = {"status": "process_error", "error": f"Sandbox error: {e}"}
+    finally:
+        # Cleanup temp directory using saved function
+        try:
+            os.chdir(old_cwd)
+            _original_rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
+    
+    # Send result via pipe - using saved send function
+    try:
+        send_result(result)
+    except Exception:
+        pass  # Parent will detect missing result
+    finally:
+        try:
+            close_conn()
+        except Exception:
+            pass
 
 
 def check_code_executes(code: str, test_cases: list[str], timeout: float = 5.0) -> dict[str, Any]:

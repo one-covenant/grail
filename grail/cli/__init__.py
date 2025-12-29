@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.logging import RichHandler
 
+from ..logging_utils import ExecutionSandboxNoiseFilter, MinerPrefixFilter
 from ..monitoring import initialize_monitoring
 from ..monitoring.config import MonitoringConfig
 from ..shared.constants import NETUID, NETWORK
@@ -72,9 +73,7 @@ def configure_logging(verbosity: int) -> None:
     ]:
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
-    # Add miner prefix filter for validation context (BEFORE creating handlers)
-    from ..logging_utils import MinerPrefixFilter
-
+    # MinerPrefixFilter imported at module level from logging_utils
     console_handler = RichHandler(
         console=console,
         rich_tracebacks=True,
@@ -185,6 +184,9 @@ def configure_logging(verbosity: int) -> None:
             return True
 
     root.addFilter(LokiLevelTagFilter())
+
+    # Suppress noisy but harmless errors from execution sandbox (shared filter)
+    root.addFilter(ExecutionSandboxNoiseFilter())
 
     # Log shipping mode indication
     promtail_enabled = os.environ.get("PROMTAIL_ENABLE", "true").strip().lower() in {
