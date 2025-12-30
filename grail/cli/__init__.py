@@ -185,8 +185,11 @@ def configure_logging(verbosity: int) -> None:
 
     root.addFilter(LokiLevelTagFilter())
 
-    # Suppress noisy but harmless errors from execution sandbox (shared filter)
-    root.addFilter(ExecutionSandboxNoiseFilter())
+    # Conditionally suppress noisy but harmless errors from execution sandbox
+    # Set GRAIL_SUPPRESS_SANDBOX_NOISE=1 to enable suppression (disabled by default)
+    suppress_sandbox_noise = os.getenv("GRAIL_SUPPRESS_SANDBOX_NOISE", "0") == "1"
+    if suppress_sandbox_noise:
+        root.addFilter(ExecutionSandboxNoiseFilter())
 
     # Log shipping mode indication
     promtail_enabled = os.environ.get("PROMTAIL_ENABLE", "true").strip().lower() in {
