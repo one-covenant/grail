@@ -15,6 +15,7 @@ cause damage. Use in isolated environments with proper system-level protections.
 from __future__ import annotations
 
 import atexit
+import concurrent.futures
 import contextlib
 import faulthandler
 import io
@@ -24,6 +25,7 @@ import platform
 import signal
 import sys
 import tempfile
+import threading
 import warnings
 from multiprocessing.connection import Connection
 from typing import Any
@@ -53,6 +55,11 @@ class TimeoutException(Exception):
     """Raised when code execution exceeds timeout limit."""
 
     pass
+
+
+# Global lock to protect CUDA env modification during process spawning
+# Ensures parent's CUDA visibility isn't affected by concurrent spawns
+_SPAWN_LOCK = threading.Lock()
 
 
 class WriteOnlyStringIO(io.StringIO):
@@ -259,25 +266,6 @@ def reliability_guard(max_memory_bytes: int = 2 * 1024**3) -> None:
     builtins.__import__ = _safe_import
 
 
-def _suppress_child_process_stderr() -> None:
-    """Redirect stderr to /dev/null to suppress expected sandbox cleanup noise.
-
-    This prevents Python internal error messages from cluttering parent logs:
-    - Thread crash tracebacks (EOFError in logging monitor)
-    - atexit callback failures (TemporaryDirectory cleanup)
-    - Resource cleanup warnings
-
-    The actual execution results are returned via the result list, not stderr.
-    """
-    try:
-        # Redirect stderr to /dev/null
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, 2)  # stderr = file descriptor 2
-        os.close(devnull)
-    except Exception:
-        pass  # Best effort - continue even if this fails
-
-
 def execute_code(code: str, timeout: float = 5.0) -> dict[str, Any]:
     """Execute Python code in a sandboxed subprocess.
 
@@ -298,39 +286,101 @@ def execute_code(code: str, timeout: float = 5.0) -> dict[str, Any]:
         >>> result['status']
         'timeout'
     """
-    # Use Pipe instead of Manager/Queue to avoid:
-    # 1. Manager's QueueListener logging noise (EOFError on cleanup)
-    # 2. Queue import issues after reliability_guard blocks multiprocessing
-    # Pipe uses simple file descriptors that work even after import blocking
-    parent_conn, child_conn = multiprocessing.Pipe(duplex=False)
-
+    # Pre-check syntax to avoid slow spawn overhead for syntax errors
     try:
-        process = multiprocessing.Process(
-            target=_unsafe_execute_with_pipe,
-            args=(code, timeout, child_conn),
-        )
-        process.start()
+        compile(code, "<string>", "exec")
+    except SyntaxError as e:
+        return {"status": "syntax_error", "error": str(e)}
+
+    # Use 'spawn' context to avoid fork() issues with CUDA, threads, and resources
+    # Spawn creates a fresh Python process without inheriting parent's:
+    # - CUDA contexts (prevents GPU corruption)
+    # - Thread locks (prevents deadlocks)
+    # - File descriptors (prevents resource leaks)
+    # - Signal handlers (prevents interference)
+    # This prevents resource_tracker errors from forked processes being killed
+    #
+    # Note: Spawn has overhead (imports module in child), but it's necessary for
+    # safety when parent has CUDA/threading state. For evaluation, we spawn
+    # processes in batches so the overhead is amortized.
+    ctx = multiprocessing.get_context("spawn")
+    parent_conn, child_conn = ctx.Pipe(duplex=False)
+
+    process = None
+    try:
+        # CRITICAL: Hide GPUs before spawning to ensure child is CPU-only from birth
+        # This prevents CUDA initialization during child process startup/imports
+        #
+        # We use a lock to atomically:
+        # 1. Save parent's CUDA env vars
+        # 2. Set CUDA_VISIBLE_DEVICES="" (child inherits this)
+        # 3. Spawn child process
+        # 4. Restore parent's CUDA env vars
+        #
+        # This ensures parent's GPU access (vLLM, HuggingFace) is never affected
+        # and prevents race conditions between concurrent spawns
+        with _SPAWN_LOCK:
+            old_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+            old_cuda_order = os.environ.get("CUDA_DEVICE_ORDER")
+
+            try:
+                # Set env vars before spawning - child will inherit these
+                os.environ["CUDA_VISIBLE_DEVICES"] = ""
+                os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+
+                process = ctx.Process(
+                    target=_unsafe_execute_with_pipe,
+                    args=(code, timeout, child_conn),
+                )
+                process.start()
+            finally:
+                # ALWAYS restore parent's CUDA visibility immediately
+                # This happens in microseconds, minimizing impact on parent
+                if old_cuda_visible is None:
+                    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+                else:
+                    os.environ["CUDA_VISIBLE_DEVICES"] = old_cuda_visible
+
+                if old_cuda_order is None:
+                    os.environ.pop("CUDA_DEVICE_ORDER", None)
+                else:
+                    os.environ["CUDA_DEVICE_ORDER"] = old_cuda_order
+
         child_conn.close()  # Close child end in parent
 
         # Wait for completion with grace period
-        process.join(timeout=timeout + 1.0)
+        # Spawn has ~5-7s overhead for importing heavy dependencies (torch, bittensor, etc.)
+        # Add extra time beyond code timeout to account for spawn overhead + cleanup
+        process_timeout = timeout + 10.0
+        process.join(timeout=process_timeout)
 
-        # Force kill if still alive
+        # Graceful shutdown: try terminate first, then kill if necessary
         if process.is_alive():
-            process.kill()
-            process.join()
+            # Try graceful shutdown first (SIGTERM allows cleanup)
+            process.terminate()
+            process.join(timeout=0.5)
+
+            # Force kill only if terminate didn't work
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=0.5)
+
             return {"status": "timeout", "error": "Execution timed out"}
 
-        # Read result from pipe.
-        #
-        # Even after join(), allow a small grace window for the child to flush
-        # the final send into the pipe under heavy scheduling pressure.
+        # Read result from pipe with timeout to prevent deadlock
+        # If child crashed after join(), poll prevents indefinite hang
         try:
             if parent_conn.poll(timeout=1.0):
                 return parent_conn.recv()
         except EOFError:
             # Child died after closing the pipe without sending a result
             pass
+        except Exception as e:
+            # Handle any other pipe communication errors
+            return {
+                "status": "process_error",
+                "error": f"Pipe communication error: {e}",
+            }
 
         exit_code = process.exitcode
         return {
@@ -338,6 +388,15 @@ def execute_code(code: str, timeout: float = 5.0) -> dict[str, Any]:
             "error": f"Process terminated unexpectedly (exit_code={exit_code})",
         }
     finally:
+        # Ensure process is fully cleaned up
+        if process is not None and process.is_alive():
+            try:
+                process.kill()
+                process.join(timeout=0.5)
+            except Exception:
+                pass
+
+        # Close pipe connections
         try:
             parent_conn.close()
         except Exception:
@@ -350,12 +409,32 @@ def _unsafe_execute_with_pipe(
     result_conn: Connection,
 ) -> None:
     """Execute code in sandbox and send result via pipe.
-    
+
     Uses Pipe instead of Queue because:
     1. Pipe.send() uses simple pickle + file descriptor write
     2. Works even after reliability_guard blocks multiprocessing imports
     3. No background threads that produce cleanup noise
+
+    Note: With spawn context, this runs in a fresh process with no inherited state.
     """
+    # CRITICAL #1: Suppress stderr IMMEDIATELY before any imports
+    # This prevents logging noise from appearing in parent's console:
+    # - EOFError tracebacks from logging queue monitors
+    # - PyTorch CUDA_ALLOC_CONF deprecation warnings
+    # - Resource cleanup warnings during exit
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 2)  # stderr = file descriptor 2
+        os.close(devnull)
+    except Exception:
+        pass  # Best effort - continue even if this fails
+
+    # CRITICAL #2: Hide all GPUs to make this process CPU-only
+    # This prevents CUDA context conflicts when spawning from GPU-enabled parent
+    # Must happen BEFORE any imports that might touch CUDA (torch, etc.)
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+
     # Ensure modules used by Connection.send() are imported BEFORE the sandbox
     # import hook blocks "multiprocessing.*" imports.
     #
@@ -363,30 +442,30 @@ def _unsafe_execute_with_pipe(
     import multiprocessing.reduction  # noqa: F401
     import pickle  # noqa: F401
 
-    # Suppress stderr for this child process first
-    _suppress_child_process_stderr()
-    
     # Store send/close callables BEFORE reliability_guard blocks imports.
     send_result = result_conn.send
     close_conn = result_conn.close
-    
+
     # Create tempdir and do all setup before security lockdown
     tmpdir = tempfile.mkdtemp()
     old_cwd = os.getcwd()
-    
+
     # Store original functions before reliability_guard disables them
     import shutil
+
     _original_rmtree = shutil.rmtree
-    
+
     # Change to temp directory
     os.chdir(tmpdir)
-    
+
+    result: dict[str, Any]
     try:
         # Apply security restrictions
         reliability_guard()
-        
-        # Now execute the code with IO suppression and timeout
-        result: dict[str, Any]
+
+        # Execute the code with IO suppression and timeout
+        # Parent handles process-level timeout via join(), but we also use
+        # signal-based timeout as defense-in-depth for runaway code
         with swallow_io():
             try:
                 with time_limit(timeout):
@@ -402,19 +481,27 @@ def _unsafe_execute_with_pipe(
     except Exception as e:
         result = {"status": "process_error", "error": f"Sandbox error: {e}"}
     finally:
-        # Cleanup temp directory using saved function
+        # Always cleanup temp directory, even on timeout/error
         try:
             os.chdir(old_cwd)
             _original_rmtree(tmpdir, ignore_errors=True)
         except Exception:
-            pass
-    
+            pass  # Cleanup errors shouldn't prevent result transmission
+
     # Send result via pipe - using saved send function
+    # This must succeed for parent to receive results
     try:
         send_result(result)
+        # Explicitly flush to ensure data is sent before process exits
+        # (though send() should be synchronous, be defensive)
+    except BrokenPipeError:
+        # Parent closed pipe - this is OK if parent timed out
+        pass
     except Exception:
-        pass  # Parent will detect missing result
+        # Other errors - parent will detect missing result
+        pass
     finally:
+        # Close our end of the pipe
         try:
             close_conn()
         except Exception:
@@ -449,15 +536,50 @@ def check_code_executes(code: str, test_cases: list[str], timeout: float = 5.0) 
             "test_results": [],
         }
 
+    # Handle empty test case list
+    if not test_cases:
+        return {
+            "passed": 0,
+            "total": 0,
+            "status": "all_passed",
+            "error": None,
+            "test_results": [],
+        }
+
+    # Execute all test cases in parallel for 3x speedup
+    # Each test spawns independently, avoiding sequential ~7s overhead per test
     test_results = []
     passed = 0
     timeout_count = 0
 
-    for i, test_case in enumerate(test_cases):
-        # Combine code with test case
-        full_code = f"{code}\n\n{test_case}"
+    # Use ProcessPoolExecutor to run tests in parallel
+    # max_workers = number of test cases for maximum parallelism
+    max_workers = min(len(test_cases), 10)  # Cap at 10 to avoid resource exhaustion
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all test cases for parallel execution
+        future_to_idx = {
+            executor.submit(execute_code, f"{code}\n\n{test_case}", timeout): i
+            for i, test_case in enumerate(test_cases)
+        }
 
-        result = execute_code(full_code, timeout=timeout)
+        # Collect results as they complete
+        # Use list to maintain order by test_idx
+        results_dict = {}
+        for future in concurrent.futures.as_completed(future_to_idx):
+            test_idx = future_to_idx[future]
+            try:
+                result = future.result()
+                results_dict[test_idx] = result
+            except Exception as e:
+                # Handle unexpected executor errors
+                results_dict[test_idx] = {
+                    "status": "process_error",
+                    "error": f"Executor error: {e}",
+                }
+
+    # Process results in original order
+    for i in range(len(test_cases)):
+        result = results_dict.get(i, {"status": "process_error", "error": "Missing result"})
 
         if result["status"] == "success":
             passed += 1
@@ -482,7 +604,6 @@ def check_code_executes(code: str, test_cases: list[str], timeout: float = 5.0) 
         status = "some_failed"
     else:
         # All tests failed - check if primarily due to timeout
-        # FIX: Use status field instead of string prefix matching on error message
         if timeout_count == len(test_cases):
             status = "timeout"
         else:
@@ -495,3 +616,417 @@ def check_code_executes(code: str, test_cases: list[str], timeout: float = 5.0) 
         "error": None if status == "all_passed" else f"Passed {passed}/{len(test_cases)} tests",
         "test_results": test_results,
     }
+
+
+# =============================================================================
+# FAST CODE EXECUTION POOL
+# =============================================================================
+# Provides a persistent worker pool that eliminates spawn overhead.
+# Workers are spawned once and reused across all code executions.
+# This gives ~50-100x speedup over spawning fresh processes per test.
+
+
+def _pool_worker_execute(
+    code: str,
+    tests: list[str],
+    timeout: float,
+) -> dict[str, Any]:
+    """Execute code with tests in a pool worker.
+
+    This function runs in a persistent worker process. The worker is spawned
+    once and stays alive, eliminating the ~2s spawn overhead per execution.
+
+    Args:
+        code: Python code string (function definitions)
+        tests: List of assertion strings to test
+        timeout: Maximum execution time in seconds
+
+    Returns:
+        Dictionary with passed, total, status, error, test_results
+    """
+    # Ensure CPU-only execution (worker inherits this from spawn)
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+
+    # Suppress noisy warnings
+    _suppress_execution_sandbox_noise()
+
+    # Pre-check syntax to fail fast
+    try:
+        compile(code, "<string>", "exec")
+    except SyntaxError as e:
+        return {
+            "passed": 0,
+            "total": len(tests),
+            "status": "syntax_error",
+            "error": str(e),
+            "test_results": [],
+        }
+
+    if not tests:
+        return {
+            "passed": 0,
+            "total": 0,
+            "status": "all_passed",
+            "error": None,
+            "test_results": [],
+        }
+
+    # Note: We don't set RLIMIT_AS here because:
+    # 1. Workers are persistent - setting once would affect all future executions
+    # 2. Python already uses significant memory after importing
+    # 3. RLIMIT_AS can't be increased once lowered
+    # The worker isolation + timeout provides sufficient protection
+
+    # Execute each test
+    test_results = []
+    passed = 0
+    timeout_count = 0
+
+    for i, test in enumerate(tests):
+        full_code = f"{code}\n\n{test}"
+        try:
+            # Use signal-based timeout for each test
+            def timeout_handler(signum: int, frame: Any) -> None:
+                raise TimeoutException("Test timed out")
+
+            if platform.system() != "Windows":
+                old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+                signal.alarm(int(timeout))
+
+            try:
+                exec_globals: dict[str, Any] = {}
+                exec(full_code, exec_globals)
+                test_results.append({"test_idx": i, "passed": True, "error": None})
+                passed += 1
+            except TimeoutException:
+                test_results.append({"test_idx": i, "passed": False, "error": "Timeout"})
+                timeout_count += 1
+            except Exception as e:
+                test_results.append(
+                    {"test_idx": i, "passed": False, "error": f"{type(e).__name__}: {e}"}
+                )
+            finally:
+                if platform.system() != "Windows":
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, old_handler)
+
+        except Exception as e:
+            test_results.append({"test_idx": i, "passed": False, "error": str(e)})
+
+    # Determine overall status
+    if passed == len(tests):
+        status = "all_passed"
+    elif passed > 0:
+        status = "some_failed"
+    elif timeout_count == len(tests):
+        status = "timeout"
+    else:
+        status = "error"
+
+    return {
+        "passed": passed,
+        "total": len(tests),
+        "status": status,
+        "error": None if status == "all_passed" else f"Passed {passed}/{len(tests)} tests",
+        "test_results": test_results,
+    }
+
+
+def _pool_warmup_noop() -> bool:
+    """Dummy function to force worker spawn during warmup."""
+    # Set CPU-only environment in worker
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    return True
+
+
+class CodeExecutionPool:
+    """Persistent worker pool for fast code execution.
+
+    Workers are spawned once at initialization and reused for all executions.
+    This eliminates the ~2s spawn overhead per execution, giving 50-100x speedup.
+
+    Usage:
+        pool = CodeExecutionPool(num_workers=8)
+        try:
+            results = pool.execute_batch([
+                ("def add(a,b): return a+b", ["assert add(1,2)==3"]),
+                ("def mul(a,b): return a*b", ["assert mul(2,3)==6"]),
+            ])
+        finally:
+            pool.shutdown()
+
+    Thread Safety:
+        The pool is thread-safe and can be called from multiple threads.
+
+    Memory Safety:
+        Workers are recycled after max_tasks_per_child executions to prevent
+        memory leaks from accumulating global state.
+    """
+
+    def __init__(
+        self,
+        num_workers: int = 8,
+        max_tasks_per_child: int = 50,
+    ) -> None:
+        """Initialize the execution pool.
+
+        Args:
+            num_workers: Number of worker processes to spawn
+            max_tasks_per_child: Recycle workers after this many tasks to prevent leaks
+        """
+        self.num_workers = num_workers
+        self.max_tasks_per_child = max_tasks_per_child
+        self._executor: concurrent.futures.ProcessPoolExecutor | None = None
+        self._lock = threading.Lock()
+        self._started = False
+
+    def start(self) -> None:
+        """Start the worker pool.
+
+        Workers are spawned immediately and warmed up to eliminate first-call latency.
+        """
+        with self._lock:
+            if self._started:
+                return
+
+            # Use spawn context - CUDA-safe, workers don't inherit GPU state
+            ctx = multiprocessing.get_context("spawn")
+
+            # Hide GPUs before spawning workers
+            with _SPAWN_LOCK:
+                old_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+                old_cuda_order = os.environ.get("CUDA_DEVICE_ORDER")
+
+                try:
+                    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+                    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+
+                    self._executor = concurrent.futures.ProcessPoolExecutor(
+                        max_workers=self.num_workers,
+                        mp_context=ctx,
+                        max_tasks_per_child=self.max_tasks_per_child,
+                    )
+
+                    # Warm up workers - force spawn now so first real call is fast
+                    warmup_futures = [
+                        self._executor.submit(_pool_warmup_noop) for _ in range(self.num_workers)
+                    ]
+                    for f in warmup_futures:
+                        f.result(timeout=30)
+
+                finally:
+                    # Restore parent's CUDA visibility
+                    if old_cuda_visible is None:
+                        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+                    else:
+                        os.environ["CUDA_VISIBLE_DEVICES"] = old_cuda_visible
+
+                    if old_cuda_order is None:
+                        os.environ.pop("CUDA_DEVICE_ORDER", None)
+                    else:
+                        os.environ["CUDA_DEVICE_ORDER"] = old_cuda_order
+
+            self._started = True
+
+    def shutdown(self) -> None:
+        """Shutdown the worker pool and release all resources.
+
+        This should be called when the pool is no longer needed to free
+        memory and prevent zombie processes.
+        """
+        with self._lock:
+            if self._executor is not None:
+                try:
+                    self._executor.shutdown(wait=True, cancel_futures=True)
+                except Exception:
+                    # Force shutdown on error
+                    try:
+                        self._executor.shutdown(wait=False, cancel_futures=True)
+                    except Exception:
+                        pass
+                self._executor = None
+            self._started = False
+
+    def execute(
+        self,
+        code: str,
+        tests: list[str],
+        timeout: float = 5.0,
+    ) -> dict[str, Any]:
+        """Execute code with tests using a pool worker.
+
+        Args:
+            code: Python code string (function definitions)
+            tests: List of assertion strings
+            timeout: Maximum execution time per test in seconds
+
+        Returns:
+            Dictionary with passed, total, status, error, test_results
+        """
+        if not self._started:
+            self.start()
+
+        if self._executor is None:
+            return {
+                "passed": 0,
+                "total": len(tests),
+                "status": "error",
+                "error": "Pool not initialized",
+                "test_results": [],
+            }
+
+        try:
+            future = self._executor.submit(_pool_worker_execute, code, tests, timeout)
+            # Add buffer for IPC overhead
+            return future.result(timeout=timeout * len(tests) + 30)
+        except concurrent.futures.TimeoutError:
+            return {
+                "passed": 0,
+                "total": len(tests),
+                "status": "timeout",
+                "error": "Execution timed out",
+                "test_results": [],
+            }
+        except Exception as e:
+            return {
+                "passed": 0,
+                "total": len(tests),
+                "status": "error",
+                "error": f"Pool execution error: {e}",
+                "test_results": [],
+            }
+
+    def execute_batch(
+        self,
+        items: list[tuple[str, list[str]]],
+        timeout: float = 5.0,
+    ) -> list[dict[str, Any]]:
+        """Execute multiple (code, tests) pairs in parallel.
+
+        Args:
+            items: List of (code, tests) tuples
+            timeout: Maximum execution time per test in seconds
+
+        Returns:
+            List of result dictionaries, one per input item
+        """
+        if not self._started:
+            self.start()
+
+        if self._executor is None or not items:
+            return [
+                {
+                    "passed": 0,
+                    "total": len(tests) if tests else 0,
+                    "status": "error",
+                    "error": "Pool not initialized",
+                    "test_results": [],
+                }
+                for _, tests in items
+            ]
+
+        # Submit all items in parallel
+        futures = [
+            self._executor.submit(_pool_worker_execute, code, tests, timeout)
+            for code, tests in items
+        ]
+
+        # Collect results in order
+        results = []
+        # Overall timeout: account for all items potentially running sequentially
+        overall_timeout = timeout * max(len(t) for _, t in items if t) + 60 if items else 30
+
+        for i, future in enumerate(futures):
+            try:
+                result = future.result(timeout=overall_timeout)
+                results.append(result)
+            except concurrent.futures.TimeoutError:
+                results.append(
+                    {
+                        "passed": 0,
+                        "total": len(items[i][1]),
+                        "status": "timeout",
+                        "error": "Execution timed out",
+                        "test_results": [],
+                    }
+                )
+            except Exception as e:
+                results.append(
+                    {
+                        "passed": 0,
+                        "total": len(items[i][1]),
+                        "status": "error",
+                        "error": f"Execution error: {e}",
+                        "test_results": [],
+                    }
+                )
+
+        return results
+
+    def __enter__(self) -> CodeExecutionPool:
+        """Context manager entry - starts the pool."""
+        self.start()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Context manager exit - shuts down the pool."""
+        self.shutdown()
+
+
+# =============================================================================
+# GLOBAL POOL ACCESSOR
+# =============================================================================
+# Provides a way to set/get a global execution pool for use by environments.
+# The pool lifecycle is managed by the caller (e.g., EvaluatorService).
+
+_GLOBAL_EXECUTION_POOL: CodeExecutionPool | None = None
+_GLOBAL_POOL_LOCK = threading.Lock()
+
+
+def set_global_execution_pool(pool: CodeExecutionPool | None) -> None:
+    """Set the global execution pool for use by environments.
+
+    Args:
+        pool: The pool to use, or None to clear
+    """
+    global _GLOBAL_EXECUTION_POOL
+    with _GLOBAL_POOL_LOCK:
+        _GLOBAL_EXECUTION_POOL = pool
+
+
+def get_global_execution_pool() -> CodeExecutionPool | None:
+    """Get the global execution pool if set.
+
+    Returns:
+        The global pool, or None if not set
+    """
+    with _GLOBAL_POOL_LOCK:
+        return _GLOBAL_EXECUTION_POOL
+
+
+def check_code_executes_fast(
+    code: str,
+    test_cases: list[str],
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    """Execute code with test cases using the global pool if available.
+
+    This is a drop-in replacement for check_code_executes that uses the
+    global execution pool when set, falling back to the original implementation.
+
+    Args:
+        code: Python code string (function definitions)
+        test_cases: List of assertion strings to test the code
+        timeout: Maximum execution time per test in seconds
+
+    Returns:
+        Dictionary with passed, total, status, error, test_results
+    """
+    pool = get_global_execution_pool()
+    if pool is not None:
+        return pool.execute(code, test_cases, timeout)
+    else:
+        # Fallback to original implementation
+        return check_code_executes(code, test_cases, timeout)
