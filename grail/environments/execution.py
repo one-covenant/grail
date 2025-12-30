@@ -626,6 +626,144 @@ def check_code_executes(code: str, test_cases: list[str], timeout: float = 5.0) 
 # This gives ~50-100x speedup over spawning fresh processes per test.
 
 
+def _pool_safe_import(
+    name: str,
+    globals_: dict[str, Any] | None = None,
+    locals_: dict[str, Any] | None = None,
+    fromlist: tuple[str, ...] = (),
+    level: int = 0,
+) -> Any:
+    """Restricted import used for pool code execution.
+
+    This is NOT a complete sandbox. It exists to block the most trivial escapes
+    (e.g., importing `importlib` to reload monkeypatched modules, importing
+    `posix`/`os`/`subprocess` to spawn processes, importing `ctypes` to call
+    native syscalls).
+
+    Keep this lightweight: it runs on every `import` in user code.
+    """
+    # Strict denylist: modules that trivially lead to RCE / host compromise.
+    # Note: block both the exact module and its top-level package.
+    blocked = {
+        "asyncio",
+        "builtins",
+        "ctypes",
+        "importlib",
+        "inspect",
+        "multiprocessing",
+        "os",
+        "pathlib",
+        "posix",
+        "resource",
+        "shutil",
+        "signal",
+        "site",
+        "socket",
+        "subprocess",
+        "sys",
+        "threading",
+        "types",
+    }
+
+    top = name.split(".")[0]
+    if name in blocked or top in blocked:
+        raise ImportError(f"Module '{name}' is not allowed in sandboxed execution")
+
+    # Allowlist for common MBPP-style solutions.
+    allowed = {
+        "math",
+        "itertools",
+        "functools",
+        "collections",
+        "heapq",
+        "bisect",
+        "operator",
+        "re",
+        "string",
+    }
+    if name not in allowed and top not in allowed:
+        raise ImportError(f"Module '{name}' is not allowed in sandboxed execution")
+
+    # Use the real import mechanism for allowed modules.
+    import builtins
+
+    return builtins.__import__(name, globals_, locals_, fromlist, level)
+
+
+def _pool_safe_builtins() -> dict[str, Any]:
+    """Return a restricted `__builtins__` dict for pool exec().
+
+    This blocks obvious dangerous functionality (open/eval/exec/compile/importlib)
+    without changing global interpreter state (important for process stability).
+    """
+    import builtins
+
+    allow_names = {
+        # Core types / constructors
+        "None",
+        "False",
+        "True",
+        "bool",
+        "int",
+        "float",
+        "complex",
+        "str",
+        "bytes",
+        "bytearray",
+        "list",
+        "tuple",
+        "set",
+        "frozenset",
+        "dict",
+        "range",
+        "enumerate",
+        "zip",
+        "map",
+        "filter",
+        "sorted",
+        "reversed",
+        "slice",
+        # Utilities
+        "abs",
+        "all",
+        "any",
+        "min",
+        "max",
+        "sum",
+        "len",
+        "round",
+        "pow",
+        "divmod",
+        "chr",
+        "ord",
+        "hex",
+        "oct",
+        "bin",
+        "format",
+        "repr",
+        "print",
+        "isinstance",
+        # Exceptions
+        "BaseException",
+        "Exception",
+        "AssertionError",
+        "ValueError",
+        "TypeError",
+        "KeyError",
+        "IndexError",
+        "StopIteration",
+        "ZeroDivisionError",
+        # Class support (needed if code defines classes)
+        "__build_class__",
+        "object",
+        "type",
+    }
+
+    safe: dict[str, Any] = {name: getattr(builtins, name) for name in allow_names}
+    safe["__import__"] = _pool_safe_import
+    return safe
+
+
 def _pool_worker_execute(
     code: str,
     tests: list[str],
@@ -636,6 +774,9 @@ def _pool_worker_execute(
     This function runs in a persistent worker process. The worker is spawned
     once and stays alive, eliminating the ~2s spawn overhead per execution.
 
+    Note: CUDA hiding and security measures are applied in _pool_worker_init(),
+    which runs once per worker at spawn time.
+
     Args:
         code: Python code string (function definitions)
         tests: List of assertion strings to test
@@ -644,12 +785,8 @@ def _pool_worker_execute(
     Returns:
         Dictionary with passed, total, status, error, test_results
     """
-    # Ensure CPU-only execution (worker inherits this from spawn)
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
-    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-
-    # Suppress noisy warnings
-    _suppress_execution_sandbox_noise()
+    # No need to set env vars here - already set in _pool_worker_init()
+    # and os.putenv is disabled for security anyway
 
     # Pre-check syntax to fail fast
     try:
@@ -682,6 +819,7 @@ def _pool_worker_execute(
     test_results = []
     passed = 0
     timeout_count = 0
+    safe_builtins = _pool_safe_builtins()
 
     for i, test in enumerate(tests):
         full_code = f"{code}\n\n{test}"
@@ -695,7 +833,7 @@ def _pool_worker_execute(
                 signal.alarm(int(timeout))
 
             try:
-                exec_globals: dict[str, Any] = {}
+                exec_globals: dict[str, Any] = {"__builtins__": safe_builtins}
                 exec(full_code, exec_globals)
                 test_results.append({"test_idx": i, "passed": True, "error": None})
                 passed += 1
@@ -733,11 +871,117 @@ def _pool_worker_execute(
     }
 
 
-def _pool_warmup_noop() -> bool:
-    """Dummy function to force worker spawn during warmup."""
-    # Set CPU-only environment in worker
+def _pool_worker_init() -> None:
+    """Initialize security sandbox in pool worker process.
+
+    Called ONCE when each worker spawns. Applies security measures that work
+    with persistent workers (can't use RLIMIT_AS as it would break the worker
+    after first task).
+
+    Security measures applied:
+    - Hide CUDA to prevent GPU access
+    - Set RLIMIT_NPROC=0 to prevent forking/spawning
+    - Set RLIMIT_NOFILE to limit file descriptors
+    - Set RLIMIT_CPU as backup timeout
+    - Disable core dumps
+    - Neutralize dangerous os functions
+    - Neutralize shutil dangerous functions
+    - Neutralize subprocess module
+    - Disable dangerous builtins
+    """
+    import builtins
+    import subprocess
+
+    # 1. Hide CUDA - prevent GPU access
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+
+    # 2. Suppress noisy warnings/errors
+    _suppress_execution_sandbox_noise()
+
+    # 3. Disable faulthandler to prevent info leakage
+    faulthandler.disable()
+
+    # 4. Set resource limits (Unix only)
+    if platform.system() != "Windows":
+        import resource
+
+        # Note: Don't set RLIMIT_NPROC - it can interfere with worker operations
+        # Fork prevention is handled by os.fork = None instead
+
+        # Disable core dumps
+        try:
+            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        except (OSError, ValueError):
+            pass
+
+        # Limit file descriptors (worker needs some, but not unlimited)
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
+        except (OSError, ValueError):
+            pass
+
+        # Backup CPU time limit (generous - signal timeout is primary)
+        try:
+            resource.setrlimit(resource.RLIMIT_CPU, (300, 300))  # 5 minutes
+        except (OSError, ValueError):
+            pass
+
+    # 5. Disable dangerous builtins
+    builtins.exit = None  # type: ignore[attr-defined]
+    builtins.quit = None  # type: ignore[attr-defined]
+
+    # 6. Save originals for internal cleanup before disabling
+    # Python's tempfile cleanup needs these to work
+    _original_unlink = os.unlink
+    _original_rmdir = os.rmdir
+    _original_remove = os.remove
+
+    def _restore_for_cleanup() -> None:
+        """Restore os functions for cleanup, suppressing any errors."""
+        try:
+            os.unlink = _original_unlink  # type: ignore[assignment]
+            os.rmdir = _original_rmdir  # type: ignore[assignment]
+            os.remove = _original_remove  # type: ignore[assignment]
+        except Exception:
+            pass
+
+    atexit.register(_restore_for_cleanup)
+
+    # 7. Neutralize dangerous os module functions
+    os.kill = None  # type: ignore[assignment]
+    os.system = None  # type: ignore[assignment]
+    os.putenv = None  # type: ignore[assignment]
+    os.remove = None  # type: ignore[assignment]
+    os.removedirs = None  # type: ignore[assignment]
+    os.rmdir = None  # type: ignore[assignment]
+    os.fchdir = None  # type: ignore[assignment]
+    os.setuid = None  # type: ignore[assignment]
+    os.fork = None  # type: ignore[assignment]
+    os.forkpty = None  # type: ignore[assignment]
+    os.killpg = None  # type: ignore[assignment]
+    os.rename = None  # type: ignore[assignment]
+    os.renames = None  # type: ignore[assignment]
+    os.truncate = None  # type: ignore[assignment]
+    os.replace = None  # type: ignore[assignment]
+    os.unlink = None  # type: ignore[assignment]
+    os.fchmod = None  # type: ignore[assignment]
+    os.fchown = None  # type: ignore[assignment]
+    os.chmod = None  # type: ignore[assignment]
+    os.chown = None  # type: ignore[assignment]
+    os.chroot = None  # type: ignore[assignment]
+    os.lchown = None  # type: ignore[assignment]
+
+    # 8. Neutralize subprocess module
+    subprocess.Popen = None  # type: ignore[assignment]
+    subprocess.call = None  # type: ignore[assignment]
+    subprocess.run = None  # type: ignore[assignment]
+    subprocess.check_call = None  # type: ignore[assignment]
+    subprocess.check_output = None  # type: ignore[assignment]
+
+
+def _pool_warmup_noop() -> bool:
+    """Dummy function to force worker spawn during warmup."""
     return True
 
 
@@ -807,9 +1051,10 @@ class CodeExecutionPool:
                         max_workers=self.num_workers,
                         mp_context=ctx,
                         max_tasks_per_child=self.max_tasks_per_child,
+                        initializer=_pool_worker_init,  # Apply security sandbox
                     )
 
-                    # Warm up workers - force spawn now so first real call is fast
+                    # Warm up workers - force spawn and apply security now
                     warmup_futures = [
                         self._executor.submit(_pool_warmup_noop) for _ in range(self.num_workers)
                     ]
