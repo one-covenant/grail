@@ -35,7 +35,7 @@ from typing import Any, cast
 
 from .base import Parser, RewardVector, ThinkingParser
 from .core import ChatMessage, Observation, Rubric, SingleTurnEnv
-from .execution import check_code_executes
+from .execution import check_code_executes_fast
 from .providers import HumanEvalTaskSource, MBPPTaskSource, TaskSource, TaskSpec
 
 
@@ -523,8 +523,8 @@ class PythonCodeEnv(SingleTurnEnv):
             test_cases = prepare_test_cases(self._task.payload)
 
             if test_cases:
-                # Execute tests ONCE
-                test_result_dict = check_code_executes(code, test_cases, timeout=5.0)
+                # Execute tests ONCE - use fast pool if available
+                test_result_dict = check_code_executes_fast(code, test_cases, timeout=5.0)
                 tests_passed = test_result_dict["passed"]
                 tests_total = test_result_dict["total"]
                 test_results = test_result_dict.get("test_results", [])
