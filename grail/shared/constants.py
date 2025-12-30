@@ -47,7 +47,7 @@ READY_MARKER_UPLOAD_BLOCKS = 1  # ~12 seconds at 12s/block
 TRAINER_LR = float(os.getenv("GRAIL_TRAINER_LR", "1e-6"))
 TRAINER_EPOCHS = int(os.getenv("GRAIL_TRAINER_EPOCHS", "1"))
 TRAINER_BATCH_SIZE = int(os.getenv("GRAIL_TRAINER_BATCH_SIZE", "16"))
-TRAINER_MAX_LENGTH = int(os.getenv("GRAIL_TRAINER_MAX_LENGTH", "1024"))
+TRAINER_MAX_LENGTH = int(os.getenv("GRAIL_TRAINER_MAX_LENGTH", "3072"))
 TRAINER_GRAD_CLIP = float(os.getenv("GRAIL_TRAINER_GRAD_CLIP", "0.5"))
 TRAINER_WARMUP_STEPS = int(os.getenv("GRAIL_TRAINER_WARMUP_STEPS", "10"))
 TRAINER_KL_COEF = float(os.getenv("GRAIL_TRAINER_KL_COEF", "0.02"))
@@ -92,7 +92,7 @@ TRAINER_MIN_TRUSTED_MINERS = int(os.getenv("GRAIL_TRAINER_MIN_TRUSTED_MINERS", "
 # Stage 1 (fast structural/cheap filters) happens before Stage 2.
 # Defaults are conservative so behavior is unchanged unless configured.
 GRPO_MAX_GROUPS = int(os.getenv("GRAIL_GRPO_MAX_GROUPS", "32"))
-GRPO_MAX_COMPLETION_TOKENS = int(os.getenv("GRAIL_GRPO_MAX_COMPLETION_TOKENS", "1024"))
+GRPO_MAX_COMPLETION_TOKENS = int(os.getenv("GRAIL_GRPO_MAX_COMPLETION_TOKENS", "2048"))
 
 # GRPO loss aggregation variant
 # Options: 'grpo' (per-sequence), 'bnpo' (global token avg),
@@ -130,7 +130,7 @@ BASE_CHECKPOINT_RETENTION_LIMIT = int(os.getenv("GRAIL_BASE_CHECKPOINT_RETENTION
 DELTA_CHECKPOINT_RETENTION_LIMIT = int(os.getenv("GRAIL_DELTA_CHECKPOINT_RETENTION_LIMIT", "15"))
 
 # Trainer identity used for checkpoint publication
-TRAINER_UID = 0
+TRAINER_UID = 80
 
 # ────────────────  LOGGING  ────────────────
 
@@ -190,7 +190,7 @@ ROLLOUTS_PER_PROBLEM = 16
 # ────────────────  ENVIRONMENT CONFIGURATION  ────────────────
 
 # Current environment ID (validators use this constant, never trust miner data)
-CURRENT_ENV_ID = "math"
+CURRENT_ENV_ID = "mbpp"
 
 # ────────────────  EMISSION BURN MECHANISM  ────────────────
 
