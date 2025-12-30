@@ -4,6 +4,7 @@ import contextvars
 import functools
 import logging
 import multiprocessing
+import os
 import sys
 import threading
 import time
@@ -62,7 +63,7 @@ class MinerPrefixFilter(logging.Filter):
         (avoids double-prefixing)
     """
 
-    def filter(self, record: logging.LogRecord) -> bool:
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
         uid = _uid_ctx.get()
         window = _window_ctx.get()
 
@@ -75,6 +76,42 @@ class MinerPrefixFilter(logging.Filter):
             else:
                 prefix = f"[MINER uid={uid}] "
             record.msg = prefix + record.msg
+        return True
+
+
+# Patterns for harmless sandbox cleanup noise that should be suppressed
+_SANDBOX_NOISE_PATTERNS: tuple[str, ...] = (
+    "Task was destroyed but it is pending",
+    "Exception in thread Thread-",
+    "Exception ignored in atexit callback",
+    "TemporaryDirectory",
+    "'NoneType' object is not callable",
+    "_monitor",
+    "EOFError",
+)
+
+
+class ExecutionSandboxNoiseFilter(logging.Filter):
+    """Suppress expected noise from Python code execution sandbox.
+
+    The execution sandbox spawns child processes that produce harmless but
+    noisy error messages during cleanup:
+    - EOFError in multiprocessing logging queue monitor threads
+    - TemporaryDirectory cleanup TypeError when os.unlink is disabled
+    - asyncio "Task was destroyed" warnings for websocket connections
+
+    These are expected behavior and don't indicate real problems.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
+        """Return False to suppress matching records."""
+        try:
+            msg = str(record.getMessage())
+            for pattern in _SANDBOX_NOISE_PATTERNS:
+                if pattern in msg:
+                    return False
+        except Exception:
+            pass
         return True
 
 
@@ -290,6 +327,12 @@ def configure_process_logging(
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(level)
+
+    # Conditionally suppress noisy but harmless errors from execution sandbox
+    # Set GRAIL_SUPPRESS_SANDBOX_NOISE=1 to enable suppression
+    suppress_sandbox_noise = os.getenv("GRAIL_SUPPRESS_SANDBOX_NOISE", "0") == "1"
+    if suppress_sandbox_noise:
+        root.addFilter(ExecutionSandboxNoiseFilter())
 
     # Force unbuffered output for immediate visibility
     sys.stdout.reconfigure(line_buffering=True)
