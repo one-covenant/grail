@@ -54,7 +54,11 @@ from grail.environments.providers import (  # noqa: E402
     MATHTaskSource,
     MBPPTaskSource,
 )
-from grail.environments.execution import check_code_executes  # noqa: E402
+from grail.environments.execution import (  # noqa: E402
+    check_code_executes,
+    CodeExecutionPool,
+    set_global_execution_pool,
+)
 from grail.shared.chat_templates import build_qwen_chat_template  # noqa: E402
 from grail.trainer.metrics import KMetricsAggregator, TaskReplicateResult  # noqa: E402
 from grail.trainer.analysis import (  # noqa: E402
@@ -1352,6 +1356,22 @@ def main() -> None:
     print(f"🚀 Starting TRL GRPO training with {args.dataset.upper()} dataset")
     print("=" * 80)
 
+    # Initialize fast code execution pool for MBPP dataset
+    # This eliminates ~6s spawn overhead per code execution (7000x speedup)
+    execution_pool: CodeExecutionPool | None = None
+    if args.dataset == "mbpp":
+        try:
+            execution_pool = CodeExecutionPool(
+                num_workers=8,
+                max_tasks_per_child=50,
+            )
+            execution_pool.start()
+            set_global_execution_pool(execution_pool)
+            print("✅ Fast code execution pool initialized: 8 workers")
+        except Exception as e:
+            print(f"⚠️  Failed to init execution pool, using slow path: {e}")
+            execution_pool = None
+
     # Print hyperparameter alignment summary
     print("\n📋 GRAIL Hyperparameter Alignment Summary:")
     print("─" * 80)
@@ -1610,6 +1630,16 @@ def main() -> None:
     print("\nGlobal metrics:")
     print(f"  reward_mean_all: {final_metrics['reward_mean_all']:.3f}")
     print(f"  success_rate_all: {final_metrics['success_rate_all']:.3f}")
+
+    # Cleanup execution pool
+    if execution_pool is not None:
+        try:
+            print("\n🧹 Shutting down code execution pool...")
+            set_global_execution_pool(None)
+            execution_pool.shutdown()
+            print("✅ Code execution pool shutdown complete")
+        except Exception as e:
+            print(f"⚠️  Error shutting down execution pool: {e}")
 
 
 if __name__ == "__main__":
