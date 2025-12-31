@@ -448,10 +448,20 @@ class CheckpointManager:
             - result.method: "fast" or "full" or "none"
             - checkpoint_path: Path to checkpoint (None if fast path used)
         """
-        # Discover latest ready checkpoint
-        checkpoint_window = await self.get_latest_ready_checkpoint(target_window)
-        if checkpoint_window is None:
-            return CheckpointLoadResult(success=False), None
+        # Cold start: use latest FULL checkpoint to minimize delta chain length
+        # This ensures we can reconstruct from available deltas in retention window
+        if model is None or current_window is None or current_window < 0:
+            checkpoint_window = await self.get_latest_full_checkpoint(target_window)
+            if checkpoint_window is None:
+                # Fallback to any checkpoint if no FULL checkpoint found
+                checkpoint_window = await self.get_latest_ready_checkpoint(target_window)
+                if checkpoint_window is None:
+                    return CheckpointLoadResult(success=False), None
+        else:
+            # Model already loaded: can use deltas, so any checkpoint works
+            checkpoint_window = await self.get_latest_ready_checkpoint(target_window)
+            if checkpoint_window is None:
+                return CheckpointLoadResult(success=False), None
 
         # Already at this checkpoint
         if checkpoint_window == current_window and model is not None:
@@ -1384,6 +1394,94 @@ class CheckpointManager:
 
         except Exception as exc:
             logger.error("Failed to discover latest ready checkpoint: %s", exc)
+            return None
+
+    async def get_latest_full_checkpoint(self, before_window: int) -> int | None:
+        """Find the latest FULL checkpoint that became READY before the given window.
+
+        This method specifically looks for FULL checkpoints (not DELTA), which is
+        critical for cold start recovery. FULL checkpoints have complete model weights
+        and can be used as a base for applying deltas.
+
+        Optimized to minimize expensive S3 API calls by:
+        1. Parsing all READY markers first (cheap, local operation)
+        2. Sorting by checkpoint_window descending
+        3. Checking from newest to oldest, stopping at first FULL
+        4. Making only the minimum necessary metadata fetches
+
+        Args:
+            before_window: Upper bound (exclusive) for ready_window
+
+        Returns:
+            FULL checkpoint window number, or None if none found
+        """
+        try:
+            # List all checkpoint directories (one S3 API call)
+            keys = await comms.list_bucket_files(
+                CHECKPOINT_PREFIX,
+                credentials=self.credentials,
+                use_write=False,
+            )
+
+            # Parse all READY-{ready_window} markers (cheap, no API calls)
+            ready_checkpoints: list[tuple[int, int]] = []  # (checkpoint_window, ready_window)
+            for key in keys:
+                if "/READY-" in key:
+                    try:
+                        # Parse: "grail/checkpoints/checkpoint-1000/READY-1100"
+                        parts = key.split("/")
+                        if len(parts) >= 4:
+                            checkpoint_segment = parts[2]  # "checkpoint-1000"
+                            ready_filename = parts[3]  # "READY-1100"
+
+                            if checkpoint_segment.startswith(
+                                "checkpoint-"
+                            ) and ready_filename.startswith("READY-"):
+                                checkpoint_window = int(checkpoint_segment.split("-")[1])
+                                ready_window = int(ready_filename.split("-")[1])
+
+                                # Only consider checkpoints that became ready before our window
+                                if ready_window < before_window:
+                                    ready_checkpoints.append((checkpoint_window, ready_window))
+                    except (IndexError, ValueError):
+                        continue
+
+            if not ready_checkpoints:
+                logger.warning(
+                    "No READY checkpoints found before window %s",
+                    before_window,
+                )
+                return None
+
+            # Sort by checkpoint_window descending (newest first)
+            # This allows us to check from newest to oldest and stop early
+            ready_checkpoints.sort(reverse=True)
+
+            # Check from newest to oldest, stop at first FULL checkpoint
+            # This minimizes expensive S3 metadata fetches
+            for checkpoint_window, ready_window in ready_checkpoints:
+                # Check if this checkpoint has FULL metadata (S3 API call)
+                full_meta = await self._fetch_full_metadata(checkpoint_window)
+                if full_meta is not None:
+                    # Found the latest FULL checkpoint, return immediately
+                    logger.info(
+                        "Found latest FULL checkpoint: checkpoint-%s (ready at window %s, requested < %s)",
+                        checkpoint_window,
+                        ready_window,
+                        before_window,
+                    )
+                    return checkpoint_window
+
+            # No FULL checkpoints found among ready checkpoints
+            logger.warning(
+                "No FULL checkpoints found before window %s (checked %d ready checkpoints)",
+                before_window,
+                len(ready_checkpoints),
+            )
+            return None
+
+        except Exception as exc:
+            logger.error("Failed to discover latest FULL checkpoint: %s", exc)
             return None
 
 
