@@ -353,6 +353,7 @@ class ValidationService:
         self._miner_validator = MinerValidator(
             pipeline=self._validation_pipeline,
             text_log_limit=5,
+            checkpoint_manager=self._checkpoint_manager,
         )
 
         # Window processor

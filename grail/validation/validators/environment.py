@@ -44,8 +44,8 @@ class EnvironmentPromptValidator(Validator):
 
     def validate(self, ctx: ValidationContext) -> bool:
         try:
-            # Use trusted environment ID constant (never trust miner data)
-            env_id = CURRENT_ENV_ID
+            # Use environment ID from checkpoint metadata (fallback to constant)
+            env_id = ctx.env_id or CURRENT_ENV_ID
 
             # Derive canonical seed from trusted validator values
             canonical_seed = _derive_canonical_seed(ctx)
@@ -123,8 +123,8 @@ class EnvironmentEvaluationValidator(Validator):
 
     def validate(self, ctx: ValidationContext) -> bool:
         try:
-            # Use trusted environment ID constant (never trust miner data)
-            env_id = CURRENT_ENV_ID
+            # Use environment ID from checkpoint metadata (fallback to constant)
+            env_id = ctx.env_id or CURRENT_ENV_ID
 
             # Derive canonical seed from trusted validator values
             canonical_seed = _derive_canonical_seed(ctx)

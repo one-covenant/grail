@@ -52,6 +52,7 @@ from grail.shared.constants import (
     CHECKPOINT_PREFIX,
     CHECKPOINT_TYPE_DELTA,
     CHECKPOINT_TYPE_FULL,
+    CURRENT_ENV_ID,
     DELTA_CHECKPOINT_RETENTION_LIMIT,
     DELTA_THRESHOLD,
     TRAINER_BATCH_SIZE,
@@ -68,6 +69,41 @@ from grail.shared.constants import (
 from grail.shared.safetensors_utils import load_model_state_dict
 
 logger = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Environment and Generation Config Helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def get_default_env_config() -> tuple[str, dict[str, Any]]:
+    """Get default environment configuration from constants.
+
+    Returns:
+        Tuple of (env_id, env_params)
+    """
+    # Read from environment variables or use defaults
+    env_id = os.getenv("GRAIL_ENV_ID", CURRENT_ENV_ID)
+    env_params = {
+        "split": os.getenv("GRAIL_ENV_SPLIT", "train"),
+        # Additional env-specific params can be added here
+    }
+    return env_id, env_params
+
+
+def get_default_generation_params() -> dict[str, Any]:
+    """Get default generation parameters from environment variables.
+
+    Returns:
+        Dictionary of generation parameters
+    """
+    return {
+        "max_tokens": int(os.getenv("GRAIL_GEN_MAX_TOKENS", "512")),
+        "temperature": float(os.getenv("GRAIL_GEN_TEMPERATURE", "0.7")),
+        "top_p": float(os.getenv("GRAIL_GEN_TOP_P", "0.9")),
+        "top_k": int(os.getenv("GRAIL_GEN_TOP_K", "50")),
+        "repetition_penalty": float(os.getenv("GRAIL_GEN_REPETITION_PENALTY", "1.0")),
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -502,6 +538,10 @@ class CheckpointPublisher:
             # Extract model name for checkpoint metadata
             model_name: str = getattr(model, "name_or_path", "no_name")
 
+            # Get environment and generation configuration
+            env_id, env_params = get_default_env_config()
+            generation_params = get_default_generation_params()
+
             metadata = CheckpointMetadata(
                 window=target_window,
                 parent_window=trained_on_window,
@@ -511,6 +551,9 @@ class CheckpointPublisher:
                 created_at=time.time(),
                 model_name=model_name,
                 checkpoint_type=CHECKPOINT_TYPE_FULL,
+                env_id=env_id,
+                env_params=env_params,
+                generation_params=generation_params,
             )
 
             metadata_dict = {**metadata.__dict__, "config_hash": config_hash}
@@ -685,6 +728,10 @@ class CheckpointPublisher:
             if parent_window is None:
                 parent_window = max(0, target_window - WINDOW_LENGTH)
 
+            # Get environment and generation configuration
+            env_id, env_params = get_default_env_config()
+            generation_params = get_default_generation_params()
+
             metadata = CheckpointMetadata(
                 window=target_window,
                 parent_window=parent_window,
@@ -694,6 +741,9 @@ class CheckpointPublisher:
                 created_at=snapshot_metadata.get("timestamp", time.time()),
                 model_name="async_trainer_snapshot",
                 checkpoint_type=CHECKPOINT_TYPE_FULL,
+                env_id=env_id,
+                env_params=env_params,
+                generation_params=generation_params,
             )
 
             config_hash = hashlib.sha256(
@@ -967,6 +1017,10 @@ class CheckpointPublisher:
             if parent_window is None:
                 parent_window = max(0, target_window - WINDOW_LENGTH)
 
+            # Get environment and generation configuration
+            env_id, env_params = get_default_env_config()
+            generation_params = get_default_generation_params()
+
             metadata = CheckpointMetadata(
                 window=target_window,
                 parent_window=parent_window,
@@ -979,6 +1033,9 @@ class CheckpointPublisher:
                 prev_window=prev_window,
                 anchor_window=anchor_window,
                 weights_hash=weights_hash,
+                env_id=env_id,
+                env_params=env_params,
+                generation_params=generation_params,
             )
 
             config_hash = hashlib.sha256(
@@ -1171,6 +1228,10 @@ class CheckpointPublisher:
             if parent_window is None:
                 parent_window = max(0, target_window - WINDOW_LENGTH)
 
+            # Get environment and generation configuration
+            env_id, env_params = get_default_env_config()
+            generation_params = get_default_generation_params()
+
             metadata = CheckpointMetadata(
                 window=target_window,
                 parent_window=parent_window,
@@ -1180,6 +1241,9 @@ class CheckpointPublisher:
                 created_at=snapshot_metadata.get("timestamp", time.time()),
                 model_name="async_trainer_snapshot",
                 checkpoint_type=CHECKPOINT_TYPE_FULL,
+                env_id=env_id,
+                env_params=env_params,
+                generation_params=generation_params,
             )
 
             config_hash = hashlib.sha256(
