@@ -135,8 +135,8 @@ def create_env(
     """
     env_id = env_id or CURRENT_ENV_ID
 
-    # Override split with env_params if provided
-    if env_params is not None:
+    # Override split with env_params if provided (check for non-empty dict)
+    if env_params:
         split = env_params.get("split", split)
 
     if env_id == "sat":

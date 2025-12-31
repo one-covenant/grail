@@ -189,17 +189,32 @@ class MinerValidator:
         # Fetch environment config from checkpoint metadata if checkpoint_manager is available
         env_id = None
         env_params = {}
-        if hasattr(self, "_checkpoint_manager") and self._checkpoint_manager is not None:
-            if validator_checkpoint_window is not None:
-                try:
-                    checkpoint_metadata = await self._checkpoint_manager._fetch_metadata(
-                        validator_checkpoint_window
+        if self._checkpoint_manager is not None and validator_checkpoint_window is not None:
+            try:
+                checkpoint_metadata = await self._checkpoint_manager.get_checkpoint_metadata(
+                    validator_checkpoint_window
+                )
+                if checkpoint_metadata is not None:
+                    env_id = checkpoint_metadata.env_id
+                    env_params = checkpoint_metadata.env_params or {}
+                    logger.debug(
+                        f"Loaded env config from checkpoint {validator_checkpoint_window}: "
+                        f"env_id={env_id}"
                     )
-                    if checkpoint_metadata is not None:
-                        env_id = checkpoint_metadata.env_id
-                        env_params = checkpoint_metadata.env_params or {}
-                except Exception as e:
-                    logger.debug(f"Failed to fetch checkpoint metadata for env config: {e}")
+                else:
+                    logger.warning(
+                        f"No metadata found for validator checkpoint window {validator_checkpoint_window}"
+                    )
+                    if monitor:
+                        monitor.log_counter("validation/metadata_missing")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to fetch checkpoint metadata for env config "
+                    f"(window={validator_checkpoint_window}): {e}",
+                    exc_info=True,
+                )
+                if monitor:
+                    monitor.log_counter("validation/metadata_fetch_errors")
 
         # Step 4: Validate selected rollouts
         validation_state = await self._validate_rollouts(
