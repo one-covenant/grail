@@ -710,6 +710,30 @@ class CheckpointManager:
 
         return results
 
+    # --------------------------- Public API --------------------------- #
+
+    async def get_checkpoint_metadata(self, window: int) -> CheckpointMetadata | None:
+        """Public API: Fetch checkpoint metadata for a given window.
+
+        Prefers DELTA metadata when available (for fast-path compatibility),
+        falls back to FULL metadata if DELTA not found.
+
+        Args:
+            window: Window number to fetch metadata for
+
+        Returns:
+            CheckpointMetadata if found, None otherwise
+
+        Example:
+            >>> metadata = await checkpoint_manager.get_checkpoint_metadata(15000)
+            >>> if metadata:
+            ...     env_id = metadata.env_id
+            ...     generation_params = metadata.generation_params
+        """
+        if window is None:
+            return None
+        return await self._fetch_metadata(window)
+
     # --------------------------- Internal helpers --------------------------- #
 
     async def _fetch_metadata(self, window: int) -> CheckpointMetadata | None:

@@ -593,16 +593,28 @@ async def generate_rollouts_for_window(
         )
         batch_size = ROLLOUTS_PER_PROBLEM
     # Create AgentEnvLoop with generation parameters from checkpoint metadata (if available)
+    # Validate and clamp generation params to safe ranges
     generation_params = generation_params or {}
+
+    def clamp(value: float | int, min_val: float | int, max_val: float | int) -> float | int:
+        """Clamp value to [min_val, max_val] range."""
+        return max(min_val, min(value, max_val))
+
+    max_tokens = clamp(generation_params.get("max_tokens", 512), 1, 4096)
+    temperature = clamp(generation_params.get("temperature", 0.7), 0.01, 2.0)
+    top_p = clamp(generation_params.get("top_p", 0.95), 0.0, 1.0)
+    top_k = clamp(generation_params.get("top_k", 50), 0, 1000)
+    repetition_penalty = clamp(generation_params.get("repetition_penalty", 1.1), 1.0, 2.0)
+
     loop = AgentEnvLoop(
         model,
         tokenizer,
         device,
-        max_new_tokens=generation_params.get("max_tokens", 512),
-        temperature=generation_params.get("temperature", 0.7),
-        top_p=generation_params.get("top_p", 0.95),
-        top_k=generation_params.get("top_k", 50),
-        repetition_penalty=generation_params.get("repetition_penalty", 1.1),
+        max_new_tokens=int(max_tokens),
+        temperature=float(temperature),
+        top_p=float(top_p),
+        top_k=int(top_k) if top_k > 0 else None,
+        repetition_penalty=float(repetition_penalty),
     )
     if batch_size > 1:
         logger.info("Using batch_size=%d for parallel rollout generation", batch_size)

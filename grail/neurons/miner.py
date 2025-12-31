@@ -258,14 +258,36 @@ class MinerNeuron(BaseNeuron):
                         continue
 
                     # Fetch checkpoint metadata for environment and generation configuration
-                    checkpoint_metadata = await checkpoint_manager._fetch_metadata(
-                        current_checkpoint_window
-                    )
-                    env_id = checkpoint_metadata.env_id if checkpoint_metadata else None
-                    env_params = checkpoint_metadata.env_params if checkpoint_metadata else {}
-                    generation_params = (
-                        checkpoint_metadata.generation_params if checkpoint_metadata else {}
-                    )
+                    env_id = None
+                    env_params = {}
+                    generation_params = {}
+
+                    if current_checkpoint_window is not None:
+                        try:
+                            checkpoint_metadata = await checkpoint_manager.get_checkpoint_metadata(
+                                current_checkpoint_window
+                            )
+                            if checkpoint_metadata:
+                                env_id = checkpoint_metadata.env_id
+                                env_params = checkpoint_metadata.env_params or {}
+                                generation_params = checkpoint_metadata.generation_params or {}
+                                logger.info(
+                                    f"Using checkpoint config: env_id={env_id}, "
+                                    f"generation_params={generation_params}"
+                                )
+                            else:
+                                logger.warning(
+                                    f"No metadata found for checkpoint window {current_checkpoint_window}, "
+                                    f"using defaults"
+                                )
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to fetch checkpoint metadata (window={current_checkpoint_window}): {e}",
+                                exc_info=True,
+                            )
+                            # Continue with defaults on error
+                    else:
+                        logger.warning("current_checkpoint_window is None, using default env config")
 
                     logger.info(
                         f"🔥 Starting inference generation for window "

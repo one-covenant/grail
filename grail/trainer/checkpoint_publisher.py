@@ -81,28 +81,104 @@ def get_default_env_config() -> tuple[str, dict[str, Any]]:
 
     Returns:
         Tuple of (env_id, env_params)
+
+    Raises:
+        ValueError: If GRAIL_ENV_ID is empty or invalid
     """
     # Read from environment variables or use defaults
     env_id = os.getenv("GRAIL_ENV_ID", CURRENT_ENV_ID)
+    if not env_id:
+        raise ValueError("GRAIL_ENV_ID cannot be empty")
+
+    # Validate split parameter
+    split = os.getenv("GRAIL_ENV_SPLIT", "train")
+    valid_splits = {"train", "test", "validation", "val"}
+    if split not in valid_splits:
+        logger.warning(
+            f"Invalid GRAIL_ENV_SPLIT='{split}' (expected one of {valid_splits}), using 'train'"
+        )
+        split = "train"
+
     env_params = {
-        "split": os.getenv("GRAIL_ENV_SPLIT", "train"),
+        "split": split,
         # Additional env-specific params can be added here
     }
     return env_id, env_params
 
 
+def _parse_int_param(
+    key: str, default: str, min_val: int | None = None, max_val: int | None = None
+) -> int:
+    """Parse integer environment variable with validation.
+
+    Args:
+        key: Environment variable name
+        default: Default value if not set or invalid
+        min_val: Optional minimum value
+        max_val: Optional maximum value
+
+    Returns:
+        Validated integer value
+    """
+    try:
+        value = int(os.getenv(key, default))
+        if min_val is not None and value < min_val:
+            logger.warning(f"{key}={value} below minimum {min_val}, using default {default}")
+            return int(default)
+        if max_val is not None and value > max_val:
+            logger.warning(f"{key}={value} above maximum {max_val}, using default {default}")
+            return int(default)
+        return value
+    except ValueError as e:
+        logger.warning(f"Invalid {key} value: {e}, using default {default}")
+        return int(default)
+
+
+def _parse_float_param(
+    key: str, default: str, min_val: float | None = None, max_val: float | None = None
+) -> float:
+    """Parse float environment variable with validation.
+
+    Args:
+        key: Environment variable name
+        default: Default value if not set or invalid
+        min_val: Optional minimum value
+        max_val: Optional maximum value
+
+    Returns:
+        Validated float value
+    """
+    try:
+        value = float(os.getenv(key, default))
+        if min_val is not None and value < min_val:
+            logger.warning(f"{key}={value} below minimum {min_val}, using default {default}")
+            return float(default)
+        if max_val is not None and value > max_val:
+            logger.warning(f"{key}={value} above maximum {max_val}, using default {default}")
+            return float(default)
+        return value
+    except ValueError as e:
+        logger.warning(f"Invalid {key} value: {e}, using default {default}")
+        return float(default)
+
+
 def get_default_generation_params() -> dict[str, Any]:
     """Get default generation parameters from environment variables.
 
+    All parameters are validated for type and range. Invalid values fall back
+    to defaults with a warning.
+
     Returns:
-        Dictionary of generation parameters
+        Dictionary of validated generation parameters
     """
     return {
-        "max_tokens": int(os.getenv("GRAIL_GEN_MAX_TOKENS", "512")),
-        "temperature": float(os.getenv("GRAIL_GEN_TEMPERATURE", "0.7")),
-        "top_p": float(os.getenv("GRAIL_GEN_TOP_P", "0.9")),
-        "top_k": int(os.getenv("GRAIL_GEN_TOP_K", "50")),
-        "repetition_penalty": float(os.getenv("GRAIL_GEN_REPETITION_PENALTY", "1.0")),
+        "max_tokens": _parse_int_param("GRAIL_GEN_MAX_TOKENS", "512", min_val=1, max_val=4096),
+        "temperature": _parse_float_param("GRAIL_GEN_TEMPERATURE", "0.7", min_val=0.01, max_val=2.0),
+        "top_p": _parse_float_param("GRAIL_GEN_TOP_P", "0.9", min_val=0.0, max_val=1.0),
+        "top_k": _parse_int_param("GRAIL_GEN_TOP_K", "50", min_val=0, max_val=1000),
+        "repetition_penalty": _parse_float_param(
+            "GRAIL_GEN_REPETITION_PENALTY", "1.0", min_val=1.0, max_val=2.0
+        ),
     }
 
 
