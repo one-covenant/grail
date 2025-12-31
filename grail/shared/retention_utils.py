@@ -28,16 +28,24 @@ def compute_retention_windows(
 ) -> set[int]:
     """Calculate which checkpoint windows should be retained.
 
-    For chained deltas, we must keep entire chains from anchor (FULL) to tip.
-    This ensures miners can always reconstruct the current state by:
-    1. Starting from an anchor (FULL checkpoint)
-    2. Applying sequential deltas to reach the current window
+    RETENTION POLICY (updated for cold start recovery):
+    - Keep previous anchor + current anchor chains (complete delta chains)
+    - Keep milestone checkpoints for long-term preservation
+    - Keep bootstrap windows for initial network state
 
-    Retention policy:
-    - Keep all windows from current anchor to now (active chain)
-    - Keep previous anchor and its entire chain (for miners catching up)
-    - Keep milestone checkpoints (every CHECKPOINT_MILESTONE_INTERVAL)
-    - Keep bootstrap windows (windows 0-N for initial network state)
+    This ensures:
+    1. Cold start validators can download the latest ready FULL checkpoint
+    2. All deltas needed to reach current window are available
+    3. No orphaned FULL checkpoints with missing delta chains
+
+    Why keep previous anchor:
+    - Latest anchor checkpoint may not be ready yet (still uploading)
+    - Validators fall back to previous anchor checkpoint
+    - Need complete delta chain from previous anchor to current
+
+    Previous implementation used safety margin, causing issues:
+    - Validators downloaded old FULL checkpoints outside retention window
+    - Tried to apply deleted deltas, causing reconstruction failures
 
     Args:
         current_window: Current window number
@@ -57,18 +65,15 @@ def compute_retention_windows(
         w for w in range(0, bootstrap_windows * WINDOW_LENGTH, WINDOW_LENGTH) if w <= current_window
     )
 
-    # Current anchor with safety margin, and all windows from there to now
-    current_anchor = max(
-        0, (current_window // stride) * stride - SAFETY_MARGIN_WINDOWS * WINDOW_LENGTH
-    )
-    keep.update(range(current_anchor, current_window + 1, WINDOW_LENGTH))
-
-    # Previous anchor chain (for miners catching up)
-    prev_anchor = current_anchor - stride
-    if prev_anchor >= 0:
-        keep.update(range(prev_anchor, current_anchor, WINDOW_LENGTH))
+    # Latest FULL checkpoint (current anchor) + complete chain to current window
+    # Keep from PREVIOUS anchor to ensure complete chain for any anchor checkpoint
+    # This handles cases where latest anchor isn't ready yet, so validators use previous anchor
+    current_anchor = (current_window // stride) * stride
+    prev_anchor = max(0, current_anchor - stride)
+    keep.update(range(prev_anchor, current_window + WINDOW_LENGTH, WINDOW_LENGTH))
 
     # Milestone checkpoints (long-term preservation)
+    # These are kept for historical analysis, separate from operational chain
     if CHECKPOINT_MILESTONE_INTERVAL > 0:
         interval = CHECKPOINT_MILESTONE_INTERVAL * WINDOW_LENGTH
         keep.update(range(0, current_window + 1, interval))

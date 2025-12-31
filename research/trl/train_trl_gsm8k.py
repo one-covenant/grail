@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
 """Minimal TRL GRPO training script for GSM8K matching GRAIL hyperparameters."""
 
+from __future__ import annotations
+
 import asyncio
 import os
 import re
 import sys
 from dataclasses import dataclass
 from typing import Any
+
+# Force unbuffered output for better logging in nohup mode
+sys.stdout = open(sys.stdout.fileno(), mode="w", buffering=1)
+sys.stderr = open(sys.stderr.fileno(), mode="w", buffering=1)
+
+# Determine project root dynamically (research/trl/ -> project root)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", ".."))
+sys.path.insert(0, _PROJECT_ROOT)
 
 import torch
 from datasets import Dataset, load_dataset
@@ -19,17 +30,12 @@ from transformers import (
 )
 from trl import GRPOConfig, GRPOTrainer
 
-from grail.shared.chat_templates import build_qwen_chat_template
-from grail.trainer.metrics import KMetricsAggregator, TaskReplicateResult
-
-# Force unbuffered output for better logging in nohup mode
-sys.stdout = open(sys.stdout.fileno(), mode="w", buffering=1)
-sys.stderr = open(sys.stderr.fileno(), mode="w", buffering=1)
-
 # Load environment from .env for WandB
-load_dotenv("/root/grail/.env")  # Load WandB API key and project
+load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
 
-sys.path.append("/root/grail")
+# GRAIL imports (after sys.path modification)
+from grail.shared.chat_templates import build_qwen_chat_template  # noqa: E402
+from grail.trainer.metrics import KMetricsAggregator, TaskReplicateResult  # noqa: E402
 
 
 # ────────────────  HYPERPARAMETERS (from .env GRAIL config)  ────────────────
@@ -106,10 +112,8 @@ SYSTEM_PROMPT = (
     f"Then, provide your solution between {SOLUTION_START}{SOLUTION_END}."
 )
 
-# Qwen chat template with system prompt and reasoning start
-QWEN_CHAT_TEMPLATE = build_qwen_chat_template(
-    system_prompt=SYSTEM_PROMPT, reasoning_start=REASONING_START
-)
+# Qwen chat template with system prompt
+QWEN_CHAT_TEMPLATE = build_qwen_chat_template(system_prompt=SYSTEM_PROMPT)
 
 
 # ────────────────  REWARD PARSER (from GSM8KEnv)  ────────────────

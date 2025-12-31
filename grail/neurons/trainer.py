@@ -22,6 +22,7 @@ from grail.infrastructure.checkpoint_consumer import default_checkpoint_cache_ro
 from grail.model.provider import get_model, get_tokenizer
 from grail.model.train_loading import ModelLoadSpec
 from grail.shared.constants import (
+    CURRENT_ENV_ID,
     NETUID,
     SNAPSHOT_POLL_INTERVAL_SECONDS,
     TRAINER_USE_FLASH_ATTENTION,
@@ -512,26 +513,49 @@ class TrainerNeuron(BaseNeuron):
             return False
 
         self._eval_in_progress = True
-        logger.info("📊 Starting evaluation cycle (window_number=%d)", window_number)
+        eval_env_id = self._eval_cfg.env_id or CURRENT_ENV_ID
+        logger.info("=" * 80)
+        logger.info("📊 EVALUATION CYCLE START")
+        logger.info(f"   Window: {window_number}")
+        logger.info(f"   Environment: {eval_env_id}")
+        logger.info(f"   Split: {self._eval_cfg.split}")
+        logger.info(f"   Backend: {self._eval_cfg.backend or 'hf'}")
+        logger.info(f"   First eval: {is_first_eval}")
+        logger.info("=" * 80)
 
+        logger.info("⏱️  [STAGE 1/4] Creating evaluation plan...")
+        plan_start = time.time()
         plan, env_factory = self._create_evaluation_plan(window_number)
+        logger.info(f"   ✓ Plan created in {time.time() - plan_start:.2f}s")
+        logger.info(f"   Tasks: {len(plan.ids)}, Replicates: {plan.replicates}")
+
         eval_start = time.time()
 
         try:
+            logger.info("⏱️  [STAGE 2/4] Running evaluation (model inference + code execution)...")
             metrics = await self._run_evaluation(plan, window_number, env_factory)
 
-            logger.info("🧪 Evaluation metrics: %s", metrics)
+            logger.info("")
+            logger.info("=" * 80)
+            logger.info("🧪 EVALUATION RESULTS")
+            logger.info(f"   Metrics: {metrics}")
+            logger.info(f"   Duration: {time.time() - eval_start:.2f}s")
+            logger.info("=" * 80)
+
+            logger.info("⏱️  [STAGE 3/4] Logging metrics...")
             await self._log_evaluation_metrics(metrics, time.time() - eval_start)
 
             self._eval_last_run_window_number = window_number
             self._windows_since_last_eval = 0
 
             self.heartbeat()
-            logger.info("✅ Evaluation cycle complete")
+            logger.info("⏱️  [STAGE 4/4] Cleanup complete")
+            logger.info(f"✅ EVALUATION CYCLE COMPLETE (total: {time.time() - eval_start:.2f}s)")
+            logger.info("=" * 80)
             return True
 
         except Exception:
-            logger.exception("Evaluation failed")
+            logger.exception("❌ EVALUATION FAILED")
             await self._log_evaluation_failure(time.time() - eval_start)
             return False
 
@@ -568,6 +592,9 @@ class TrainerNeuron(BaseNeuron):
     def _create_evaluation_plan(self, window_number: int) -> tuple[Any, Any]:
         """Create evaluation plan and environment factory.
 
+        Uses the configured eval_env_id (or CURRENT_ENV_ID if not set) to ensure
+        evaluation matches the training environment.
+
         Args:
             window_number: Current window number
 
@@ -576,8 +603,13 @@ class TrainerNeuron(BaseNeuron):
         """
         from grail.environments import get_or_create_task_source
 
-        source = get_or_create_task_source("math", split=self._eval_cfg.split)
-        env_factory = create_env_factory("math", task_source=source, split=self._eval_cfg.split)
+        # Use configured env_id or fall back to CURRENT_ENV_ID
+        eval_env_id = self._eval_cfg.env_id or CURRENT_ENV_ID
+
+        source = get_or_create_task_source(eval_env_id, split=self._eval_cfg.split)
+        env_factory = create_env_factory(
+            eval_env_id, task_source=source, split=self._eval_cfg.split
+        )
 
         if self._eval_cfg.subset_size is not None:
             plan = self._create_subset_evaluation_plan(source, window_number)
@@ -654,22 +686,29 @@ class TrainerNeuron(BaseNeuron):
         Raises:
             RuntimeError: If snapshot not available
         """
+        logger.info("📦 Loading evaluation resources...")
         snapshot_path = self._snapshot_manager.get_latest_snapshot_path()
         if not snapshot_path:
             raise RuntimeError("No snapshot available for evaluation")
 
-        logger.info("Loading tokenizer from snapshot: %s", snapshot_path)
+        logger.info(f"   Snapshot path: {snapshot_path}")
+
+        logger.info("   Loading tokenizer...")
+        tok_start = time.time()
         tokenizer = get_tokenizer(str(snapshot_path))
+        logger.info(f"   ✓ Tokenizer loaded in {time.time() - tok_start:.2f}s")
 
         model = None
         if for_hf_backend:
-            logger.info("Loading model to GPU for HF backend evaluation...")
+            logger.info("   Loading model to GPU for HF backend...")
+            model_start = time.time()
             model = get_model(
                 str(snapshot_path),
                 device="cuda",
                 eval_mode=True,
                 use_flash_attention=TRAINER_USE_FLASH_ATTENTION,
             )
+            logger.info(f"   ✓ Model loaded in {time.time() - model_start:.2f}s")
 
         return str(snapshot_path), tokenizer, model
 
@@ -689,13 +728,19 @@ class TrainerNeuron(BaseNeuron):
         Returns:
             Evaluation metrics
         """
+        logger.info("🖥️  Using managed server backend (%s)", self._eval_cfg.backend)
+
+        logger.info("   [1/5] Loading resources...")
+        load_start = time.time()
         snapshot_path, tokenizer, _ = self._load_evaluation_resources(for_hf_backend=False)
         self._eval_checkpoint_dir = snapshot_path
+        logger.info(f"   ✓ Resources loaded in {time.time() - load_start:.2f}s")
 
         self._log_gpu_memory("before server")
 
         chat_template_path = self._get_chat_template_path(snapshot_path)
 
+        logger.info("   [2/5] Creating server manager...")
         server_manager = create_inference_server(
             backend=self._eval_cfg.backend,
             model_path=snapshot_path,
@@ -703,14 +748,20 @@ class TrainerNeuron(BaseNeuron):
             model_name_override="async_trainer_snapshot",
             chat_template_path=chat_template_path,
         )
+        logger.info("   ✓ Server manager created")
 
         async with server_manager as server:
             self.heartbeat()
-            logger.info("Starting server process...")
+            logger.info("   [3/5] Starting server process...")
+            server_start = time.time()
             await server.start_server()
-            logger.info("Server started at %s", server.base_url)
+            logger.info(
+                f"   ✓ Server started at {server.base_url} in {time.time() - server_start:.2f}s"
+            )
+            self._log_gpu_memory("after server start")
             self.heartbeat()
 
+            logger.info("   [4/5] Creating evaluator service...")
             evaluator = EvaluatorService(
                 model=None,
                 tokenizer=tokenizer,
@@ -721,22 +772,34 @@ class TrainerNeuron(BaseNeuron):
                 server_base_url=server.base_url,
                 server_model_name=server.model_name,
             )
+            logger.info("   ✓ Evaluator created")
 
             try:
+                logger.info("   [5/5] Running evaluation cycle...")
+                eval_cycle_start = time.time()
                 metrics = await self._run_evaluation_cycle(
                     plan=plan,
                     window_number=window_number,
                     env_factory=env_factory,
                     evaluator=evaluator,
                 )
+                logger.info(
+                    f"   ✓ Evaluation cycle complete in {time.time() - eval_cycle_start:.2f}s"
+                )
             finally:
                 # Explicitly shutdown evaluator before server context exits
                 # to ensure all resources are released before vLLM process is killed
+                logger.info("   Shutting down evaluator...")
+                shutdown_start = time.time()
                 evaluator.shutdown()
                 del tokenizer
                 gc.collect()
+                logger.info(
+                    f"   ✓ Evaluator shutdown complete in {time.time() - shutdown_start:.2f}s"
+                )
 
-        logger.info("Server shutdown complete")
+        logger.info("   ✓ Server shutdown complete")
+        self._log_gpu_memory("after server shutdown")
         return metrics
 
     async def _run_direct_evaluation(
@@ -756,15 +819,20 @@ class TrainerNeuron(BaseNeuron):
             Evaluation metrics
         """
         backend_name = (self._eval_cfg.backend or "hf").lower()
+        logger.info("🖥️  Using direct evaluation (backend: %s)", backend_name)
 
         server_base_url = None
         if backend_name in ("vllm", "sglang"):
             server_base_url = f"http://{self._eval_cfg.server_host}:{self._eval_cfg.server_port}"
-            logger.info("Using external server at %s", server_base_url)
+            logger.info("   Using external server at %s", server_base_url)
 
         need_model = backend_name == "hf" or not server_base_url
+        logger.info("   [1/3] Loading resources (model: %s)...", need_model)
+        load_start = time.time()
         _, tokenizer, model = self._load_evaluation_resources(for_hf_backend=need_model)
+        logger.info(f"   ✓ Resources loaded in {time.time() - load_start:.2f}s")
 
+        logger.info("   [2/3] Creating evaluator service...")
         evaluator = EvaluatorService(
             model=model,
             tokenizer=tokenizer,
@@ -775,16 +843,24 @@ class TrainerNeuron(BaseNeuron):
             server_base_url=server_base_url,
             server_model_name=None,
         )
+        logger.info("   ✓ Evaluator created")
 
         try:
-            return await self._run_evaluation_cycle(
+            logger.info("   [3/3] Running evaluation cycle...")
+            eval_start = time.time()
+            metrics = await self._run_evaluation_cycle(
                 plan=plan,
                 window_number=window_number,
                 env_factory=env_factory,
                 evaluator=evaluator,
             )
+            logger.info(f"   ✓ Evaluation cycle complete in {time.time() - eval_start:.2f}s")
+            return metrics
         finally:
+            logger.info("   Cleaning up evaluation resources...")
+            cleanup_start = time.time()
             self._cleanup_evaluation_resources(evaluator, tokenizer, model)
+            logger.info(f"   ✓ Cleanup complete in {time.time() - cleanup_start:.2f}s")
 
     async def _run_evaluation_cycle(
         self,
@@ -810,19 +886,23 @@ class TrainerNeuron(BaseNeuron):
             "startup" if is_startup_eval else f"after {self._windows_since_last_eval} windows"
         )
 
-        logger.info(
-            "🧪 Starting evaluation: window=%s tasks=%s replicates=%s split=%s backend=%s (%s)",
-            window_number,
-            len(plan.ids),
-            plan.replicates,
-            self._eval_cfg.split,
-            self._eval_cfg.backend,
-            eval_reason,
-        )
+        logger.info("")
+        logger.info("🧪 RUNNING EVALUATION CYCLE")
+        logger.info(f"   Window: {window_number}")
+        logger.info(f"   Tasks: {len(plan.ids)}")
+        logger.info(f"   Replicates: {plan.replicates}")
+        logger.info(f"   Total prompts: {len(plan.ids) * plan.replicates}")
+        logger.info(f"   Split: {self._eval_cfg.split}")
+        logger.info(f"   Backend: {self._eval_cfg.backend}")
+        logger.info(f"   Reason: {eval_reason}")
+        logger.info("")
 
-        return await evaluator.run_cycle(
+        cycle_start = time.time()
+        metrics = await evaluator.run_cycle(
             plan, start_offset=0, heartbeat=self.heartbeat, window_number=window_number
         )
+        logger.info(f"🧪 Evaluation cycle finished in {time.time() - cycle_start:.2f}s")
+        return metrics
 
     # ────────────────────────────────────────────────────────────────────────────
     # Helper Methods

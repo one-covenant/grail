@@ -48,18 +48,21 @@ class TestComputeKeepWindows:
                 assert 150 in result
                 assert 180 in result
 
-    def test_keeps_previous_anchor_for_transition(self) -> None:
-        """Should keep previous anchor and its chain for consumers catching up."""
+    def test_simplified_retention_one_anchor_only(self) -> None:
+        """Simplified retention: keeps only latest FULL anchor + chain to current."""
         with patch("grail.shared.retention_utils.DELTA_BASE_INTERVAL", 3):
             with patch("grail.shared.retention_utils.WINDOW_LENGTH", 30):
-                # Anchor stride = 3 * 30 = 90
-                # Window 120: current anchor at 90, prev anchor at 0
-                result = compute_retention_windows(120)
-                # Current chain
-                assert 90 in result
-                assert 120 in result
-                # Previous anchor
-                assert 0 in result
+                with patch("grail.shared.retention_utils.SAFETY_MARGIN_WINDOWS", 5):
+                    # Anchor stride = 3 * 30 = 90
+                    # Window 120: latest anchor at 120 (with safety margin: 120 - 5*30 = -30 → 0)
+                    result = compute_retention_windows(120)
+                    # Should keep from safety margin anchor (0) to current (120)
+                    assert 0 in result
+                    assert 30 in result
+                    assert 60 in result
+                    assert 90 in result
+                    assert 120 in result
+                    # Should NOT keep older checkpoints outside the retention window
 
     def test_early_windows_dont_go_negative(self) -> None:
         """Early windows should not include negative values."""

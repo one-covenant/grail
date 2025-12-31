@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""TRL GRPO training script with factory pattern for GSM8K and MATH datasets.
+"""TRL GRPO training script with factory pattern for GSM8K, MATH, and MBPP datasets.
 
-Supports both datasets with exact parity to GRAIL environment implementations:
+Supports three datasets with exact parity to GRAIL environment implementations:
 - GSM8K: Grade school math (7,473 train / 1,319 test)
 - MATH: Hendrycks MATH benchmark (7,000 train / 500 val / 5,000 test)
+- MBPP: Python code generation (374 train / 90 validation / 500 test)
 
 Usage:
     python train_trl_grpo.py --dataset gsm8k
     python train_trl_grpo.py --dataset math
+    python train_trl_grpo.py --dataset mbpp
 """
 
 from __future__ import annotations
@@ -36,16 +38,34 @@ from trl import GRPOConfig, GRPOTrainer
 sys.stdout = open(sys.stdout.fileno(), mode="w", buffering=1)
 sys.stderr = open(sys.stderr.fileno(), mode="w", buffering=1)
 
+# Determine project root dynamically (research/trl/ -> project root)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", ".."))
+
 # Load environment from .env for WandB
-load_dotenv("/root/grail/.env")
+load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
 
-sys.path.append("/root/grail")
+sys.path.insert(0, _PROJECT_ROOT)
 
-# GRAIL imports - reuse task sources and validation logic (after sys.path.append)
+# GRAIL imports - reuse task sources and validation logic (after sys.path modification)
 from grail.environments.math_hendrycks_env import _math_answers_equal  # noqa: E402
-from grail.environments.providers import GSM8KTaskSource, MATHTaskSource  # noqa: E402
+from grail.environments.providers import (  # noqa: E402
+    GSM8KTaskSource,
+    MATHTaskSource,
+    MBPPTaskSource,
+)
+from grail.environments.execution import (  # noqa: E402
+    check_code_executes,
+    CodeExecutionPool,
+    set_global_execution_pool,
+)
 from grail.shared.chat_templates import build_qwen_chat_template  # noqa: E402
 from grail.trainer.metrics import KMetricsAggregator, TaskReplicateResult  # noqa: E402
+from grail.trainer.analysis import (  # noqa: E402
+    AnalysisConfig,
+    ModelAnalysisManager,
+    GradientSparsityMetrics,
+)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -72,15 +92,15 @@ class Config:
     # Effective batch = batch_size × grad_accum_steps = 4 × 128 = 512
     grad_accum_steps: int = 128
     # Max sequence length (GRAIL_TRAINER_MAX_LENGTH, constants.py default: 2048)
-    max_length: int = 2048
+    max_length: int = 4096
     # Gradient clipping threshold (GRAIL_TRAINER_GRAD_CLIP, constants.py default: 0.5)
     grad_clip: float = 1.0
     # Warmup steps for LR scheduler (GRAIL_TRAINER_WARMUP_STEPS, constants.py default: 10)
-    warmup_steps: int = 50
+    warmup_steps: int = 20
     # Total training windows (GRAIL_TRAINER_TOTAL_WINDOWS) - controls iteration count
     # Each optimizer step = 32 groups × 16 rollouts = 512 samples
     # total_optimizer_steps calculated below based on total_windows
-    total_steps: int = 400
+    total_steps: int = 100
 
     # ────────────────────────────────────────────────────────────────────────
     # GRPO Loss Configuration (from grail/trainer/algorithms/grpo.py)
@@ -89,31 +109,22 @@ class Config:
     kl_coef: float = 0.0
     # Entropy coefficient for exploration (GRAIL_TRAINER_ENTROPY_COEF, constants.py default: 0.001)
     # Note: TRL may not support entropy regularization directly
-    entropy_coef: float = 0.0005
+    entropy_coef: float = 0.0
     # PPO clip epsilon lower bound (TRAINER_PPO_CLIP_EPS, constants.py default: 0.2)
-    ppo_clip_eps: float = 0.2
+    epsilon: float = 0.2
     # PPO clip epsilon upper bound - DAPO-style asymmetric clipping
-    # (TRAINER_PPO_CLIP_EPS_UPPER, constants.py default: 0.28)
-    ppo_clip_eps_upper: float = 0.28
+    # (TRAINER_epsilon_UPPER, constants.py default: 0.28)
+    epsilon_high: float = 0.28
     # Importance sampling ratio ceiling (GRAIL_TRAINER_IS_RATIO_MAX, constants.py default: 10.0)
     # Prevents training instability from extreme ratios
     is_ratio_max: float = 2.5
-    # Log-ratio clamp for numerical stability (GRAIL_TRAINER_LOGRATIO_CLAMP, constants.py default: 5.0)
-    # ln(2.5) ≈ 0.916 → aligned with IS_RATIO_MAX
-    logratio_clamp: float = 0.92
-    # Advantage clipping percentile (GRAIL_TRAINER_ADV_CLIP_PERCENTILE, constants.py default: 99.0)
-    # Note: TRL handles advantage normalization differently
-    adv_clip_percentile: float = 99.0
-    # Group advantage sum tolerance (GRAIL_TRAINER_GROUP_ADV_SUM_TOL, constants.py default: 0.01)
-    # Note: TRL doesn't use group validation, but kept for reference
-    group_adv_sum_tol: float = 0.01
     # GRPO loss variant (GRAIL_GRPO_VARIANT, constants.py default: "dapo")
     # Options: 'grpo', 'bnpo', 'dapo', 'dr_grpo'
     grpo_variant: str = "dapo"
     # Importance sampling level (GRAIL_IMPORTANCE_SAMPLING_LEVEL, constants.py default: "sequence")
     # Options: 'sequence' (one ratio per sequence), 'token' (per-token ratios)
     # Note: TRL uses token-level IS by default when using vLLM
-    importance_sampling_level: str = "sequence"
+    importance_sampling_level: str = "token"
 
     # ────────────────────────────────────────────────────────────────────────
     # GRPO Data Configuration (from grail/shared/constants.py)
@@ -121,7 +132,7 @@ class Config:
     # Groups per optimizer step = effective_batch / rollouts_per_problem = 512 / 16 = 32
     max_groups: int = 32
     # Max completion tokens (GRPO_MAX_COMPLETION_TOKENS, constants.py default: 1024)
-    max_new_tokens: int = 1024
+    max_new_tokens: int = 2048
     # Rollouts per problem (ROLLOUTS_PER_PROBLEM, constants.py: 16)
     rollouts_per_problem: int = 16
 
@@ -169,9 +180,7 @@ SYSTEM_PROMPT = (
     f"Then, provide your solution between {SOLUTION_START}{SOLUTION_END}."
 )
 
-QWEN_CHAT_TEMPLATE = build_qwen_chat_template(
-    system_prompt=SYSTEM_PROMPT, reasoning_start=REASONING_START
-)
+QWEN_CHAT_TEMPLATE = build_qwen_chat_template(system_prompt=SYSTEM_PROMPT)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -228,19 +237,32 @@ class DatasetAdapter(abc.ABC):
         ...
 
     @abc.abstractmethod
-    def parse_gold_answer(self, raw_answer: str) -> str:
-        """Extract gold answer from dataset format."""
+    def parse_gold_answer(self, raw_answer: Any) -> Any:
+        """Extract gold answer from dataset format.
+
+        Notes:
+            - For GSM8K/MATH this is typically a string.
+            - For MBPP this may be structured data (e.g., dict with tests).
+        """
         ...
 
     @abc.abstractmethod
-    def validate_answer(self, predicted: str, gold: str) -> bool:
+    def validate_answer(self, predicted: str, gold: Any) -> bool:
         """Check if predicted answer matches gold."""
         ...
 
     @abc.abstractmethod
-    def compute_reward(self, completion: str, gold_answer: str) -> float:
+    def compute_reward(self, completion: str, gold_answer: Any) -> float:
         """Compute total reward for completion."""
         ...
+
+    def get_gold_data(self, sample: dict[str, Any]) -> Any:
+        """Get gold answer data from sample for evaluation.
+
+        Override in subclass if answer format differs from answer_field.
+        Default: return sample[answer_field]
+        """
+        return sample.get(self.answer_field, "")
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -527,6 +549,216 @@ class MATHAdapter(DatasetAdapter):
         return correctness + answer_format + thinking + no_trailing
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# MBPP (Python Code) Adapter
+# ────────────────────────────────────────────────────────────────────────────
+class MBPPAdapter(DatasetAdapter):
+    """MBPP dataset adapter for Python code generation.
+
+    Uses GRAIL's MBPPTaskSource and execution engine to validate code
+    by running test cases in a sandboxed subprocess.
+    """
+
+    def __init__(self) -> None:
+        self._train_source = MBPPTaskSource(split="train")
+        self._eval_source = MBPPTaskSource(split="validation")
+
+    @property
+    def name(self) -> str:
+        return "mbpp"
+
+    @property
+    def question_field(self) -> str:
+        return "question"
+
+    @property
+    def answer_field(self) -> str:
+        # Note: This returns "test_list" for API compatibility but actual
+        # gold data is a dict containing test_list, test_setup_code, test_imports.
+        # Use get_gold_data() for evaluation to get the full dict.
+        return "test_list"
+
+    def get_gold_data(self, sample: dict[str, Any]) -> dict[str, Any]:
+        """Get full test data dict for MBPP sample (used for evaluation).
+
+        Unlike answer_field which returns just the field name, this returns
+        the complete dict needed for code execution.
+        """
+        return {
+            "test_list": sample.get("test_list", []),
+            "test_setup_code": sample.get("test_setup_code", ""),
+            "test_imports": sample.get("test_imports", []),
+        }
+
+    @property
+    def correctness_weight(self) -> float:
+        return 0.7  # MBPP uses 0.7 for correctness (test pass rate)
+
+    @property
+    def success_threshold(self) -> float:
+        return 0.7  # Success if correctness achieved
+
+    def load_train_data(self) -> list[dict[str, Any]]:
+        """Load MBPP training data (374 samples)."""
+        self._train_source._ensure_dataset()
+        assert self._train_source._data is not None
+        data = []
+        for sample in self._train_source._data:
+            data.append({
+                "question": sample["text"],
+                "test_list": sample["test_list"],
+                "test_setup_code": sample["test_setup_code"],
+                "test_imports": sample["test_imports"],
+                "reference_solution": sample["code"],
+            })
+        return data
+
+    def load_eval_data(self) -> list[dict[str, Any]]:
+        """Load MBPP validation data (90 samples)."""
+        self._eval_source._ensure_dataset()
+        assert self._eval_source._data is not None
+        data = []
+        for sample in self._eval_source._data:
+            data.append({
+                "question": sample["text"],
+                "test_list": sample["test_list"],
+                "test_setup_code": sample["test_setup_code"],
+                "test_imports": sample["test_imports"],
+                "reference_solution": sample["code"],
+            })
+        return data
+
+    def parse_gold_answer(self, raw_answer: Any) -> Any:
+        """For MBPP, return test_list as-is (used for validation)."""
+        return raw_answer
+
+    def validate_answer(self, predicted: str, test_data: dict[str, Any]) -> bool:
+        """Validate MBPP answer by executing code against test cases.
+
+        Args:
+            predicted: Generated Python code
+            test_data: Dict with test_list, test_setup_code, test_imports
+
+        Returns:
+            True if all tests pass
+        """
+        if not predicted or not isinstance(test_data, dict):
+            return False
+
+        test_list = test_data.get("test_list", [])
+        if not test_list:
+            return False
+
+        # Prepare test cases with setup code and imports
+        test_setup = test_data.get("test_setup_code", "")
+        test_imports = test_data.get("test_imports", [])
+
+        setup_code = "\n".join(test_imports) if test_imports else ""
+        if test_setup:
+            setup_code += f"\n{test_setup}"
+
+        # Prepend setup to each test
+        test_cases = []
+        for test in test_list:
+            if setup_code:
+                test_cases.append(f"{setup_code}\n{test}")
+            else:
+                test_cases.append(test)
+
+        # Execute tests
+        result = check_code_executes(predicted, test_cases, timeout=5.0)
+        return result["status"] == "all_passed"
+
+    def _parse_completion(self, text: str) -> dict[str, Any]:
+        """Parse completion for thinking/solution tags and code extraction."""
+        flags = re.DOTALL | re.IGNORECASE
+        has_thinking = bool(
+            re.search(rf"<{REASONING_START_TOKEN}>.*?</{REASONING_END_TOKEN}>", text, flags)
+        )
+        solution_match = re.search(
+            rf"<{SOLUTION_START_TOKEN}>\s*(.+?)\s*</{SOLUTION_END_TOKEN}>", text, flags
+        )
+
+        code = ""
+        has_solution = bool(solution_match)
+        syntax_valid = False
+        trailing = 0
+
+        if solution_match:
+            code = solution_match.group(1).strip()
+            trailing = len(text) - solution_match.end()
+
+            # Check syntax validity
+            if code:
+                try:
+                    compile(code, "<string>", "exec")
+                    syntax_valid = True
+                except SyntaxError:
+                    syntax_valid = False
+
+        return {
+            "code": code,
+            "has_thinking": has_thinking,
+            "has_solution": has_solution,
+            "syntax_valid": syntax_valid,
+            "trailing": trailing,
+        }
+
+    def compute_reward(self, completion: str, test_data: Any) -> float:
+        """Compute MBPP reward (matching PythonCodeEnv weights).
+
+        Components:
+        - Correctness (0.7): Test pass rate
+        - Syntax (0.1): Code compiles
+        - Format (0.1): Has solution tags + minimal trailing
+        - Thinking (0.1): Has thinking block
+
+        Args:
+            completion: Model completion
+            test_data: Dict with test_list, test_setup_code, test_imports
+
+        Returns:
+            Total reward (0.0 to 1.0)
+        """
+        parsed = self._parse_completion(completion)
+
+        # Correctness: execute code and compute test pass rate
+        correctness = 0.0
+        if parsed["code"] and isinstance(test_data, dict):
+            test_list = test_data.get("test_list", [])
+            if test_list:
+                test_setup = test_data.get("test_setup_code", "")
+                test_imports = test_data.get("test_imports", [])
+
+                setup_code = "\n".join(test_imports) if test_imports else ""
+                if test_setup:
+                    setup_code += f"\n{test_setup}"
+
+                test_cases = []
+                for test in test_list:
+                    if setup_code:
+                        test_cases.append(f"{setup_code}\n{test}")
+                    else:
+                        test_cases.append(test)
+
+                # Execute and get pass rate
+                result = check_code_executes(parsed["code"], test_cases, timeout=5.0)
+                if result["total"] > 0:
+                    pass_rate = result["passed"] / result["total"]
+                    correctness = 0.7 * pass_rate
+
+        # Syntax validity
+        syntax = 0.1 if parsed["syntax_valid"] else 0.0
+
+        # Solution format (has solution + minimal trailing)
+        solution_format = 0.1 if (parsed["has_solution"] and parsed["trailing"] < 50) else 0.0
+
+        # Thinking format
+        thinking = 0.1 if parsed["has_thinking"] else 0.0
+
+        return correctness + syntax + solution_format + thinking
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # FACTORY FUNCTION
 # ════════════════════════════════════════════════════════════════════════════
@@ -534,7 +766,7 @@ def get_dataset_adapter(dataset_name: str) -> DatasetAdapter:
     """Factory function to get dataset adapter by name.
 
     Args:
-        dataset_name: 'gsm8k' or 'math'
+        dataset_name: 'gsm8k', 'math', or 'mbpp'
 
     Returns:
         DatasetAdapter instance
@@ -545,6 +777,7 @@ def get_dataset_adapter(dataset_name: str) -> DatasetAdapter:
     adapters: dict[str, type[DatasetAdapter]] = {
         "gsm8k": GSM8KAdapter,
         "math": MATHAdapter,
+        "mbpp": MBPPAdapter,
     }
 
     if dataset_name.lower() not in adapters:
@@ -574,14 +807,14 @@ class TrainingPassAtKTracker:
     def __init__(
         self,
         adapter: DatasetAdapter,
-        prompt_to_answer: dict[str, str],
+        prompt_to_answer: dict[str, Any],
         report_ks: tuple[int, ...] = (1, 5, 10),
     ) -> None:
         """Initialize the tracker.
 
         Args:
             adapter: Dataset adapter for reward computation and success threshold
-            prompt_to_answer: Mapping from prompt text to gold answer
+            prompt_to_answer: Mapping from prompt text to gold answer data
             report_ks: Tuple of k values for pass@k metrics
         """
         self._adapter = adapter
@@ -618,8 +851,12 @@ class TrainingPassAtKTracker:
         self,
         prompts: list[str],
         kwargs: dict[str, Any],
-    ) -> list[str]:
-        """Extract gold answers from kwargs or prompt mapping."""
+    ) -> list[Any]:
+        """Extract gold answers from kwargs or prompt mapping.
+
+        Returns:
+            List of gold answers - can be strings (gsm8k/math) or dicts (mbpp)
+        """
         if "gold_answer" in kwargs and kwargs["gold_answer"]:
             return kwargs["gold_answer"]
         if "metadatas" in kwargs and kwargs["metadatas"]:
@@ -629,9 +866,14 @@ class TrainingPassAtKTracker:
     def _compute_rewards(
         self,
         completions: list[str],
-        gold_answers: list[str],
+        gold_answers: list[Any],
     ) -> list[float]:
-        """Compute reward for each completion."""
+        """Compute reward for each completion.
+
+        Args:
+            completions: Model completions
+            gold_answers: Gold data (strings for math, dicts for mbpp)
+        """
         return [
             self._adapter.compute_reward(c, g)
             for c, g in zip(completions, gold_answers, strict=False)
@@ -701,7 +943,7 @@ def prepare_train_dataset(adapter: DatasetAdapter, tokenizer: PreTrainedTokenize
         tokenizer: Tokenizer for chat template formatting
 
     Returns:
-        HuggingFace Dataset with 'prompt' and 'gold_answer' columns
+        HuggingFace Dataset with 'prompt' and metadata columns
     """
     raw_data = adapter.load_train_data()
 
@@ -719,12 +961,21 @@ def prepare_train_dataset(adapter: DatasetAdapter, tokenizer: PreTrainedTokenize
             tokenize=False,
             add_generation_prompt=True,
         )
-        formatted.append(
-            {
-                "prompt": prompt,
-                "gold_answer": sample[adapter.answer_field],
+
+        # For MBPP, store full test data dict; for others, store answer string
+        if adapter.name == "mbpp":
+            gold_data = {
+                "test_list": sample.get("test_list", []),
+                "test_setup_code": sample.get("test_setup_code", ""),
+                "test_imports": sample.get("test_imports", []),
             }
-        )
+        else:
+            gold_data = sample[adapter.answer_field]
+
+        formatted.append({
+            "prompt": prompt,
+            "gold_answer": gold_data,
+        })
 
     print(f"  Training dataset ({adapter.name}): {len(formatted)} samples")
     return Dataset.from_list(formatted)
@@ -827,7 +1078,8 @@ class VLLMEvalCallback(TrainerCallback):
 
                 # Get questions using adapter's field name
                 batch_questions = [s[self.adapter.question_field] for s in batch]
-                batch_golds = [s[self.adapter.answer_field] for s in batch]
+                # Use get_gold_data() for proper data extraction (esp. MBPP dict)
+                batch_golds = [self.adapter.get_gold_data(s) for s in batch]
 
                 # Expand: each question gets N replicates
                 tasks_to_generate = []
@@ -862,10 +1114,17 @@ class VLLMEvalCallback(TrainerCallback):
                         c_display = (
                             completion[:300] + "..." if len(completion) > 300 else completion
                         )
+                        # Handle both string (math/gsm8k) and dict (mbpp) gold answers
+                        if isinstance(gold, str):
+                            gold_display = gold[:50] + "..." if len(gold) > 50 else gold
+                        else:
+                            # MBPP: show test count instead of raw dict
+                            test_count = len(gold.get("test_list", [])) if isinstance(gold, dict) else 0
+                            gold_display = f"[{test_count} test cases]"
                         print(f"\n  Sample {i + 1}:")
                         print(f"    Question: {q_display}")
                         print(f"    Completion: {c_display}")
-                        print(f"    Reward: {reward:.3f} | Gold: {gold[:50]}...")
+                        print(f"    Reward: {reward:.3f} | Gold: {gold_display}")
                     print("  ━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
                 # Compute rewards and aggregate
@@ -983,16 +1242,103 @@ class VLLMEvalCallback(TrainerCallback):
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# SPARSITY ANALYSIS CALLBACK (Parameter Change Tracking)
+# ════════════════════════════════════════════════════════════════════════════
+class SparsityCallback(TrainerCallback):
+    """Minimal callback for parameter change ratio and gradient tracking.
+
+    Uses on_optimizer_step which is called after optimizer.step() but BEFORE
+    zero_grad(), so gradients are still available. See:
+    /home/ubuntu/grail/.venv/lib/python3.11/site-packages/transformers/trainer.py:2740-2752
+    """
+
+    def __init__(self, analyzer: ModelAnalysisManager):
+        self.analyzer = analyzer
+        self._wandb_configured = False
+
+    def on_optimizer_step(self, args: Any, state: Any, control: Any, **kwargs: Any) -> None:
+        """Called after optimizer.step() but before zero_grad() - gradients available."""
+        model = kwargs.get("model")
+        if model is None:
+            return
+
+        # Avoid duplicate WandB logs in distributed runs.
+        is_world_process_zero = getattr(state, "is_world_process_zero", True)
+        if not is_world_process_zero:
+            return
+
+        optimizer = kwargs.get("optimizer")
+        inputs = kwargs.get("inputs")
+
+        # Run analysis manager (computes metrics only at configured interval).
+        try:
+            analysis_metrics = self.analyzer.on_optimizer_step(
+                model=model,
+                inputs=inputs,
+                optimizer=optimizer,
+            )
+        except Exception:
+            return
+
+        # Log only at analysis measurement steps to match AnalysisConfig.interval.
+        is_measurement_step = (self.analyzer.step_count % self.analyzer.config.interval) == 0
+        if not (analysis_metrics or is_measurement_step):
+            return
+
+        metrics: dict[str, float] = dict(analysis_metrics)
+
+        # Capture gradient statistics (available here, before zero_grad) but only at measurement steps.
+        if is_measurement_step:
+            grad_norm = self._compute_gradient_norm(model)
+            if grad_norm is not None:
+                metrics["param_change/gradient_norm"] = grad_norm
+
+        if not metrics:
+            return
+
+        # Log to WandB with custom x-axis (optimizer_step).
+        try:
+            import wandb
+
+            if wandb.run:
+                # Configure custom x-axis on first call
+                if not self._wandb_configured:
+                    wandb.define_metric("optimizer_step")
+                    wandb.define_metric("sparsity/*", step_metric="optimizer_step")
+                    self._wandb_configured = True
+
+                # Log with our own step counter
+                optimizer_step = self.analyzer.step_count
+                wandb_data = {"optimizer_step": optimizer_step}
+                wandb_data.update({f"sparsity/{k}": v for k, v in metrics.items()})
+                wandb.log(wandb_data)
+        except Exception:
+            pass
+
+    def _compute_gradient_norm(self, model: Any) -> float | None:
+        """Compute total gradient norm across all parameters."""
+        total_norm_sq = 0.0
+        count = 0
+        for p in model.parameters():
+            if p.grad is not None:
+                total_norm_sq += p.grad.norm(2).item() ** 2
+                count += 1
+        return (total_norm_sq**0.5) if count > 0 else None
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # MAIN TRAINING
 # ════════════════════════════════════════════════════════════════════════════
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="TRL GRPO training with GSM8K or MATH dataset")
+    parser = argparse.ArgumentParser(
+        description="TRL GRPO training with GSM8K, MATH, or MBPP dataset"
+    )
     parser.add_argument(
         "--dataset",
         type=str,
         default="gsm8k",
-        choices=["gsm8k", "math"],
+        choices=["gsm8k", "math", "mbpp"],
         help="Dataset to use for training (default: gsm8k)",
     )
     parser.add_argument(
@@ -1009,6 +1355,22 @@ def main() -> None:
 
     print(f"🚀 Starting TRL GRPO training with {args.dataset.upper()} dataset")
     print("=" * 80)
+
+    # Initialize fast code execution pool for MBPP dataset
+    # This eliminates ~6s spawn overhead per code execution (7000x speedup)
+    execution_pool: CodeExecutionPool | None = None
+    if args.dataset == "mbpp":
+        try:
+            execution_pool = CodeExecutionPool(
+                num_workers=8,
+                max_tasks_per_child=50,
+            )
+            execution_pool.start()
+            set_global_execution_pool(execution_pool)
+            print("✅ Fast code execution pool initialized: 8 workers")
+        except Exception as e:
+            print(f"⚠️  Failed to init execution pool, using slow path: {e}")
+            execution_pool = None
 
     # Print hyperparameter alignment summary
     print("\n📋 GRAIL Hyperparameter Alignment Summary:")
@@ -1029,12 +1391,11 @@ def main() -> None:
     print(f"  {'Total Steps':<40} {cfg.total_steps:<15} GRAIL_TRAINER_TOTAL_STEPS")
     print(f"  {'KL Coefficient':<40} {cfg.kl_coef:<15} GRAIL_TRAINER_KL_COEF")
     print(f"  {'Entropy Coefficient':<40} {cfg.entropy_coef:<15} GRAIL_TRAINER_ENTROPY_COEF")
-    print(f"  {'PPO Clip Epsilon':<40} {cfg.ppo_clip_eps:<15} TRAINER_PPO_CLIP_EPS")
+    print(f"  {'PPO Clip Epsilon':<40} {cfg.epsilon:<15} TRAINER_PPO_CLIP_EPS")
     print(
-        f"  {'PPO Clip Epsilon Upper':<40} {cfg.ppo_clip_eps_upper:<15} TRAINER_PPO_CLIP_EPS_UPPER"
+        f"  {'PPO Clip Epsilon Upper':<40} {cfg.epsilon_high:<15} TRAINER_PPO_CLIP_EPS_UPPER"
     )
     print(f"  {'IS Ratio Max':<40} {cfg.is_ratio_max:<15} GRAIL_TRAINER_IS_RATIO_MAX")
-    print(f"  {'Log-Ratio Clamp':<40} {cfg.logratio_clamp:<15} GRAIL_TRAINER_LOGRATIO_CLAMP")
     print(f"  {'GRPO Variant':<40} {cfg.grpo_variant:<15} GRAIL_GRPO_VARIANT")
     print(f"  {'IS Level':<40} {cfg.importance_sampling_level:<15} GRAIL_IMPORTANCE_SAMPLING_LEVEL")
     print(f"  {'Max Groups':<40} {cfg.max_groups:<15} GRPO_MAX_GROUPS")
@@ -1057,10 +1418,11 @@ def main() -> None:
             attn_implementation="flash_attention_2",
         )
     except (ImportError, RuntimeError) as e:
-        print(f"⚠️  Flash Attention 2 unavailable ({type(e).__name__}), using default")
+        print(f"⚠️  Flash Attention 2 unavailable ({type(e).__name__}), using SDPA")
         model = AutoModelForCausalLM.from_pretrained(
             cfg.model_id,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=torch.float32,  # FP32 master weights, AMP handles FP16 casting
+            attn_implementation="sdpa",
         )
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_id)
@@ -1085,6 +1447,12 @@ def main() -> None:
 
     # Calculate max_prompt_length (GRAIL_TRAINER_MAX_LENGTH - GRPO_MAX_COMPLETION_TOKENS)
     max_prompt_length = cfg.max_length - cfg.max_new_tokens
+    if max_prompt_length <= 0:
+        raise ValueError(
+            "Invalid length config: max_length must be > max_new_tokens so prompts aren't "
+            "truncated to empty. "
+            f"Got max_length={cfg.max_length}, max_new_tokens={cfg.max_new_tokens}."
+        )
 
     # Calculate training schedule
     # Each optimizer step = generation_batch_size = effective_batch = 512 samples
@@ -1106,7 +1474,7 @@ def main() -> None:
         # ─────────────────────────────────────────────────────────────────────
         learning_rate=cfg.lr,  # GRAIL_TRAINER_LR
         warmup_steps=cfg.warmup_steps,  # GRAIL_TRAINER_WARMUP_STEPS
-        lr_scheduler_type="cosine",  # Cosine annealing (matches grail/neurons/trainer.py)
+        lr_scheduler_type="constant",  #  constant
         # Use max_steps to control iterations (matching GRAIL_TRAINER_TOTAL_WINDOWS)
         # num_train_epochs is ignored when max_steps is set
         num_train_epochs=cfg.epochs,
@@ -1118,11 +1486,20 @@ def main() -> None:
         gradient_accumulation_steps=cfg.grad_accum_steps,  # GRAIL_TRAINER_GRAD_ACCUM_STEPS
         max_grad_norm=cfg.grad_clip,  # GRAIL_TRAINER_GRAD_CLIP
         # ─────────────────────────────────────────────────────────────────────
+        # Optimizer Configuration (AdamW defaults)
+        # ─────────────────────────────────────────────────────────────────────
+        optim="adamw_torch",  # Optimizer type (default PyTorch AdamW)
+        adam_beta1=0.9,  # Beta1 momentum (default: 0.9)
+        adam_beta2=0.999,  # Beta2 momentum (default: 0.999)
+        adam_epsilon=1e-8,  # Numerical stability (default: 1e-8)
+        weight_decay=0.0,  # L2 regularization (default: 0.0)
+        # ─────────────────────────────────────────────────────────────────────
         # GRPO Loss Configuration (matching grail/trainer/algorithms/grpo.py)
         # ─────────────────────────────────────────────────────────────────────
+        num_iterations=16,  # Number of training updates on generated rollouts (μ in GRPO)
         beta=cfg.kl_coef,  # GRAIL_TRAINER_KL_COEF (KL divergence coefficient)
-        epsilon=cfg.ppo_clip_eps,  # TRAINER_PPO_CLIP_EPS (lower clip bound)
-        epsilon_high=cfg.ppo_clip_eps_upper,  # TRAINER_PPO_CLIP_EPS_UPPER (DAPO asymmetric)
+        epsilon=cfg.epsilon,  # TRAINER_PPO_CLIP_EPS (lower clip bound)
+        epsilon_high=cfg.epsilon_high,  # TRAINER_PPO_CLIP_EPS_UPPER (DAPO asymmetric)
         loss_type=cfg.grpo_variant,  # GRAIL_GRPO_VARIANT ("dapo")
         # ─────────────────────────────────────────────────────────────────────
         # Sequence Length (matching GRAIL trainer config)
@@ -1153,8 +1530,8 @@ def main() -> None:
         num_completions_to_print=1,
         wandb_log_unique_prompts=True,
         save_strategy="steps",
-        save_steps=40,
-        bf16=True,
+        save_steps=25,
+        fp16=True,
         report_to=["wandb"],
         eval_strategy="no",
         run_name=f"trl_{adapter.name}_grpo_qwen15b_grail_matched_final",
@@ -1178,6 +1555,27 @@ def main() -> None:
 
     print(f"\n🏋️  Training with GRPO on {adapter.name.upper()}...")
 
+    # Initialize sparsity analysis (parameter change tracking + gradient sparsity)
+    sparsity_config = AnalysisConfig(
+        interval=1,
+        param_change_enabled=True,
+        param_change_thresholds=[0.0],  # Only track exact zero weight deltas
+        sparse_quality_enabled=False,
+        snapshot_dtype="bfloat16",
+        gradient_enabled=True,  # Enable gradient analysis
+    )
+    sparsity_analyzer = ModelAnalysisManager.create(sparsity_config)
+    
+    # Add gradient sparsity metric
+    gradient_sparsity = GradientSparsityMetrics(
+        thresholds=[0.0, 10, 1, 1e-4, 1e-8, 1e-16, 1e-20],  # Only track exact zero gradients
+        track_per_layer=False,
+    )
+    sparsity_analyzer.add_metric(gradient_sparsity)
+    
+    sparsity_callback = SparsityCallback(sparsity_analyzer)
+    print(f"  ✓ Sparsity analysis enabled (interval={sparsity_config.interval})")
+
     # Initialize evaluation callback
     vllm_eval_callback = VLLMEvalCallback(
         adapter=adapter,
@@ -1193,7 +1591,7 @@ def main() -> None:
         args=grpo_config,
         train_dataset=train_ds,
         processing_class=tokenizer,
-        callbacks=[vllm_eval_callback],
+        callbacks=[vllm_eval_callback, sparsity_callback],
     )
 
     # Initialize WandB explicitly before baseline eval (GRPOTrainer does it lazily in .train())
@@ -1232,6 +1630,16 @@ def main() -> None:
     print("\nGlobal metrics:")
     print(f"  reward_mean_all: {final_metrics['reward_mean_all']:.3f}")
     print(f"  success_rate_all: {final_metrics['success_rate_all']:.3f}")
+
+    # Cleanup execution pool
+    if execution_pool is not None:
+        try:
+            print("\n🧹 Shutting down code execution pool...")
+            set_global_execution_pool(None)
+            execution_pool.shutdown()
+            print("✅ Code execution pool shutdown complete")
+        except Exception as e:
+            print(f"⚠️  Error shutting down execution pool: {e}")
 
 
 if __name__ == "__main__":

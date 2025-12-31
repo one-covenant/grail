@@ -12,6 +12,8 @@ dependencies = [
     "openai>=1.0.0",
     "trl>=0.22.0",
     "wandb>=0.22.3",
+    # Evaluation harness with vLLM support
+    "lm-eval>=0.4.0",
 ]
 
 [tool.ruff]
@@ -21,4 +23,3 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "C4", "UP"]
 ignore = ["E501", "B008", "C901", "W191"]
-

@@ -18,6 +18,10 @@ from typing import Any
 import bittensor as bt
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from ..environments.execution import (
+    CodeExecutionPool,
+    set_global_execution_pool,
+)
 from ..infrastructure.chain import GrailChainManager
 from ..infrastructure.checkpoint_consumer import CheckpointManager
 from ..infrastructure.credentials import BucketCredentials
@@ -114,6 +118,7 @@ class ValidationService:
         self._metagraph: Any = None
         self._model: AutoModelForCausalLM | None = None
         self._tokenizer: AutoTokenizer | None = None
+        self._execution_pool: CodeExecutionPool | None = None
 
         # Service components (lazy-init)
         self._miner_sampler: MinerSampler | None = None
@@ -314,6 +319,28 @@ class ValidationService:
 
     def _initialize_components(self) -> None:
         """Initialize service components."""
+        # Initialize fast code execution pool for Python code environments
+        # This eliminates ~6s spawn overhead per code execution (7000x speedup)
+        # CRITICAL: Must match miner's execution environment to ensure deterministic rewards
+        #
+        # NOTE: Validator uses 8 workers vs miner's 4 workers for higher throughput.
+        # This is safe because:
+        # - Each execution is isolated within a single worker
+        # - Worker count only affects parallel throughput, not individual results
+        # - Both use identical worker init (_pool_worker_init) and execution (_pool_worker_execute)
+        # - Determinism is guaranteed by sequential test execution within each worker
+        try:
+            self._execution_pool = CodeExecutionPool(
+                num_workers=8,  # Higher than miner (4) for parallel validation workload
+                max_tasks_per_child=50,
+            )
+            self._execution_pool.start()
+            set_global_execution_pool(self._execution_pool)
+            logger.info("✅ Fast code execution pool initialized: %d workers", 8)
+        except Exception as e:
+            logger.warning("⚠️ Failed to init execution pool, using slow path: %s", e)
+            self._execution_pool = None
+
         # Miner sampler
         self._miner_sampler = MinerSampler(
             sample_rate=MINER_SAMPLE_RATE,
@@ -1126,6 +1153,17 @@ class ValidationService:
         if getattr(self, "_cleaned_up", False):
             return
         self._cleaned_up = True
+
+        # Shutdown code execution pool
+        if self._execution_pool is not None:
+            try:
+                logger.info("Shutting down code execution pool...")
+                set_global_execution_pool(None)
+                self._execution_pool.shutdown()
+                self._execution_pool = None
+                logger.info("✅ Code execution pool shutdown complete")
+            except Exception as e:
+                logger.warning(f"Error shutting down execution pool: {e}")
 
         if self._chain_manager:
             try:

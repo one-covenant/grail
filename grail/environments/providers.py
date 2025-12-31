@@ -443,3 +443,319 @@ class MATHTaskSource(TaskSource):
         self._ensure_dataset()
         assert self._data is not None
         return [f"{self._split}_{i}" for i in range(len(self._data))]
+
+
+# Python code generation dataset sources
+
+
+# Fraction of original test set to add to train (rest goes to validation)
+_MBPP_TEST_TO_TRAIN_FRACTION = 0.8
+# Seed for deterministic shuffling of test set redistribution
+_MBPP_REDISTRIBUTION_SEED = 42
+
+
+class MBPPTaskSource(TaskSource):
+    """HF datasets-backed MBPP (Mostly Basic Python Problems) provider.
+
+    Uses mbpp dataset (full configuration) with redistributed splits.
+    The original test set (500 examples) is redistributed to train/validation
+    to maximize training data while reserving a validation set for evaluation.
+
+    Dataset structure:
+        - task_id: Unique identifier
+        - text: Natural language problem description
+        - code: Reference solution
+        - test_list: List of assertion strings
+        - test_setup_code: Setup code for tests (usually empty)
+        - test_imports: Required imports for tests
+
+    Split behavior (after redistribution):
+        - "train": Original train (374) + 80% of original test (400) = 774 examples
+        - "validation": Original validation (90) + 20% of original test (100) = 190 examples
+        - "test": NOT AVAILABLE (raises AssertionError)
+
+    Note: Dataset uses 'validation' not 'val' for the validation split.
+    """
+
+    # Class-level cache for loaded data
+    _cache: dict[str, Any] = {}
+
+    def __init__(self, *, split: str = "train") -> None:
+        """Initialize MBPP task source.
+
+        Args:
+            split: Dataset split to use ('train' or 'validation')
+
+        Raises:
+            AssertionError: If split is 'test' (redistributed to train/validation)
+            ValueError: If split is not recognized
+        """
+        if split == "test":
+            raise AssertionError(
+                "MBPP 'test' split does not exist. "
+                "The original test set (500 examples) has been redistributed to "
+                "train (80%) and validation (20%). Use 'train' or 'validation' instead."
+            )
+        if split not in ("train", "validation"):
+            raise ValueError(f"split must be 'train' or 'validation', got '{split}'")
+        self._split = split
+        self._data: list[dict[str, Any]] | None = None
+
+    def _parse_hf_samples(self, ds: Any) -> list[dict[str, Any]]:
+        """Parse HuggingFace dataset samples into standard format.
+
+        Args:
+            ds: HuggingFace dataset split
+
+        Returns:
+            List of parsed sample dictionaries
+        """
+        samples = []
+        for sample in ds:
+            # Extract fields from full configuration format
+            task_id = sample.get("task_id", 0)
+            text = sample.get("text", "")  # Full config uses 'text' field
+            code = sample.get("code", "")
+            test_list = sample.get("test_list", [])
+            test_setup_code = sample.get("test_setup_code", "")
+            # Note: full config doesn't have test_imports field
+            test_imports = sample.get("test_imports", [])
+
+            samples.append(
+                {
+                    "task_id": int(task_id) if task_id is not None else 0,
+                    "text": str(text),
+                    "code": str(code),
+                    "test_list": [str(t) for t in test_list],
+                    "test_setup_code": str(test_setup_code),
+                    "test_imports": [str(imp) for imp in test_imports],
+                }
+            )
+        return samples
+
+    def _ensure_dataset(self) -> None:
+        """Lazy load dataset from HuggingFace with test set redistribution."""
+        if self._data is not None:
+            return
+
+        # Check class-level cache first
+        cache_key = f"mbpp_{self._split}"
+        if cache_key in MBPPTaskSource._cache:
+            self._data = MBPPTaskSource._cache[cache_key]
+            return
+
+        # Check if redistribution has already been computed
+        if "mbpp_train" in MBPPTaskSource._cache and "mbpp_validation" in MBPPTaskSource._cache:
+            self._data = MBPPTaskSource._cache[cache_key]
+            return
+
+        # Need to compute redistribution - load all splits
+        self._compute_redistributed_splits()
+        self._data = MBPPTaskSource._cache[cache_key]
+
+    def _compute_redistributed_splits(self) -> None:
+        """Compute train/validation splits with test set redistribution.
+
+        Redistribution strategy:
+        1. Load original train, validation, and test splits from HuggingFace
+        2. Shuffle test set deterministically
+        3. Split test into 80% for train, 20% for validation
+        4. Combine: new_train = train + test_train_portion
+                    new_validation = validation + test_val_portion
+        """
+        import random
+
+        from datasets import load_dataset
+
+        # Load all three original splits
+        ds_train = load_dataset("mbpp", "full", split="train")
+        ds_validation = load_dataset("mbpp", "full", split="validation")
+        ds_test = load_dataset("mbpp", "full", split="test")
+
+        # Parse into standard format
+        train_samples = self._parse_hf_samples(ds_train)
+        validation_samples = self._parse_hf_samples(ds_validation)
+        test_samples = self._parse_hf_samples(ds_test)
+
+        # Deterministically shuffle test samples for redistribution
+        rng = random.Random(_MBPP_REDISTRIBUTION_SEED)
+        test_indices = list(range(len(test_samples)))
+        rng.shuffle(test_indices)
+
+        # Split test set: 80% to train, 20% to validation
+        n_test_to_train = int(len(test_samples) * _MBPP_TEST_TO_TRAIN_FRACTION)
+        test_train_indices = test_indices[:n_test_to_train]
+        test_val_indices = test_indices[n_test_to_train:]
+
+        # Combine splits
+        new_train = train_samples + [test_samples[i] for i in test_train_indices]
+        new_validation = validation_samples + [test_samples[i] for i in test_val_indices]
+
+        # Cache the redistributed splits
+        MBPPTaskSource._cache["mbpp_train"] = new_train
+        MBPPTaskSource._cache["mbpp_validation"] = new_validation
+
+    def next(self, *, seed: int | None = None, task_id: str | None = None) -> TaskSpec:
+        """Sample task from dataset.
+
+        Args:
+            seed: Random seed for deterministic sampling
+            task_id: Specific task ID to load (format: "{split}_{idx}")
+
+        Returns:
+            TaskSpec with problem description, tests, and metadata
+        """
+        self._ensure_dataset()
+        assert self._data is not None
+
+        if task_id is not None:
+            try:
+                idx = int(task_id.split("_")[-1])
+            except (ValueError, IndexError):
+                idx = 0
+        elif seed is not None:
+            # Deterministic sampling - use modulo directly for uniform distribution
+            idx = int(seed) % len(self._data)
+        else:
+            idx = 0
+
+        sample = self._data[int(idx) % len(self._data)]
+
+        return TaskSpec(
+            id=f"{self._split}_{idx}",
+            payload={
+                "question": sample["text"],
+                "test_list": sample["test_list"],
+                "test_setup_code": sample["test_setup_code"],
+                "test_imports": sample["test_imports"],
+                "reference_solution": sample["code"],
+            },
+            metadata={
+                "split": self._split,
+                "index": int(idx),
+                "task_id": sample["task_id"],
+                "num_tests": len(sample["test_list"]),
+            },
+        )
+
+    def size(self) -> int:
+        """Get total number of examples in split."""
+        self._ensure_dataset()
+        assert self._data is not None
+        return len(self._data)
+
+    def iter_ids(self) -> list[str]:
+        """Get all task IDs in split."""
+        self._ensure_dataset()
+        assert self._data is not None
+        return [f"{self._split}_{i}" for i in range(len(self._data))]
+
+
+class HumanEvalTaskSource(TaskSource):
+    """HF datasets-backed HumanEval provider.
+
+    Uses openai/openai_humaneval dataset (164 problems, test split only).
+
+    Dataset structure:
+        - task_id: Unique identifier (e.g., "HumanEval/0")
+        - prompt: Function signature + docstring
+        - canonical_solution: Reference implementation
+        - test: Test function with assertions
+        - entry_point: Function name to test
+
+    Note: HumanEval only has a test split. For RL training, use MBPP instead.
+    This source is primarily for evaluation/benchmarking.
+    """
+
+    # Class-level cache for loaded data
+    _cache: dict[str, Any] | None = None
+
+    def __init__(self) -> None:
+        """Initialize HumanEval task source.
+
+        Note: HumanEval only has test split, no train/val.
+        """
+        self._data: list[dict[str, Any]] | None = None
+
+    def _ensure_dataset(self) -> None:
+        """Lazy load dataset from HuggingFace."""
+        if self._data is not None:
+            return
+
+        # Check class-level cache first
+        if HumanEvalTaskSource._cache is not None:
+            self._data = HumanEvalTaskSource._cache
+            return
+
+        from datasets import load_dataset
+
+        # HumanEval only has 'test' split
+        ds = load_dataset("openai_humaneval", split="test")
+
+        samples = []
+        for sample in ds:
+            samples.append(
+                {
+                    "task_id": str(sample.get("task_id", "")),
+                    "prompt": str(sample.get("prompt", "")),
+                    "canonical_solution": str(sample.get("canonical_solution", "")),
+                    "test": str(sample.get("test", "")),
+                    "entry_point": str(sample.get("entry_point", "")),
+                }
+            )
+
+        self._data = samples
+        HumanEvalTaskSource._cache = self._data
+
+    def next(self, *, seed: int | None = None, task_id: str | None = None) -> TaskSpec:
+        """Sample task from dataset.
+
+        Args:
+            seed: Random seed for deterministic sampling
+            task_id: Specific task ID to load (format: "humaneval_{idx}")
+
+        Returns:
+            TaskSpec with problem prompt, test function, and metadata
+        """
+        self._ensure_dataset()
+        assert self._data is not None
+
+        if task_id is not None:
+            try:
+                idx = int(task_id.split("_")[-1])
+            except (ValueError, IndexError):
+                idx = 0
+        elif seed is not None:
+            # Deterministic sampling - use modulo directly for uniform distribution
+            idx = int(seed) % len(self._data)
+        else:
+            idx = 0
+
+        sample = self._data[int(idx) % len(self._data)]
+
+        return TaskSpec(
+            id=f"humaneval_{idx}",
+            payload={
+                "question": sample["prompt"],
+                "test": sample["test"],
+                "entry_point": sample["entry_point"],
+                "reference_solution": sample["canonical_solution"],
+            },
+            metadata={
+                "split": "test",
+                "index": int(idx),
+                "original_task_id": sample["task_id"],
+            },
+        )
+
+    def size(self) -> int:
+        """Get total number of examples (always 164)."""
+        self._ensure_dataset()
+        assert self._data is not None
+        return len(self._data)
+
+    def iter_ids(self) -> list[str]:
+        """Get all task IDs."""
+        self._ensure_dataset()
+        assert self._data is not None
+        return [f"humaneval_{i}" for i in range(len(self._data))]
