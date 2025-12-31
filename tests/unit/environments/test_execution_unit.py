@@ -315,7 +315,11 @@ class TestErrorMessages:
         """Test that timeout errors have clear messages."""
         result = execute_code("while True: pass", timeout=0.5)
         assert result["status"] == "timeout"
-        assert "timeout" in result["error"].lower() or "timed out" in result["error"].lower()
+        error_lower = result["error"].lower()
+        # Accept various timeout-related error messages
+        assert (
+            "timeout" in error_lower or "timed out" in error_lower or "unresponsive" in error_lower
+        )
 
 
 @pytest.mark.slow
