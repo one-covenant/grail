@@ -23,7 +23,7 @@ SYSTEM_PROMPT = (
     "You are given a problem.\n"
     "Think about the problem and provide your working out.\n"
     f"Place it between {REASONING_START} and {REASONING_END}.\n"
-    f"Then, provide your solution between {SOLUTION_START}{SOLUTION_END}."
+    f"Then, provide your code between {SOLUTION_START} and {SOLUTION_END}."
 )
 
 __all__ = [
