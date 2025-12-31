@@ -539,6 +539,9 @@ async def generate_rollouts_for_window(
     monitor: Any | None,
     use_drand: bool,
     checkpoint_window: int,
+    env_id: str | None = None,
+    env_params: dict[str, Any] | None = None,
+    generation_params: dict[str, Any] | None = None,
 ) -> list[dict]:
     """Generate as many GRPO rollouts as safely possible within a window.
 
@@ -560,6 +563,9 @@ async def generate_rollouts_for_window(
         monitor: Optional monitoring client for metrics.
         use_drand: Whether drand was used in randomness generation.
         checkpoint_window: The checkpoint window used for this generation
+        env_id: Environment identifier from checkpoint metadata
+        env_params: Environment parameters from checkpoint metadata
+        generation_params: Generation parameters from checkpoint metadata
 
     Returns:
         List of signed rollout data ready for upload.
@@ -586,7 +592,18 @@ async def generate_rollouts_for_window(
             ROLLOUTS_PER_PROBLEM,
         )
         batch_size = ROLLOUTS_PER_PROBLEM
-    loop = AgentEnvLoop(model, tokenizer, device)
+    # Create AgentEnvLoop with generation parameters from checkpoint metadata (if available)
+    generation_params = generation_params or {}
+    loop = AgentEnvLoop(
+        model,
+        tokenizer,
+        device,
+        max_new_tokens=generation_params.get("max_tokens", 512),
+        temperature=generation_params.get("temperature", 0.7),
+        top_p=generation_params.get("top_p", 0.95),
+        top_k=generation_params.get("top_k", 50),
+        repetition_penalty=generation_params.get("repetition_penalty", 1.1),
+    )
     if batch_size > 1:
         logger.info("Using batch_size=%d for parallel rollout generation", batch_size)
 
@@ -649,8 +666,9 @@ async def generate_rollouts_for_window(
 
             # Generate GRPO rollouts using AgentEnvLoop
             # Factory uses cached task source automatically (no manual instantiation needed)
+            # Use environment configuration from checkpoint metadata if available
             def _env_factory():
-                return create_env()
+                return create_env(env_id=env_id, env_params=env_params)
 
             # Time the rollout generation for both logging and monitoring
             rollout_gen_start = time.time()

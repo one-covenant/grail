@@ -40,6 +40,10 @@ class ValidationContext:
     # Optional identifiers / logging context (defaulted fields must follow non-defaults)
     miner_uid: str | None = None  # Miner UID for logging/metrics namespacing
 
+    # Environment configuration from checkpoint metadata
+    env_id: str | None = None  # Environment identifier from checkpoint
+    env_params: dict[str, Any] = field(default_factory=dict)  # Environment params from checkpoint
+
     # Cached intermediate results (populated by validators)
     cached_logits: torch.Tensor | None = None
     verified_problem: Any | None = None  # SATProblem, CodeProblem, etc.

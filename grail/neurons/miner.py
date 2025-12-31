@@ -257,6 +257,16 @@ class MinerNeuron(BaseNeuron):
                         last_window_start = window_start  # Prevent infinite loop
                         continue
 
+                    # Fetch checkpoint metadata for environment and generation configuration
+                    checkpoint_metadata = await checkpoint_manager._fetch_metadata(
+                        current_checkpoint_window
+                    )
+                    env_id = checkpoint_metadata.env_id if checkpoint_metadata else None
+                    env_params = checkpoint_metadata.env_params if checkpoint_metadata else {}
+                    generation_params = (
+                        checkpoint_metadata.generation_params if checkpoint_metadata else {}
+                    )
+
                     logger.info(
                         f"🔥 Starting inference generation for window "
                         f"{window_start}-{window_start + WINDOW_LENGTH - 1}"
@@ -285,6 +295,9 @@ class MinerNeuron(BaseNeuron):
                         monitor,
                         self.use_drand,
                         current_checkpoint_window,
+                        env_id=env_id,
+                        env_params=env_params,
+                        generation_params=generation_params,
                     )
 
                     if inferences:

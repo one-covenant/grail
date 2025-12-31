@@ -90,6 +90,13 @@ class CheckpointMetadata:
     anchor_window: int | None = None  # For DELTA: nearest FULL checkpoint for recovery
     weights_hash: str | None = None  # SHA256 of final weights for verification
 
+    # Environment and generation configuration
+    env_id: str | None = None  # Environment identifier (e.g., "mbpp", "gsm8k")
+    env_params: dict[str, Any] = field(default_factory=dict)  # Environment-specific parameters
+    generation_params: dict[str, Any] = field(
+        default_factory=dict
+    )  # Generation parameters (max_tokens, temperature, etc.)
+
     def remote_prefix(self) -> str:
         """Get the remote R2 prefix for this checkpoint.
 
@@ -738,6 +745,9 @@ class CheckpointManager:
             prev_window=payload.get("prev_window"),
             anchor_window=payload.get("anchor_window"),
             weights_hash=payload.get("weights_hash"),
+            env_id=payload.get("env_id"),
+            env_params=payload.get("env_params", {}),
+            generation_params=payload.get("generation_params", {}),
         )
         self._metadata_cache[cache_key] = metadata
         return metadata
@@ -767,6 +777,9 @@ class CheckpointManager:
             prev_window=payload.get("prev_window"),
             anchor_window=payload.get("anchor_window"),
             weights_hash=payload.get("weights_hash"),
+            env_id=payload.get("env_id"),
+            env_params=payload.get("env_params", {}),
+            generation_params=payload.get("generation_params", {}),
         )
         self._metadata_cache[cache_key] = metadata
         return metadata

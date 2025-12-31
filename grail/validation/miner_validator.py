@@ -93,15 +93,18 @@ class MinerValidator:
         self,
         pipeline: ValidationPipeline,
         text_log_limit: int = 5,
+        checkpoint_manager: Any = None,
     ):
         """Initialize miner validator.
 
         Args:
             pipeline: Environment-agnostic validation pipeline
             text_log_limit: Max number of text samples to log per miner
+            checkpoint_manager: Optional checkpoint manager for fetching environment config
         """
         self._pipeline = pipeline
         self._text_log_limit = text_log_limit
+        self._checkpoint_manager = checkpoint_manager
 
         # Derive check keys from pipeline validators (single source of truth)
         self._hard_check_keys = get_hard_check_keys(pipeline)
@@ -183,6 +186,21 @@ class MinerValidator:
         # Extract validator's checkpoint window from model attribute (set by get_model())
         validator_checkpoint_window = getattr(model, "grail_checkpoint_window", None)
 
+        # Fetch environment config from checkpoint metadata if checkpoint_manager is available
+        env_id = None
+        env_params = {}
+        if hasattr(self, "_checkpoint_manager") and self._checkpoint_manager is not None:
+            if validator_checkpoint_window is not None:
+                try:
+                    checkpoint_metadata = await self._checkpoint_manager._fetch_metadata(
+                        validator_checkpoint_window
+                    )
+                    if checkpoint_metadata is not None:
+                        env_id = checkpoint_metadata.env_id
+                        env_params = checkpoint_metadata.env_params or {}
+                except Exception as e:
+                    logger.debug(f"Failed to fetch checkpoint metadata for env config: {e}")
+
         # Step 4: Validate selected rollouts
         validation_state = await self._validate_rollouts(
             inferences=inferences,
@@ -199,6 +217,8 @@ class MinerValidator:
             text_logs_emitted=text_logs_emitted,
             heartbeat_callback=heartbeat_callback,
             validator_checkpoint_window=validator_checkpoint_window,
+            env_id=env_id,
+            env_params=env_params,
         )
 
         # Step 5: Check for early failures
@@ -401,6 +421,8 @@ class MinerValidator:
         text_logs_emitted: dict[str, int],
         heartbeat_callback: Any,
         validator_checkpoint_window: int | None = None,
+        env_id: str | None = None,
+        env_params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Validate selected rollouts and accumulate state.
 
@@ -535,6 +557,8 @@ class MinerValidator:
                     model=model,
                     tokenizer=tokenizer,
                     device=model.device,
+                    env_id=env_id,
+                    env_params=env_params or {},
                 )
 
                 if monitor:
