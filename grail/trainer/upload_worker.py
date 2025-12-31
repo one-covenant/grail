@@ -194,9 +194,28 @@ async def upload_worker_loop(
 
             logger.info("New snapshot detected, preparing upload")
 
-            # Determine target window BEFORE copying snapshot
+            # Get current block for timing/monitoring
             upload_start_block = await subtensor.get_current_block()
-            checkpoint_window = (upload_start_block // WINDOW_LENGTH) * WINDOW_LENGTH
+
+            # CRITICAL: Use window from snapshot metadata (when it was trained),
+            # NOT current block (when it's being uploaded).
+            # The snapshot was saved for a specific window during training,
+            # and we must preserve that window number to avoid checkpoint corruption.
+            checkpoint_window = snapshot_msg.get("window")
+            if checkpoint_window is None:
+                logger.error("Snapshot message missing 'window' field, skipping upload")
+                continue
+
+            # Log window alignment for debugging
+            current_window = (upload_start_block // WINDOW_LENGTH) * WINDOW_LENGTH
+            if checkpoint_window != current_window:
+                logger.info(
+                    "Upload timing: snapshot trained at window %s, uploading during window %s (lag: %d blocks)",
+                    checkpoint_window,
+                    current_window,
+                    current_window - checkpoint_window,
+                )
+
             if monitor:
                 monitor.set_block_context(upload_start_block, checkpoint_window)
 
