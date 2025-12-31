@@ -356,7 +356,10 @@ def execute_code(code: str, timeout: float = 5.0) -> dict[str, Any]:
 
         # Graceful shutdown: try terminate first, then kill if necessary
         if process.is_alive():
-            # Try graceful shutdown first (SIGTERM allows cleanup)
+            # Process didn't exit after timeout + 10s grace period
+            # This means code is hanging the process (infinite loop, blocking syscall, etc.)
+            # NOT a normal timeout (which would send result via pipe before exit)
+            # Classify as "timeout" since it's code-related, not infrastructure failure
             process.terminate()
             process.join(timeout=0.5)
 
@@ -365,7 +368,10 @@ def execute_code(code: str, timeout: float = 5.0) -> dict[str, Any]:
                 process.kill()
                 process.join(timeout=0.5)
 
-            return {"status": "timeout", "error": "Execution timed out"}
+            return {
+                "status": "timeout",
+                "error": "Process unresponsive (likely code caused hang - infinite loop or blocking call)",
+            }
 
         # Read result from pipe with timeout to prevent deadlock
         # If child crashed after join(), poll prevents indefinite hang
@@ -1117,7 +1123,7 @@ class CodeExecutionPool:
             return {
                 "passed": 0,
                 "total": len(tests),
-                "status": "error",
+                "status": "process_error",
                 "error": "Pool not initialized",
                 "test_results": [],
             }
@@ -1125,20 +1131,35 @@ class CodeExecutionPool:
         try:
             future = self._executor.submit(_pool_worker_execute, code, tests, timeout)
             # Add buffer for IPC overhead
-            return future.result(timeout=timeout * len(tests) + 30)
+            result = future.result(timeout=timeout * len(tests) + 30)
+            return result
         except concurrent.futures.TimeoutError:
+            # Executor-level timeout - worker didn't respond in time
+            # This is almost always caused by code hanging the worker (infinite loop, blocking call)
+            # NOT a transient infrastructure issue - same code will hang again
+            # Classify as "timeout" (code problem) to prevent wasteful retries
             return {
                 "passed": 0,
                 "total": len(tests),
                 "status": "timeout",
-                "error": "Execution timed out",
+                "error": "Worker unresponsive (likely code caused worker to hang)",
                 "test_results": [],
             }
-        except Exception as e:
+        except concurrent.futures.BrokenExecutor as e:
+            # Worker pool crashed - this is a process error, retryable
             return {
                 "passed": 0,
                 "total": len(tests),
-                "status": "error",
+                "status": "process_error",
+                "error": f"Worker pool failure: {e}",
+                "test_results": [],
+            }
+        except Exception as e:
+            # Other executor errors (worker crash, IPC failure) - process error
+            return {
+                "passed": 0,
+                "total": len(tests),
+                "status": "process_error",
                 "error": f"Pool execution error: {e}",
                 "test_results": [],
             }
@@ -1188,21 +1209,35 @@ class CodeExecutionPool:
                 result = future.result(timeout=overall_timeout)
                 results.append(result)
             except concurrent.futures.TimeoutError:
+                # Executor-level timeout - worker didn't respond
+                # Almost always code hanging the worker, not infrastructure failure
                 results.append(
                     {
                         "passed": 0,
                         "total": len(items[i][1]),
                         "status": "timeout",
-                        "error": "Execution timed out",
+                        "error": "Worker unresponsive (likely code caused worker to hang)",
                         "test_results": [],
                     }
                 )
-            except Exception as e:
+            except concurrent.futures.BrokenExecutor as e:
+                # Worker pool crashed - process error
                 results.append(
                     {
                         "passed": 0,
                         "total": len(items[i][1]),
-                        "status": "error",
+                        "status": "process_error",
+                        "error": f"Worker pool failure: {e}",
+                        "test_results": [],
+                    }
+                )
+            except Exception as e:
+                # Other executor errors - process error
+                results.append(
+                    {
+                        "passed": 0,
+                        "total": len(items[i][1]),
+                        "status": "process_error",
                         "error": f"Execution error: {e}",
                         "test_results": [],
                     }
@@ -1255,23 +1290,62 @@ def check_code_executes_fast(
     code: str,
     test_cases: list[str],
     timeout: float = 5.0,
+    max_retries: int = 3,
 ) -> dict[str, Any]:
     """Execute code with test cases using the global pool if available.
 
     This is a drop-in replacement for check_code_executes that uses the
     global execution pool when set, falling back to the original implementation.
 
+    Automatically retries on process errors (infrastructure failures), but not
+    on legitimate Python errors (syntax errors, runtime errors, timeouts).
+
     Args:
         code: Python code string (function definitions)
         test_cases: List of assertion strings to test the code
         timeout: Maximum execution time per test in seconds
+        max_retries: Maximum retry attempts for process errors (default: 3)
 
     Returns:
         Dictionary with passed, total, status, error, test_results
     """
+    import logging
+
+    logger = logging.getLogger(__name__)
     pool = get_global_execution_pool()
-    if pool is not None:
-        return pool.execute(code, test_cases, timeout)
-    else:
-        # Fallback to original implementation
-        return check_code_executes(code, test_cases, timeout)
+
+    # Determine execution method
+    execute_fn = pool.execute if pool is not None else check_code_executes
+
+    # Retry loop for process errors only
+    for attempt in range(max_retries):
+        result = execute_fn(code, test_cases, timeout)
+
+        # Check if this is a process error (infrastructure failure)
+        # These are retryable: worker crash, pipe error, executor error
+        status = result.get("status", "")
+        if status == "process_error":
+            # Last attempt - return the error
+            if attempt == max_retries - 1:
+                logger.warning(
+                    "Code execution failed with process error after %d attempts: %s",
+                    max_retries,
+                    result.get("error", "unknown"),
+                )
+                return result
+
+            # Retry on process error
+            logger.debug(
+                "Retrying code execution due to process error (attempt %d/%d): %s",
+                attempt + 1,
+                max_retries,
+                result.get("error", "unknown"),
+            )
+            continue
+
+        # Non-retryable result (success, syntax error, runtime error, timeout)
+        # These reflect actual code behavior, not infrastructure issues
+        return result
+
+    # Fallback (should never reach here due to return in last attempt)
+    return result
