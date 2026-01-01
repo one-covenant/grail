@@ -130,7 +130,7 @@ BASE_CHECKPOINT_RETENTION_LIMIT = int(os.getenv("GRAIL_BASE_CHECKPOINT_RETENTION
 DELTA_CHECKPOINT_RETENTION_LIMIT = int(os.getenv("GRAIL_DELTA_CHECKPOINT_RETENTION_LIMIT", "15"))
 
 # Trainer identity used for checkpoint publication
-TRAINER_UID = 80
+TRAINER_UID = 0
 
 # ────────────────  LOGGING  ────────────────
 
