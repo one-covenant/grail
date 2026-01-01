@@ -40,6 +40,14 @@ from grail.trainer.metrics import (
     TaskReplicateResult,
     derive_k_values,
 )
+from grail.trainer.param_tracker import (
+    ParamChangeTracker,
+    log_param_change_metrics,
+)
+from grail.trainer.sparse_quality import (
+    SparseQualityAnalyzer,
+    log_sparse_quality_metrics,
+)
 
 from .base import TrainingAlgorithm
 
@@ -706,7 +714,7 @@ def _filter_valid_groups(
                 )
 
         # Stage 5: Rank by combined efficiency score and select top-k groups
-        max_groups: int = int(getattr(config, "grpo_max_groups", 8))
+        max_groups: int = int(getattr(config, "grpo_max_groups_per_window", 10000))
         if len(refined_groups) > max_groups:
             # Get ranking weights from config or fall back to constants
             reward_weight: float = float(
@@ -1055,6 +1063,26 @@ class GRPOAlgorithm(TrainingAlgorithm):
             from grail.trainer.config import TrainingConfig as TC
 
             self.config = TC(grpo_variant=grpo_variant or "grpo")
+
+        # Optimizer step counter for parameter change tracking
+        self.optimizer_step_count: int = 0
+
+        # Parameter change tracker (memory-safe, CPU-offloaded)
+        self.param_tracker = ParamChangeTracker.from_config(self.config)
+        if self.param_tracker.is_enabled():
+            logger.info(
+                "Parameter change tracking enabled: measure every %d optimizer steps, "
+                "threshold=%.0e, per_layer=%s, components=%s",
+                self.param_tracker.measure_interval,
+                self.param_tracker.threshold,
+                self.param_tracker.track_per_layer,
+                self.param_tracker.track_components,
+            )
+
+        # Sparse quality analyzer (uses param_tracker's snapshot, runs at same interval)
+        self.sparse_analyzer = SparseQualityAnalyzer.from_config(self.param_tracker, self.config)
+        if self.sparse_analyzer.enabled:
+            logger.info("Sparse quality analysis enabled (runs with param tracking)")
 
         # Persistent adaptive KL controller across epochs/windows
         self.kl_controller: AdaptiveKLController = AdaptiveKLController(
@@ -1540,56 +1568,65 @@ class GRPOAlgorithm(TrainingAlgorithm):
         epoch_metrics["reward_mean"].append(torch.tensor(batch_rewards).mean().item())
         epoch_metrics["reward_std"].append(torch.tensor(batch_rewards).std().item())
 
+    def _finalize_actual_batch_metrics(
+        self,
+        tracker: dict[str, float],
+        grad_norm_scalar: float | None,
+    ) -> dict[str, float] | None:
+        """Convert accumulated micro-batch stats into a full-batch metrics dict."""
+        micro_batches = int(tracker.get("micro_batches", 0))
+        if micro_batches == 0:
+            return None
+
+        def _safe_mean(total: float, denom: float) -> float:
+            return float(total) / max(denom, 1.0)
+
+        adv_mean = _safe_mean(tracker["adv_sum"], tracker["adv_count"])
+        reward_mean = _safe_mean(tracker["reward_sum"], tracker["reward_count"])
+        entropy_mean = _safe_mean(tracker["entropy_sum"], tracker["entropy_count"])
+        ratio_denominator = (
+            tracker["token_count"]
+            if self.importance_sampling_level == "token"
+            else tracker["sequence_count"]
+        )
+
+        return {
+            "loss_total": _safe_mean(tracker["loss_total_sum"], micro_batches),
+            "loss_pg": _safe_mean(tracker["loss_pg_sum"], micro_batches),
+            "loss_kl": _safe_mean(tracker["loss_kl_sum"], micro_batches),
+            "loss_entropy": _safe_mean(tracker["loss_entropy_sum"], micro_batches),
+            "grad_norm": grad_norm_scalar if grad_norm_scalar is not None else 0.0,
+            "advantage_mean": adv_mean,
+            "reward_mean": reward_mean,
+            "kl_divergence": _safe_mean(tracker["kl_sum"], micro_batches),
+            "entropy_mean": entropy_mean,
+            "ratio_clip_frac": _safe_mean(
+                tracker["ratio_clip_sum"],
+                ratio_denominator,
+            ),
+            "ratio_ceiling_frac": _safe_mean(
+                tracker["ratio_ceiling_sum"],
+                ratio_denominator,
+            ),
+        }
+
     async def _log_batch_metrics(
         self,
         monitor: Any,
-        loss_total: torch.Tensor,
-        loss_pg: torch.Tensor,
-        loss_kl: torch.Tensor,
-        loss_entropy: torch.Tensor,
-        grad_norm_scalar: float | None,
-        advantages_tensor: torch.Tensor,
-        batch_rewards: list[float],
-        kl_value: float,
-        entropies: torch.Tensor,
-        ratio_clip_frac_val: float,
-        ratio_ceiling_frac_val: float,
+        batch_metrics: dict[str, float] | None,
     ) -> None:
         """Log per-batch metrics to monitoring system.
 
         Args:
             monitor: Monitoring system instance
-            loss_total: Total loss value
-            loss_pg: Policy gradient loss
-            loss_kl: KL divergence loss
-            loss_entropy: Entropy loss
-            grad_norm_scalar: Gradient norm (None if not computed)
-            advantages_tensor: Raw advantages
-            batch_rewards: List of rewards for this batch
-            kl_value: KL divergence value
-            entropies: Entropy values
-            ratio_clip_frac_val: Fraction of ratios clipped
-            ratio_ceiling_frac_val: Fraction of ratios hitting ceiling
+            batch_metrics: Aggregated metrics for the full (effective) batch
         """
-        if monitor is None:
+        if monitor is None or not batch_metrics:
             return
 
         # Use global batch counter for smooth, continuous x-axis across all windows
         self.global_batch_counter += 1
-        batch_log_metrics = {
-            "loss_total": loss_total.item(),
-            "loss_pg": loss_pg.item(),
-            "loss_kl": loss_kl.item(),
-            "loss_entropy": loss_entropy.item(),
-            "grad_norm": grad_norm_scalar if grad_norm_scalar is not None else 0.0,
-            "advantage_mean": advantages_tensor.mean().item(),
-            "reward_mean": torch.tensor(batch_rewards).mean().item(),
-            "kl_divergence": kl_value,
-            "entropy_mean": entropies.mean().item(),
-            "ratio_clip_frac": ratio_clip_frac_val,
-            "ratio_ceiling_frac": ratio_ceiling_frac_val,
-        }
-        for key, value in batch_log_metrics.items():
+        for key, value in batch_metrics.items():
             try:
                 await monitor.log_gauge(
                     f"training/batch/{key}",
@@ -1638,7 +1675,8 @@ class GRPOAlgorithm(TrainingAlgorithm):
         # Increment global epoch counter for continuous tracking
         self.global_epoch_counter += 1
 
-        batch_size = config.batch_size
+        micro_batch_size = max(1, int(config.batch_size))
+        grad_accum_steps = max(1, self.config.grad_accum_steps)
 
         model.train()
         # KL gating: if base coefficient is zero, disable KL entirely
@@ -1654,11 +1692,51 @@ class GRPOAlgorithm(TrainingAlgorithm):
 
         all_rollouts.sort(key=lambda item: (item[1], item[0].nonce))
 
-        # Use batch_size parameter (defaults to TRAINER_BATCH_SIZE if not provided)
-        num_batches = math.ceil(len(all_rollouts) / batch_size)
+        # Use micro batch size parameter (defaults to TRAINER_BATCH_SIZE if not provided)
+        num_micro_batches = math.ceil(len(all_rollouts) / micro_batch_size)
 
         epoch_metrics: dict[str, list[float]] = defaultdict(list)
         grad_accum_counter = 0
+        actual_batch_tracker = {
+            "micro_batches": 0,
+            "sequence_count": 0.0,
+            "token_count": 0.0,
+            "loss_total_sum": 0.0,
+            "loss_pg_sum": 0.0,
+            "loss_kl_sum": 0.0,
+            "loss_entropy_sum": 0.0,
+            "adv_sum": 0.0,
+            "adv_count": 0.0,
+            "reward_sum": 0.0,
+            "reward_count": 0.0,
+            "entropy_sum": 0.0,
+            "entropy_count": 0.0,
+            "kl_sum": 0.0,
+            "ratio_clip_sum": 0.0,
+            "ratio_ceiling_sum": 0.0,
+        }
+
+        def reset_actual_batch_tracker() -> None:
+            actual_batch_tracker.update(
+                {
+                    "micro_batches": 0,
+                    "sequence_count": 0.0,
+                    "token_count": 0.0,
+                    "loss_total_sum": 0.0,
+                    "loss_pg_sum": 0.0,
+                    "loss_kl_sum": 0.0,
+                    "loss_entropy_sum": 0.0,
+                    "adv_sum": 0.0,
+                    "adv_count": 0.0,
+                    "reward_sum": 0.0,
+                    "reward_count": 0.0,
+                    "entropy_sum": 0.0,
+                    "entropy_count": 0.0,
+                    "kl_sum": 0.0,
+                    "ratio_clip_sum": 0.0,
+                    "ratio_ceiling_sum": 0.0,
+                }
+            )
 
         # Adaptive KL coefficient: prefer persistent controller when KL enabled
         if kl_enabled and self.adaptive_kl_enabled:
@@ -1666,9 +1744,13 @@ class GRPOAlgorithm(TrainingAlgorithm):
         else:
             current_kl_coef = float(self.config.kl_coef)
 
-        for batch_idx in range(num_batches):
-            start_idx = batch_idx * batch_size
-            end_idx = min(start_idx + batch_size, len(all_rollouts))
+        reset_actual_batch_tracker()
+
+        for micro_idx in range(num_micro_batches):
+            start_idx = micro_idx * micro_batch_size
+            end_idx = min(start_idx + micro_batch_size, len(all_rollouts))
+            if start_idx >= len(all_rollouts):
+                break
             batch_rollouts = [all_rollouts[i][0] for i in range(start_idx, end_idx)]
 
             # Step 1: Prepare batch tensors from rollouts
@@ -1689,14 +1771,15 @@ class GRPOAlgorithm(TrainingAlgorithm):
             )
 
             # Step 2: Compute current policy logprobs (with per-token for proper KL)
-            logprobs_current_sum, logprobs_current_per_token = compute_logprobs(
-                model,
-                input_ids_tensor,
-                attention_mask_tensor,
-                batch_prompt_lens,
-                batch_comp_lens,
-                return_per_token=True,
-            )
+            with accelerator.autocast():
+                logprobs_current_sum, logprobs_current_per_token = compute_logprobs(
+                    model,
+                    input_ids_tensor,
+                    attention_mask_tensor,
+                    batch_prompt_lens,
+                    batch_comp_lens,
+                    return_per_token=True,
+                )
 
             if not _is_finite_tensor(logprobs_current_sum):
                 cur_min = torch.nan_to_num(logprobs_current_sum).min().item()
@@ -1739,9 +1822,10 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 continue
 
             # Step 4: Compute reference model logprobs for KL divergence penalty (only if enabled)
+            logprobs_ref_per_token = None
             if kl_enabled:
                 if ref_model is not None:
-                    with torch.no_grad():
+                    with torch.no_grad(), accelerator.autocast():
                         logprobs_ref_sum, logprobs_ref_per_token = compute_logprobs(
                             ref_model,
                             input_ids_tensor,
@@ -1757,7 +1841,11 @@ class GRPOAlgorithm(TrainingAlgorithm):
                             "Non-finite reference logprobs; skipping batch",
                             extra={"min": float(ref_min), "max": float(ref_max)},
                         )
+                        # Free tensors before continuing
+                        del logprobs_ref_sum, logprobs_ref_per_token
                         continue
+                    # Delete reference sum to free memory (only need per-token)
+                    del logprobs_ref_sum
                 else:
                     # If no ref model, set ref per-token logprobs equal to current (zero KL)
                     logprobs_ref_per_token = logprobs_current_per_token.detach()
@@ -1799,17 +1887,23 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 kl_value = 0.0
 
             # Step 9: Compute entropy regularization
-            entropies = compute_entropy(
-                model,
-                input_ids_tensor,
-                attention_mask_tensor,
-                batch_prompt_lens,
-                batch_comp_lens,
-            )
-            if not _is_finite_tensor(entropies):
-                logger.warning("Non-finite entropies; skipping batch")
-                continue
-            loss_entropy = -self.config.entropy_coef * entropies.mean()
+            # Only compute entropy if coefficient is non-zero (saves memory)
+            if self.config.entropy_coef > 0.0:
+                entropies = compute_entropy(
+                    model,
+                    input_ids_tensor,
+                    attention_mask_tensor,
+                    batch_prompt_lens,
+                    batch_comp_lens,
+                )
+                if not _is_finite_tensor(entropies):
+                    logger.warning("Non-finite entropies; skipping batch")
+                    continue
+                loss_entropy = -self.config.entropy_coef * entropies.mean()
+            else:
+                # Skip entropy computation entirely when coefficient is zero
+                entropies = torch.zeros(len(batch_rollouts), device=accelerator.device)
+                loss_entropy = torch.tensor(0.0, device=accelerator.device)
 
             # Step 10: Aggregate total loss
             loss_total = loss_pg + loss_kl + loss_entropy
@@ -1829,19 +1923,45 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 )
                 continue
 
+            micro_sequence_count = len(batch_rollouts)
+            micro_token_count = float(completion_mask.sum().item())
+            reward_sum = float(sum(batch_rewards)) if batch_rewards else 0.0
+
+            actual_batch_tracker["micro_batches"] += 1
+            actual_batch_tracker["sequence_count"] += float(micro_sequence_count)
+            actual_batch_tracker["token_count"] += micro_token_count
+            actual_batch_tracker["loss_total_sum"] += float(loss_total.item())
+            actual_batch_tracker["loss_pg_sum"] += float(loss_pg.item())
+            actual_batch_tracker["loss_kl_sum"] += float(loss_kl.item())
+            actual_batch_tracker["loss_entropy_sum"] += float(loss_entropy.item())
+            actual_batch_tracker["adv_sum"] += float(advantages_tensor.sum().item())
+            actual_batch_tracker["adv_count"] += float(advantages_tensor.numel())
+            actual_batch_tracker["reward_sum"] += reward_sum
+            actual_batch_tracker["reward_count"] += float(len(batch_rewards))
+            actual_batch_tracker["entropy_sum"] += float(entropies.sum().item())
+            actual_batch_tracker["entropy_count"] += float(entropies.numel())
+            actual_batch_tracker["kl_sum"] += float(kl_value)
+            ratio_weight = (
+                micro_token_count
+                if self.importance_sampling_level == "token"
+                else float(micro_sequence_count)
+            )
+            actual_batch_tracker["ratio_clip_sum"] += ratio_clip_frac_val * ratio_weight
+            actual_batch_tracker["ratio_ceiling_sum"] += ratio_ceiling_frac_val * ratio_weight
+
             # Step 11: Perform gradient accumulation and optimization
             # Zero gradients before backward pass (only at start of accumulation)
             if grad_accum_counter == 0:
                 optimizer.zero_grad(set_to_none=True)
 
             # Scale loss by accumulation steps to keep effective LR stable
-            scaled_loss = loss_total / float(self.config.grad_accum_steps)
+            scaled_loss = loss_total / float(grad_accum_steps)
             accelerator.backward(scaled_loss)
             grad_accum_counter += 1
 
             grad_norm_scalar = None
             # Only step optimizer and clip gradients every N accumulation steps
-            if grad_accum_counter >= self.config.grad_accum_steps:
+            if grad_accum_counter >= grad_accum_steps:
                 # Clip gradients in fp32 (no mixed precision)
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     model.parameters(),
@@ -1870,10 +1990,45 @@ class GRPOAlgorithm(TrainingAlgorithm):
                         },
                     )
                     grad_accum_counter = 0
+                    reset_actual_batch_tracker()
                     continue
 
                 # Standard optimizer step in fp32
                 optimizer.step()
+                self.optimizer_step_count += 1
+
+                # Parameter change tracking: measure diff between step t and step t-k
+                # Snapshot persists across k steps, then we measure and update snapshot
+                if (
+                    self.param_tracker.is_enabled()
+                    and self.optimizer_step_count % self.param_tracker.measure_interval == 0
+                ):
+                    # If we have a snapshot from k steps ago, compute metrics
+                    if self.param_tracker.has_snapshot():
+                        # Basic param change metrics
+                        try:
+                            param_metrics = self.param_tracker.compute_metrics(model)
+                            await log_param_change_metrics(
+                                param_metrics, monitor, self.optimizer_step_count
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("Failed to compute param change metrics: %s", exc)
+
+                        # Sparse quality analysis (uses same snapshot)
+                        if self.sparse_analyzer.enabled:
+                            try:
+                                sparse_metrics = self.sparse_analyzer.analyze(
+                                    model, input_ids_tensor, attention_mask_tensor
+                                )
+                                await log_sparse_quality_metrics(
+                                    sparse_metrics, monitor, self.optimizer_step_count
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning("Failed to compute sparse quality metrics: %s", exc)
+
+                    # Capture new snapshot for next k-step measurement
+                    self.param_tracker.clear_snapshot()
+                    self.param_tracker.capture_snapshot(model)
 
                 logger.info(f"Optimizer step completed. Current KL coef: {current_kl_coef}")
 
@@ -1881,6 +2036,13 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 if kl_enabled and self.adaptive_kl_enabled:
                     current_kl_coef = self.kl_controller.update(kl_value)
                 grad_accum_counter = 0
+
+                batch_metrics = self._finalize_actual_batch_metrics(
+                    actual_batch_tracker,
+                    grad_norm_scalar,
+                )
+                await self._log_batch_metrics(monitor, batch_metrics)
+                reset_actual_batch_tracker()
 
             # Step 12: Collect batch metrics for epoch aggregation
             self._collect_batch_metrics(
@@ -1900,22 +2062,6 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 batch_rewards,
             )
 
-            # Step 13: Log per-batch metrics to monitoring system
-            await self._log_batch_metrics(
-                monitor,
-                loss_total,
-                loss_pg,
-                loss_kl,
-                loss_entropy,
-                grad_norm_scalar,
-                advantages_tensor,
-                batch_rewards,
-                kl_value,
-                entropies,
-                ratio_clip_frac_val,
-                ratio_ceiling_frac_val,
-            )
-
         # Handle remaining accumulated gradients at epoch end
         if grad_accum_counter > 0:
             final_grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -1924,6 +2070,44 @@ class GRPOAlgorithm(TrainingAlgorithm):
             )
             if not (torch.isnan(final_grad_norm) or torch.isinf(final_grad_norm)):
                 optimizer.step()
+                self.optimizer_step_count += 1
+
+                # Parameter change tracking at epoch end (same logic as main loop)
+                if (
+                    self.param_tracker.is_enabled()
+                    and self.optimizer_step_count % self.param_tracker.measure_interval == 0
+                ):
+                    if self.param_tracker.has_snapshot():
+                        try:
+                            param_metrics = self.param_tracker.compute_metrics(model)
+                            await log_param_change_metrics(
+                                param_metrics, monitor, self.optimizer_step_count
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("Failed to compute param change metrics: %s", exc)
+
+                        # Sparse quality analysis (uses same snapshot)
+                        if self.sparse_analyzer.enabled:
+                            try:
+                                sparse_metrics = self.sparse_analyzer.analyze(
+                                    model, input_ids_tensor, attention_mask_tensor
+                                )
+                                await log_sparse_quality_metrics(
+                                    sparse_metrics, monitor, self.optimizer_step_count
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning("Failed to compute sparse quality metrics: %s", exc)
+
+                    self.param_tracker.clear_snapshot()
+                    self.param_tracker.capture_snapshot(model)
+
+                batch_metrics = self._finalize_actual_batch_metrics(
+                    actual_batch_tracker,
+                    final_grad_norm.item(),
+                )
+                await self._log_batch_metrics(monitor, batch_metrics)
+            reset_actual_batch_tracker()
+            grad_accum_counter = 0
 
         return {
             metric: sum(values) / len(values) if values else 0.0

@@ -228,10 +228,89 @@ class MATHEnvAdapter:
         return result
 
 
+@dataclass(frozen=True)
+class PythonCodeEnvAdapter:
+    """Python code generation adapter backed by PythonCodeEnv.
+
+    Supports MBPP and HumanEval datasets for code generation tasks.
+    Validates code by executing test cases in sandboxed subprocess.
+    """
+
+    dataset: str = "mbpp"  # "mbpp" or "humaneval"
+    split: str = "train"  # "train", "validation", "test"
+
+    def build_prompt_ids(
+        self,
+        seed: int,
+        tokenizer: PreTrainedTokenizerBase,
+    ) -> list[int]:
+        from .factory import create_env
+
+        env_id = "humaneval" if self.dataset == "humaneval" else "mbpp"
+        env = create_env(env_id, split=self.split)
+        obs = env.reset(seed=seed)
+        messages = [{"role": m.role, "content": m.content} for m in obs.messages]
+
+        rendered = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        toks = tokenizer(
+            rendered,
+            return_tensors="pt",
+            return_attention_mask=False,
+        )
+        input_ids_tensor = toks.input_ids[0]
+        ids: list[int] = [int(v) for v in input_ids_tensor.tolist()]
+
+        # Debug: log rendered prompt text for comparison with miner
+        logger.debug(
+            ("VALIDATOR RENDERED PROMPT (PYTHON): length=%d chars, tokens=%d\n%s, seed=%d"),
+            len(rendered),
+            len(ids),
+            rendered,
+            int(seed),
+        )
+
+        return ids
+
+    def evaluate_completion(
+        self,
+        seed: int,
+        completion_text: str,
+        tokenizer: PreTrainedTokenizerBase,
+    ) -> dict:
+        from .core import ChatMessage
+        from .factory import create_env
+
+        env_id = "humaneval" if self.dataset == "humaneval" else "mbpp"
+        env = create_env(env_id, split=self.split)
+        env.reset(seed=int(seed))
+
+        _obs, reward, _terminated, _truncated, info = env.step(
+            ChatMessage(role="assistant", content=completion_text)
+        )
+        success = bool(info.get("success", False))
+        result = {
+            "success": success,
+            "reward": float(reward),
+            "tests_passed": info.get("tests_passed", 0),
+            "tests_total": info.get("tests_total", 0),
+        }
+        # Include diagnostics
+        if "syntax_valid" in info:
+            result["syntax_valid"] = info["syntax_valid"]
+        if "has_code" in info:
+            result["has_code"] = info["has_code"]
+        return result
+
+
 _REGISTRY: dict[str, EnvAdapter] = {
     "sat": cast(EnvAdapter, SATEnvAdapter()),
     "gsm8k": cast(EnvAdapter, GSM8KEnvAdapter()),
     "math": cast(EnvAdapter, MATHEnvAdapter()),
+    "mbpp": cast(EnvAdapter, PythonCodeEnvAdapter(dataset="mbpp", split="train")),
+    "python_code": cast(EnvAdapter, PythonCodeEnvAdapter(dataset="mbpp", split="train")),
+    "humaneval": cast(EnvAdapter, PythonCodeEnvAdapter(dataset="humaneval", split="test")),
 }
 
 

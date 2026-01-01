@@ -17,4 +17,3 @@ CUDA_VISIBLE_DEVICES=7 nohup python scripts/train_trl_gsm8k.py > scripts/train_t
 ```
 
 Training logs stream to `scripts/train_trl_gsm8k.log`.
-

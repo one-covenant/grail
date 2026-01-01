@@ -10,19 +10,15 @@ from typing import Any
 import bittensor as bt
 import typer
 
-from grail.infrastructure.checkpoints import (
-    CheckpointManager,
-    default_checkpoint_cache_root,
-)
 from grail.infrastructure.credentials import load_r2_credentials
 from grail.model.train_loading import (
     ModelLoadSpec,
-    load_training_artifacts,
     parse_ref_env,
     parse_train_env,
 )
 from grail.monitoring import get_monitoring_manager
 from grail.monitoring.config import MonitoringConfig
+from grail.trainer.checkpoint_publisher import CheckpointPublisher
 
 from . import console
 
@@ -41,10 +37,15 @@ def register(app: typer.Typer) -> None:
     app.command("train")(train)
 
 
-def train() -> None:
+def train(
+    ctx: typer.Context,
+) -> None:
     """Run the training process via TrainerNeuron orchestration."""
     from grail.neurons import TrainerNeuron
     from grail.neurons.trainer import TrainerContext
+
+    # Get verbosity from parent context (set by main callback)
+    verbosity = getattr(ctx.parent, "params", {}).get("verbose", 1) if ctx.parent else 1
 
     coldkey = get_conf("BT_WALLET_COLD", "default")
     hotkey = get_conf("BT_WALLET_HOT", "default")
@@ -56,10 +57,10 @@ def train() -> None:
         # Credentials
         credentials = load_r2_credentials()
 
-        # Checkpoints
-        checkpoint_manager = CheckpointManager(
-            cache_root=default_checkpoint_cache_root(),
+        # Checkpoint publisher (producer - trainer only)
+        checkpoint_publisher = CheckpointPublisher(
             credentials=credentials,
+            wallet=wallet,
         )
 
         # Monitoring
@@ -68,51 +69,52 @@ def train() -> None:
             training_config = MonitoringConfig.for_training(wallet.name)
             run_id = await monitor.start_run(
                 f"trainer_{wallet.name}",
-                training_config.get("hyperparameters", {}),
+                training_config,  # Pass full config (includes wandb_shared_mode)
             )
             logger.info(f"Started monitoring run: {run_id}")
 
-        # Parse env and load training artifacts (strict; no defaults)
+            # CRITICAL: Wait for WandB run to fully sync to cloud before spawning subprocess
+            # Shared mode requires the primary run to be API-accessible before workers connect
+            # Without this delay, workers timeout trying to connect to a not-yet-synced run
+            if training_config.get("wandb_shared_mode"):
+                import asyncio
+
+                logger.info(
+                    "Waiting 5s for WandB run to sync to cloud (shared mode requirement)..."
+                )
+                await asyncio.sleep(5)
+                logger.info("WandB run sync complete, safe to spawn worker processes")
+
+        # Parse env (strict; no defaults)
         try:
             train_spec: ModelLoadSpec = parse_train_env()
             ref_spec: ModelLoadSpec = parse_ref_env()
-
-            # Log chosen configuration
-            logger.info("🚀 Trainer model loading configuration:")
-            logger.info(f"  Train mode: {train_spec.mode}")
-            if train_spec.hf_id:
-                logger.info(f"  Train HF ID: {train_spec.hf_id}")
-            if train_spec.window is not None:
-                logger.info(f"  Train checkpoint window: {train_spec.window}")
-            logger.info(f"  Reference mode: {ref_spec.mode}")
-            if ref_spec.hf_id:
-                logger.info(f"  Reference HF ID: {ref_spec.hf_id}")
-            if ref_spec.window is not None:
-                logger.info(f"  Reference checkpoint window: {ref_spec.window}")
-
-            train_model, ref_model, tokenizer = await load_training_artifacts(
-                train_spec, ref_spec, checkpoint_manager
-            )
-            logger.info("✅ Successfully loaded training artifacts")
-
-            # Store model paths for potential reloading after evaluation
-            train_model_path = getattr(train_model, "name_or_path", None)
-            ref_model_path = getattr(ref_model, "name_or_path", None)
         except Exception as exc:
             logger.error("Trainer startup configuration error: %s", exc)
             raise typer.Exit(code=1) from exc
+
+        # Log chosen configuration
+        logger.info("🚀 Trainer model loading configuration:")
+        logger.info(f"  Train mode: {train_spec.mode}")
+        if train_spec.hf_id:
+            logger.info(f"  Train HF ID: {train_spec.hf_id}")
+        if train_spec.window is not None:
+            logger.info(f"  Train checkpoint window: {train_spec.window}")
+        logger.info(f"  Reference mode: {ref_spec.mode}")
+        if ref_spec.hf_id:
+            logger.info(f"  Reference HF ID: {ref_spec.hf_id}")
+        if ref_spec.window is not None:
+            logger.info(f"  Reference checkpoint window: {ref_spec.window}")
 
         # Context
         context = TrainerContext(
             wallet=wallet,
             credentials=credentials,
-            checkpoint_manager=checkpoint_manager,
+            checkpoint_publisher=checkpoint_publisher,
             monitor=monitor,
-            train_model=train_model,
-            ref_model=ref_model,
-            tokenizer=tokenizer,
-            train_model_path=train_model_path,
-            ref_model_path=ref_model_path,
+            train_spec=train_spec,
+            ref_spec=ref_spec,
+            verbosity=verbosity,
         )
 
         # Run neuron (watchdog is managed by BaseNeuron)

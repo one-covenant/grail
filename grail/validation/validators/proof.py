@@ -112,15 +112,56 @@ class GRAILProofValidator(Validator):
 
         # Verify model/layer binding
         model_info = ctx.commit.get("model", {})
-        expected_model = getattr(ctx.model, "name_or_path", None)
-        if model_info.get("name") != expected_model:
+        if not isinstance(model_info, dict):
             logger.debug(
-                f"[proof_valid] Model mismatch | "
-                f"Expected: {expected_model} | "
-                f"Got: {model_info.get('name')}"
+                f"[proof_valid] Invalid model field in commit | "
+                f"model_type={type(model_info).__name__}"
             )
             ctx.checks[self.check_name] = False
             return False
+
+        # NOTE: Never hard-fail on raw name_or_path mismatches. Miners/validators
+        # run on different machines with different local cache paths, so
+        # `model.name_or_path` will often differ even when weights match.
+        expected_model = getattr(ctx.model, "name_or_path", None)
+        claimed_model = model_info.get("name")
+
+        # Best-effort checkpoint identity. We intentionally avoid parsing strings
+        # here; the canonical checkpoint window is attached at model load time
+        # by `grail.model.provider.get_model()` as `model.grail_checkpoint_window`.
+        expected_checkpoint_window: int | None = getattr(ctx.model, "grail_checkpoint_window", None)
+        claimed_checkpoint_window: int | None = None
+        claimed_raw = model_info.get("checkpoint_window")
+        if claimed_raw is not None:
+            try:
+                claimed_checkpoint_window = int(claimed_raw)
+            except (TypeError, ValueError):
+                claimed_checkpoint_window = None
+
+        # If both sides provide a comparable checkpoint window, enforce it.
+        if (
+            expected_checkpoint_window is not None
+            and claimed_checkpoint_window is not None
+            and claimed_checkpoint_window != expected_checkpoint_window
+        ):
+            logger.warning(
+                "[proof_valid] CHECKPOINT WINDOW MISMATCH (model binding) | "
+                "expected_checkpoint_window=%s | claimed_checkpoint_window=%s | "
+                "expected_model=%s | claimed_model=%s",
+                expected_checkpoint_window,
+                claimed_checkpoint_window,
+                expected_model,
+                claimed_model,
+            )
+            ctx.checks[self.check_name] = False
+            return False
+
+        if claimed_model != expected_model:
+            logger.debug(
+                "[proof_valid] Non-fatal model identifier mismatch | expected=%s | got=%s",
+                expected_model,
+                claimed_model,
+            )
 
         try:
             layer_claim = int(model_info.get("layer_index"))
@@ -233,21 +274,36 @@ class GRAILProofValidator(Validator):
 
             if not is_valid:
                 failed_checks.append((i, diagnostics))
-                logger.debug(
-                    f"[proof_valid] Commitment verification failed at position {i} | "
-                    f"sketch_diff={diagnostics['sketch_diff']:.6f} | "
-                    f"tolerance={diagnostics['sketch_tolerance']:.6f}"
+                # Get detailed miner commitment info
+                miner_commit = commitments[i]
+                miner_indices = miner_commit.get("indices", [])[:5]  # First 5
+
+                logger.warning(
+                    f"[proof_valid] Commitment verification FAILED at position {i} | "
+                    f"sketch_diff={diagnostics['sketch_diff']} | "
+                    f"tolerance={diagnostics['sketch_tolerance']} | "
+                    f"validator_sketch={diagnostics.get('validator_sketch')} | "
+                    f"miner_sketch={diagnostics.get('miner_sketch')} | "
+                    f"miner_indices_sample={miner_indices} | "
+                    f"validator_hidden_norm={float(h_layer[i].norm().item()):.4f} | "
+                    f"token_id={tokens[i]} | "
+                    f"uid={ctx.miner_uid}"
                 )
 
         if failed_checks:
-            failure_details = "; ".join(f"pos={i}" for i, _ in failed_checks)
-            logger.debug(
+            failure_details = "; ".join(
+                f"pos={i}(diff={d['sketch_diff']},tol={d['sketch_tolerance']})"
+                for i, d in failed_checks
+            )
+            logger.warning(
                 f"[proof_valid] FAILED | "
                 f"failed_positions={len(failed_checks)}/{len(idxs)} | "
-                f"positions=[{failure_details}] | "
+                f"details=[{failure_details}] | "
                 f"seq_len={seq_len} | "
                 f"model={model_info.get('name')} | "
-                f"layer={layer_claim}"
+                f"layer={layer_claim} | "
+                f"uid={ctx.miner_uid} | "
+                f"This failure typically means miner and validator have different model weights"
             )
             ctx.checks[self.check_name] = False
             return False

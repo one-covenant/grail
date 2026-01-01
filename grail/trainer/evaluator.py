@@ -17,6 +17,7 @@ import torch
 from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeRemainingColumn
 
 from grail.environments.core import ChatMessage, MultiTurnEnv
+from grail.environments.execution import CodeExecutionPool, set_global_execution_pool
 from grail.environments.loop import AgentEnvLoop
 from grail.environments.vector import EnvVector
 from grail.trainer.config import EvalConfig
@@ -82,6 +83,35 @@ class EvaluatorService:
         # Store backend reference for cleanup
         self._gen_backend = gen_backend
 
+        # Initialize fast code execution pool
+        # Workers are spawned once and reused across all evaluations
+        # This eliminates ~2s spawn overhead per code execution
+        self._execution_pool: CodeExecutionPool | None = None
+        self._init_execution_pool()
+
+    def _init_execution_pool(self) -> None:
+        """Initialize the fast code execution pool.
+
+        Workers are spawned immediately and warmed up to eliminate first-call latency.
+        The pool is set as the global execution pool so environments can use it.
+        """
+        try:
+            # Use 8 workers - enough parallelism without exhausting resources
+            # max_tasks_per_child=50 recycles workers to prevent memory leaks
+            self._execution_pool = CodeExecutionPool(
+                num_workers=8,
+                max_tasks_per_child=50,
+            )
+            self._execution_pool.start()
+            set_global_execution_pool(self._execution_pool)
+            logger.info(
+                "Fast code execution pool initialized: %d workers",
+                self._execution_pool.num_workers,
+            )
+        except Exception as e:
+            logger.warning("Failed to initialize execution pool, falling back to slow path: %s", e)
+            self._execution_pool = None
+
     def _create_sglang_backend(self, base_url: str, model_name: str | None) -> Any | None:
         """Create SGLang server backend with fallback handling."""
         try:
@@ -115,15 +145,15 @@ class EvaluatorService:
             from grail.environments.loop import VLLMServerBackend
 
             model_id = model_name or getattr(self._model, "name_or_path", "model")
+            return_chosen_lp = bool(getattr(self._cfg, "vllm_return_chosen_logprobs", False))
             backend = VLLMServerBackend(
                 base_url=base_url,
                 model_name=str(model_id),
                 tokenizer=self._tokenizer,
                 timeout=300.0,
                 max_concurrent_requests=self._cfg.vllm_max_concurrent_requests,
-                return_chosen_logprobs=bool(
-                    getattr(self._cfg, "vllm_return_chosen_logprobs", False)
-                ),
+                return_chosen_logprobs=return_chosen_lp,
+                warn_on_missing_token_ids=return_chosen_lp,
             )
             logger.info(
                 "Evaluator using vLLM server backend: url=%s model=%s concurrency=%d",
@@ -143,6 +173,17 @@ class EvaluatorService:
         Must be called after evaluation completes.
         """
         import gc
+
+        # Shutdown fast code execution pool first
+        if self._execution_pool is not None:
+            try:
+                logger.info("Shutting down code execution pool...")
+                set_global_execution_pool(None)  # Clear global reference
+                self._execution_pool.shutdown()
+                self._execution_pool = None
+                logger.info("Code execution pool shutdown complete")
+            except Exception as e:
+                logger.warning(f"Error shutting down execution pool: {e}")
 
         # Shutdown specialized backends (vLLM/SGLang engines)
         if self._gen_backend is not None and hasattr(self._gen_backend, "shutdown"):
@@ -185,13 +226,32 @@ class EvaluatorService:
         start_offset: int = 0,
         wallet: Any | None = None,
         heartbeat: Callable[[], None] | None = None,
+        window_number: int | None = None,
     ) -> dict[str, float]:
-        """Run an evaluation cycle from the given offset. Returns summary metrics."""
+        """Run an evaluation cycle from the given offset. Returns summary metrics.
+
+        Args:
+            plan: Evaluation plan with task IDs and seeds
+            start_offset: Offset to start from (for resumption)
+            wallet: Optional wallet for credentials
+            heartbeat: Optional heartbeat callback
+            window_number: Current window number for context tracking
+        """
+        logger.info("=" * 60)
+        logger.info("🚀 EVALUATION CYCLE START")
+        logger.info(f"   Total tasks: {len(plan.ids)}")
+        logger.info(f"   Replicates: {plan.replicates}")
+        logger.info(f"   Batch size: {self._cfg.batch_size}")
+        logger.info(f"   Total prompts: {len(plan.ids) * plan.replicates}")
+        logger.info(f"   Backend: {self._cfg.backend or 'hf'}")
+        logger.info("=" * 60)
+
         aggregator = EvalAggregator(report_ks=self._cfg.report_ks)
 
         total_ids = len(plan.ids)
         batch_size = self._cfg.batch_size
         t0 = time.monotonic()
+        self._current_window_number = window_number
 
         # Progress bar for evaluation
         with Progress(
@@ -206,29 +266,76 @@ class EvaluatorService:
             )
 
             # Iterate over task IDs, expanding to replicates via per-replicate seeds
-            for offset in range(start_offset, total_ids, batch_size):
+            num_batches = (total_ids - start_offset + batch_size - 1) // batch_size
+            logger.info(f"📦 Processing {num_batches} batches...")
+
+            for batch_idx, offset in enumerate(range(start_offset, total_ids, batch_size), 1):
                 batch_start = time.monotonic()
+                logger.info("")
+                logger.info(f"{'=' * 60}")
+                logger.info(f"📦 BATCH {batch_idx}/{num_batches} (offset={offset})")
+                logger.info(f"{'=' * 60}")
+
                 if heartbeat is not None:
                     heartbeat()
                 batch_ids = plan.ids[offset : min(offset + batch_size, total_ids)]
+                logger.info(f"   Tasks in batch: {len(batch_ids)}")
+                logger.info(f"   Task IDs: {batch_ids[:3]}{'...' if len(batch_ids) > 3 else ''}")
 
                 # Prepare batch: reset envs, expand to replicates, render prompts
+                logger.info(
+                    "⚙️  [1/4] Preparing batch (reset envs, expand to replicates, render prompts)..."
+                )
+                prep_start = time.monotonic()
                 expanded_ids, expanded_msgs, prompt_ids = self._prepare_batch(batch_ids, plan)
+                prep_time = time.monotonic() - prep_start
+                logger.info(f"   ✓ Prepared {len(expanded_ids)} prompts in {prep_time:.2f}s")
 
                 # Generate sequences deterministically per replicate using seeds
+                logger.info(f"🤖 [2/4] Generating completions ({len(prompt_ids)} prompts)...")
+                gen_start = time.monotonic()
                 seq_with_prompt_lens = await self._generate_batch(prompt_ids, expanded_ids, plan)
+                gen_time = time.monotonic() - gen_start
+                logger.info(
+                    f"   ✓ Generated {len(seq_with_prompt_lens)} completions in {gen_time:.2f}s ({gen_time / len(seq_with_prompt_lens):.2f}s/prompt)"
+                )
 
                 # Decode completions
+                logger.info("📝 [3/4] Decoding completions...")
+                decode_start = time.monotonic()
                 decoded = self._decode_completions(seq_with_prompt_lens)
+                decode_time = time.monotonic() - decode_start
+                logger.info(f"   ✓ Decoded {len(decoded)} completions in {decode_time:.2f}s")
 
                 # Log sample completions with full templated prompts
                 self._log_completion_samples(expanded_ids, prompt_ids, decoded, plan.replicates)
 
                 # Step environments and accumulate results
+                logger.info("🧪 [4/4] Executing code tests (running in parallel)...")
+                step_start = time.monotonic()
                 self._step_and_aggregate(batch_ids, decoded, plan.replicates, aggregator)
+                step_time = time.monotonic() - step_start
+                logger.info(
+                    f"   ✓ Executed tests for {len(batch_ids)} tasks in {step_time:.2f}s ({step_time / len(batch_ids):.2f}s/task)"
+                )
 
                 # Update progress and log metrics
                 progress.update(prog_task, advance=len(batch_ids))
+                batch_total = time.monotonic() - batch_start
+                logger.info("")
+                logger.info(f"📊 Batch {batch_idx} timing breakdown:")
+                logger.info(
+                    f"   Prepare:  {prep_time:6.2f}s ({100 * prep_time / batch_total:5.1f}%)"
+                )
+                logger.info(f"   Generate: {gen_time:6.2f}s ({100 * gen_time / batch_total:5.1f}%)")
+                logger.info(
+                    f"   Decode:   {decode_time:6.2f}s ({100 * decode_time / batch_total:5.1f}%)"
+                )
+                logger.info(
+                    f"   Execute:  {step_time:6.2f}s ({100 * step_time / batch_total:5.1f}%) ← CODE EXECUTION"
+                )
+                logger.info(f"   Total:    {batch_total:6.2f}s")
+
                 self._log_batch_metrics(
                     offset, batch_size, len(batch_ids), plan.replicates, batch_start
                 )

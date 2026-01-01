@@ -23,6 +23,7 @@ from ..infrastructure.comms import sink_window_inferences
 from ..infrastructure.drand import get_drand_beacon
 from ..shared.constants import (
     BLOCK_TIME_SECONDS,
+    CHALLENGE_K,
     LAYER_INDEX,
     ROLLOUTS_PER_PROBLEM,
     WINDOW_LENGTH,
@@ -405,6 +406,7 @@ def package_rollout_data(
     window_block_hash: str,
     combined_randomness: str,
     use_drand: bool,
+    checkpoint_window: int,
 ) -> dict:
     """Assemble the full on-chain/off-chain payload for a single rollout.
 
@@ -424,6 +426,7 @@ def package_rollout_data(
         window_block_hash: Window block hash
         combined_randomness: Challenge randomness
         use_drand: Whether drand was used
+        checkpoint_window: The checkpoint window used for this rollout
 
     Returns:
         Signed dictionary ready to upload for validation
@@ -457,6 +460,7 @@ def package_rollout_data(
         "rollout_group": base_nonce,
         "rollout_index": rollout_idx,
         "total_in_group": total_in_group,
+        "checkpoint_window": checkpoint_window,  # Explicit checkpoint used
         "commit": {
             "tokens": rollout.tokens,
             "commitments": rollout.commitments,
@@ -534,6 +538,7 @@ async def generate_rollouts_for_window(
     timers: MiningTimers,
     monitor: Any | None,
     use_drand: bool,
+    checkpoint_window: int,
 ) -> list[dict]:
     """Generate as many GRPO rollouts as safely possible within a window.
 
@@ -554,6 +559,7 @@ async def generate_rollouts_for_window(
         timers: EMA-based timing estimates for safety.
         monitor: Optional monitoring client for metrics.
         use_drand: Whether drand was used in randomness generation.
+        checkpoint_window: The checkpoint window used for this generation
 
     Returns:
         List of signed rollout data ready for upload.
@@ -717,6 +723,33 @@ async def generate_rollouts_for_window(
                         success_rate = successful_rollouts / (successful_rollouts + failed_rollouts)
                         await monitor.log_gauge("mining/success_rate", success_rate)
 
+            # ─────────────────────────────────────────────────────────────────────
+            # COMPLETION LENGTH GATE: Drop entire group if any rollout is too short
+            # ─────────────────────────────────────────────────────────────────────
+            # Validators require at least CHALLENGE_K tokens in the completion region
+            # to perform cryptographic verification (sketch checks at k=16 positions).
+            # If any rollout in the group has completion_length < CHALLENGE_K, the
+            # validator will reject that rollout. Rather than waste bandwidth uploading
+            # a partially valid group, we drop the entire group preemptively.
+            short_rollouts = [
+                (i, r.completion_length)
+                for i, r in enumerate(grpo_rollouts)
+                if r.completion_length < CHALLENGE_K
+            ]
+            if short_rollouts:
+                short_details = ", ".join(f"idx={i}:len={length}" for i, length in short_rollouts)
+                logger.warning(
+                    "Dropping group %d: %d/%d rollouts have completion < %d tokens (%s)",
+                    base_nonce,
+                    len(short_rollouts),
+                    len(grpo_rollouts),
+                    CHALLENGE_K,
+                    short_details,
+                )
+                # Skip packaging this group entirely; continue to next problem
+                timers.update_gen_time_ema(time.time() - gen_start)
+                continue
+
             # Package each rollout with signatures and proofs for validation
             for rollout_idx, rollout in enumerate(grpo_rollouts):
                 rollout_data = package_rollout_data(
@@ -731,6 +764,7 @@ async def generate_rollouts_for_window(
                     window_block_hash,
                     combined_randomness,
                     use_drand,
+                    checkpoint_window,
                 )
                 inferences.append(rollout_data)
 

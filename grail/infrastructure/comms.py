@@ -404,19 +404,20 @@ async def upload_file_chunked(
     data: bytes,
     chunk_size: int | None = None,
     max_retries: int = 3,
-    compress: bool = True,
+    compress: bool = False,
     credentials: BucketCredentials | None = None,
     use_write: bool = False,
     upload_timeout: float = UPLOAD_TIMEOUT,
 ) -> bool:
-    """Upload file in chunks optimized for H100 high-bandwidth - 100MB chunks with compression
+    """Upload file in chunks optimized for H100 high-bandwidth - 100MB chunks.
 
     Args:
         key: S3 object key
         data: File data to upload
         chunk_size: Size of each chunk (adaptive if None)
         max_retries: Max retry attempts per chunk (default: 3)
-        compress: Whether to compress JSON files (default: True)
+        compress: Whether to compress JSON files (default: False, disabled due to
+            negligible bandwidth savings and download path complexity)
         credentials: R2 credentials
         use_write: Whether to use write credentials
         upload_timeout: Timeout in seconds per chunk upload (default: 600s/10min)
@@ -425,7 +426,10 @@ async def upload_file_chunked(
         True if upload succeeded, False otherwise
     """
 
-    # Compress small JSON only; skip binaries/large files
+    # NOTE: JSON gzip compression disabled by default. The bandwidth savings are
+    # negligible (<0.01% of total upload for typical checkpoints) and it adds
+    # complexity to download paths (handling .gz vs non-.gz filenames).
+    # Model weights use zstandard compression which provides the real savings.
     if compress and key.endswith(".json") and len(data) < 10 * 1024 * 1024:
         original_size = len(data)
         data = gzip.compress(data, compresslevel=6)
@@ -986,14 +990,37 @@ async def list_bucket_files(
     credentials: BucketCredentials | Bucket | dict | None = None,
     use_write: bool = False,
 ) -> list[str]:
-    """List files in bucket with given prefix"""
+    """List files in bucket with given prefix.
+
+    Handles pagination to return all files even when >1000 exist.
+    """
     try:
         client = await _get_cached_client(credentials, use_write)
         bucket_id = get_bucket_id(credentials, use_write)
-        response = await client.list_objects_v2(Bucket=bucket_id, Prefix=prefix)
-        if "Contents" in response:
-            return [obj["Key"] for obj in response["Contents"]]
-        return []
+
+        all_keys: list[str] = []
+        continuation_token: str | None = None
+
+        while True:
+            # Build request parameters
+            params: dict[str, Any] = {"Bucket": bucket_id, "Prefix": prefix}
+            if continuation_token:
+                params["ContinuationToken"] = continuation_token
+
+            response = await client.list_objects_v2(**params)
+
+            if "Contents" in response:
+                all_keys.extend(obj["Key"] for obj in response["Contents"])
+
+            # Check if there are more results
+            if response.get("IsTruncated"):
+                continuation_token = response.get("NextContinuationToken")
+                if not continuation_token:
+                    break  # Safety: shouldn't happen but avoid infinite loop
+            else:
+                break
+
+        return all_keys
     except Exception:
         logger.error("Failed to list bucket files with prefix %s", prefix, exc_info=True)
         return []
@@ -1085,6 +1112,39 @@ async def get_file(
         return None
 
 
+async def get_parquet_file(
+    key: str,
+    credentials: BucketCredentials | Bucket | dict | None = None,
+    use_write: bool = False,
+) -> dict[str, Any] | None:
+    """Download and parse Parquet file containing window data.
+
+    Downloads a Parquet file from S3/R2 and deserializes it to a window
+    dictionary with inferences list.
+
+    Args:
+        key: S3/R2 key for the Parquet file
+        credentials: Bucket credentials for authentication
+        use_write: Whether to use write credentials (typically False for reads)
+
+    Returns:
+        Window data dictionary or None if download/parse fails
+    """
+    from .parquet_io import ParquetError, deserialize_parquet_to_window
+
+    try:
+        data = await download_file_chunked(key, credentials=credentials, use_write=use_write)
+        if data:
+            return deserialize_parquet_to_window(data)
+        return None
+    except ParquetError as e:
+        logger.warning(f"Corrupt Parquet file {key}: {e}")
+        return None
+    except Exception as e:
+        logger.debug(f"Failed to get parquet file {key}: {e}")
+        return None
+
+
 # --------------------------------------------------------------------------- #
 #                   GRAIL-specific Storage Functions                          #
 # --------------------------------------------------------------------------- #
@@ -1096,8 +1156,14 @@ async def sink_window_inferences(
     inferences: list[dict],
     credentials: BucketCredentials | None = None,
 ) -> None:
-    """Upload window of inferences to S3 with improved logging"""
-    key = f"grail/windows/{wallet.hotkey.ss58_address}-window-{window_start}.json"
+    """Upload window of inferences to S3 in Parquet format.
+
+    Uses Apache Parquet for efficient columnar storage with snappy compression,
+    providing better compression ratios and faster serialization than JSON.
+    """
+    from .parquet_io import serialize_window_to_parquet
+
+    key = f"grail/windows/{wallet.hotkey.ss58_address}-window-{window_start}.parquet"
 
     # Pack all inferences into window data
     window_data = {
@@ -1109,7 +1175,7 @@ async def sink_window_inferences(
         "timestamp": time.time(),
     }
 
-    body = json.dumps(window_data).encode()
+    body = serialize_window_to_parquet(window_data)
     logger.debug(f"[SINK] window={window_start} count={len(inferences)} → key={key}")
 
     success = await upload_file_chunked(key, body, credentials=credentials, use_write=True)

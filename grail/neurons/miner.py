@@ -17,8 +17,15 @@ from grail.cli.mine import (
     has_time_for_next_generation,
     upload_inferences_with_metrics,
 )
+from grail.environments.execution import (
+    CodeExecutionPool,
+    set_global_execution_pool,
+)
 from grail.infrastructure.chain import GrailChainManager
-from grail.infrastructure.checkpoints import CheckpointManager, default_checkpoint_cache_root
+from grail.infrastructure.checkpoint_consumer import (
+    CheckpointManager,
+    default_checkpoint_cache_root,
+)
 from grail.infrastructure.credentials import load_r2_credentials
 from grail.model.provider import clear_model_and_tokenizer, get_model, get_tokenizer
 from grail.monitoring import get_monitoring_manager
@@ -93,6 +100,36 @@ class MinerNeuron(BaseNeuron):
             self.register_shutdown_callback(chain_manager.stop)
             self.heartbeat()
 
+            # Initialize fast code execution pool for MBPP/HumanEval environments
+            # This eliminates ~6s spawn overhead per code execution (7000x speedup)
+            execution_pool: CodeExecutionPool | None = None
+            try:
+                execution_pool = CodeExecutionPool(
+                    num_workers=4,  # Fewer workers for miner (less parallel load)
+                    max_tasks_per_child=50,
+                )
+                execution_pool.start()
+                set_global_execution_pool(execution_pool)
+                logger.info("✅ Fast code execution pool initialized: %d workers", 4)
+            except Exception as e:
+                logger.warning("⚠️ Failed to init execution pool, using slow path: %s", e)
+                execution_pool = None
+
+            def _cleanup_execution_pool() -> None:
+                nonlocal execution_pool
+                if execution_pool is not None:
+                    try:
+                        logger.info("Shutting down code execution pool...")
+                        set_global_execution_pool(None)
+                        execution_pool.shutdown()
+                        execution_pool = None
+                        logger.info("✅ Code execution pool shutdown complete")
+                    except Exception as e:
+                        logger.warning(f"Error shutting down execution pool: {e}")
+
+            self.register_shutdown_callback(_cleanup_execution_pool)
+            self.heartbeat()
+
             # Use trainer UID's committed read credentials for checkpoints
             trainer_bucket = chain_manager.get_bucket(TRAINER_UID)
             if trainer_bucket is not None:
@@ -140,8 +177,6 @@ class MinerNeuron(BaseNeuron):
 
                     current_block = await subtensor.get_current_block()
                     window_start = self.calculate_window(current_block)
-                    # Miners use the checkpoint published after the previous window finished
-                    checkpoint_window = window_start - WINDOW_LENGTH
 
                     # Set monitoring context for metrics (use block_number for x-axis)
                     if monitor:
@@ -167,54 +202,59 @@ class MinerNeuron(BaseNeuron):
                     # Window is available - reset tracker
                     window_wait_tracker.reset()
 
-                    # Load checkpoint (required - miners always use checkpoints)
-                    if checkpoint_window is not None and checkpoint_window >= 0:
-                        if current_checkpoint_window != checkpoint_window:
-                            # Time checkpoint download/retrieval
-                            timer_ctx = (
-                                monitor.timer("profiling/checkpoint_download")
-                                if monitor
-                                else contextlib.nullcontext()
+                    # Load or update checkpoint (unified fast/slow path)
+                    timer_ctx = (
+                        monitor.timer("profiling/checkpoint_load")
+                        if monitor
+                        else contextlib.nullcontext()
+                    )
+                    with timer_ctx:
+                        result, checkpoint_path = await checkpoint_manager.load_or_update_model(
+                            window_start, model, current_checkpoint_window
+                        )
+                    self.heartbeat()
+
+                    if result.success:
+                        if result.is_fast_path:
+                            # Fast path: model already updated in-place
+                            current_checkpoint_window = result.window
+                            logger.info("⚡ Model updated in-place to window %s", result.window)
+                        elif checkpoint_path is not None:
+                            # Slow path: load from disk
+                            logger.info(
+                                "🔁 Loading checkpoint for window %s from %s",
+                                result.window,
+                                checkpoint_path,
                             )
-                            with timer_ctx:
-                                checkpoint_path = await checkpoint_manager.get_checkpoint(
-                                    checkpoint_window
-                                )
-                            self.heartbeat()
+                            try:
+                                model, tokenizer = clear_model_and_tokenizer(model, tokenizer)
+                                model = get_model(str(checkpoint_path), device=None, eval_mode=True)
+                                tokenizer = get_tokenizer(str(checkpoint_path))
+                                current_checkpoint_window = result.window
 
-                            if checkpoint_path is not None:
-                                logger.info(
-                                    "🔁 Loading checkpoint for window %s from %s",
-                                    checkpoint_window,
-                                    checkpoint_path,
-                                )
-                                try:
-                                    # Pre-load cleanup to prevent VRAM growth when swapping
-                                    model, tokenizer = clear_model_and_tokenizer(model, tokenizer)
-                                    model = get_model(
-                                        str(checkpoint_path), device=None, eval_mode=True
+                                if torch.cuda.is_available():
+                                    logger.info(
+                                        f"GPU Memory: allocated={torch.cuda.memory_allocated() / 1024**3:.2f}GB, "
+                                        f"reserved={torch.cuda.memory_reserved() / 1024**3:.2f}GB"
                                     )
-                                    tokenizer = get_tokenizer(str(checkpoint_path))
-                                    current_checkpoint_window = checkpoint_window
-                                    if torch.cuda.is_available():
-                                        torch.cuda.empty_cache()
-                                except Exception:
-                                    logger.exception(
-                                        "Failed to load checkpoint for window %s",
-                                        checkpoint_window,
-                                    )
-                                    raise
-                            elif model is None or tokenizer is None:
-                                logger.error(
-                                    "No checkpoint available and no model loaded, cannot mine"
+                                    torch.cuda.empty_cache()
+                            except Exception:
+                                logger.exception(
+                                    "Failed to load checkpoint for window %s", result.window
                                 )
-                                await asyncio.sleep(60)
-                                continue
+                                raise
+                    elif model is None or tokenizer is None:
+                        # No checkpoint and no model - skip this window, wait for next
+                        logger.warning(
+                            "No checkpoint for window %s, waiting for next window", window_start
+                        )
+                        last_window_start = window_start
+                        continue
 
-                    # Ensure model and tokenizer are loaded before mining
+                    # Safety check: ensure model and tokenizer are loaded before mining
                     if model is None or tokenizer is None:
                         logger.error("Model or tokenizer not loaded, cannot mine")
-                        await asyncio.sleep(30)
+                        last_window_start = window_start  # Prevent infinite loop
                         continue
 
                     logger.info(
@@ -244,6 +284,7 @@ class MinerNeuron(BaseNeuron):
                         timers,
                         monitor,
                         self.use_drand,
+                        current_checkpoint_window,
                     )
 
                     if inferences:

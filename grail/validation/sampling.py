@@ -71,7 +71,7 @@ class MinerSampler:
         """Find miners with window files for the given window.
 
         Active miners are those that uploaded:
-        `grail/windows/{hotkey}-window-{window}.json`
+        `grail/windows/{hotkey}-window-{window}.parquet`
 
         This method checks file existence concurrently with bounded parallelism
         and proper timeout handling.
@@ -92,7 +92,7 @@ class MinerSampler:
         too_small_counter: dict[str, int] = {"count": 0}
 
         async def _check(hotkey: str) -> tuple[str, bool]:
-            filename = f"grail/windows/{hotkey}-window-{window}.json"
+            filename = f"grail/windows/{hotkey}-window-{window}.parquet"
             bucket = chain_manager.get_bucket_for_hotkey(hotkey)
             uid = uid_by_hotkey.get(hotkey) if uid_by_hotkey else None
             miner_id = f"uid={uid}" if uid is not None else f"hotkey={hotkey[:12]}..."

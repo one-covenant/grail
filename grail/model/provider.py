@@ -59,6 +59,7 @@ def get_model(
     use_safetensors: bool = True,
     eval_mode: bool = True,
     use_flash_attention: bool = False,
+    checkpoint_window: int | None = None,
 ) -> Any:
     """Load model with consistent configuration.
 
@@ -69,9 +70,11 @@ def get_model(
         eval_mode: Whether to set model to eval() mode
         use_flash_attention: Whether to use Flash Attention 2 (requires flash-attn package).
                             Only enabled for training, not for evaluation/inference.
+        checkpoint_window: Optional checkpoint window number. If not provided, will be
+                          extracted from metadata.json or parsed from the path.
 
     Returns:
-        Configured model instance with preserved original name
+        Configured model instance with preserved original name and checkpoint_window attribute
     """
     logger.debug(f"Loading model: {model_name}")
 
@@ -82,6 +85,7 @@ def get_model(
 
     # Check if this is a local checkpoint path with metadata
     original_model_name = model_name
+    resolved_checkpoint_window = checkpoint_window
     model_path = Path(model_name)
     if model_path.exists() and model_path.is_dir():
         metadata_file = model_path / "metadata.json"
@@ -89,9 +93,23 @@ def get_model(
             try:
                 metadata = json.loads(metadata_file.read_text())
                 original_model_name = metadata.get("model_name", model_name)
-                logger.debug(f"Found checkpoint: {original_model_name}")
+                # Extract checkpoint_window from metadata if not explicitly provided
+                if resolved_checkpoint_window is None and "window" in metadata:
+                    resolved_checkpoint_window = int(metadata["window"])
+                logger.debug(
+                    f"Found checkpoint: {original_model_name}, window={resolved_checkpoint_window}"
+                )
             except Exception as e:
                 logger.debug(f"Failed to read checkpoint metadata: {e}")
+
+        # Fallback: parse checkpoint-{window} from path if still not set
+        if resolved_checkpoint_window is None and "checkpoint-" in model_name:
+            try:
+                checkpoint_segment = model_name.split("checkpoint-")[-1].split("/")[0]
+                resolved_checkpoint_window = int(checkpoint_segment)
+                logger.debug(f"Parsed checkpoint window from path: {resolved_checkpoint_window}")
+            except (ValueError, IndexError):
+                pass
 
     # Configure attention implementation
     attn_implementation = None
@@ -118,6 +136,9 @@ def get_model(
     # Preserve original model name for GRAIL proof validation
     model.name_or_path = original_model_name
 
+    # Store checkpoint window for validation (avoids parsing path strings)
+    model.grail_checkpoint_window = resolved_checkpoint_window
+
     # Move to device
     model = model.to(device)
 
@@ -125,6 +146,27 @@ def get_model(
     if eval_mode:
         model.eval()
         logger.debug("Model set to eval mode")
+
+    # Log model metadata
+    try:
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        model_dtype = model.dtype
+        model_config = model.config
+
+        logger.info(
+            f"✅ Model loaded: {original_model_name} | "
+            f"Params: {total_params:,} (trainable: {trainable_params:,}) | "
+            f"Dtype: {model_dtype} | Device: {device}"
+        )
+        logger.debug(
+            f"Model config: vocab_size={getattr(model_config, 'vocab_size', '?')}, "
+            f"hidden_size={getattr(model_config, 'hidden_size', '?')}, "
+            f"num_hidden_layers={getattr(model_config, 'num_hidden_layers', '?')}, "
+            f"num_attention_heads={getattr(model_config, 'num_attention_heads', '?')}"
+        )
+    except Exception as e:
+        logger.debug(f"Failed to log model metadata: {e}")
 
     return model
 

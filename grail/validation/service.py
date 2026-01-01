@@ -18,8 +18,12 @@ from typing import Any
 import bittensor as bt
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from ..environments.execution import (
+    CodeExecutionPool,
+    set_global_execution_pool,
+)
 from ..infrastructure.chain import GrailChainManager
-from ..infrastructure.checkpoints import CheckpointManager
+from ..infrastructure.checkpoint_consumer import CheckpointManager
 from ..infrastructure.credentials import BucketCredentials
 from ..logging_utils import dump_asyncio_stacks
 from ..model.provider import (
@@ -114,6 +118,7 @@ class ValidationService:
         self._metagraph: Any = None
         self._model: AutoModelForCausalLM | None = None
         self._tokenizer: AutoTokenizer | None = None
+        self._execution_pool: CodeExecutionPool | None = None
 
         # Service components (lazy-init)
         self._miner_sampler: MinerSampler | None = None
@@ -126,6 +131,7 @@ class ValidationService:
         self._last_copycat_interval_id: int = -1
         self._windows_processed_since_start: int = 0
         self._current_checkpoint_id: str | None = None
+        self._current_checkpoint_window: int | None = None  # Track window for fast path
 
         # Rolling histories for miner selection and availability
         self._selection_history: deque[set[str]] = deque(maxlen=WEIGHT_ROLLING_WINDOWS)
@@ -232,7 +238,11 @@ class ValidationService:
                 # Load checkpoint for this window
                 checkpoint_loaded = await self._load_checkpoint_for_window(target_window)
                 if not checkpoint_loaded:
-                    await asyncio.sleep(30)
+                    # No checkpoint available - skip this window, wait for next
+                    logger.warning(
+                        "No checkpoint for window %s, waiting for next window", target_window
+                    )
+                    self._last_processed_window = target_window
                     continue
 
                 # Cleanup old checkpoints
@@ -309,6 +319,28 @@ class ValidationService:
 
     def _initialize_components(self) -> None:
         """Initialize service components."""
+        # Initialize fast code execution pool for Python code environments
+        # This eliminates ~6s spawn overhead per code execution (7000x speedup)
+        # CRITICAL: Must match miner's execution environment to ensure deterministic rewards
+        #
+        # NOTE: Validator uses 8 workers vs miner's 4 workers for higher throughput.
+        # This is safe because:
+        # - Each execution is isolated within a single worker
+        # - Worker count only affects parallel throughput, not individual results
+        # - Both use identical worker init (_pool_worker_init) and execution (_pool_worker_execute)
+        # - Determinism is guaranteed by sequential test execution within each worker
+        try:
+            self._execution_pool = CodeExecutionPool(
+                num_workers=8,  # Higher than miner (4) for parallel validation workload
+                max_tasks_per_child=50,
+            )
+            self._execution_pool.start()
+            set_global_execution_pool(self._execution_pool)
+            logger.info("✅ Fast code execution pool initialized: %d workers", 8)
+        except Exception as e:
+            logger.warning("⚠️ Failed to init execution pool, using slow path: %s", e)
+            self._execution_pool = None
+
         # Miner sampler
         self._miner_sampler = MinerSampler(
             sample_rate=MINER_SAMPLE_RATE,
@@ -334,15 +366,16 @@ class ValidationService:
     async def _load_checkpoint_for_window(self, target_window: int) -> bool:
         """Load model/tokenizer checkpoint for validation window.
 
+        Uses unified load_or_update_model for fast path (in-place delta) and
+        slow path (full disk load) with automatic fallback.
+
         Args:
             target_window: Target window to validate
 
         Returns:
             True if checkpoint loaded successfully, False otherwise
         """
-        checkpoint_window = target_window - WINDOW_LENGTH
-
-        # Get trainer's bucket for checkpoints
+        # Get trainer's bucket for checkpoints (one-time setup)
         if self._chain_manager and self._current_checkpoint_id is None:
             trainer_bucket = self._chain_manager.get_bucket(TRAINER_UID)
             if trainer_bucket:
@@ -353,79 +386,68 @@ class ValidationService:
                     f"⚠️ Trainer UID {TRAINER_UID} bucket not found, using local credentials"
                 )
 
-        # Try to get checkpoint
-        checkpoint_path = None
-        try:
-            timer_ctx = (
-                self._monitor.timer("profiling/checkpoint_download")
-                if self._monitor
-                else contextlib.nullcontext()
-            )
-            with timer_ctx:
-                if checkpoint_window >= 0:
-                    checkpoint_path = await self._checkpoint_manager.get_checkpoint(
-                        checkpoint_window
-                    )
-        except Exception as exc:
-            logger.warning(
-                f"Failed to resolve checkpoint path for target_window={target_window} "
-                f"(ckpt={checkpoint_window}): {exc}",
-                exc_info=True,
+        # Unified checkpoint loading (fast path + slow path with fallback)
+        timer_ctx = (
+            self._monitor.timer("profiling/checkpoint_load")
+            if self._monitor
+            else contextlib.nullcontext()
+        )
+        with timer_ctx:
+            result, checkpoint_path = await self._checkpoint_manager.load_or_update_model(
+                target_window, self._model, self._current_checkpoint_window
             )
 
-        if not checkpoint_path:
-            logger.warning(f"No checkpoint available for window {target_window}, skipping")
+        if not result.success:
+            logger.warning(
+                f"No checkpoint available for window {target_window}, skipping validation"
+            )
             return False
 
-        # Load if new checkpoint or models not loaded
-        if (
-            str(checkpoint_path) != self._current_checkpoint_id
-            or self._model is None
-            or self._tokenizer is None
-        ):
+        # Fast path: model already updated in-place
+        if result.is_fast_path:
+            self._current_checkpoint_window = result.window
+            self._current_checkpoint_id = f"inplace-{result.window}"
+            logger.info(f"⚡ Validator model updated in-place to window {result.window}")
+            return True
+
+        # Slow path: load from disk
+        if checkpoint_path is not None:
             try:
                 logger.info(
                     f"🚀 Loading checkpoint for validation window {target_window} "
                     f"from {checkpoint_path}"
                 )
-                # Time model loading (can be slow: GPU transfer, safetensors load)
-                timer_ctx = (
-                    self._monitor.timer("profiling/checkpoint_load")
-                    if self._monitor
-                    else contextlib.nullcontext()
+                self._model, self._tokenizer = clear_model_and_tokenizer(
+                    self._model, self._tokenizer
                 )
-                with timer_ctx:
-                    # Pre-load cleanup to prevent VRAM growth
-                    self._model, self._tokenizer = clear_model_and_tokenizer(
-                        self._model, self._tokenizer
-                    )
-                    self._model = get_model(str(checkpoint_path), device=None, eval_mode=True)
-                    # Do not inject chat template; rely on checkpoint/tokenizer config
-                    self._tokenizer = get_tokenizer(str(checkpoint_path))
-                    self._current_checkpoint_id = str(checkpoint_path)
+                self._model = get_model(str(checkpoint_path), device=None, eval_mode=True)
+                self._tokenizer = get_tokenizer(str(checkpoint_path))
+                self._current_checkpoint_id = str(checkpoint_path)
+                self._current_checkpoint_window = result.window
 
-                # Log tokenizer version information for debugging
-                try:
-                    import tokenizers  # type: ignore
-                    import transformers
-
-                    logger.info(
-                        "VALIDATOR TOKENIZER INFO: transformers=%s, "
-                        "tokenizers=%s, name_or_path=%s, checkpoint=%s",
-                        transformers.__version__,
-                        tokenizers.__version__,
-                        getattr(self._tokenizer, "name_or_path", "unknown"),
-                        str(checkpoint_path),
-                    )
-                except Exception as e:
-                    logger.debug("Failed to log tokenizer version info: %s", e)
-
+                self._log_tokenizer_info(checkpoint_path)
                 return True
             except Exception:
                 logger.exception(f"Failed to load checkpoint for window {target_window}")
                 return False
 
         return True
+
+    def _log_tokenizer_info(self, checkpoint_path: Any) -> None:
+        """Log tokenizer version information for debugging."""
+        try:
+            import tokenizers  # type: ignore
+            import transformers
+
+            logger.info(
+                "VALIDATOR TOKENIZER INFO: transformers=%s, tokenizers=%s, name_or_path=%s, checkpoint=%s",
+                transformers.__version__,
+                tokenizers.__version__,
+                getattr(self._tokenizer, "name_or_path", "unknown"),
+                str(checkpoint_path),
+            )
+        except Exception as e:
+            logger.debug("Failed to log tokenizer version info: %s", e)
 
     async def _process_window(
         self,
@@ -1131,6 +1153,17 @@ class ValidationService:
         if getattr(self, "_cleaned_up", False):
             return
         self._cleaned_up = True
+
+        # Shutdown code execution pool
+        if self._execution_pool is not None:
+            try:
+                logger.info("Shutting down code execution pool...")
+                set_global_execution_pool(None)
+                self._execution_pool.shutdown()
+                self._execution_pool = None
+                logger.info("✅ Code execution pool shutdown complete")
+            except Exception as e:
+                logger.warning(f"Error shutting down execution pool: {e}")
 
         if self._chain_manager:
             try:

@@ -10,7 +10,8 @@ Key features:
 - LaTeX answer format support (fractions, radicals, matrices, text)
 - Rich reasoning traces (average 88-word solutions)
 
-Answer extraction uses \\boxed{...} notation (100% reliable across dataset).
+    Answer extraction uses <SOLUTION>...</SOLUTION> tags (consistent with GSM8K).
+    Dataset gold answers are extracted from the 'answer' field or parsed from \\boxed{...} in the solution.
 """
 
 from __future__ import annotations
@@ -26,6 +27,37 @@ from .reward_components import (
     no_trailing_reward,
     thinking_format_reward,
 )
+
+
+def _extract_boxed_answer(text: str) -> str | None:
+    """Extract content from the last \\boxed{...} in text.
+
+    Handles nested braces by counting depth.
+    Returns None if no \\boxed{} found.
+    """
+    if not text:
+        return None
+
+    # Find all indices of \boxed{
+    boxed_indices = [m.start() for m in re.finditer(r"\\boxed\{", text)]
+    if not boxed_indices:
+        return None
+
+    # Use the last one
+    start = boxed_indices[-1]
+    # Skip \boxed{ (7 chars)
+    content_start = start + 7
+
+    depth = 1
+    for i, char in enumerate(text[content_start:], start=content_start):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[content_start:i]
+
+    return None
 
 
 def _normalize_latex_answer(s: str) -> str:
@@ -269,8 +301,23 @@ class MATHEnv(MathDatasetEnv):
     # =========================================================================
 
     def _extract_dataset_answer(self, task_payload: dict[str, Any]) -> str:
-        """Extract gold answer from MATH dataset (direct field access)."""
-        return task_payload.get("answer", "")
+        """Extract gold answer from MATH dataset.
+
+        Tries 'answer' field first, falls back to parsing \\boxed{...} from 'solution'.
+        """
+        # 1. Try direct field (pre-processed datasets)
+        answer = task_payload.get("answer", "")
+        if answer:
+            return str(answer)
+
+        # 2. Fallback: Parse from solution text
+        solution = task_payload.get("solution", "")
+        if solution:
+            boxed = _extract_boxed_answer(str(solution))
+            if boxed:
+                return boxed
+
+        return ""
 
     def _extract_completion_answer(self, completion: str, context: dict[str, Any]) -> str | None:
         """Extract answer from <SOLUTION>...</SOLUTION> tags."""
