@@ -145,7 +145,7 @@ LAYER_INDEX = -1
 
 # ────────────────  TERMINATION VALIDATION HPs  ────────────────
 
-MAX_NEW_TOKENS = 1024
+MAX_NEW_TOKENS = 2048
 
 # Must match rollout generator default
 MIN_EOS_PROBABILITY = 0.02  # Minimum probability for valid EOS termination
