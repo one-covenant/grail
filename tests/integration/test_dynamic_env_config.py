@@ -4,18 +4,18 @@ Tests verify that env/gen configs propagate correctly through the checkpoint mec
 from publisher → consumer → miners/validators.
 """
 
-import pytest
 import tempfile
 from pathlib import Path
 from unittest.mock import Mock, patch
-import json
 
+import pytest
+
+from grail.environments.factory import create_env
 from grail.infrastructure.checkpoint_consumer import CheckpointManager, CheckpointMetadata
 from grail.trainer.checkpoint_publisher import (
     get_default_env_config,
     get_default_generation_params,
 )
-from grail.environments.factory import create_env
 
 
 @pytest.mark.asyncio
@@ -290,7 +290,7 @@ async def test_null_window_handling():
         assert result is None
 
         # Should also handle as expected
-        result2 = await manager.get_checkpoint_metadata(0)
+        _ = await manager.get_checkpoint_metadata(0)
         # This will try to fetch but won't find anything (returns None)
         # The point is it doesn't crash
 
