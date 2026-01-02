@@ -219,6 +219,8 @@ def create_env_factory(
     env_id = env_id or CURRENT_ENV_ID
 
     def _factory() -> MultiTurnEnv:
-        return create_env(env_id=env_id, task_source=task_source, split=split, env_params=env_params)
+        return create_env(
+            env_id=env_id, task_source=task_source, split=split, env_params=env_params
+        )
 
     return _factory

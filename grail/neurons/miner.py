@@ -287,7 +287,9 @@ class MinerNeuron(BaseNeuron):
                             )
                             # Continue with defaults on error
                     else:
-                        logger.warning("current_checkpoint_window is None, using default env config")
+                        logger.warning(
+                            "current_checkpoint_window is None, using default env config"
+                        )
 
                     logger.info(
                         f"🔥 Starting inference generation for window "
