@@ -84,8 +84,7 @@ TRAINER_USE_GRADIENT_CHECKPOINTING = (
     os.getenv("GRAIL_TRAINER_USE_GRADIENT_CHECKPOINTING", "1") == "1"
 )
 
-# Trainer miner trust filtering (weight-based)
-TRAINER_MIN_AGGREGATE_WEIGHT = float(os.getenv("GRAIL_TRAINER_MIN_AGGREGATE_WEIGHT", "0.01"))
+# Trainer miner trust filtering (incentive-based via Yuma Consensus)
 TRAINER_MIN_TRUSTED_MINERS = int(os.getenv("GRAIL_TRAINER_MIN_TRUSTED_MINERS", "1"))
 
 # ────────────────  GRPO DATA FILTERING (TWO-STAGE)  ────────────────

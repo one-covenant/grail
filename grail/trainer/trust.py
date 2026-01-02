@@ -1,10 +1,74 @@
-"""Miner trust scoring based on validator weights."""
+"""Miner trust scoring based on on-chain incentive (Yuma Consensus output).
+
+This module selects trusted miners for training data by using the on-chain
+incentive metric, which is the output of Bittensor's Yuma Consensus mechanism.
+
+WHY ON-CHAIN INCENTIVE (vs raw validator weights):
+==================================================
+
+The previous approach computed trust by manually aggregating raw validator
+weights with stake-weighting. This had a critical flaw: a single validator
+with anomalous weights could dominate the trust ranking.
+
+Example of the bug:
+  - Validator 197 (10.5% stake) set weight=0.25 on UID 47
+  - All other validators set weight=0.0014 on UID 73
+  - Result: UID 47 selected despite having ZERO on-chain incentive
+  - UID 73 (actual highest incentive miner) was ignored
+
+WHY YUMA CONSENSUS IS BETTER:
+=============================
+
+Yuma Consensus is Bittensor's core mechanism for aggregating validator opinions
+into a single, manipulation-resistant score. It provides:
+
+1. STAKE-WEIGHTED VOTING: Validators vote proportionally to their stake,
+   but with consensus requirements that prevent single-validator domination.
+
+2. BOND MECHANISM: Validators form "bonds" with miners they consistently
+   rate highly. This creates temporal smoothing and prevents sudden
+   manipulation of scores.
+
+3. CONSENSUS REQUIREMENT: Unlike simple stake-weighted averaging, Yuma
+   penalizes validators who deviate from consensus. A single validator
+   giving anomalously high weights gets diluted.
+
+4. MANIPULATION RESISTANCE: To manipulate incentive, an attacker needs
+   to either:
+   - Control >50% of stake (expensive)
+   - Convince multiple validators to collude (coordination cost)
+
+   vs raw weights where ONE validator with 10% stake could dominate.
+
+The on-chain incentive (metagraph.incentive) IS the output of Yuma Consensus.
+It represents the network's agreed-upon quality ranking of miners. By using
+it directly, we:
+
+  - Leverage the consensus mechanism we're already paying for (validator emissions)
+  - Avoid re-implementing a weaker version of consensus
+  - Get manipulation resistance built into Bittensor's protocol
+  - Simplify our code from ~170 lines to ~30 lines
+
+TRADEOFF - UPDATE LAG:
+======================
+
+On-chain incentive updates every tempo (360 blocks ≈ 72 minutes) after
+validators submit weights. This means:
+
+  - Worst case: ~2.5 hours for a cheating miner's incentive to drop
+  - During this window, trainer may use data from a miner being penalized
+
+We accept this tradeoff because:
+  1. Validators ARE the validation layer - duplicating their work is wasteful
+  2. The chain's consensus is the source of truth for miner quality
+  3. Training on one bad window won't catastrophically damage the model
+  4. Trying to be faster than the chain adds complexity without clear benefit
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections import defaultdict
 from typing import Any
 
 from ..shared.constants import GRAIL_BURN_UID
@@ -14,158 +78,96 @@ logger = logging.getLogger(__name__)
 
 async def get_trusted_miner_hotkeys(
     metagraph: Any,
-    min_aggregate_weight: float,
     min_trusted_miners: int,
     timeout: float,
-    subtensor: Any | None = None,
 ) -> set[str]:
-    """Get hotkeys of miners trusted by validators via stake-weighted aggregation.
+    """Get hotkeys of trusted miners using on-chain incentive (Yuma Consensus).
+
+    This function selects the top miners by on-chain incentive, which is the
+    output of Bittensor's Yuma Consensus mechanism. This is more robust than
+    manually aggregating raw validator weights because Yuma includes consensus
+    requirements that prevent single-validator manipulation.
 
     Args:
-        metagraph: Bittensor metagraph with validator weights
-        min_aggregate_weight: Minimum aggregate weight threshold (0-1)
-        min_trusted_miners: Minimum number of trusted miners to select
-        timeout: Maximum time to spend computing trust scores
+        metagraph: Bittensor metagraph with incentive data
+        min_trusted_miners: Number of top miners to select
+        timeout: Maximum time for the operation
 
     Returns:
-        Set of trusted miner hotkeys, or empty set if no trusted miners available
+        Set of trusted miner hotkeys, or empty set if no miners have incentive
     """
     try:
         return await asyncio.wait_for(
-            _compute_trusted_hotkeys(
-                metagraph, min_aggregate_weight, min_trusted_miners, subtensor
-            ),
+            _select_top_miners_by_incentive(metagraph, min_trusted_miners),
             timeout=timeout,
         )
     except asyncio.TimeoutError:
         logger.error(
-            "Timeout computing trusted miners after %.1fs; skipping training",
+            "Timeout selecting trusted miners after %.1fs; skipping training",
             timeout,
         )
         return set()
     except Exception as exc:
         logger.error(
-            "Failed to compute trusted miners: %s; skipping training",
+            "Failed to select trusted miners: %s; skipping training",
             exc,
             exc_info=True,
         )
         return set()
 
 
-async def _get_raw_weights(
-    metagraph: Any, subtensor: Any | None = None
-) -> dict[int, dict[int, float]]:
-    """Get raw weights from subtensor, parsing the tuple format."""
-
-    # NOTE: metagraph.W is empty on recent Bittensor builds; we must read weights
-    #       directly from the subtensor API and normalize them here.
-    try:
-        active_subtensor = subtensor
-        if active_subtensor is None:
-            if hasattr(metagraph, "subtensor") and metagraph.subtensor is not None:
-                active_subtensor = metagraph.subtensor
-            else:
-                logger.error("No subtensor available for weights query")
-                return {}
-
-        raw_weights = await active_subtensor.weights(metagraph.netuid)
-
-        parsed_weights: dict[int, dict[int, float]] = {}
-        for validator_uid, weight_list in raw_weights:
-            parsed_weights[validator_uid] = {
-                miner_uid: weight_u16 / 65535.0 for miner_uid, weight_u16 in weight_list
-            }
-
-        logger.debug("Parsed weights for %d validators from raw chain data", len(parsed_weights))
-        return parsed_weights
-
-    except Exception as exc:
-        logger.error("Failed to get raw weights: %s", exc, exc_info=True)
-        return {}
-
-
-async def _compute_trusted_hotkeys(
+async def _select_top_miners_by_incentive(
     metagraph: Any,
-    min_aggregate_weight: float,
     min_trusted_miners: int,
-    subtensor: Any | None = None,
 ) -> set[str]:
-    """Compute stake-weighted trust scores and filter to trusted miners.
+    """Select top miners by on-chain incentive (Yuma Consensus output).
 
-    Always selects at least min_trusted_miners (top N by trust).
+    The incentive metric is computed by Bittensor's Yuma Consensus, which
+    aggregates all validator weights with stake-weighting AND consensus
+    requirements. This makes it resistant to single-validator manipulation.
     """
+    # Build list of (uid, incentive) for miners with non-zero incentive
+    # Exclude the burn UID which receives most incentive but isn't a real miner
+    miner_incentives: list[tuple[int, float]] = []
 
-    # Identify active validators (those with non-zero validator_trust)
-    validator_uids = [
-        uid for uid in range(len(metagraph.uids)) if metagraph.validator_trust[uid] > 0
-    ]
-
-    if not validator_uids:
-        logger.warning("No active validators found; skipping training window")
-        return set()
-
-    # Calculate total validator stake for normalization
-    total_validator_stake = sum(metagraph.S[uid] for uid in validator_uids)
-    if total_validator_stake == 0:
-        logger.warning("Total validator stake is zero; skipping training window")
-        return set()
-
-    # Get raw weights from subtensor (workaround for metagraph.W being empty)
-    raw_weights = await _get_raw_weights(metagraph, subtensor)
-    if not raw_weights:
-        logger.warning("No raw weights available; skipping training window")
-        return set()
-
-    # Aggregate miner trust: stake-weighted sum of validator weights
-    miner_trust: dict[int, float] = defaultdict(float)
-
-    for v_uid in validator_uids:
-        validator_stake_fraction = metagraph.S[v_uid] / total_validator_stake
-
-        # Check if this validator has set weights
-        if v_uid not in raw_weights:
-            logger.debug("Validator %d has no weights set", v_uid)
+    for uid in range(len(metagraph.uids)):
+        if uid == GRAIL_BURN_UID:
             continue
 
-        validator_weights = raw_weights[v_uid]
-        logger.debug("Validator %d has weights for %d miners", v_uid, len(validator_weights))
+        incentive = float(metagraph.incentive[uid])
+        if incentive > 0:
+            miner_incentives.append((uid, incentive))
 
-        for m_uid, weight in validator_weights.items():
-            if weight > 0:
-                # Accumulate stake-weighted trust
-                miner_trust[m_uid] += float(weight) * validator_stake_fraction
-
-    if not miner_trust:
-        logger.warning("No miner trust scores computed; skipping training window")
+    if not miner_incentives:
+        logger.warning(
+            "No miners with non-zero incentive (excluding burn UID %d); skipping training window",
+            GRAIL_BURN_UID,
+        )
         return set()
 
-    # Exclude burn UID from trust scores (never train on burner data)
-    if GRAIL_BURN_UID in miner_trust:
-        logger.debug("Excluding burn UID %d from trusted miners", GRAIL_BURN_UID)
-        del miner_trust[GRAIL_BURN_UID]
+    # Sort by incentive descending (highest first)
+    sorted_miners = sorted(miner_incentives, key=lambda x: x[1], reverse=True)
 
-    if not miner_trust:
-        logger.warning("No miner trust scores after excluding burn UID; skipping training window")
-        return set()
-
-    # Sort miners by trust score (highest first)
-    sorted_miners = sorted(miner_trust.items(), key=lambda x: x[1], reverse=True)
-
-    # Select top N miners by trust score
-    top_n_miners = sorted_miners[:min_trusted_miners]
-    trusted_uids = {uid for uid, _ in top_n_miners}
-
+    # Select top N miners
+    top_n = sorted_miners[:min_trusted_miners]
+    trusted_uids = [uid for uid, _ in top_n]
     trusted_hotkeys = {metagraph.hotkeys[uid] for uid in trusted_uids}
 
-    # Log with UIDs for readability
-    trusted_uid_list = sorted(trusted_uids)
+    # Log selection details
     logger.info(
-        "Selected %d/%d trusted miners: UIDs=%s (validators: %d, stake: %.2f)",
+        "Selected %d/%d trusted miners by incentive: UIDs=%s",
         len(trusted_hotkeys),
-        len(metagraph.hotkeys),
-        trusted_uid_list,
-        len(validator_uids),
-        total_validator_stake,
+        len(metagraph.uids),
+        trusted_uids,
     )
+
+    # Log incentive values for transparency
+    for uid, incentive in top_n:
+        logger.debug(
+            "  UID %d: incentive=%.6f, hotkey=%s",
+            uid,
+            incentive,
+            metagraph.hotkeys[uid][:16] + "...",
+        )
 
     return trusted_hotkeys

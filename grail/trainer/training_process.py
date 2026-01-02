@@ -726,10 +726,8 @@ class TrainingService:
             metagraph = await self.subtensor.metagraph(NETUID)
             trusted_hotkeys = await get_trusted_miner_hotkeys(
                 metagraph,
-                self.config.min_aggregate_weight,
                 self.config.min_trusted_miners,
                 timeout=TRUST_COMPUTATION_TIMEOUT_SECONDS,
-                subtensor=self.subtensor,
             )
 
             if not trusted_hotkeys:

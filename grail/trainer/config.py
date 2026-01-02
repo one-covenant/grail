@@ -58,7 +58,6 @@ class TrainingConfig:
 
     # Miner/data quality filters
     group_adv_sum_tolerance: float = constants.TRAINER_GROUP_ADV_SUM_TOL
-    min_aggregate_weight: float = constants.TRAINER_MIN_AGGREGATE_WEIGHT
     min_trusted_miners: int = constants.TRAINER_MIN_TRUSTED_MINERS
 
     # GRPO two-stage filtering controls
