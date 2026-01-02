@@ -173,7 +173,9 @@ def get_default_generation_params() -> dict[str, Any]:
     """
     return {
         "max_tokens": _parse_int_param("GRAIL_GEN_MAX_TOKENS", "512", min_val=1, max_val=4096),
-        "temperature": _parse_float_param("GRAIL_GEN_TEMPERATURE", "0.7", min_val=0.01, max_val=2.0),
+        "temperature": _parse_float_param(
+            "GRAIL_GEN_TEMPERATURE", "0.7", min_val=0.01, max_val=2.0
+        ),
         "top_p": _parse_float_param("GRAIL_GEN_TOP_P", "0.9", min_val=0.0, max_val=1.0),
         "top_k": _parse_int_param("GRAIL_GEN_TOP_K", "50", min_val=0, max_val=1000),
         "repetition_penalty": _parse_float_param(
