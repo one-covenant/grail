@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import shutil
+import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -190,7 +191,12 @@ class CheckpointManager:
         lock = self._download_locks.setdefault(window, asyncio.Lock())
 
         async with lock:
-            metadata = await self._fetch_metadata(window)
+            # For slow-path disk downloads, prefer FULL metadata when available.
+            # FULL checkpoints (often uploaded in background at anchor windows) are the
+            # most reliable recovery points and avoid long delta-chain reconstruction.
+            metadata = await self._fetch_full_metadata(window)
+            if metadata is None:
+                metadata = await self._fetch_delta_metadata(window)
             if metadata is None:
                 logger.debug(
                     "No metadata.json for window %s — attempting best-effort download",
@@ -222,9 +228,7 @@ class CheckpointManager:
                 ready_window,
             )
 
-            tmp_dir = self.cache_root / f"checkpoint-{window}.partial"
-            if tmp_dir.exists():
-                shutil.rmtree(tmp_dir, ignore_errors=True)
+            tmp_dir = _unique_partial_dir(self.cache_root, f"checkpoint-{window}")
             tmp_dir.mkdir(parents=True, exist_ok=True)
 
             try:
@@ -282,6 +286,8 @@ class CheckpointManager:
                     await self._download_all_in_prefix(window, tmp_dir)
 
                 logger.info("Checkpoint download completed for window %s, finalizing...", window)
+                if local_dir.exists():
+                    shutil.rmtree(local_dir, ignore_errors=True)
                 shutil.move(str(tmp_dir), str(local_dir))
                 logger.info("✅ Checkpoint for window %s ready at %s", window, local_dir)
                 return local_dir
@@ -538,9 +544,7 @@ class CheckpointManager:
         """Write cached checkpoint synchronously (called from thread)."""
         from safetensors.torch import save_file
 
-        tmp_dir = output_dir.parent / f"{output_dir.name}.partial"
-        if tmp_dir.exists():
-            shutil.rmtree(tmp_dir)
+        tmp_dir = _unique_partial_dir(output_dir.parent, output_dir.name)
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -745,9 +749,12 @@ class CheckpointManager:
             return self._metadata_cache[cache_key]
 
         remote_key = checkpoint_full_metadata_key(window)
+        logger.debug("Fetching FULL metadata from %s", remote_key)
         payload = await comms.get_file(remote_key, credentials=self.credentials, use_write=False)
         if not payload:
+            logger.debug("FULL metadata not found at %s", remote_key)
             return None
+        logger.debug("Found FULL metadata for window %s", window)
 
         metadata = CheckpointMetadata(
             window=payload.get("window", window),
@@ -1026,6 +1033,7 @@ class CheckpointManager:
         """
         chain: list[CheckpointMetadata] = []
         current = target_metadata
+        anchors_checked: list[int] = []  # Track anchor windows we tried to use
 
         while current.checkpoint_type == "DELTA":
             chain.append(current)
@@ -1058,8 +1066,24 @@ class CheckpointManager:
                 from grail.shared.retention_utils import is_anchor_window
 
                 if is_anchor_window(current.prev_window):
+                    anchors_checked.append(current.prev_window)
                     prev_meta = await self._fetch_full_metadata(current.prev_window)
-            except Exception:
+                    if prev_meta is None:
+                        logger.warning(
+                            "No FULL metadata at anchor window %s, will use DELTA instead",
+                            current.prev_window,
+                        )
+                    else:
+                        logger.info(
+                            "Found FULL at anchor window %s, stopping chain walk",
+                            current.prev_window,
+                        )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to fetch FULL metadata for anchor %s: %s",
+                    current.prev_window,
+                    exc,
+                )
                 prev_meta = None
 
             if prev_meta is None:
@@ -1072,9 +1096,18 @@ class CheckpointManager:
             current = prev_meta
 
         # current is now a FULL checkpoint - get it
+        logger.info(
+            "Delta chain terminated at FULL checkpoint %s (chain length=%d, anchors checked without FULL: %s)",
+            current.window,
+            len(chain),
+            anchors_checked if anchors_checked else "none",
+        )
         base_path = await self.get_checkpoint(current.window)
         if base_path is None:
-            logger.error("Cannot get FULL checkpoint %s", current.window)
+            logger.error(
+                "Cannot get FULL checkpoint %s (READY marker missing or download failed)",
+                current.window,
+            )
             return None
 
         chain.reverse()  # Order: oldest delta first
@@ -1179,9 +1212,7 @@ class CheckpointManager:
         from safetensors.torch import load_file
 
         # Download delta files to temp directory
-        delta_tmp = self.cache_root / f"delta-{delta_meta.window}.partial"
-        if delta_tmp.exists():
-            shutil.rmtree(delta_tmp, ignore_errors=True)
+        delta_tmp = _unique_partial_dir(self.cache_root, f"delta-{delta_meta.window}")
         delta_tmp.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -1524,6 +1555,15 @@ def iter_checkpoints(cache_root: Path) -> Iterable[Path]:
         checkpoints.append((window, entry))
     for _, path in sorted(checkpoints):
         yield path
+
+
+def _unique_partial_dir(cache_root: Path, stem: str) -> Path:
+    """Return a process-unique `.partial` directory path under *cache_root*.
+
+    This prevents cross-process races when miner and validator share a cache root.
+    """
+    suffix = f"{os.getpid()}.{uuid.uuid4().hex[:8]}"
+    return cache_root / f"{stem}.{suffix}.partial"
 
 
 # --------------------------------------------------------------------------- #
