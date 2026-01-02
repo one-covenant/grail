@@ -48,7 +48,9 @@ class EnvironmentPromptValidator(Validator):
             env_id = ctx.env_id or CURRENT_ENV_ID
 
             if not env_id:
-                logger.error("No environment ID available (both ctx.env_id and CURRENT_ENV_ID are None)")
+                logger.error(
+                    "No environment ID available (both ctx.env_id and CURRENT_ENV_ID are None)"
+                )
                 ctx.checks[self.check_name] = False
                 return False
 
@@ -137,7 +139,9 @@ class EnvironmentEvaluationValidator(Validator):
             env_id = ctx.env_id or CURRENT_ENV_ID
 
             if not env_id:
-                logger.error("No environment ID available (both ctx.env_id and CURRENT_ENV_ID are None)")
+                logger.error(
+                    "No environment ID available (both ctx.env_id and CURRENT_ENV_ID are None)"
+                )
                 ctx.checks[self.check_name] = False
                 return False
 
