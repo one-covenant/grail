@@ -7,10 +7,13 @@ across multiple windows until a cycle completes.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 import torch
@@ -32,6 +35,21 @@ logger = logging.getLogger(__name__)
 class EvalProgress:
     cycle_index: int
     offset: int  # number of task IDs fully processed so far
+
+
+@dataclass
+class EvalSample:
+    """A single evaluation sample for debugging and analysis."""
+
+    task_id: str
+    replicate_idx: int
+    prompt: list[dict[str, str]]  # Chat messages format
+    generation: str
+    reward: float
+    success: bool
+    reward_components: dict[str, float] | None = None
+    window: int | None = None
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 class EvaluatorService:
@@ -88,6 +106,11 @@ class EvaluatorService:
         # This eliminates ~2s spawn overhead per code execution
         self._execution_pool: CodeExecutionPool | None = None
         self._init_execution_pool()
+
+        # Sample collection for debugging (reset per cycle)
+        self._successful_samples: list[EvalSample] = []
+        self._failed_samples: list[EvalSample] = []
+        self._current_window_number: int | None = None
 
     def _init_execution_pool(self) -> None:
         """Initialize the fast code execution pool.
@@ -248,6 +271,10 @@ class EvaluatorService:
 
         aggregator = EvalAggregator(report_ks=self._cfg.report_ks)
 
+        # Reset sample collectors for this cycle
+        self._successful_samples = []
+        self._failed_samples = []
+
         total_ids = len(plan.ids)
         batch_size = self._cfg.batch_size
         t0 = time.monotonic()
@@ -313,7 +340,9 @@ class EvaluatorService:
                 # Step environments and accumulate results
                 logger.info("🧪 [4/4] Executing code tests (running in parallel)...")
                 step_start = time.monotonic()
-                self._step_and_aggregate(batch_ids, decoded, plan.replicates, aggregator)
+                self._step_and_aggregate(
+                    batch_ids, decoded, plan.replicates, aggregator, expanded_msgs
+                )
                 step_time = time.monotonic() - step_start
                 logger.info(
                     f"   ✓ Executed tests for {len(batch_ids)} tasks in {step_time:.2f}s ({step_time / len(batch_ids):.2f}s/task)"
@@ -364,7 +393,9 @@ class EvaluatorService:
             for key, val in metrics.items():
                 await self._monitor.log_gauge(f"eval/{key}", float(val))
 
-        # Optionally persist metrics
+        # Write evaluation samples for debugging
+        self._write_eval_samples()
+
         return metrics
 
     def _prepare_batch(
@@ -512,6 +543,7 @@ class EvaluatorService:
         decoded: list[str],
         replicates: int,
         aggregator: EvalAggregator,
+        expanded_msgs: list[list[dict[str, str]]] | None = None,
     ) -> None:
         """Step environments per replicate and accumulate results.
 
@@ -520,7 +552,9 @@ class EvaluatorService:
             decoded: Decoded completion strings
             replicates: Number of replicates per task
             aggregator: Metrics aggregator to accumulate results
+            expanded_msgs: Optional list of prompt messages for sample storage
         """
+        k = self._cfg.sample_storage_k
         cursor = 0
         for env_idx, task_id in enumerate(batch_ids):
             for r_idx in range(replicates):
@@ -539,6 +573,23 @@ class EvaluatorService:
                         components=info.get("reward_components"),
                     )
                 )
+
+                # Collect samples for debugging (up to k successful + k failed)
+                if expanded_msgs is not None and k > 0:
+                    target_list = self._successful_samples if success else self._failed_samples
+                    if len(target_list) < k:
+                        sample = EvalSample(
+                            task_id=task_id,
+                            replicate_idx=r_idx,
+                            prompt=expanded_msgs[cursor],
+                            generation=text,
+                            reward=float(reward),
+                            success=success,
+                            reward_components=info.get("reward_components"),
+                            window=self._current_window_number,
+                        )
+                        target_list.append(sample)
+
                 cursor += 1
 
     def _log_batch_metrics(
@@ -565,3 +616,45 @@ class EvaluatorService:
             f"Batch {offset // batch_size + 1}: {num_batch_ids} tasks × {replicates} reps "
             f"({batch_prompts} prompts) in {batch_elapsed:.2f}s ({throughput:.1f} prompts/sec)"
         )
+
+    def _write_eval_samples(self) -> None:
+        """Write collected evaluation samples to JSONL file for debugging.
+
+        Writes k successful + k failed samples to a JSONL file.
+        Each line is a complete JSON object representing one sample.
+        """
+        if not self._cfg.store_predictions_path:
+            return
+
+        total_samples = len(self._successful_samples) + len(self._failed_samples)
+        if total_samples == 0:
+            return
+
+        try:
+            # Create directory if needed
+            os.makedirs(self._cfg.store_predictions_path, exist_ok=True)
+
+            # Build filename with window number
+            window_suffix = f"_w{self._current_window_number}" if self._current_window_number else ""
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            filename = f"eval_samples{window_suffix}_{timestamp}.jsonl"
+            filepath = os.path.join(self._cfg.store_predictions_path, filename)
+
+            # Write samples to JSONL
+            with open(filepath, "w") as f:
+                # Write successful samples first
+                for sample in self._successful_samples:
+                    f.write(json.dumps(asdict(sample)) + "\n")
+                # Then failed samples
+                for sample in self._failed_samples:
+                    f.write(json.dumps(asdict(sample)) + "\n")
+
+            logger.info(
+                "📝 Saved %d eval samples (%d successful, %d failed) to %s",
+                total_samples,
+                len(self._successful_samples),
+                len(self._failed_samples),
+                filepath,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to write eval samples: {e}")
