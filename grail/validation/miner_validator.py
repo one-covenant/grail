@@ -93,15 +93,18 @@ class MinerValidator:
         self,
         pipeline: ValidationPipeline,
         text_log_limit: int = 5,
+        checkpoint_manager: Any = None,
     ):
         """Initialize miner validator.
 
         Args:
             pipeline: Environment-agnostic validation pipeline
             text_log_limit: Max number of text samples to log per miner
+            checkpoint_manager: Optional checkpoint manager for fetching environment config
         """
         self._pipeline = pipeline
         self._text_log_limit = text_log_limit
+        self._checkpoint_manager = checkpoint_manager
 
         # Derive check keys from pipeline validators (single source of truth)
         self._hard_check_keys = get_hard_check_keys(pipeline)
@@ -176,12 +179,46 @@ class MinerValidator:
         total_inferences = len(inferences)
 
         # Step 3: Determine which rollouts to check (all or sample)
-        indices_to_check, groups_map, group_index_by_id = self._determine_rollouts_to_check(
+        indices_to_check, _, group_index_by_id = self._determine_rollouts_to_check(
             inferences, miner_hotkey, window_rand, validator_wallet, total_inferences
         )
 
         # Extract validator's checkpoint window from model attribute (set by get_model())
         validator_checkpoint_window = getattr(model, "grail_checkpoint_window", None)
+
+        # Fetch environment config from checkpoint metadata if checkpoint_manager is available
+        env_id = None
+        env_params = {}
+        generation_params: dict[str, Any] = {}
+        if self._checkpoint_manager is not None and validator_checkpoint_window is not None:
+            try:
+                checkpoint_metadata = await self._checkpoint_manager.get_checkpoint_metadata(
+                    validator_checkpoint_window
+                )
+                if checkpoint_metadata is not None:
+                    env_id = checkpoint_metadata.env_id
+                    env_params = checkpoint_metadata.env_params or {}
+                    generation_params = checkpoint_metadata.generation_params or {}
+                    logger.debug(
+                        "Loaded checkpoint config from %s: env_id=%s max_tokens=%s",
+                        validator_checkpoint_window,
+                        env_id,
+                        generation_params.get("max_tokens"),
+                    )
+                else:
+                    logger.warning(
+                        f"No metadata found for validator checkpoint window {validator_checkpoint_window}"
+                    )
+                    if monitor:
+                        monitor.log_counter("validation/metadata_missing")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to fetch checkpoint metadata for env config "
+                    f"(window={validator_checkpoint_window}): {e}",
+                    exc_info=True,
+                )
+                if monitor:
+                    monitor.log_counter("validation/metadata_fetch_errors")
 
         # Step 4: Validate selected rollouts
         validation_state = await self._validate_rollouts(
@@ -199,6 +236,9 @@ class MinerValidator:
             text_logs_emitted=text_logs_emitted,
             heartbeat_callback=heartbeat_callback,
             validator_checkpoint_window=validator_checkpoint_window,
+            env_id=env_id,
+            env_params=env_params,
+            generation_params=generation_params,
         )
 
         # Step 5: Check for early failures
@@ -254,7 +294,7 @@ class MinerValidator:
         uid_str = str(uid) if uid is not None else f"{miner_hotkey[:12]}..."
 
         # Check existence with deadline validation and min size
-        exists, was_late, too_small, upload_time = await file_exists_with_deadline(
+        exists, was_late, _, upload_time = await file_exists_with_deadline(
             key=filename,
             credentials=bucket_to_use,
             use_write=False,
@@ -267,9 +307,10 @@ class MinerValidator:
             return None
 
         if was_late:
+            late_by = upload_time - deadline_ts  # type: ignore[operator]  # TODO: handle None case
             logger.warning(
                 f"🚫 LATE UPLOAD: uid={uid_str} uploaded at {upload_time:.0f}, "
-                f"deadline was {deadline_ts:.0f} (late by {upload_time - deadline_ts:.0f}s)"
+                f"deadline was {deadline_ts:.0f} (late by {late_by:.0f}s)"
             )
             return None
 
@@ -401,6 +442,9 @@ class MinerValidator:
         text_logs_emitted: dict[str, int],
         heartbeat_callback: Any,
         validator_checkpoint_window: int | None = None,
+        env_id: str | None = None,
+        env_params: dict[str, Any] | None = None,
+        generation_params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Validate selected rollouts and accumulate state.
 
@@ -532,16 +576,19 @@ class MinerValidator:
                     window_hash=window_hash,
                     group_index=group_index,
                     miner_uid=uid_str,
-                    model=model,
-                    tokenizer=tokenizer,
-                    device=model.device,
+                    model=model,  # type: ignore[arg-type]  # transformers stub
+                    tokenizer=tokenizer,  # type: ignore[arg-type]  # transformers stub
+                    device=model.device,  # type: ignore[attr-defined]  # transformers stub
+                    env_id=env_id,
+                    env_params=env_params or {},
+                    generation_params=generation_params or {},
                 )
 
                 if monitor:
                     with monitor.timer("profiling/rollout_verification"):
-                        is_valid, checks = self._pipeline.validate(ctx)
+                        _, checks = self._pipeline.validate(ctx)
                 else:
-                    is_valid, checks = self._pipeline.validate(ctx)
+                    _, checks = self._pipeline.validate(ctx)
 
                 state["pr_total"] += 1
 
@@ -572,7 +619,7 @@ class MinerValidator:
                 await self._log_sample_text(
                     commit_data,
                     rollout_meta,
-                    nonce,
+                    nonce,  # type: ignore[arg-type]  # TODO: handle None case
                     miner_hotkey,
                     uid_str,
                     window,
@@ -766,8 +813,8 @@ class MinerValidator:
             else:
                 completion_ids = tokens[prompt_len:]
 
-            problem_text = tokenizer.decode(tokens[:prompt_len], skip_special_tokens=False)
-            text = tokenizer.decode(completion_ids, skip_special_tokens=False)
+            problem_text = tokenizer.decode(tokens[:prompt_len], skip_special_tokens=False)  # type: ignore[attr-defined]  # transformers stub
+            text = tokenizer.decode(completion_ids, skip_special_tokens=False)  # type: ignore[attr-defined]  # transformers stub
 
             reward_val = rollout_meta.get("total_reward", float("nan"))
             adv_val = rollout_meta.get("advantage", float("nan"))

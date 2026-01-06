@@ -39,6 +39,12 @@ def register(app: typer.Typer) -> None:
 
 def train(
     ctx: typer.Context,
+    test_mode: bool = typer.Option(
+        False,
+        "--test-mode/--no-test-mode",
+        help="Test mode: train only on TRAINER_UID data (default: False)",
+        show_default=True,
+    ),
 ) -> None:
     """Run the training process via TrainerNeuron orchestration."""
     from grail.neurons import TrainerNeuron
@@ -115,6 +121,7 @@ def train(
             train_spec=train_spec,
             ref_spec=ref_spec,
             verbosity=verbosity,
+            test_mode=test_mode,
         )
 
         # Run neuron (watchdog is managed by BaseNeuron)
@@ -125,4 +132,8 @@ def train(
 
 
 def main() -> None:
-    train()
+    """Entry point for standalone train command."""
+    # Create a minimal Typer app and invoke train via CLI
+    app = typer.Typer()
+    app.command()(train)
+    app()

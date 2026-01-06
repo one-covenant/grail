@@ -52,6 +52,7 @@ from grail.shared.constants import (
     CHECKPOINT_PREFIX,
     CHECKPOINT_TYPE_DELTA,
     CHECKPOINT_TYPE_FULL,
+    CURRENT_ENV_ID,
     DELTA_CHECKPOINT_RETENTION_LIMIT,
     DELTA_THRESHOLD,
     TRAINER_BATCH_SIZE,
@@ -68,6 +69,119 @@ from grail.shared.constants import (
 from grail.shared.safetensors_utils import load_model_state_dict
 
 logger = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Environment and Generation Config Helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def get_default_env_config() -> tuple[str, dict[str, Any]]:
+    """Get default environment configuration from constants.
+
+    Returns:
+        Tuple of (env_id, env_params)
+
+    Raises:
+        ValueError: If GRAIL_ENV_ID is empty or invalid
+    """
+    # Read from environment variables or use defaults
+    env_id = os.getenv("GRAIL_ENV_ID", CURRENT_ENV_ID)
+    if not env_id:
+        raise ValueError("GRAIL_ENV_ID cannot be empty")
+
+    # Validate split parameter
+    split = os.getenv("GRAIL_ENV_SPLIT", "train")
+    valid_splits = {"train", "test", "validation", "val"}
+    if split not in valid_splits:
+        logger.warning(
+            f"Invalid GRAIL_ENV_SPLIT='{split}' (expected one of {valid_splits}), using 'train'"
+        )
+        split = "train"
+
+    env_params = {
+        "split": split,
+        # Additional env-specific params can be added here
+    }
+    return env_id, env_params
+
+
+def _parse_int_param(
+    key: str, default: str, min_val: int | None = None, max_val: int | None = None
+) -> int:
+    """Parse integer environment variable with validation.
+
+    Args:
+        key: Environment variable name
+        default: Default value if not set or invalid
+        min_val: Optional minimum value
+        max_val: Optional maximum value
+
+    Returns:
+        Validated integer value
+    """
+    try:
+        value = int(os.getenv(key, default))
+        if min_val is not None and value < min_val:
+            logger.warning(f"{key}={value} below minimum {min_val}, using default {default}")
+            return int(default)
+        if max_val is not None and value > max_val:
+            logger.warning(f"{key}={value} above maximum {max_val}, using default {default}")
+            return int(default)
+        return value
+    except ValueError as e:
+        logger.warning(f"Invalid {key} value: {e}, using default {default}")
+        return int(default)
+
+
+def _parse_float_param(
+    key: str, default: str, min_val: float | None = None, max_val: float | None = None
+) -> float:
+    """Parse float environment variable with validation.
+
+    Args:
+        key: Environment variable name
+        default: Default value if not set or invalid
+        min_val: Optional minimum value
+        max_val: Optional maximum value
+
+    Returns:
+        Validated float value
+    """
+    try:
+        value = float(os.getenv(key, default))
+        if min_val is not None and value < min_val:
+            logger.warning(f"{key}={value} below minimum {min_val}, using default {default}")
+            return float(default)
+        if max_val is not None and value > max_val:
+            logger.warning(f"{key}={value} above maximum {max_val}, using default {default}")
+            return float(default)
+        return value
+    except ValueError as e:
+        logger.warning(f"Invalid {key} value: {e}, using default {default}")
+        return float(default)
+
+
+def get_default_generation_params() -> dict[str, Any]:
+    """Get default generation parameters from environment variables.
+
+    All parameters are validated for type and range. Invalid values fall back
+    to defaults with a warning.
+
+    Returns:
+        Dictionary of validated generation parameters
+    """
+    return {
+        "max_tokens": _parse_int_param("GRAIL_GEN_MAX_TOKENS", "512", min_val=1, max_val=4096),
+        "temperature": _parse_float_param(
+            "GRAIL_GEN_TEMPERATURE", "0.7", min_val=0.01, max_val=2.0
+        ),
+        "top_p": _parse_float_param("GRAIL_GEN_TOP_P", "0.9", min_val=0.0, max_val=1.0),
+        "top_k": _parse_int_param("GRAIL_GEN_TOP_K", "50", min_val=0, max_val=1000),
+        "repetition_penalty": _parse_float_param(
+            "GRAIL_GEN_REPETITION_PENALTY", "1.0", min_val=1.0, max_val=2.0
+        ),
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -502,6 +616,10 @@ class CheckpointPublisher:
             # Extract model name for checkpoint metadata
             model_name: str = getattr(model, "name_or_path", "no_name")
 
+            # Get environment and generation configuration
+            env_id, env_params = get_default_env_config()
+            generation_params = get_default_generation_params()
+
             metadata = CheckpointMetadata(
                 window=target_window,
                 parent_window=trained_on_window,
@@ -511,6 +629,9 @@ class CheckpointPublisher:
                 created_at=time.time(),
                 model_name=model_name,
                 checkpoint_type=CHECKPOINT_TYPE_FULL,
+                env_id=env_id,
+                env_params=env_params,
+                generation_params=generation_params,
             )
 
             metadata_dict = {**metadata.__dict__, "config_hash": config_hash}
@@ -685,6 +806,10 @@ class CheckpointPublisher:
             if parent_window is None:
                 parent_window = max(0, target_window - WINDOW_LENGTH)
 
+            # Get environment and generation configuration
+            env_id, env_params = get_default_env_config()
+            generation_params = get_default_generation_params()
+
             metadata = CheckpointMetadata(
                 window=target_window,
                 parent_window=parent_window,
@@ -694,6 +819,9 @@ class CheckpointPublisher:
                 created_at=snapshot_metadata.get("timestamp", time.time()),
                 model_name="async_trainer_snapshot",
                 checkpoint_type=CHECKPOINT_TYPE_FULL,
+                env_id=env_id,
+                env_params=env_params,
+                generation_params=generation_params,
             )
 
             config_hash = hashlib.sha256(
@@ -967,6 +1095,10 @@ class CheckpointPublisher:
             if parent_window is None:
                 parent_window = max(0, target_window - WINDOW_LENGTH)
 
+            # Get environment and generation configuration
+            env_id, env_params = get_default_env_config()
+            generation_params = get_default_generation_params()
+
             metadata = CheckpointMetadata(
                 window=target_window,
                 parent_window=parent_window,
@@ -979,6 +1111,9 @@ class CheckpointPublisher:
                 prev_window=prev_window,
                 anchor_window=anchor_window,
                 weights_hash=weights_hash,
+                env_id=env_id,
+                env_params=env_params,
+                generation_params=generation_params,
             )
 
             config_hash = hashlib.sha256(
@@ -1171,6 +1306,10 @@ class CheckpointPublisher:
             if parent_window is None:
                 parent_window = max(0, target_window - WINDOW_LENGTH)
 
+            # Get environment and generation configuration
+            env_id, env_params = get_default_env_config()
+            generation_params = get_default_generation_params()
+
             metadata = CheckpointMetadata(
                 window=target_window,
                 parent_window=parent_window,
@@ -1180,6 +1319,9 @@ class CheckpointPublisher:
                 created_at=snapshot_metadata.get("timestamp", time.time()),
                 model_name="async_trainer_snapshot",
                 checkpoint_type=CHECKPOINT_TYPE_FULL,
+                env_id=env_id,
+                env_params=env_params,
+                generation_params=generation_params,
             )
 
             config_hash = hashlib.sha256(

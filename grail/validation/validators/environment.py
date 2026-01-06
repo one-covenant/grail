@@ -44,13 +44,25 @@ class EnvironmentPromptValidator(Validator):
 
     def validate(self, ctx: ValidationContext) -> bool:
         try:
-            # Use trusted environment ID constant (never trust miner data)
-            env_id = CURRENT_ENV_ID
+            # Use environment ID from checkpoint metadata (fallback to constant)
+            env_id = ctx.env_id or CURRENT_ENV_ID
+
+            if not env_id:
+                logger.error(
+                    "No environment ID available (both ctx.env_id and CURRENT_ENV_ID are None)"
+                )
+                ctx.checks[self.check_name] = False
+                return False
 
             # Derive canonical seed from trusted validator values
             canonical_seed = _derive_canonical_seed(ctx)
 
-            adapter = get_adapter(env_id)
+            try:
+                adapter = get_adapter(env_id)
+            except ValueError as e:
+                logger.error(f"Invalid environment ID '{env_id}': {e}")
+                ctx.checks[self.check_name] = False
+                return False
 
             # Pass integer seed through; adapter handles type as needed
             canonical_ids = adapter.build_prompt_ids(canonical_seed, ctx.tokenizer)
@@ -123,8 +135,15 @@ class EnvironmentEvaluationValidator(Validator):
 
     def validate(self, ctx: ValidationContext) -> bool:
         try:
-            # Use trusted environment ID constant (never trust miner data)
-            env_id = CURRENT_ENV_ID
+            # Use environment ID from checkpoint metadata (fallback to constant)
+            env_id = ctx.env_id or CURRENT_ENV_ID
+
+            if not env_id:
+                logger.error(
+                    "No environment ID available (both ctx.env_id and CURRENT_ENV_ID are None)"
+                )
+                ctx.checks[self.check_name] = False
+                return False
 
             # Derive canonical seed from trusted validator values
             canonical_seed = _derive_canonical_seed(ctx)
@@ -137,7 +156,12 @@ class EnvironmentEvaluationValidator(Validator):
             completion_ids = tokens[prompt_len:end_idx]
             completion_text = ctx.tokenizer.decode(completion_ids, skip_special_tokens=False)
 
-            adapter = get_adapter(env_id)
+            try:
+                adapter = get_adapter(env_id)
+            except ValueError as e:
+                logger.error(f"Invalid environment ID '{env_id}': {e}")
+                ctx.checks[self.check_name] = False
+                return False
             # Pass integer seed through; adapter handles type as needed
             result = adapter.evaluate_completion(canonical_seed, completion_text, ctx.tokenizer)
             ctx.metadata["env_eval_result"] = result

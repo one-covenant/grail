@@ -91,9 +91,19 @@ def _fake_run_training_process(
     monitor_config: dict[str, Any],
     ipc: Any,
     verbosity: int = 1,
+    test_mode: bool = False,
 ) -> None:
     """Simulate the training child process."""
-    _ = (train_spec, ref_spec, config, credentials, wallet_args, monitor_config, verbosity)
+    _ = (
+        train_spec,
+        ref_spec,
+        config,
+        credentials,
+        wallet_args,
+        monitor_config,
+        verbosity,
+        test_mode,
+    )
     _write_snapshot(snapshot_manager)
     snapshot_manager.set_training_heartbeat()
     while not ipc.stop.is_set():

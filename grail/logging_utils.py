@@ -335,8 +335,8 @@ def configure_process_logging(
         root.addFilter(ExecutionSandboxNoiseFilter())
 
     # Force unbuffered output for immediate visibility
-    sys.stdout.reconfigure(line_buffering=True)
-    sys.stderr.reconfigure(line_buffering=True)
+    sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+    sys.stderr.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
 
 
 def log_blocking_operation(operation_label: str) -> Callable[[Callable[..., T]], Callable[..., T]]:

@@ -206,7 +206,7 @@ exclude_lines = [
     "if __name__ == .__main__.:",
     "class .*\\bProtocol\\):",
     "@(abc\\.)?abstractmethod",
-] 
+]
 
 [tool.flake8]
 max-line-length = 100
@@ -217,6 +217,7 @@ max-complexity = 12
 [dependency-groups]
 dev = [
     "flake8==7.3.0",
+    "pyright>=1.1.407",
     "ruff==0.14.4",
 ]
 
@@ -248,3 +249,15 @@ quote-style = "double"
 indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "auto"
+
+[tool.pyright]
+include = ["grail"]
+exclude = ["**/__pycache__", ".venv", "build", "dist"]
+typeCheckingMode = "basic"
+pythonVersion = "3.10"
+reportMissingImports = true
+reportMissingTypeStubs = false
+reportUnusedImport = "warning"
+reportUnusedVariable = "warning"
+reportDuplicateImport = "error"
+reportPrivateUsage = "warning"

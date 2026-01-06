@@ -24,7 +24,7 @@ Report miners engaging in fraudulent behavior by providing concrete proof.
 
 **Rollout Copying**
 - **Claim**: Miner X is copying rollouts from Miner Y
-- **Evidence Required**: 
+- **Evidence Required**:
   - Retrieve rollouts from both miners
   - Show they are identical (matching token IDs, logprobs, and hidden states)
   - Include timestamps proving simultaneous or suspiciously timed submissions

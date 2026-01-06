@@ -146,7 +146,7 @@ class SATParser(ThinkingParser):
         tokens = re.findall(r"[01]", answer_text)
         return len(tokens)
 
-    def parse(self, completion: str, problem: _SATProblem) -> dict[str, Any]:
+    def parse(self, completion: str, context: _SATProblem) -> dict[str, Any]:
         text = completion or ""
 
         has_thinking = self._detect_thinking_block(text)
@@ -173,7 +173,7 @@ class SATParser(ThinkingParser):
                     and num_ans_closes == 1
                     and trailing_after_answer == 0
                     and bool(re.fullmatch(r"[\s01]*", answer_text or ""))
-                    and self._exact_token_count(answer_text) == problem.num_vars
+                    and self._exact_token_count(answer_text) == context.num_vars
                 )
             else:
                 has_answer = False
@@ -184,10 +184,10 @@ class SATParser(ThinkingParser):
 
         if has_answer and answer_text:
             bits = re.findall(r"[01]", answer_text)
-            actions = [int(b) for b in bits[: problem.num_vars]]
-            while len(actions) < problem.num_vars:
+            actions = [int(b) for b in bits[: context.num_vars]]
+            while len(actions) < context.num_vars:
                 actions.append(0)
-            assignment = [bool(x) for x in actions[: problem.num_vars]]
+            assignment = [bool(x) for x in actions[: context.num_vars]]
         else:
             assignment = []
 

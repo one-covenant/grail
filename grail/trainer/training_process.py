@@ -17,6 +17,7 @@ import os
 import random
 import sys
 import time
+from multiprocessing.synchronize import Event
 from types import SimpleNamespace
 from typing import Any
 
@@ -102,6 +103,7 @@ class TrainingService:
         train_spec: ModelLoadSpec,
         ref_spec: ModelLoadSpec,
         ipc: IPCChannels | None = None,
+        test_mode: bool = False,
     ) -> None:
         """Initialize training service.
 
@@ -114,6 +116,7 @@ class TrainingService:
             train_spec: Specification for loading the training model/tokenizer
             ref_spec: Specification for loading the reference model
             ipc: IPC channels for coordination (None = use filesystem fallback)
+            test_mode: Test mode flag for training on TRAINER_UID data only
         """
         self.config = config
         self.snapshot_manager = snapshot_manager
@@ -123,6 +126,7 @@ class TrainingService:
         self.monitor: Any | None = None
         self.train_spec = train_spec
         self.ref_spec = ref_spec
+        self.test_mode = test_mode
 
         # IPC channels for all inter-process communication (with filesystem fallback)
         self._ipc = ipc
@@ -172,7 +176,7 @@ class TrainingService:
 
     async def run(
         self,
-        stop_event: multiprocessing.Event,
+        stop_event: Event,
     ) -> None:
         """Run continuous training service.
 
@@ -198,7 +202,7 @@ class TrainingService:
 
         logger.info("Training service exiting (epochs completed: %d)", self.epoch_counter)
 
-    async def _wait_for_miners(self, stop_event: multiprocessing.Event) -> None:
+    async def _wait_for_miners(self, stop_event: Event) -> None:
         """Wait for miners to download initial checkpoint.
 
         Args:
@@ -210,7 +214,7 @@ class TrainingService:
         WAIT_WINDOW_LENGTH = 0.0  # Wait 0 window for miners to download
 
         # Get current block first before using it
-        current_block = await self.subtensor.get_current_block()
+        current_block = await self.subtensor.get_current_block()  # type: ignore[misc]  # bittensor async stub
         current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
         if self.monitor:
             self.monitor.set_block_context(current_block, current_window)
@@ -220,7 +224,7 @@ class TrainingService:
         )
 
         while not stop_event.is_set():
-            current_block = await self.subtensor.get_current_block()
+            current_block = await self.subtensor.get_current_block()  # type: ignore[misc]  # bittensor async stub
             current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
             if self.monitor:
                 self.monitor.set_block_context(current_block, current_window)
@@ -287,17 +291,18 @@ class TrainingService:
 
         # Create subtensor (must be inside async context)
         logger.info("Creating subtensor connection...")
-        self.subtensor = await create_subtensor(resilient=True)
+        self.subtensor = await create_subtensor(resilient=True)  # type: ignore[assignment]  # ResilientSubtensor compatible
 
         # Initialize chain manager
         logger.info("Initializing chain manager...")
-        metagraph = await self.subtensor.metagraph(NETUID)
+        assert self.subtensor is not None
+        metagraph = await self.subtensor.metagraph(NETUID)  # type: ignore[misc]  # bittensor async stub
         chain_config = SimpleNamespace(netuid=NETUID)
         self.chain_manager = GrailChainManager(
             chain_config,
             self.wallet,
             metagraph,
-            self.subtensor,
+            self.subtensor,  # type: ignore[arg-type]  # ResilientSubtensor compatible
             self.credentials,
         )
         await self.chain_manager.initialize()
@@ -315,7 +320,7 @@ class TrainingService:
 
         async def get_block_context() -> tuple[int, int]:
             """Get current block and window for monitoring context."""
-            current_block = await self.subtensor.get_current_block()
+            current_block = await self.subtensor.get_current_block()  # type: ignore[misc]  # bittensor async stub
             current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
             return current_block, current_window
 
@@ -345,6 +350,7 @@ class TrainingService:
         Returns:
             Configured scheduler instance
         """
+        assert self.optimizer is not None, "Optimizer must be initialized before creating scheduler"
         warmup_steps = max(1, int(WARMUP_FRACTION * TOTAL_TRAINING_WINDOWS))
 
         def lr_lambda_warmup(current_step: int) -> float:
@@ -365,13 +371,13 @@ class TrainingService:
             milestones=[warmup_steps],
         )
 
-    async def _upload_initial_checkpoint(self, stop_event: multiprocessing.Event) -> None:
+    async def _upload_initial_checkpoint(self, stop_event: Event) -> None:
         """Save initial checkpoint and queue for upload worker.
 
         Args:
             stop_event: Event to signal shutdown
         """
-        current_block = await self.subtensor.get_current_block()
+        current_block = await self.subtensor.get_current_block()  # type: ignore[misc]  # bittensor async stub
         current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
         if self.monitor:
             self.monitor.set_block_context(current_block, current_window)
@@ -400,7 +406,7 @@ class TrainingService:
         # Queue snapshot for upload worker
         snapshot_path = self.snapshot_manager.get_latest_snapshot_path()
         if self._ipc is not None and snapshot_path:
-            self._ipc.queue_snapshot(snapshot_path, snapshot_metadata, current_window)
+            self._ipc.queue_snapshot(str(snapshot_path), snapshot_metadata, current_window)
             logger.info("Initial checkpoint queued for upload worker (window=%s)", current_window)
         else:
             logger.warning(
@@ -409,7 +415,7 @@ class TrainingService:
                 snapshot_path is not None,
             )
 
-    async def _training_loop(self, stop_event: multiprocessing.Event) -> None:
+    async def _training_loop(self, stop_event: Event) -> None:
         """Main continuous training loop.
 
         Args:
@@ -522,7 +528,8 @@ class TrainingService:
                 self.optimizer,
             )
             if hasattr(ref_model, "eval"):
-                ref_model.eval()
+                assert ref_model is not None
+            ref_model.eval()
         else:
             train_model, optimizer = accelerator.prepare(
                 self.train_model,
@@ -538,7 +545,7 @@ class TrainingService:
         ref_model: Any | None,
         optimizer: torch.optim.Optimizer,
         accelerator: Accelerator,
-        stop_event: multiprocessing.Event,
+        stop_event: Event,
     ) -> tuple[Any, Any | None, torch.optim.Optimizer]:
         """Handle PAUSE_TRAINING flag by moving models to CPU and waiting.
 
@@ -620,7 +627,10 @@ class TrainingService:
                     if hasattr(inner, "close"):
                         await inner.close()
                 elif hasattr(self.subtensor, "close"):
-                    await self.subtensor.close()
+                    close_result = self.subtensor.close()
+                    # Handle both sync and async close methods
+                    if asyncio.iscoroutine(close_result):
+                        await close_result  # type: ignore[misc]
                 logger.info("Closed subtensor connection during pause to prevent idle timeout")
             except Exception as e:
                 logger.warning("Failed to close subtensor during pause: %s", e)
@@ -629,11 +639,14 @@ class TrainingService:
         # Wait for pause flag to be cleared via IPC (primary) or filesystem (fallback)
         while not stop_event.is_set():
             # Check if resume signal received
-            pause_still_active = (
-                self._ipc.is_pause_requested()
-                if self._ipc is not None
-                else self.snapshot_manager.check_pause_flag()
-            )
+            if self._ipc is not None:
+                pause_still_active = self._ipc.is_pause_requested()
+            elif hasattr(self.snapshot_manager, "check_pause_flag"):
+                pause_still_active = self.snapshot_manager.check_pause_flag()  # type: ignore[attr-defined]
+            else:
+                # No IPC and no pause flag method - exit pause loop
+                logger.debug("No IPC or pause flag method available, exiting pause")
+                pause_still_active = False
             if not pause_still_active:
                 break
             await asyncio.sleep(PAUSE_CHECK_INTERVAL_SECONDS)
@@ -649,7 +662,7 @@ class TrainingService:
 
         # Recreate subtensor connection after pause
         logger.info("Recreating subtensor connection after pause...")
-        self.subtensor = await create_subtensor(resilient=True)
+        self.subtensor = await create_subtensor(resilient=True)  # type: ignore[assignment]
         logger.info("Subtensor connection recreated successfully")
 
         logger.info("🔄 STATE: models_moving_to_gpu - starting CPU→GPU transfer")
@@ -685,6 +698,7 @@ class TrainingService:
                 ref_model_gpu,
                 optimizer,
             )
+            assert ref_model is not None
             ref_model.eval()
         else:
             train_model, prepared_optimizer = await asyncio.to_thread(
@@ -707,7 +721,7 @@ class TrainingService:
             Current window number
         """
         try:
-            current_block = await self.subtensor.get_current_block()
+            current_block = await self.subtensor.get_current_block()  # type: ignore[misc]  # bittensor async stub
             current_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
             if self.monitor:
                 self.monitor.set_block_context(current_block, current_window)
@@ -716,14 +730,38 @@ class TrainingService:
             logger.warning("Failed to get current block: %s", exc)
             return self.epoch_counter * WINDOW_LENGTH
 
-    async def _get_trusted_miners(self) -> list[str]:
+    async def _get_trusted_miners(self) -> set[str]:
         """Get trusted miner hotkeys from metagraph with fallback to cache.
 
+        In test mode, returns only TRAINER_UID's hotkey for controlled testing.
+
         Returns:
-            List of trusted miner hotkeys (may be cached if blockchain unavailable)
+            Set of trusted miner hotkeys (may be cached if blockchain unavailable)
         """
         try:
-            metagraph = await self.subtensor.metagraph(NETUID)
+            metagraph = await self.subtensor.metagraph(NETUID)  # type: ignore[misc]  # bittensor async stub
+
+            # Test mode: only use TRAINER_UID
+            if self.test_mode:
+                from grail.shared.constants import TRAINER_UID
+
+                if TRAINER_UID < len(metagraph.hotkeys):
+                    trainer_hotkey = metagraph.hotkeys[TRAINER_UID]
+                    logger.info(
+                        "Test mode: Using TRAINER_UID %d hotkey %s for training data",
+                        TRAINER_UID,
+                        trainer_hotkey[:12],
+                    )
+                    return {trainer_hotkey}
+                else:
+                    logger.warning(
+                        "Test mode: TRAINER_UID %d not found in metagraph (size: %d)",
+                        TRAINER_UID,
+                        len(metagraph.hotkeys),
+                    )
+                    return set()
+
+            # Normal mode: compute trusted miners
             trusted_hotkeys = await get_trusted_miner_hotkeys(
                 metagraph,
                 self.config.min_trusted_miners,
@@ -737,9 +775,9 @@ class TrainingService:
 
         except Exception as exc:
             logger.error("Failed to get trusted miners: %s", exc)
-            return []
+            return set()
 
-    async def _load_grpo_groups(self, current_window: int, trusted_hotkeys: list[str]) -> None:
+    async def _load_grpo_groups(self, current_window: int, trusted_hotkeys: set[str]) -> None:
         """Load GRPO groups from trusted miners (Replay Buffer Logic).
 
         Args:
@@ -754,7 +792,7 @@ class TrainingService:
             return
 
         try:
-            metagraph = await self.subtensor.metagraph(NETUID)
+            metagraph = await self.subtensor.metagraph(NETUID)  # type: ignore[misc]  # bittensor async stub
             uid_by_hotkey = dict(zip(metagraph.hotkeys, metagraph.uids, strict=True))
 
             logger.info(
@@ -859,6 +897,8 @@ class TrainingService:
                 return {}
 
             epoch_start = time.time()
+            assert self.optimizer is not None, "Optimizer must be initialized before training"
+            assert self.algorithm is not None, "Algorithm must be initialized before training"
 
             metrics = await self.algorithm.train_epoch(
                 train_model,
@@ -873,7 +913,8 @@ class TrainingService:
             )
 
             # Update scheduler
-            self.scheduler.step()
+            if self.scheduler is not None:
+                self.scheduler.step()
 
             epoch_duration = time.time() - epoch_start
             logger.info(
@@ -928,7 +969,7 @@ class TrainingService:
             # Notify upload worker via IPC queue (primary) or filesystem marker (fallback)
             snapshot_path = self.snapshot_manager.get_latest_snapshot_path()
             if self._ipc is not None and snapshot_path:
-                self._ipc.queue_snapshot(snapshot_path, snapshot_metadata, current_window)
+                self._ipc.queue_snapshot(str(snapshot_path), snapshot_metadata, current_window)
                 logger.debug("Snapshot message queued for upload worker")
 
             logger.info("Snapshot saved for epoch %d", self.epoch_counter)
@@ -1001,6 +1042,7 @@ def run_training_process(
     monitor_config: dict[str, Any],
     ipc: IPCChannels,
     verbosity: int = 1,
+    test_mode: bool = False,
 ) -> None:
     """Entry point for training process.
 
@@ -1018,6 +1060,7 @@ def run_training_process(
         monitor_config: Monitoring configuration
         ipc: IPC channels for coordination with orchestrator
         verbosity: CLI verbosity level (0=silent, 1=INFO, >=2=DEBUG)
+        test_mode: Test mode flag for training on TRAINER_UID data only
     """
     # Configure logging for child process
     _configure_child_process_logging(verbosity)
@@ -1045,6 +1088,7 @@ def run_training_process(
             train_spec=train_spec,
             ref_spec=ref_spec,
             ipc=ipc,
+            test_mode=test_mode,
         )
 
         asyncio.run(service.run(ipc.stop))

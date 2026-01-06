@@ -20,10 +20,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, cast
 
-try:
-    import bittensor as bt
-except Exception:  # pragma: no cover - optional in offline mode
-    bt = None  # type: ignore[assignment]
 import numpy as np
 import torch
 
@@ -330,7 +326,7 @@ class VLLMServerBackend:
 
         async def _call_one_async(
             idx: int, prompt: str, rnd_seed: int | None
-        ) -> tuple[int, str, list[float] | None]:
+        ) -> tuple[int, str, list[float] | None, list[int] | None]:
             max_retries = 3
             base_backoff = 1.0
             async with sem:
@@ -395,15 +391,17 @@ class VLLMServerBackend:
                                 if tokens_field:
                                     try:
                                         # tokens might be integers or strings
-                                        chosen_token_ids = [
-                                            int(t)
-                                            if isinstance(t, (int, str)) and str(t).isdigit()
-                                            else None
-                                            for t in tokens_field
-                                        ]
-                                        # If we got None values, token IDs weren't available
-                                        if any(t is None for t in chosen_token_ids):
-                                            chosen_token_ids = None
+                                        parsed_ids: list[int] = []
+                                        valid = True
+                                        for t in tokens_field:
+                                            if isinstance(t, int):
+                                                parsed_ids.append(t)
+                                            elif isinstance(t, str) and t.isdigit():
+                                                parsed_ids.append(int(t))
+                                            else:
+                                                valid = False
+                                                break
+                                        chosen_token_ids = parsed_ids if valid else None
                                     except (ValueError, TypeError):
                                         chosen_token_ids = None
                         except Exception as e:
@@ -736,7 +734,7 @@ class AgentEnvLoop:
             logger.info(
                 "MINER TOKENIZER INFO: transformers=%s, tokenizers=%s, name_or_path=%s",
                 transformers.__version__,
-                tokenizers.__version__,
+                tokenizers.__version__,  # type: ignore[attr-defined]  # tokenizers has __version__
                 getattr(tokenizer, "name_or_path", "unknown"),
             )
         except Exception as e:
@@ -1153,7 +1151,7 @@ class AgentEnvLoop:
             # Sign commitments
             commitment_data = json.dumps(commitments, sort_keys=True)
             commitment_hash = hashlib.sha256(commitment_data.encode()).digest()
-            if bt is None or wallet is None:
+            if wallet is None:
                 raise RuntimeError(
                     "GRAIL proof generation requires bittensor wallet (unavailable in offline mode)"
                 )

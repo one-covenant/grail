@@ -32,6 +32,7 @@ def compute_completion_digest(commit_data: dict, rollout_meta: dict) -> str | No
         >>> isinstance(digest, str) and len(digest) == 64
         True
     """
+    tokens: list[int] = []
     try:
         tokens = commit_data.get("tokens", [])
         if not isinstance(tokens, list) or not tokens:

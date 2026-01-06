@@ -240,6 +240,7 @@ class EvaluatorService:
             logger.warning(f"Error releasing evaluator resources: {e}")
 
     def _render_prompts(self, prompts_list: list[list[dict[str, str]]]) -> list[list[int]]:
+        assert self._loop is not None, "AgentEnvLoop not initialized (shutdown called?)"
         return self._loop.render_prompt_ids_batch(prompts_list)
 
     async def run_cycle(
@@ -314,7 +315,7 @@ class EvaluatorService:
                     "⚙️  [1/4] Preparing batch (reset envs, expand to replicates, render prompts)..."
                 )
                 prep_start = time.monotonic()
-                expanded_ids, expanded_msgs, prompt_ids = self._prepare_batch(batch_ids, plan)
+                expanded_ids, _, prompt_ids = self._prepare_batch(batch_ids, plan)
                 prep_time = time.monotonic() - prep_start
                 logger.info(f"   ✓ Prepared {len(expanded_ids)} prompts in {prep_time:.2f}s")
 
@@ -415,6 +416,7 @@ class EvaluatorService:
         expanded_seeds: list[int] = []
 
         # Reset envs once per task (not per replicate) for correct info context
+        assert self._vector is not None, "EnvVector not initialized (shutdown called?)"
         self._vector.reset_ids(batch_ids)
 
         # Build prompts per replicate
@@ -437,7 +439,7 @@ class EvaluatorService:
         prompt_ids: list[list[int]],
         expanded_ids: list[str],
         plan: EvaluationPlan,
-    ) -> list[tuple[list[int], int]]:
+    ) -> list[tuple[list[int], int, list[float] | None]]:
         """Generate sequences deterministically using seeds.
 
         Args:
@@ -446,10 +448,8 @@ class EvaluatorService:
             plan: Evaluation plan containing seed and replication info
 
         Returns:
-            List of tuples per sample. Each tuple contains at least
-            (sequence, prompt_length). A third element may be present with
-            chosen-token logprobs if the backend provides them and they were
-            requested upstream.
+            List of tuples: (sequence, prompt_length, chosen_logprobs).
+            chosen_logprobs may be None if not requested or unavailable.
         """
         # Reconstruct seeds for generation
         expanded_seeds: list[int] = []
@@ -459,6 +459,7 @@ class EvaluatorService:
             task_id_to_replicates[task_id] = r_idx + 1
             expanded_seeds.append(plan.seed_for(task_id, r_idx))
 
+        assert self._loop is not None, "AgentEnvLoop not initialized (shutdown called?)"
         seq_with_prompt_lens = await self._loop.generate_from_prompt_ids_batch(
             prompt_ids,
             seeds=expanded_seeds,
@@ -468,15 +469,13 @@ class EvaluatorService:
 
     def _decode_completions(
         self,
-        seq_with_prompt_lens: list[
-            tuple[list[int], int] | tuple[list[int], int, list[float] | None]
-        ],
+        seq_with_prompt_lens: list[tuple[list[int], int, list[float] | None]],
     ) -> list[str]:
         """Decode generated sequences to text, excluding prompt tokens.
 
         Args:
-            seq_with_prompt_lens: List of tuples: (sequence, prompt_length)
-                and optionally a third element with chosen-token logprobs.
+            seq_with_prompt_lens: List of tuples: (sequence, prompt_length, logprobs).
+                logprobs may be None if not requested or unavailable.
 
         Returns:
             List of decoded completion strings
@@ -556,6 +555,7 @@ class EvaluatorService:
         """
         k = self._cfg.sample_storage_k
         cursor = 0
+        assert self._vector is not None, "EnvVector not initialized (shutdown called?)"
         for env_idx, task_id in enumerate(batch_ids):
             for r_idx in range(replicates):
                 text = decoded[cursor]

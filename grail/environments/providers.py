@@ -92,7 +92,11 @@ class GSM8KTaskSource(TaskSource):
             # Load original test set directly
             ds = load_dataset("openai/gsm8k", "main", split="test")
             self._data = [
-                {"question": sample["question"], "answer": sample["answer"]} for sample in ds
+                {
+                    "question": sample.get("question", ""),  # type: ignore[union-attr]
+                    "answer": sample.get("answer", ""),  # type: ignore[union-attr]
+                }
+                for sample in ds
             ]
         else:
             # Load train split and create train/val split
@@ -109,7 +113,11 @@ class GSM8KTaskSource(TaskSource):
 
         ds = load_dataset("openai/gsm8k", "main", split="train")
         all_samples = [
-            {"question": sample["question"], "answer": sample["answer"]} for sample in ds
+            {
+                "question": sample.get("question", ""),  # type: ignore[union-attr]
+                "answer": sample.get("answer", ""),  # type: ignore[union-attr]
+            }
+            for sample in ds
         ]
 
         # Deterministic shuffle for val sampling
@@ -261,14 +269,18 @@ class MATHTaskSource(TaskSource):
             for subset in _MATH_SUBSETS:
                 ds = load_dataset("EleutherAI/hendrycks_math", subset, split="test")
                 for sample in ds:
-                    answer = _extract_boxed_answer(sample["solution"])
+                    answer = _extract_boxed_answer(
+                        sample.get("solution", "")  # type: ignore[union-attr]
+                    )
                     all_samples.append(
                         {
-                            "problem": sample["problem"],
-                            "solution": sample["solution"],
+                            "problem": sample.get("problem", ""),  # type: ignore[union-attr]
+                            "solution": sample.get("solution", ""),  # type: ignore[union-attr]
                             "answer": answer,
-                            "subject": sample["type"],
-                            "level": self._parse_level(sample["level"]),
+                            "subject": sample.get("type", ""),  # type: ignore[union-attr]
+                            "level": self._parse_level(
+                                sample.get("level", "")  # type: ignore[union-attr]
+                            ),
                         }
                     )
             self._data = all_samples
@@ -296,14 +308,18 @@ class MATHTaskSource(TaskSource):
         for subset in _MATH_SUBSETS:
             ds = load_dataset("EleutherAI/hendrycks_math", subset, split="train")
             for sample in ds:
-                answer = _extract_boxed_answer(sample["solution"])
+                answer = _extract_boxed_answer(
+                    sample.get("solution", "")  # type: ignore[union-attr]
+                )
                 samples_by_subject[subset].append(
                     {
-                        "problem": sample["problem"],
-                        "solution": sample["solution"],
+                        "problem": sample.get("problem", ""),  # type: ignore[union-attr]
+                        "solution": sample.get("solution", ""),  # type: ignore[union-attr]
                         "answer": answer,
-                        "subject": sample["type"],
-                        "level": self._parse_level(sample["level"]),
+                        "subject": sample.get("type", ""),  # type: ignore[union-attr]
+                        "level": self._parse_level(
+                            sample.get("level", "")  # type: ignore[union-attr]
+                        ),
                     }
                 )
 
@@ -595,6 +611,30 @@ class MBPPTaskSource(TaskSource):
         MBPPTaskSource._cache["mbpp_train"] = new_train
         MBPPTaskSource._cache["mbpp_validation"] = new_validation
 
+    def _extract_function_signature(self, code: str) -> str:
+        """Extract function signature from reference solution.
+
+        Args:
+            code: Reference solution code
+
+        Returns:
+            Function signature line (e.g., "def func_name(args):") or empty string
+        """
+        if not code:
+            return ""
+
+        try:
+            # Find first 'def ' line
+            for line in code.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith("def "):
+                    # Return the signature line (up to and including the colon)
+                    return stripped
+        except Exception:
+            pass
+
+        return ""
+
     def next(self, *, seed: int | None = None, task_id: str | None = None) -> TaskSpec:
         """Sample task from dataset.
 
@@ -621,10 +661,21 @@ class MBPPTaskSource(TaskSource):
 
         sample = self._data[int(idx) % len(self._data)]
 
+        # Extract function signature from reference solution to provide as a stub
+        # This prevents function name guessing and improves success rate
+        function_signature = self._extract_function_signature(sample["code"])
+
+        # Build prompt with signature stub (following HumanEval's approach)
+        if function_signature:
+            question = f"{sample['text']}\n\n{function_signature}\n    pass"
+        else:
+            # Fallback if signature extraction fails
+            question = sample["text"]
+
         return TaskSpec(
             id=f"{self._split}_{idx}",
             payload={
-                "question": sample["text"],
+                "question": question,
                 "test_list": sample["test_list"],
                 "test_setup_code": sample["test_setup_code"],
                 "test_imports": sample["test_imports"],
@@ -668,7 +719,7 @@ class HumanEvalTaskSource(TaskSource):
     """
 
     # Class-level cache for loaded data
-    _cache: dict[str, Any] | None = None
+    _cache: list[dict[str, Any]] | None = None
 
     def __init__(self) -> None:
         """Initialize HumanEval task source.
@@ -696,11 +747,13 @@ class HumanEvalTaskSource(TaskSource):
         for sample in ds:
             samples.append(
                 {
-                    "task_id": str(sample.get("task_id", "")),
-                    "prompt": str(sample.get("prompt", "")),
-                    "canonical_solution": str(sample.get("canonical_solution", "")),
-                    "test": str(sample.get("test", "")),
-                    "entry_point": str(sample.get("entry_point", "")),
+                    "task_id": str(sample.get("task_id", "")),  # type: ignore[union-attr]
+                    "prompt": str(sample.get("prompt", "")),  # type: ignore[union-attr]
+                    "canonical_solution": str(
+                        sample.get("canonical_solution", "")  # type: ignore[union-attr]
+                    ),
+                    "test": str(sample.get("test", "")),  # type: ignore[union-attr]
+                    "entry_point": str(sample.get("entry_point", "")),  # type: ignore[union-attr]
                 }
             )
 

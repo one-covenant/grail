@@ -834,6 +834,7 @@ def _pool_worker_execute(
             def timeout_handler(signum: int, frame: Any) -> None:
                 raise TimeoutException("Test timed out")
 
+            old_handler = None
             if platform.system() != "Windows":
                 old_handler = signal.signal(signal.SIGALRM, timeout_handler)
                 signal.alarm(int(timeout))
@@ -851,7 +852,7 @@ def _pool_worker_execute(
                     {"test_idx": i, "passed": False, "error": f"{type(e).__name__}: {e}"}
                 )
             finally:
-                if platform.system() != "Windows":
+                if platform.system() != "Windows" and old_handler is not None:
                     signal.alarm(0)
                     signal.signal(signal.SIGALRM, old_handler)
 
@@ -1053,7 +1054,8 @@ class CodeExecutionPool:
                     os.environ["CUDA_VISIBLE_DEVICES"] = ""
                     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
-                    self._executor = concurrent.futures.ProcessPoolExecutor(
+                    # max_tasks_per_child requires Python 3.11+; Pyright stubs may not include it
+                    self._executor = concurrent.futures.ProcessPoolExecutor(  # type: ignore[call-overload]
                         max_workers=self.num_workers,
                         mp_context=ctx,
                         max_tasks_per_child=self.max_tasks_per_child,
@@ -1318,6 +1320,7 @@ def check_code_executes_fast(
     execute_fn = pool.execute if pool is not None else check_code_executes
 
     # Retry loop for process errors only
+    result: dict[str, Any] = {"status": "error", "error": "No attempts made"}
     for attempt in range(max_retries):
         result = execute_fn(code, test_cases, timeout)
 

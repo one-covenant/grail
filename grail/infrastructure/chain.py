@@ -126,7 +126,7 @@ class GrailChainManager:
         if self.netuid is not None:
             try:
                 # Use async subtensor commit
-                await self.subtensor.commit(self.wallet, self.netuid, commitment)
+                await self.subtensor.commit(self.wallet, self.netuid, commitment)  # type: ignore[misc]  # bittensor stub issue
                 logger.info(
                     "Successfully committed read credentials to chain "
                     f"for hotkey {self.wallet.hotkey.ss58_address}"
@@ -336,7 +336,7 @@ class GrailChainManager:
             See: https://docs.bittensor.com and substrate documentation.
         """
         try:
-            block_hash = await self.subtensor.get_block_hash(block_number)
+            block_hash = await self.subtensor.get_block_hash(block_number)  # type: ignore[misc]  # bittensor async stub
         except Exception:
             logger.debug("Failed to get block hash for block %d", block_number, exc_info=True)
             return None
@@ -395,7 +395,7 @@ class GrailChainManager:
         Returns None if timestamps cannot be read.
         """
         try:
-            current_block = await self.subtensor.get_current_block()
+            current_block = await self.subtensor.get_current_block()  # type: ignore[misc]  # bittensor async stub
         except Exception:
             return None
 

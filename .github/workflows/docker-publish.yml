@@ -30,19 +30,19 @@ jobs:
     if: github.event.inputs.skip_tests != 'true'
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install uv
         uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
-      
+
       - name: Set up Python
         run: uv python install 3.11
-      
+
       - name: Install dependencies
         run: uv sync --extra dev
-      
+
       - name: Run tests
         run: uv run pytest tests/ -v --tb=short
 
@@ -56,18 +56,18 @@ jobs:
       packages: write
       attestations: write
       id-token: write
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
+
       - name: Free up GitHub Actions runner disk space
         run: |
           echo "============================================"
           echo "Disk space before cleanup:"
           df -h
           echo "============================================"
-          
+
           # Remove unnecessary tools and packages
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
@@ -75,7 +75,7 @@ jobs:
           sudo rm -rf /opt/hostedtoolcache/CodeQL
           sudo rm -rf /usr/local/share/boost
           sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-          
+
           # Remove large packages
           sudo apt-get remove -y '^aspnetcore-.*' || true
           sudo apt-get remove -y '^dotnet-.*' --fix-missing || true
@@ -83,26 +83,26 @@ jobs:
           sudo apt-get remove -y '^mongodb-.*' --fix-missing || true
           sudo apt-get remove -y '^mysql-.*' --fix-missing || true
           sudo apt-get remove -y azure-cli google-chrome-stable firefox powershell mono-devel || true
-          
+
           # Clean up
           sudo apt-get autoremove -y
           sudo apt-get clean
-          
+
           # Remove Docker images we won't need
           docker rmi $(docker images -q) || true
-          
+
           echo "============================================"
           echo "Disk space after cleanup:"
           df -h
           echo "============================================"
-      
+
       - name: Log in to the Container registry
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      
+
       - name: Extract metadata for release
         if: github.event_name == 'release'
         id: meta-release
@@ -115,7 +115,7 @@ jobs:
             type=semver,pattern={{major}}
             type=raw,value=latest
             type=raw,value=stable
-      
+
       - name: Extract metadata for manual dispatch
         if: github.event_name == 'workflow_dispatch'
         id: meta-manual
@@ -126,13 +126,13 @@ jobs:
             type=raw,value=${{ github.event.inputs.tag }}
             type=raw,value=${{ github.event.inputs.tag }}-{{date 'YYYYMMDD'}}
             type=sha,prefix=${{ github.event.inputs.tag }}-
-      
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
-        
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      
+
       - name: Build and push Docker image
         id: push
         uses: docker/build-push-action@v6
@@ -149,14 +149,14 @@ jobs:
             BUILD_DATE=${{ github.event.release.created_at || github.event.repository.updated_at }}
             VERSION=${{ github.event.release.tag_name || github.event.inputs.tag }}
             VCS_REF=${{ github.sha }}
-      
+
       - name: Generate artifact attestation
         uses: actions/attest-build-provenance@v2
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
-      
+
       - name: Print image details
         run: |
           echo "🐳 Docker image published successfully!"
