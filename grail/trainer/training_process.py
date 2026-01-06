@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 # ────────────────────────────────────────────────────────────────────────────────
 
 # Optimizer hyperparameters
-OPTIMIZER_BETAS = (0.9, 0.999)
+OPTIMIZER_BETAS = (0.9, 0.95)
 OPTIMIZER_WEIGHT_DECAY = 0.1
 
 # Scheduler hyperparameters
