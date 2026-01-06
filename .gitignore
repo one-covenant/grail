@@ -200,7 +200,7 @@ config.local.*
 # Temporary files
 *.tmp
 *.temp
-.tmp/ 
+.tmp/
 
 # monitoring files
 wandb/

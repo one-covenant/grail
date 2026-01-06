@@ -86,5 +86,3 @@ network_spec:
   bandwidth:
     download: 200  # Minimum download bandwidth (Mbps)
     upload: 100    # Minimum upload bandwidth (Mbps)
-
-
