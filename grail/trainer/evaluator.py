@@ -315,7 +315,7 @@ class EvaluatorService:
                     "⚙️  [1/4] Preparing batch (reset envs, expand to replicates, render prompts)..."
                 )
                 prep_start = time.monotonic()
-                expanded_ids, _, prompt_ids = self._prepare_batch(batch_ids, plan)
+                expanded_ids, expanded_msgs, prompt_ids = self._prepare_batch(batch_ids, plan)
                 prep_time = time.monotonic() - prep_start
                 logger.info(f"   ✓ Prepared {len(expanded_ids)} prompts in {prep_time:.2f}s")
 
@@ -635,7 +635,9 @@ class EvaluatorService:
             os.makedirs(self._cfg.store_predictions_path, exist_ok=True)
 
             # Build filename with window number
-            window_suffix = f"_w{self._current_window_number}" if self._current_window_number else ""
+            window_suffix = (
+                f"_w{self._current_window_number}" if self._current_window_number else ""
+            )
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             filename = f"eval_samples{window_suffix}_{timestamp}.jsonl"
             filepath = os.path.join(self._cfg.store_predictions_path, filename)
