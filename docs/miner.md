@@ -65,7 +65,7 @@ cp .env.example .env
 # Edit .env with your wallet names, network, and R2 credentials
 
 # Run miner
-grail mine 
+grail mine
 
 # Run miner in debug mode
 grail -vv mine
