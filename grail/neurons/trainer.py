@@ -76,6 +76,7 @@ class TrainerContext:
         train_spec: Specification for loading training model
         ref_spec: Specification for loading reference model
         verbosity: CLI verbosity level for child process logging
+        test_mode: Test mode flag for training on TRAINER_UID data only
         chain_manager: Chain manager for miner data (initialized later)
     """
 
@@ -86,6 +87,7 @@ class TrainerContext:
     train_spec: ModelLoadSpec
     ref_spec: ModelLoadSpec
     verbosity: int = 1
+    test_mode: bool = False
     chain_manager: Any | None = None
 
 
@@ -206,6 +208,7 @@ class TrainerNeuron(BaseNeuron):
                 monitor_config,
                 self._ipc,
                 self._context.verbosity,
+                self._context.test_mode,
             ),
         )
         self._training_process.start()

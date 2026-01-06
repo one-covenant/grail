@@ -1,0 +1,54 @@
+# Pre-commit hooks using uv run to ensure version consistency with CI
+# Install: pre-commit install
+# Run manually: pre-commit run --all-files
+#
+# All Python tools (ruff, pyright) use uv run to match exact versions in uv.lock
+# This ensures local pre-commit checks match CI exactly.
+
+default_install_hook_types: [pre-commit]
+
+repos:
+  # Local hooks using uv run - matches CI exactly
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff (lint)
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+        require_serial: true
+        exclude: ^(scripts/|research/)
+
+      - id: ruff-format
+        name: ruff (format)
+        entry: uv run ruff format
+        language: system
+        types: [python]
+        require_serial: true
+        exclude: ^(scripts/|research/)
+
+      # NOTE: pyright is intentionally excluded from pre-commit hooks.
+      # It runs on the entire grail/ directory and blocks commits until ALL
+      # type errors are fixed (currently 200+). Type checking is enforced in CI
+      # via .github/workflows/ci.yml instead. Run manually with:
+      #   uv run pyright grail
+
+  # Basic file quality checks (version-insensitive, safe to use from remote)
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        name: trim trailing whitespace
+      - id: end-of-file-fixer
+        name: fix end of files
+      - id: check-yaml
+        name: check yaml syntax
+      - id: check-toml
+        name: check toml syntax
+      - id: check-added-large-files
+        args: [--maxkb=1000]
+        name: check for large files
+      - id: detect-private-key
+        name: detect private keys
+      - id: check-merge-conflict
+        name: check for merge conflicts

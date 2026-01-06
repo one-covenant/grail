@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 # ────────────────────────────────────────────────────────────────────────────────
 
 # Optimizer hyperparameters
-OPTIMIZER_BETAS = (0.9, 0.999)
+OPTIMIZER_BETAS = (0.9, 0.95)
 OPTIMIZER_WEIGHT_DECAY = 0.1
 
 # Scheduler hyperparameters
@@ -102,6 +102,7 @@ class TrainingService:
         train_spec: ModelLoadSpec,
         ref_spec: ModelLoadSpec,
         ipc: IPCChannels | None = None,
+        test_mode: bool = False,
     ) -> None:
         """Initialize training service.
 
@@ -114,6 +115,7 @@ class TrainingService:
             train_spec: Specification for loading the training model/tokenizer
             ref_spec: Specification for loading the reference model
             ipc: IPC channels for coordination (None = use filesystem fallback)
+            test_mode: Test mode flag for training on TRAINER_UID data only
         """
         self.config = config
         self.snapshot_manager = snapshot_manager
@@ -123,6 +125,7 @@ class TrainingService:
         self.monitor: Any | None = None
         self.train_spec = train_spec
         self.ref_spec = ref_spec
+        self.test_mode = test_mode
 
         # IPC channels for all inter-process communication (with filesystem fallback)
         self._ipc = ipc
@@ -719,11 +722,35 @@ class TrainingService:
     async def _get_trusted_miners(self) -> list[str]:
         """Get trusted miner hotkeys from metagraph with fallback to cache.
 
+        In test mode, returns only TRAINER_UID's hotkey for controlled testing.
+
         Returns:
             List of trusted miner hotkeys (may be cached if blockchain unavailable)
         """
         try:
             metagraph = await self.subtensor.metagraph(NETUID)
+
+            # Test mode: only use TRAINER_UID
+            if self.test_mode:
+                from grail.shared.constants import TRAINER_UID
+
+                if TRAINER_UID < len(metagraph.hotkeys):
+                    trainer_hotkey = metagraph.hotkeys[TRAINER_UID]
+                    logger.info(
+                        "Test mode: Using TRAINER_UID %d hotkey %s for training data",
+                        TRAINER_UID,
+                        trainer_hotkey[:12],
+                    )
+                    return [trainer_hotkey]
+                else:
+                    logger.warning(
+                        "Test mode: TRAINER_UID %d not found in metagraph (size: %d)",
+                        TRAINER_UID,
+                        len(metagraph.hotkeys),
+                    )
+                    return []
+
+            # Normal mode: compute trusted miners
             trusted_hotkeys = await get_trusted_miner_hotkeys(
                 metagraph,
                 self.config.min_trusted_miners,
@@ -1001,6 +1028,7 @@ def run_training_process(
     monitor_config: dict[str, Any],
     ipc: IPCChannels,
     verbosity: int = 1,
+    test_mode: bool = False,
 ) -> None:
     """Entry point for training process.
 
@@ -1018,6 +1046,7 @@ def run_training_process(
         monitor_config: Monitoring configuration
         ipc: IPC channels for coordination with orchestrator
         verbosity: CLI verbosity level (0=silent, 1=INFO, >=2=DEBUG)
+        test_mode: Test mode flag for training on TRAINER_UID data only
     """
     # Configure logging for child process
     _configure_child_process_logging(verbosity)
@@ -1045,6 +1074,7 @@ def run_training_process(
             train_spec=train_spec,
             ref_spec=ref_spec,
             ipc=ipc,
+            test_mode=test_mode,
         )
 
         asyncio.run(service.run(ipc.stop))

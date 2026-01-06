@@ -529,7 +529,22 @@ class ValidationService:
 
         # Determine subset to validate
         if test_mode:
-            hotkeys_to_check = [self._wallet.hotkey.ss58_address]
+            # Test mode: validate only TRAINER_UID
+            if TRAINER_UID < len(meta.hotkeys):
+                trainer_hotkey = meta.hotkeys[TRAINER_UID]
+                hotkeys_to_check = [trainer_hotkey]
+                logger.info(
+                    "Test mode: Validating TRAINER_UID %d with hotkey %s",
+                    TRAINER_UID,
+                    trainer_hotkey[:12],
+                )
+            else:
+                logger.warning(
+                    "Test mode: TRAINER_UID %d not found in metagraph (size: %d)",
+                    TRAINER_UID,
+                    len(meta.hotkeys),
+                )
+                hotkeys_to_check = []
         elif MINER_SAMPLING_ENABLED:
             if self._miner_sampler is None:
                 raise RuntimeError("MinerSampler not initialized")
