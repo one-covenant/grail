@@ -195,7 +195,7 @@ async def upload_worker_loop(
             logger.info("New snapshot detected, preparing upload")
 
             # Get current block for timing/monitoring
-            upload_start_block = await subtensor.get_current_block()
+            upload_start_block = await subtensor.get_current_block()  # type: ignore[misc]  # bittensor async stub
 
             # CRITICAL: Use window from snapshot metadata (when it was trained),
             # NOT current block (when it's being uploaded).
@@ -395,7 +395,7 @@ async def upload_worker_loop(
                 "Getting current block after %.1fs upload (idle detection will extend timeout)",
                 upload_duration,
             )
-            current_block = await subtensor.get_current_block()
+            current_block = await subtensor.get_current_block()  # type: ignore[misc]  # bittensor async stub
             ready_window = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH
             blocks_elapsed = current_block - upload_start_block
 

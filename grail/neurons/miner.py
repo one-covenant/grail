@@ -175,7 +175,7 @@ class MinerNeuron(BaseNeuron):
                     # Use shared subtensor from base class
                     subtensor = await self.get_subtensor()
 
-                    current_block = await subtensor.get_current_block()
+                    current_block = await subtensor.get_current_block()  # type: ignore[misc]  # bittensor async stub
                     window_start = self.calculate_window(current_block)
 
                     # Set monitoring context for metrics (use block_number for x-axis)

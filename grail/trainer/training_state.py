@@ -151,18 +151,24 @@ def apply_training_state(
 
     # Restore RNGs for determinism if available
     if rng_state is not None:
-        try:
-            random.setstate(rng_state.get("python"))
-        except Exception:
-            pass
-        try:
-            np.random.set_state(rng_state.get("numpy"))
-        except Exception:
-            pass
-        try:
-            torch.set_rng_state(rng_state.get("torch_cpu"))
-        except Exception:
-            pass
+        python_state = rng_state.get("python")
+        if python_state is not None:
+            try:
+                random.setstate(python_state)
+            except Exception:
+                pass
+        numpy_state = rng_state.get("numpy")
+        if numpy_state is not None:
+            try:
+                np.random.set_state(numpy_state)
+            except Exception:
+                pass
+        torch_state = rng_state.get("torch_cpu")
+        if torch_state is not None:
+            try:
+                torch.set_rng_state(torch_state)
+            except Exception:
+                pass
         if torch.cuda.is_available():
             try:
                 torch.cuda.set_rng_state_all(rng_state.get("torch_cuda_all", []))

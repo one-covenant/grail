@@ -471,6 +471,7 @@ class PythonCodeEnv(SingleTurnEnv):
             Initial observation with problem description
         """
         self._task = self._source.next(seed=seed, task_id=task_id)
+        assert self._task is not None, "TaskSource.next() must return a TaskSpec"
 
         # Create initial observation with problem prompt
         obs = Observation(

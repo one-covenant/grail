@@ -1412,6 +1412,10 @@ class GRPOAlgorithm(TrainingAlgorithm):
 
                 # Expand to [batch_size, max_comp_len] by broadcasting
                 per_token_loss = per_token_loss.expand(-1, completion_mask.size(1))
+            else:
+                raise ValueError(
+                    f"Unknown importance_sampling_level: {self.importance_sampling_level}"
+                )
 
             # Aggregate using variant-specific strategy
             max_completion_length = completion_mask.size(1)
@@ -1766,6 +1770,10 @@ class GRPOAlgorithm(TrainingAlgorithm):
 
         reset_actual_batch_tracker()
 
+        # Track last batch tensors for sparse analysis (may be None if no batches processed)
+        input_ids_tensor: torch.Tensor | None = None
+        attention_mask_tensor: torch.Tensor | None = None
+
         for micro_idx in range(num_micro_batches):
             start_idx = micro_idx * micro_batch_size
             end_idx = min(start_idx + micro_batch_size, len(all_rollouts))
@@ -1879,7 +1887,11 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 local_completion_tokens = completion_mask.sum()  # Keep as tensor
                 # Gather across all processes with proper shape [1] for each process
                 all_tokens = accelerator.gather(local_completion_tokens.unsqueeze(0))
-                total_completion_tokens = int(all_tokens.sum().item())
+                # accelerator.gather returns Tensor but Pyright thinks it could be Mapping
+                if isinstance(all_tokens, torch.Tensor):
+                    total_completion_tokens = int(all_tokens.sum().item())
+                else:
+                    total_completion_tokens = int(local_completion_tokens.item())
 
             # Step 7: Compute policy gradient loss with importance sampling and PPO clipping
             loss_pg, ratio_clip_frac_val, ratio_ceiling_frac_val, ratios_pre_ceiling = (
@@ -1894,7 +1906,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
             )
 
             # Step 8: Compute KL divergence penalty (only when enabled)
-            if kl_enabled:
+            if kl_enabled and logprobs_ref_per_token is not None:
                 loss_kl, kl_value = self._compute_kl_divergence_loss(
                     logprobs_current_per_token,
                     logprobs_ref_per_token,
@@ -2035,7 +2047,11 @@ class GRPOAlgorithm(TrainingAlgorithm):
                             logger.warning("Failed to compute param change metrics: %s", exc)
 
                         # Sparse quality analysis (uses same snapshot)
-                        if self.sparse_analyzer.enabled:
+                        if (
+                            self.sparse_analyzer.enabled
+                            and input_ids_tensor is not None
+                            and attention_mask_tensor is not None
+                        ):
                             try:
                                 sparse_metrics = self.sparse_analyzer.analyze(
                                     model, input_ids_tensor, attention_mask_tensor
@@ -2107,7 +2123,11 @@ class GRPOAlgorithm(TrainingAlgorithm):
                             logger.warning("Failed to compute param change metrics: %s", exc)
 
                         # Sparse quality analysis (uses same snapshot)
-                        if self.sparse_analyzer.enabled:
+                        if (
+                            self.sparse_analyzer.enabled
+                            and input_ids_tensor is not None
+                            and attention_mask_tensor is not None
+                        ):
                             try:
                                 sparse_metrics = self.sparse_analyzer.analyze(
                                     model, input_ids_tensor, attention_mask_tensor

@@ -56,6 +56,7 @@ class SATEnvAdapter:
         rendered = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
+        assert isinstance(rendered, str), "Expected apply_chat_template to return string"
         toks = tokenizer(
             rendered,
             return_tensors="pt",
@@ -118,6 +119,7 @@ class GSM8KEnvAdapter:
         rendered = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
+        assert isinstance(rendered, str), "Expected apply_chat_template to return string"
         toks = tokenizer(
             rendered,
             return_tensors="pt",
@@ -184,6 +186,7 @@ class MATHEnvAdapter:
         rendered = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
+        assert isinstance(rendered, str), "Expected apply_chat_template to return string"
         toks = tokenizer(
             rendered,
             return_tensors="pt",
@@ -254,6 +257,7 @@ class PythonCodeEnvAdapter:
         rendered = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
+        assert isinstance(rendered, str), "Expected apply_chat_template to return string"
         toks = tokenizer(
             rendered,
             return_tensors="pt",

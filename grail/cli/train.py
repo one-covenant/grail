@@ -132,4 +132,8 @@ def train(
 
 
 def main() -> None:
-    train()
+    """Entry point for standalone train command."""
+    # Create a minimal Typer app and invoke train via CLI
+    app = typer.Typer()
+    app.command()(train)
+    app()

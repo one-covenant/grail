@@ -92,7 +92,11 @@ class GSM8KTaskSource(TaskSource):
             # Load original test set directly
             ds = load_dataset("openai/gsm8k", "main", split="test")
             self._data = [
-                {"question": sample["question"], "answer": sample["answer"]} for sample in ds
+                {
+                    "question": sample.get("question", ""),  # type: ignore[union-attr]
+                    "answer": sample.get("answer", ""),  # type: ignore[union-attr]
+                }
+                for sample in ds
             ]
         else:
             # Load train split and create train/val split
@@ -109,7 +113,11 @@ class GSM8KTaskSource(TaskSource):
 
         ds = load_dataset("openai/gsm8k", "main", split="train")
         all_samples = [
-            {"question": sample["question"], "answer": sample["answer"]} for sample in ds
+            {
+                "question": sample.get("question", ""),  # type: ignore[union-attr]
+                "answer": sample.get("answer", ""),  # type: ignore[union-attr]
+            }
+            for sample in ds
         ]
 
         # Deterministic shuffle for val sampling
@@ -261,14 +269,18 @@ class MATHTaskSource(TaskSource):
             for subset in _MATH_SUBSETS:
                 ds = load_dataset("EleutherAI/hendrycks_math", subset, split="test")
                 for sample in ds:
-                    answer = _extract_boxed_answer(sample["solution"])
+                    answer = _extract_boxed_answer(
+                        sample.get("solution", "")  # type: ignore[union-attr]
+                    )
                     all_samples.append(
                         {
-                            "problem": sample["problem"],
-                            "solution": sample["solution"],
+                            "problem": sample.get("problem", ""),  # type: ignore[union-attr]
+                            "solution": sample.get("solution", ""),  # type: ignore[union-attr]
                             "answer": answer,
-                            "subject": sample["type"],
-                            "level": self._parse_level(sample["level"]),
+                            "subject": sample.get("type", ""),  # type: ignore[union-attr]
+                            "level": self._parse_level(
+                                sample.get("level", "")  # type: ignore[union-attr]
+                            ),
                         }
                     )
             self._data = all_samples
@@ -296,14 +308,18 @@ class MATHTaskSource(TaskSource):
         for subset in _MATH_SUBSETS:
             ds = load_dataset("EleutherAI/hendrycks_math", subset, split="train")
             for sample in ds:
-                answer = _extract_boxed_answer(sample["solution"])
+                answer = _extract_boxed_answer(
+                    sample.get("solution", "")  # type: ignore[union-attr]
+                )
                 samples_by_subject[subset].append(
                     {
-                        "problem": sample["problem"],
-                        "solution": sample["solution"],
+                        "problem": sample.get("problem", ""),  # type: ignore[union-attr]
+                        "solution": sample.get("solution", ""),  # type: ignore[union-attr]
                         "answer": answer,
-                        "subject": sample["type"],
-                        "level": self._parse_level(sample["level"]),
+                        "subject": sample.get("type", ""),  # type: ignore[union-attr]
+                        "level": self._parse_level(
+                            sample.get("level", "")  # type: ignore[union-attr]
+                        ),
                     }
                 )
 
@@ -668,7 +684,7 @@ class HumanEvalTaskSource(TaskSource):
     """
 
     # Class-level cache for loaded data
-    _cache: dict[str, Any] | None = None
+    _cache: list[dict[str, Any]] | None = None
 
     def __init__(self) -> None:
         """Initialize HumanEval task source.
@@ -696,11 +712,13 @@ class HumanEvalTaskSource(TaskSource):
         for sample in ds:
             samples.append(
                 {
-                    "task_id": str(sample.get("task_id", "")),
-                    "prompt": str(sample.get("prompt", "")),
-                    "canonical_solution": str(sample.get("canonical_solution", "")),
-                    "test": str(sample.get("test", "")),
-                    "entry_point": str(sample.get("entry_point", "")),
+                    "task_id": str(sample.get("task_id", "")),  # type: ignore[union-attr]
+                    "prompt": str(sample.get("prompt", "")),  # type: ignore[union-attr]
+                    "canonical_solution": str(
+                        sample.get("canonical_solution", "")  # type: ignore[union-attr]
+                    ),
+                    "test": str(sample.get("test", "")),  # type: ignore[union-attr]
+                    "entry_point": str(sample.get("entry_point", "")),  # type: ignore[union-attr]
                 }
             )
 

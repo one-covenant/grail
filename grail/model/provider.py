@@ -117,7 +117,7 @@ def get_model(
     attn_implementation = None
     if use_flash_attention and device_is_cuda:
         try:
-            import flash_attn  # noqa: F401
+            import flash_attn  # type: ignore[import-not-found]  # noqa: F401
 
             attn_implementation = "flash_attention_2"
             logger.info("Using Flash Attention 2 for model loading")
@@ -136,13 +136,13 @@ def get_model(
     )
 
     # Preserve original model name for GRAIL proof validation
-    model.name_or_path = original_model_name
+    model.name_or_path = original_model_name  # type: ignore[attr-defined]
 
     # Store checkpoint window for validation (avoids parsing path strings)
-    model.grail_checkpoint_window = resolved_checkpoint_window
+    model.grail_checkpoint_window = resolved_checkpoint_window  # type: ignore[attr-defined]
 
     # Move to device
-    model = model.to(device)
+    model = model.to(device)  # type: ignore[call-overload]
 
     # Set eval mode if requested
     if eval_mode:

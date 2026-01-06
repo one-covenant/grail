@@ -164,7 +164,10 @@ class GRAILProofValidator(Validator):
             )
 
         try:
-            layer_claim = int(model_info.get("layer_index"))
+            layer_index_value = model_info.get("layer_index")
+            if layer_index_value is None:
+                raise ValueError("layer_index is None")
+            layer_claim = int(layer_index_value)
         except (TypeError, ValueError):
             logger.debug(
                 f"[proof_valid] Invalid layer_index in commit | "

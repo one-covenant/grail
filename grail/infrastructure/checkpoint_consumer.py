@@ -1601,39 +1601,3 @@ def _unique_partial_dir(cache_root: Path, stem: str) -> Path:
     """
     suffix = f"{os.getpid()}.{uuid.uuid4().hex[:8]}"
     return cache_root / f"{stem}.{suffix}.partial"
-
-
-# --------------------------------------------------------------------------- #
-#                        DEPRECATED: Fallback Logic                           #
-# --------------------------------------------------------------------------- #
-# The following function was used when the trainer might skip publishing
-# checkpoints for some windows. Now that the trainer ALWAYS publishes
-# checkpoints (even if training is skipped), this fallback logic is no longer
-# needed. Preserved here for reference only.
-
-
-async def _find_latest_ready_checkpoint_window_DEPRECATED(
-    checkpoint_manager: CheckpointManager,
-) -> int | None:
-    """Find the highest window number with READY marker (fully uploaded).
-
-    DEPRECATED: No longer needed since trainer always publishes checkpoints.
-
-    Used when requested checkpoint is not ready yet. Falls back to latest
-    available ready checkpoint to keep mining/validation operational.
-
-    Returns:
-        Window number of latest ready checkpoint, or None if none are ready.
-    """
-    windows = await checkpoint_manager.list_remote_windows()
-    if not windows:
-        return None
-
-    # Check windows in descending order to find latest ready one
-    for window in sorted(windows, reverse=True):
-        if await checkpoint_manager._is_checkpoint_ready(window):
-            logger.info(f"Found latest ready checkpoint at window {window}")
-            return window
-
-    logger.warning("No ready checkpoints found")
-    return None

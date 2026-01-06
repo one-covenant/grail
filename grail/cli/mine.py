@@ -207,7 +207,7 @@ async def has_time_for_next_generation(
     Returns:
         True if blocks remaining > conservative estimate of blocks required.
     """
-    current_check = await subtensor.get_current_block()
+    current_check = await subtensor.get_current_block()  # type: ignore[await-not-coroutine]
     timers.update_block_time_ema(current_check)
     blocks_remaining = (window_start + WINDOW_LENGTH) - current_check
     needed_blocks = timers.blocks_needed_for_next_gen()
@@ -234,7 +234,7 @@ async def get_window_randomness(
     Returns:
         (window_block_hash, combined_randomness)
     """
-    window_block_hash = await subtensor.get_block_hash(window_start)
+    window_block_hash = await subtensor.get_block_hash(window_start)  # type: ignore[await-not-coroutine]
     if not use_drand:
         return window_block_hash, window_block_hash
 
@@ -284,7 +284,7 @@ async def maybe_log_debug_sample(
     try:
         prompt_len = int(getattr(sample, "prompt_length", 0) or 0)
         completion_len = int(getattr(sample, "completion_length", 0) or 0)
-        sample_text = tokenizer.decode(sample.tokens, skip_special_tokens=False)
+        sample_text = tokenizer.decode(sample.tokens, skip_special_tokens=False)  # type: ignore[attr-defined]
         sample_nonce = base_nonce * 10
         logger.debug(
             (
@@ -368,7 +368,7 @@ async def log_generation_timing(
     Returns:
         True if generation finished with safe buffer for upload, False otherwise
     """
-    post_gen_block = await subtensor.get_current_block()
+    post_gen_block = await subtensor.get_current_block()  # type: ignore[await-not-coroutine]
     blocks_remaining = (window_start + WINDOW_LENGTH) - post_gen_block
     time_remaining_s = blocks_remaining * timers.block_time_ema_s
     needed_blocks_for_upload = max(
@@ -406,7 +406,7 @@ def package_rollout_data(
     window_block_hash: str,
     combined_randomness: str,
     use_drand: bool,
-    checkpoint_window: int,
+    checkpoint_window: int | None,
 ) -> dict:
     """Assemble the full on-chain/off-chain payload for a single rollout.
 
@@ -440,7 +440,7 @@ def package_rollout_data(
     commit_sig = sign_commit_binding(
         tokens=rollout.tokens,
         randomness_hex=combined_randomness,
-        model_name=model.name_or_path,
+        model_name=model.name_or_path,  # type: ignore[attr-defined]
         layer_index=LAYER_INDEX,
         commitments=rollout.commitments,
         wallet=wallet,
@@ -466,7 +466,7 @@ def package_rollout_data(
             "commitments": rollout.commitments,
             "proof_version": rollout.proof_version,
             "model": {
-                "name": model.name_or_path,
+                "name": model.name_or_path,  # type: ignore[attr-defined]
                 "layer_index": LAYER_INDEX,
             },
             "signature": commit_sig.hex(),
@@ -538,7 +538,7 @@ async def generate_rollouts_for_window(
     timers: MiningTimers,
     monitor: Any | None,
     use_drand: bool,
-    checkpoint_window: int,
+    checkpoint_window: int | None,
     env_id: str | None = None,
     env_params: dict[str, Any] | None = None,
     generation_params: dict[str, Any] | None = None,
@@ -581,7 +581,7 @@ async def generate_rollouts_for_window(
     text_logs_emitted = 0  # Running count of emitted debug texts
     problem_count = 0
 
-    device = model.device
+    device = model.device  # type: ignore[attr-defined]
     # Batch size for parallel rollout generation (tune per node for memory/throughput)
     batch_size = int(os.getenv("GRAIL_GENERATION_BATCH_SIZE", "2"))
     if batch_size > ROLLOUTS_PER_PROBLEM:
@@ -620,7 +620,7 @@ async def generate_rollouts_for_window(
         logger.info("Using batch_size=%d for parallel rollout generation", batch_size)
 
     while True:
-        current_block = await subtensor.get_current_block()
+        current_block = await subtensor.get_current_block()  # type: ignore[await-not-coroutine]
         timers.update_block_time_ema(current_block)
         current_window = calculate_window_start(current_block)
         if current_window > window_start:

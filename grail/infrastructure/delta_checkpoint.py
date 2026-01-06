@@ -366,7 +366,7 @@ def compare_state_dicts_detailed(
             # Log detailed info for first few mismatched params
             if diff_params_logged < max_diff_params_to_log:
                 # Find indices of largest differences
-                top_diff_indices = diff.topk(min(5, num_different)).indices.tolist()
+                top_diff_indices = diff.topk(min(5, int(num_different))).indices.tolist()
                 top_diffs = []
                 for idx in top_diff_indices:
                     top_diffs.append(

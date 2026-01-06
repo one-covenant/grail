@@ -204,7 +204,7 @@ class ValidationService:
                 if self._chain_manager:
                     self._chain_manager.metagraph = meta
 
-                current_block = await self._subtensor.get_current_block()
+                current_block = await self._subtensor.get_current_block()  # type: ignore[misc]  # bittensor async stub
                 # Validate the last fully completed window, not the in-progress one
                 target_window = self._compute_target_validation_window(current_block)
 
@@ -443,7 +443,7 @@ class ValidationService:
             logger.info(
                 "VALIDATOR TOKENIZER INFO: transformers=%s, tokenizers=%s, name_or_path=%s, checkpoint=%s",
                 transformers.__version__,
-                tokenizers.__version__,
+                tokenizers.__version__,  # type: ignore[attr-defined]
                 getattr(self._tokenizer, "name_or_path", "unknown"),
                 str(checkpoint_path),
             )
@@ -472,14 +472,14 @@ class ValidationService:
         # Get window block hash and randomness
         if self._subtensor is None:
             raise RuntimeError("Subtensor not initialized")
-        target_window_hash = await self._subtensor.get_block_hash(target_window)
+        target_window_hash = await self._subtensor.get_block_hash(target_window)  # type: ignore[misc]  # bittensor async stub
         window_rand = await self._compute_window_randomness(target_window_hash, use_drand)
 
         # Compute upload deadline timestamp (start of the validator window)
         deadline_ts: float | None = None
+        deadline_block = target_window + WINDOW_LENGTH
         try:
             if self._chain_manager is not None:
-                deadline_block = target_window + WINDOW_LENGTH
                 deadline_ts = await self._chain_manager.get_block_timestamp(deadline_block)
                 if deadline_ts is None:
                     deadline_ts = await self._chain_manager.estimate_block_timestamp(deadline_block)
@@ -718,7 +718,7 @@ class ValidationService:
             try:
                 if self._subtensor is None:
                     raise RuntimeError("Subtensor not initialized")
-                await self._subtensor.set_weights(
+                await self._subtensor.set_weights(  # type: ignore[await-not-coroutine]
                     wallet=self._wallet,
                     netuid=self._netuid,
                     uids=list(meta.uids),
