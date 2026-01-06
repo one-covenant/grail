@@ -461,20 +461,20 @@ class CheckpointManager:
             - result.method: "fast" or "full" or "none"
             - checkpoint_path: Path to checkpoint (None if fast path used)
         """
-        # Cold start: use latest FULL checkpoint to minimize delta chain length
-        # This ensures we can reconstruct from available deltas in retention window
-        if model is None or current_window is None or current_window < 0:
-            checkpoint_window = await self.get_latest_full_checkpoint(target_window)
-            if checkpoint_window is None:
-                # Fallback to any checkpoint if no FULL checkpoint found
-                checkpoint_window = await self.get_latest_ready_checkpoint(target_window)
-                if checkpoint_window is None:
-                    return CheckpointLoadResult(success=False), None
-        else:
-            # Model already loaded: can use deltas, so any checkpoint works
-            checkpoint_window = await self.get_latest_ready_checkpoint(target_window)
-            if checkpoint_window is None:
-                return CheckpointLoadResult(success=False), None
+        # Always target the latest checkpoint that was READY before *target_window*.
+        #
+        # Rationale:
+        # - Validators enforce that miner rollouts were generated with the same checkpoint
+        #   the validator is using for that window.
+        # - On cold start, selecting only a FULL checkpoint can lag behind newer DELTA
+        #   checkpoints (which are still valid and reconstructable), causing
+        #   CHECKPOINT_MISMATCH and false rejections.
+        #
+        # We still preserve cold-start efficiency via get_checkpoint(): if the target
+        # checkpoint is DELTA, it reconstructs from the nearest cached/FULL base.
+        checkpoint_window = await self.get_latest_ready_checkpoint(target_window)
+        if checkpoint_window is None:
+            return CheckpointLoadResult(success=False), None
 
         # Already at this checkpoint
         if checkpoint_window == current_window and model is not None:
