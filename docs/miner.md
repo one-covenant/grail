@@ -173,12 +173,27 @@ Artifacts uploaded per rollout include:
 
 ## Troubleshooting
 
+### Quick Fixes
+
 - CUDA OOM or driver errors: Ensure you're using an NVIDIA A100 GPU; verify drivers match CUDA runtime; periodically clear cache.
 - GPU not detected: Currently requires NVIDIA A100. Check `nvidia-smi` output to verify GPU availability.
 - No uploads: check `R2_*` variables and bucket permissions; verify network/firewall.
 - Not receiving weights: ensure uploads succeed; validator will score the previous complete window.
 - Drand failures: miner automatically falls back to block-hash; you can use `--no-drand`.
 - Wallet not found: ensure `BT_WALLET_COLD`/`BT_WALLET_HOT` names exist in your `~/.bittensor/wallets`.
+
+### Debugging and Optimization
+
+**Don't debug on mainnet first!** The most efficient way to debug and optimize your miner is to run a local validator and monitor your submissions in real-time.
+
+For a comprehensive guide on debugging techniques, local validation setup, and optimization workflows, see:
+- **[Miner Debugging and Optimization Guide](miner-debugging.md)**
+
+Key points:
+- ✅ Run a local validator to test your miner submissions
+- ✅ Monitor logs for detailed rejection reasons
+- ✅ Fix issues before they impact mainnet performance
+- ❌ Don't rely solely on Grafana/WandB dashboards for debugging
 
 ---
 
@@ -196,5 +211,7 @@ Artifacts uploaded per rollout include:
 ## Support
 
 For issues or questions:
+- **FAQ**: [Common questions and answers](FAQ.md)
+- **Debugging Guide**: [Miner debugging and optimization](miner-debugging.md)
 - GitHub Issues: https://github.com/one-covenant/grail/issues
 - Discord: https://discord.com/channels/799672011265015819/1354089114189955102
