@@ -23,20 +23,12 @@ class Validator(ABC):
     - Declares severity (hard or soft)
     """
 
-    @property
-    @abstractmethod
-    def check_name(self) -> str:
-        """Name of this check (e.g., 'proof_valid', 'sat_problem_valid')."""
-        pass
+    # Subclasses must define these class attributes
+    check_name: str
+    """Name of this check (e.g., 'proof_valid', 'sat_problem_valid')."""
 
-    @property
-    def severity(self) -> str:
-        """Severity of this check: 'hard' or 'soft'.
-
-        Hard checks: Failure causes immediate rejection
-        Soft checks: Failure accumulates, threshold-based rejection
-        """
-        return "hard"  # Default to hard
+    severity: str = "hard"
+    """Severity: 'hard' (immediate rejection) or 'soft' (threshold-based)."""
 
     @abstractmethod
     def validate(self, ctx: ValidationContext) -> bool:

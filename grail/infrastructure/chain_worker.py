@@ -114,7 +114,12 @@ def _fetch_commitments_sync(
         total_entries = 0
         skipped_entries = 0
 
-        for key, value in query_result:
+        if query_result is None:
+            logger.warning("Chain query returned None, no commitments available")
+            return commitments
+
+        # query_map returns an iterable at runtime but Pyright stubs may not reflect this
+        for key, value in query_result:  # type: ignore[union-attr]
             total_entries += 1
             try:
                 # Decode the commitment

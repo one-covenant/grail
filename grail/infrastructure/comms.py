@@ -463,6 +463,8 @@ async def upload_file_chunked(
         f"📤 Starting chunked upload of {key} ({total_size} bytes, {(total_size + chunk_size - 1) // chunk_size} chunks)"
     )
 
+    client = None
+    upload_id = None
     try:
         client = await _get_cached_client(credentials, use_write)
 
@@ -529,19 +531,21 @@ async def upload_file_chunked(
 
     except asyncio.TimeoutError as e:
         logger.error(f"❌ Upload timeout for {key} after {upload_timeout}s: {e}")
-        try:
-            bucket_id = get_bucket_id(credentials, use_write)
-            await client.abort_multipart_upload(Bucket=bucket_id, Key=key, UploadId=upload_id)
-        except Exception as cleanup_err:
-            logger.debug(f"Failed to cleanup after timeout: {cleanup_err}")
+        if client is not None and upload_id is not None:
+            try:
+                bucket_id = get_bucket_id(credentials, use_write)
+                await client.abort_multipart_upload(Bucket=bucket_id, Key=key, UploadId=upload_id)
+            except Exception as cleanup_err:
+                logger.debug(f"Failed to cleanup after timeout: {cleanup_err}")
         return False
     except Exception as e:
         logger.error(f"❌ Upload failed for {key}: {e}")
-        try:
-            bucket_id = get_bucket_id(credentials, use_write)
-            await client.abort_multipart_upload(Bucket=bucket_id, Key=key, UploadId=upload_id)
-        except Exception as cleanup_err:
-            logger.debug(f"Failed to cleanup after error: {cleanup_err}")
+        if client is not None and upload_id is not None:
+            try:
+                bucket_id = get_bucket_id(credentials, use_write)
+                await client.abort_multipart_upload(Bucket=bucket_id, Key=key, UploadId=upload_id)
+            except Exception as cleanup_err:
+                logger.debug(f"Failed to cleanup after error: {cleanup_err}")
         return False
 
 
@@ -780,6 +784,7 @@ async def download_file_chunked(
 
             # For large files, download in chunks
             chunks: list[bytes] = []
+            assert chunk_size is not None, "chunk_size must be set for chunked downloads"
             semaphore = asyncio.Semaphore(10 if chunk_size >= 200 * 1024 * 1024 else 30)
             tasks = []
 
@@ -1533,7 +1538,7 @@ async def upload_to_huggingface(
                     )
 
                 # Append new data to existing
-                combined_dataset = concatenate_datasets([existing_dataset, dataset])
+                combined_dataset = concatenate_datasets([existing_dataset, dataset])  # type: ignore[arg-type]  # HF dataset type stub issue
                 combined_dataset.push_to_hub(
                     dataset_name, token=token, private=False, split="train"
                 )
@@ -1592,7 +1597,7 @@ async def download_from_huggingface(
             dataset = dataset.filter(lambda x: x["window"] == window)
 
         # Convert to list of dicts
-        rollouts = dataset.to_list()
+        rollouts = dataset.to_list()  # type: ignore[attr-defined]  # HF dataset method exists but not in stubs
 
         # Apply limit if specified
         if limit:

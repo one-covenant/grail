@@ -101,9 +101,9 @@ class BaseNeuron:
         """
         if self._subtensor is None:
             logger.info("Making Bittensor connection...")
-            self._subtensor = await create_subtensor()
+            self._subtensor = await create_subtensor()  # type: ignore[assignment]
             logger.info("Connected to Bittensor")
-        return self._subtensor
+        return self._subtensor  # type: ignore[return-value]
 
     def reset_subtensor(self) -> None:
         """Clear the cached subtensor instance.

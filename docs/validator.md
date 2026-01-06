@@ -130,7 +130,7 @@ For centralized logging, use Promtail to ship logs to Loki. This approach is mor
    PROMTAIL_LOKI_URL=http://your-loki-server:3100/loki/api/v1/push
    GRAIL_ENV=prod
    GRAIL_LOG_FILE=/var/log/grail/grail.log
-   
+
    # Optional: log rotation settings
    GRAIL_LOG_MAX_SIZE=100MB
    GRAIL_LOG_BACKUP_COUNT=5
@@ -140,7 +140,7 @@ For centralized logging, use Promtail to ship logs to Loki. This approach is mor
    ```bash
    docker compose --env-file .env --profile promtail -f docker/docker-compose.validator.yml up -d
    ```
-   
+
    Or set the profile in your environment:
    ```bash
    export COMPOSE_PROFILES=promtail

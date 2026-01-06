@@ -44,7 +44,3 @@ COPY README.md /app/README.md
 
 # Entrypoint delegates to uv
 ENTRYPOINT ["uv", "run", "grail"]
-
-
-
-

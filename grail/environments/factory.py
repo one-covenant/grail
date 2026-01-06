@@ -103,6 +103,7 @@ def create_env(
     *,
     task_source: Any | None = None,
     split: str = "train",
+    env_params: dict[str, Any] | None = None,
 ) -> MultiTurnEnv:
     """Create environment instance with clean dependency injection.
 
@@ -113,6 +114,7 @@ def create_env(
         env_id: Environment identifier (defaults to CURRENT_ENV_ID)
         task_source: Optional task source (if None, uses cached source)
         split: Dataset split for GSM8K/MATH (train/test/validation)
+        env_params: Optional environment parameters (overrides defaults like split)
 
     Returns:
         Initialized environment instance
@@ -128,8 +130,14 @@ def create_env(
         >>> # Custom source (bypasses cache)
         >>> custom_source = MATHTaskSource(split="validation")
         >>> env = create_env("math", task_source=custom_source)
+        >>> # With runtime params from checkpoint
+        >>> env = create_env("mbpp", env_params={"split": "validation"})
     """
     env_id = env_id or CURRENT_ENV_ID
+
+    # Override split with env_params if provided (check for non-empty dict)
+    if env_params:
+        split = env_params.get("split", split)
 
     if env_id == "sat":
         from .sat_env import SATEnv
@@ -185,6 +193,7 @@ def create_env_factory(
     *,
     task_source: Any | None = None,
     split: str = "train",
+    env_params: dict[str, Any] | None = None,
 ) -> Any:
     """Create environment factory function for deferred instantiation.
 
@@ -195,6 +204,7 @@ def create_env_factory(
         env_id: Environment identifier (defaults to CURRENT_ENV_ID)
         task_source: Optional task source for dataset-backed envs
         split: Dataset split for GSM8K
+        env_params: Optional environment parameters (overrides defaults)
 
     Returns:
         Callable that creates new environment instances
@@ -203,10 +213,14 @@ def create_env_factory(
         >>> factory = create_env_factory("gsm8k", split="test")
         >>> env1 = factory()
         >>> env2 = factory()
+        >>> # With runtime params from checkpoint
+        >>> factory = create_env_factory("mbpp", env_params={"split": "validation"})
     """
     env_id = env_id or CURRENT_ENV_ID
 
     def _factory() -> MultiTurnEnv:
-        return create_env(env_id=env_id, task_source=task_source, split=split)
+        return create_env(
+            env_id=env_id, task_source=task_source, split=split, env_params=env_params
+        )
 
     return _factory

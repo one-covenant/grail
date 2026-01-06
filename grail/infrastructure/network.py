@@ -414,7 +414,10 @@ async def create_subtensor(*, resilient: bool = True) -> bt.subtensor | Resilien
                 if asyncio.iscoroutinefunction(subtensor.close):
                     await asyncio.wait_for(subtensor.close(), timeout=5.0)
                 else:
-                    subtensor.close()
+                    result = subtensor.close()
+                    # Handle case where close() returns a coroutine unexpectedly
+                    if asyncio.iscoroutine(result):
+                        await asyncio.wait_for(result, timeout=5.0)
             except Exception:
                 pass
         raise
@@ -431,6 +434,6 @@ async def create_subtensor(*, resilient: bool = True) -> bt.subtensor | Resilien
             retries,
             backoff,
         )
-        return ResilientSubtensor(subtensor, timeout=timeout, retries=retries, backoff_base=backoff)
+        return ResilientSubtensor(subtensor, timeout=timeout, retries=retries, backoff_base=backoff)  # type: ignore[arg-type]
 
-    return subtensor
+    return subtensor  # type: ignore[return-value]

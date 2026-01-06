@@ -230,6 +230,7 @@ class MathDatasetEnv(SingleTurnEnv):
 
         # Sample task from source
         self._task = self._source.next(**task_filters)
+        assert self._task is not None, "TaskSource.next() must return a TaskSpec"
 
         # Create initial observation
         obs = Observation(

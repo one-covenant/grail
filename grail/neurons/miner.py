@@ -175,7 +175,7 @@ class MinerNeuron(BaseNeuron):
                     # Use shared subtensor from base class
                     subtensor = await self.get_subtensor()
 
-                    current_block = await subtensor.get_current_block()
+                    current_block = await subtensor.get_current_block()  # type: ignore[misc]  # bittensor async stub
                     window_start = self.calculate_window(current_block)
 
                     # Set monitoring context for metrics (use block_number for x-axis)
@@ -257,6 +257,40 @@ class MinerNeuron(BaseNeuron):
                         last_window_start = window_start  # Prevent infinite loop
                         continue
 
+                    # Fetch checkpoint metadata for environment and generation configuration
+                    env_id = None
+                    env_params = {}
+                    generation_params = {}
+
+                    if current_checkpoint_window is not None:
+                        try:
+                            checkpoint_metadata = await checkpoint_manager.get_checkpoint_metadata(
+                                current_checkpoint_window
+                            )
+                            if checkpoint_metadata:
+                                env_id = checkpoint_metadata.env_id
+                                env_params = checkpoint_metadata.env_params or {}
+                                generation_params = checkpoint_metadata.generation_params or {}
+                                logger.info(
+                                    f"Using checkpoint config: env_id={env_id}, "
+                                    f"generation_params={generation_params}"
+                                )
+                            else:
+                                logger.warning(
+                                    f"No metadata found for checkpoint window {current_checkpoint_window}, "
+                                    f"using defaults"
+                                )
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to fetch checkpoint metadata (window={current_checkpoint_window}): {e}",
+                                exc_info=True,
+                            )
+                            # Continue with defaults on error
+                    else:
+                        logger.warning(
+                            "current_checkpoint_window is None, using default env config"
+                        )
+
                     logger.info(
                         f"🔥 Starting inference generation for window "
                         f"{window_start}-{window_start + WINDOW_LENGTH - 1}"
@@ -285,6 +319,9 @@ class MinerNeuron(BaseNeuron):
                         monitor,
                         self.use_drand,
                         current_checkpoint_window,
+                        env_id=env_id,
+                        env_params=env_params,
+                        generation_params=generation_params,
                     )
 
                     if inferences:

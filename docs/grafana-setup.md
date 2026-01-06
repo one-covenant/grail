@@ -64,7 +64,7 @@ docker compose --env-file ../.env -f compose.grafana.yaml down
 
 - **Loki**: Log aggregation system (port 3100)
 - **Grafana**: Visualization and dashboards (port 3000)
-- **Auto-provisioning**: 
+- **Auto-provisioning**:
   - Loki datasource pre-configured
   - Public log explorer dashboard as default home
 - **Public access**: Anonymous viewing enabled with embedding support

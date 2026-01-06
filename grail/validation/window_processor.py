@@ -131,10 +131,9 @@ class WindowProcessor:
             except Exception:
                 b0 = None
 
+            # Get UID before try block so it's available in except handler
+            uid = uid_by_hotkey.get(miner_hotkey, miner_hotkey)
             try:
-                # Validate miner (use .get() to avoid KeyError)
-                uid = uid_by_hotkey.get(miner_hotkey, miner_hotkey)
-
                 with miner_log_context(uid, window):
                     result: MinerResults = await self._miner_validator.validate_miner(
                         miner_hotkey=miner_hotkey,

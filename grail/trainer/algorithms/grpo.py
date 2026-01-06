@@ -20,14 +20,6 @@ import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
 
-try:
-    from grail.infrastructure.miner_data import fetch_multiple_miners_data
-except Exception:  # pragma: no cover - optional in offline mode
-
-    async def fetch_multiple_miners_data(*args: Any, **kwargs: Any) -> dict[str, Any]:  # type: ignore[override]
-        raise RuntimeError("Miner data fetching is unavailable in offline mode.")
-
-
 from grail.shared.constants import (
     GRPO_RANKING_REWARD_WEIGHT,
     GRPO_RANKING_VARIANCE_WEIGHT,
@@ -57,6 +49,20 @@ if TYPE_CHECKING:
     from grail.trainer.config import TrainingConfig
 
 logger = logging.getLogger(__name__)
+
+
+async def fetch_multiple_miners_data(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Fetch miner window data (lazy import).
+
+    Keeping this import lazy prevents `grail.trainer.algorithms.grpo` from pulling in
+    bittensor/networking dependencies during offline usage (e.g., research/offline_trainer).
+    """
+    try:
+        from grail.infrastructure.miner_data import fetch_multiple_miners_data as _impl
+    except Exception as exc:  # pragma: no cover - optional in offline mode
+        raise RuntimeError("Miner data fetching is unavailable in offline mode.") from exc
+
+    return await _impl(*args, **kwargs)
 
 
 class AdaptiveKLController:
@@ -1159,12 +1165,26 @@ class GRPOAlgorithm(TrainingAlgorithm):
             tokens = rollout.tokens[: self.config.max_length]
             batch_tokens.append(tokens)
 
-            # CRITICAL FIX: Recalculate completion_len after truncation
-            # If sequence is truncated, actual completion tokens may be fewer
-            actual_prompt_len = rollout.prompt_length
-            actual_comp_len = min(
-                rollout.completion_length,
-                self.config.max_length - rollout.prompt_length,
+            # CRITICAL FIX: Recalculate prompt/completion lengths after truncation
+            # Both values must be clamped to valid non-negative ranges
+            #
+            # Case 1: prompt_length > max_length
+            #   - actual_prompt_len = max_length (entire sequence is prompt)
+            #   - actual_comp_len = 0 (no completion tokens in truncated sequence)
+            #
+            # Case 2: prompt_length <= max_length
+            #   - actual_prompt_len = prompt_length (unchanged)
+            #   - actual_comp_len = min(completion_length, max_length - prompt_length)
+            #
+            # The max(0, ...) guards are critical to prevent negative lengths which
+            # would corrupt mask construction and gradient computation.
+            actual_prompt_len = min(rollout.prompt_length, self.config.max_length)
+            actual_comp_len = max(
+                0,
+                min(
+                    rollout.completion_length,
+                    self.config.max_length - rollout.prompt_length,
+                ),
             )
             batch_prompt_lens.append(actual_prompt_len)
             batch_comp_lens.append(actual_comp_len)
@@ -1392,6 +1412,10 @@ class GRPOAlgorithm(TrainingAlgorithm):
 
                 # Expand to [batch_size, max_comp_len] by broadcasting
                 per_token_loss = per_token_loss.expand(-1, completion_mask.size(1))
+            else:
+                raise ValueError(
+                    f"Unknown importance_sampling_level: {self.importance_sampling_level}"
+                )
 
             # Aggregate using variant-specific strategy
             max_completion_length = completion_mask.size(1)
@@ -1746,6 +1770,10 @@ class GRPOAlgorithm(TrainingAlgorithm):
 
         reset_actual_batch_tracker()
 
+        # Track last batch tensors for sparse analysis (may be None if no batches processed)
+        input_ids_tensor: torch.Tensor | None = None
+        attention_mask_tensor: torch.Tensor | None = None
+
         for micro_idx in range(num_micro_batches):
             start_idx = micro_idx * micro_batch_size
             end_idx = min(start_idx + micro_batch_size, len(all_rollouts))
@@ -1859,7 +1887,11 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 local_completion_tokens = completion_mask.sum()  # Keep as tensor
                 # Gather across all processes with proper shape [1] for each process
                 all_tokens = accelerator.gather(local_completion_tokens.unsqueeze(0))
-                total_completion_tokens = int(all_tokens.sum().item())
+                # accelerator.gather returns Tensor but Pyright thinks it could be Mapping
+                if isinstance(all_tokens, torch.Tensor):
+                    total_completion_tokens = int(all_tokens.sum().item())
+                else:
+                    total_completion_tokens = int(local_completion_tokens.item())
 
             # Step 7: Compute policy gradient loss with importance sampling and PPO clipping
             loss_pg, ratio_clip_frac_val, ratio_ceiling_frac_val, ratios_pre_ceiling = (
@@ -1874,7 +1906,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
             )
 
             # Step 8: Compute KL divergence penalty (only when enabled)
-            if kl_enabled:
+            if kl_enabled and logprobs_ref_per_token is not None:
                 loss_kl, kl_value = self._compute_kl_divergence_loss(
                     logprobs_current_per_token,
                     logprobs_ref_per_token,
@@ -2015,7 +2047,11 @@ class GRPOAlgorithm(TrainingAlgorithm):
                             logger.warning("Failed to compute param change metrics: %s", exc)
 
                         # Sparse quality analysis (uses same snapshot)
-                        if self.sparse_analyzer.enabled:
+                        if (
+                            self.sparse_analyzer.enabled
+                            and input_ids_tensor is not None
+                            and attention_mask_tensor is not None
+                        ):
                             try:
                                 sparse_metrics = self.sparse_analyzer.analyze(
                                     model, input_ids_tensor, attention_mask_tensor
@@ -2087,7 +2123,11 @@ class GRPOAlgorithm(TrainingAlgorithm):
                             logger.warning("Failed to compute param change metrics: %s", exc)
 
                         # Sparse quality analysis (uses same snapshot)
-                        if self.sparse_analyzer.enabled:
+                        if (
+                            self.sparse_analyzer.enabled
+                            and input_ids_tensor is not None
+                            and attention_mask_tensor is not None
+                        ):
                             try:
                                 sparse_metrics = self.sparse_analyzer.analyze(
                                     model, input_ids_tensor, attention_mask_tensor

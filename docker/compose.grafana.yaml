@@ -48,5 +48,3 @@ services:
 volumes:
   loki-data:
   grafana-data:
-
-

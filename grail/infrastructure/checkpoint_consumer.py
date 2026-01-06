@@ -90,6 +90,13 @@ class CheckpointMetadata:
     anchor_window: int | None = None  # For DELTA: nearest FULL checkpoint for recovery
     weights_hash: str | None = None  # SHA256 of final weights for verification
 
+    # Environment and generation configuration
+    env_id: str | None = None  # Environment identifier (e.g., "mbpp", "gsm8k")
+    env_params: dict[str, Any] = field(default_factory=dict)  # Environment-specific parameters
+    generation_params: dict[str, Any] = field(
+        default_factory=dict
+    )  # Generation parameters (max_tokens, temperature, etc.)
+
     def remote_prefix(self) -> str:
         """Get the remote R2 prefix for this checkpoint.
 
@@ -454,20 +461,20 @@ class CheckpointManager:
             - result.method: "fast" or "full" or "none"
             - checkpoint_path: Path to checkpoint (None if fast path used)
         """
-        # Cold start: use latest FULL checkpoint to minimize delta chain length
-        # This ensures we can reconstruct from available deltas in retention window
-        if model is None or current_window is None or current_window < 0:
-            checkpoint_window = await self.get_latest_full_checkpoint(target_window)
-            if checkpoint_window is None:
-                # Fallback to any checkpoint if no FULL checkpoint found
-                checkpoint_window = await self.get_latest_ready_checkpoint(target_window)
-                if checkpoint_window is None:
-                    return CheckpointLoadResult(success=False), None
-        else:
-            # Model already loaded: can use deltas, so any checkpoint works
-            checkpoint_window = await self.get_latest_ready_checkpoint(target_window)
-            if checkpoint_window is None:
-                return CheckpointLoadResult(success=False), None
+        # Always target the latest checkpoint that was READY before *target_window*.
+        #
+        # Rationale:
+        # - Validators enforce that miner rollouts were generated with the same checkpoint
+        #   the validator is using for that window.
+        # - On cold start, selecting only a FULL checkpoint can lag behind newer DELTA
+        #   checkpoints (which are still valid and reconstructable), causing
+        #   CHECKPOINT_MISMATCH and false rejections.
+        #
+        # We still preserve cold-start efficiency via get_checkpoint(): if the target
+        # checkpoint is DELTA, it reconstructs from the nearest cached/FULL base.
+        checkpoint_window = await self.get_latest_ready_checkpoint(target_window)
+        if checkpoint_window is None:
+            return CheckpointLoadResult(success=False), None
 
         # Already at this checkpoint
         if checkpoint_window == current_window and model is not None:
@@ -703,6 +710,30 @@ class CheckpointManager:
 
         return results
 
+    # --------------------------- Public API --------------------------- #
+
+    async def get_checkpoint_metadata(self, window: int) -> CheckpointMetadata | None:
+        """Public API: Fetch checkpoint metadata for a given window.
+
+        Prefers DELTA metadata when available (for fast-path compatibility),
+        falls back to FULL metadata if DELTA not found.
+
+        Args:
+            window: Window number to fetch metadata for
+
+        Returns:
+            CheckpointMetadata if found, None otherwise
+
+        Example:
+            >>> metadata = await checkpoint_manager.get_checkpoint_metadata(15000)
+            >>> if metadata:
+            ...     env_id = metadata.env_id
+            ...     generation_params = metadata.generation_params
+        """
+        if window is None:
+            return None
+        return await self._fetch_metadata(window)
+
     # --------------------------- Internal helpers --------------------------- #
 
     async def _fetch_metadata(self, window: int) -> CheckpointMetadata | None:
@@ -738,6 +769,9 @@ class CheckpointManager:
             prev_window=payload.get("prev_window"),
             anchor_window=payload.get("anchor_window"),
             weights_hash=payload.get("weights_hash"),
+            env_id=payload.get("env_id"),
+            env_params=payload.get("env_params", {}),
+            generation_params=payload.get("generation_params", {}),
         )
         self._metadata_cache[cache_key] = metadata
         return metadata
@@ -767,6 +801,9 @@ class CheckpointManager:
             prev_window=payload.get("prev_window"),
             anchor_window=payload.get("anchor_window"),
             weights_hash=payload.get("weights_hash"),
+            env_id=payload.get("env_id"),
+            env_params=payload.get("env_params", {}),
+            generation_params=payload.get("generation_params", {}),
         )
         self._metadata_cache[cache_key] = metadata
         return metadata
@@ -1564,39 +1601,3 @@ def _unique_partial_dir(cache_root: Path, stem: str) -> Path:
     """
     suffix = f"{os.getpid()}.{uuid.uuid4().hex[:8]}"
     return cache_root / f"{stem}.{suffix}.partial"
-
-
-# --------------------------------------------------------------------------- #
-#                        DEPRECATED: Fallback Logic                           #
-# --------------------------------------------------------------------------- #
-# The following function was used when the trainer might skip publishing
-# checkpoints for some windows. Now that the trainer ALWAYS publishes
-# checkpoints (even if training is skipped), this fallback logic is no longer
-# needed. Preserved here for reference only.
-
-
-async def _find_latest_ready_checkpoint_window_DEPRECATED(
-    checkpoint_manager: CheckpointManager,
-) -> int | None:
-    """Find the highest window number with READY marker (fully uploaded).
-
-    DEPRECATED: No longer needed since trainer always publishes checkpoints.
-
-    Used when requested checkpoint is not ready yet. Falls back to latest
-    available ready checkpoint to keep mining/validation operational.
-
-    Returns:
-        Window number of latest ready checkpoint, or None if none are ready.
-    """
-    windows = await checkpoint_manager.list_remote_windows()
-    if not windows:
-        return None
-
-    # Check windows in descending order to find latest ready one
-    for window in sorted(windows, reverse=True):
-        if await checkpoint_manager._is_checkpoint_ready(window):
-            logger.info(f"Found latest ready checkpoint at window {window}")
-            return window
-
-    logger.warning("No ready checkpoints found")
-    return None

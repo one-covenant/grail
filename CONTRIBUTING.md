@@ -44,12 +44,13 @@ Thanks for helping make this project better. Please keep changes focused, well-t
 - **Tests**: Add/extend tests; include a small benchmark or profile for inference/hardware changes.
 - **Docs**: Update README/docs where behavior or usage changes.
 - **Deps**: Reuse existing libraries when possible; if adding, pin exact versions and run `uv lock`.
+- **Pre-commit hooks**: Install and run `uv run pre-commit install` once, then hooks run automatically on commit.
 - **Local checks**: Formatting, linting, type checks, and tests must pass locally.
-  - Format: `uv run black .`
-  - Lint: `uv run flake8`
-  - Types: `uv run mypy`
+  - All checks: `uv run pre-commit run --all-files`
+  - Format: `uv run ruff format .`
+  - Lint: `uv run ruff check .`
+  - Types: `uv run pyright grail`
   - Tests: `uv run pytest -q`
-  - Note: CI for tests and type checks is **planned** but not yet enabled; please run locally.
 
 ### Style guide (Python)
 - **PEP 8, 100 chars**: Keep lines ≤100 characters.
@@ -80,6 +81,3 @@ and testing strategy before implementation.
   library versions), and relevant logs.
 
 We appreciate every contribution—thank you for helping improve performance, stability, and reach.
-
-
-

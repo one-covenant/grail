@@ -16,6 +16,7 @@ from __future__ import annotations
 import multiprocessing
 import time
 from dataclasses import dataclass, field
+from multiprocessing.synchronize import Event
 from typing import Any
 
 
@@ -35,11 +36,11 @@ class IPCChannels:
     """
 
     # Lifecycle
-    stop: multiprocessing.Event = field(default_factory=multiprocessing.Event)
+    stop: Event = field(default_factory=multiprocessing.Event)
 
     # Pause coordination (orchestrator ↔ training)
-    pause_requested: multiprocessing.Event = field(default_factory=multiprocessing.Event)
-    pause_confirmed: multiprocessing.Event = field(default_factory=multiprocessing.Event)
+    pause_requested: Event = field(default_factory=multiprocessing.Event)
+    pause_confirmed: Event = field(default_factory=multiprocessing.Event)
 
     # Heartbeat monitoring (training → orchestrator)
     # Using Any type because multiprocessing.Value is not generic

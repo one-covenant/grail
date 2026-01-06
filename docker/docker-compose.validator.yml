@@ -12,14 +12,14 @@ services:
     environment:
       # Debug configuration
       - GRAIL_DEBUG=${GRAIL_DEBUG:-false}
-      
+
       # Core Bittensor configuration
       - BT_WALLET_COLD=${BT_WALLET_COLD}
       - BT_WALLET_HOT=${BT_WALLET_HOT:-default}
       - NETUID=${NETUID}
       - BT_NETWORK=${BT_NETWORK}
       - BT_CHAIN_ENDPOINT=${BT_CHAIN_ENDPOINT}
-      
+
       # R2/S3 Object Storage (REQUIRED for validators)
       - R2_BUCKET_ID=${R2_BUCKET_ID}
       - R2_ACCOUNT_ID=${R2_ACCOUNT_ID}
@@ -27,7 +27,7 @@ services:
       - R2_WRITE_SECRET_ACCESS_KEY=${R2_WRITE_SECRET_ACCESS_KEY}
       - R2_READ_ACCESS_KEY_ID=${R2_READ_ACCESS_KEY_ID}
       - R2_READ_SECRET_ACCESS_KEY=${R2_READ_SECRET_ACCESS_KEY}
-      
+
       # Monitoring configuration
       - WANDB_API_KEY=${WANDB_API_KEY}
       - WANDB_PROJECT=${WANDB_PROJECT}
@@ -49,32 +49,32 @@ services:
       - WANDB_CONSOLE=off
       # Disable git info collection
       - WANDB_DISABLE_GIT=true
-      
+
       # Hugging Face configuration
       - HF_TOKEN=${HF_TOKEN}
       - HF_USERNAME=${HF_USERNAME}
       - HF_HOME=/root/.cache/huggingface
-      
+
       # GRAIL checkpoint configuration
       - GRAIL_BASE_CHECKPOINT_RETENTION_LIMIT=${GRAIL_BASE_CHECKPOINT_RETENTION_LIMIT:-3}
       - GRAIL_DELTA_CHECKPOINT_RETENTION_LIMIT=${GRAIL_DELTA_CHECKPOINT_RETENTION_LIMIT:-15}
       - GRAIL_CHECKPOINT_MILESTONE_INTERVAL=${GRAIL_CHECKPOINT_MILESTONE_INTERVAL:-100}
       - GRAIL_CACHE_DIR=${GRAIL_CACHE_DIR}
-      
+
       # Environment label for observability
       - GRAIL_ENV=${GRAIL_ENV:-prod}
-      
+
       # Performance tuning
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
       - TRANSFORMERS_NO_ADVISORY_WARNINGS=1
       - GRAIL_METRIC_BUFFER_SIZE=${GRAIL_METRIC_BUFFER_SIZE}
       - GRAIL_METRIC_FLUSH_INTERVAL=${GRAIL_METRIC_FLUSH_INTERVAL}
-      
+
       # Network timeout and retry configuration
       - BT_CALL_TIMEOUT=${BT_CALL_TIMEOUT:-15.0}
       - BT_CALL_RETRIES=${BT_CALL_RETRIES:-3}
       - BT_CALL_BACKOFF=${BT_CALL_BACKOFF:-5.0}
-      
+
       # Logging configuration
       - PROMTAIL_ENABLE=${PROMTAIL_ENABLE:-true}
       - GRAIL_LOG_FILE=${GRAIL_LOG_FILE:-/var/log/grail/grail.log}
@@ -89,7 +89,7 @@ services:
       - validator-logs:/var/log/grail
       # Mount host /ephemeral (1.5TB) for checkpoints
       - /ephemeral:/ephemeral
-      
+
     deploy:
       resources:
         reservations:
@@ -97,10 +97,10 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    
+
     networks:
       - grail-network
-    
+
     # Health check to ensure validator is running
     healthcheck:
       test: ["CMD", "pgrep", "-f", "grail validate"]
@@ -108,7 +108,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
-    
+
     # Labels for Watchtower
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
