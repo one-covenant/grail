@@ -20,10 +20,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, cast
 
-try:
-    import bittensor as bt
-except Exception:  # pragma: no cover - optional in offline mode
-    bt = None  # type: ignore[assignment]
 import numpy as np
 import torch
 
@@ -1153,7 +1149,7 @@ class AgentEnvLoop:
             # Sign commitments
             commitment_data = json.dumps(commitments, sort_keys=True)
             commitment_hash = hashlib.sha256(commitment_data.encode()).digest()
-            if bt is None or wallet is None:
+            if wallet is None:
                 raise RuntimeError(
                     "GRAIL proof generation requires bittensor wallet (unavailable in offline mode)"
                 )

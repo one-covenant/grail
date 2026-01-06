@@ -65,7 +65,7 @@ def get_model(
 
     Args:
         model_name: HuggingFace model identifier or local checkpoint path
-        device: Target device ("cuda", "cpu", or None for auto-detect)
+        device: Target device (e.g., "cuda", "cuda:0", "cpu", or None for auto-detect)
         use_safetensors: Whether to prefer safetensors format
         eval_mode: Whether to set model to eval() mode
         use_flash_attention: Whether to use Flash Attention 2 (requires flash-attn package).
@@ -82,6 +82,8 @@ def get_model(
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.debug(f"Auto-detected device: {device}")
+
+    device_is_cuda = str(device).startswith("cuda")
 
     # Check if this is a local checkpoint path with metadata
     original_model_name = model_name
@@ -113,7 +115,7 @@ def get_model(
 
     # Configure attention implementation
     attn_implementation = None
-    if use_flash_attention and device == "cuda":
+    if use_flash_attention and device_is_cuda:
         try:
             import flash_attn  # noqa: F401
 
@@ -130,7 +132,7 @@ def get_model(
         model_name,
         use_safetensors=use_safetensors,
         attn_implementation=attn_implementation,
-        torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
+        torch_dtype=torch.bfloat16 if device_is_cuda else torch.float32,
     )
 
     # Preserve original model name for GRAIL proof validation

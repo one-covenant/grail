@@ -20,14 +20,6 @@ import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
 
-try:
-    from grail.infrastructure.miner_data import fetch_multiple_miners_data
-except Exception:  # pragma: no cover - optional in offline mode
-
-    async def fetch_multiple_miners_data(*args: Any, **kwargs: Any) -> dict[str, Any]:  # type: ignore[override]
-        raise RuntimeError("Miner data fetching is unavailable in offline mode.")
-
-
 from grail.shared.constants import (
     GRPO_RANKING_REWARD_WEIGHT,
     GRPO_RANKING_VARIANCE_WEIGHT,
@@ -57,6 +49,20 @@ if TYPE_CHECKING:
     from grail.trainer.config import TrainingConfig
 
 logger = logging.getLogger(__name__)
+
+
+async def fetch_multiple_miners_data(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Fetch miner window data (lazy import).
+
+    Keeping this import lazy prevents `grail.trainer.algorithms.grpo` from pulling in
+    bittensor/networking dependencies during offline usage (e.g., research/offline_trainer).
+    """
+    try:
+        from grail.infrastructure.miner_data import fetch_multiple_miners_data as _impl
+    except Exception as exc:  # pragma: no cover - optional in offline mode
+        raise RuntimeError("Miner data fetching is unavailable in offline mode.") from exc
+
+    return await _impl(*args, **kwargs)
 
 
 class AdaptiveKLController:
@@ -1159,12 +1165,26 @@ class GRPOAlgorithm(TrainingAlgorithm):
             tokens = rollout.tokens[: self.config.max_length]
             batch_tokens.append(tokens)
 
-            # CRITICAL FIX: Recalculate completion_len after truncation
-            # If sequence is truncated, actual completion tokens may be fewer
-            actual_prompt_len = rollout.prompt_length
-            actual_comp_len = min(
-                rollout.completion_length,
-                self.config.max_length - rollout.prompt_length,
+            # CRITICAL FIX: Recalculate prompt/completion lengths after truncation
+            # Both values must be clamped to valid non-negative ranges
+            #
+            # Case 1: prompt_length > max_length
+            #   - actual_prompt_len = max_length (entire sequence is prompt)
+            #   - actual_comp_len = 0 (no completion tokens in truncated sequence)
+            #
+            # Case 2: prompt_length <= max_length
+            #   - actual_prompt_len = prompt_length (unchanged)
+            #   - actual_comp_len = min(completion_length, max_length - prompt_length)
+            #
+            # The max(0, ...) guards are critical to prevent negative lengths which
+            # would corrupt mask construction and gradient computation.
+            actual_prompt_len = min(rollout.prompt_length, self.config.max_length)
+            actual_comp_len = max(
+                0,
+                min(
+                    rollout.completion_length,
+                    self.config.max_length - rollout.prompt_length,
+                ),
             )
             batch_prompt_lens.append(actual_prompt_len)
             batch_comp_lens.append(actual_comp_len)
