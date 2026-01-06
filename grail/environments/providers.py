@@ -611,6 +611,30 @@ class MBPPTaskSource(TaskSource):
         MBPPTaskSource._cache["mbpp_train"] = new_train
         MBPPTaskSource._cache["mbpp_validation"] = new_validation
 
+    def _extract_function_signature(self, code: str) -> str:
+        """Extract function signature from reference solution.
+
+        Args:
+            code: Reference solution code
+
+        Returns:
+            Function signature line (e.g., "def func_name(args):") or empty string
+        """
+        if not code:
+            return ""
+
+        try:
+            # Find first 'def ' line
+            for line in code.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith("def "):
+                    # Return the signature line (up to and including the colon)
+                    return stripped
+        except Exception:
+            pass
+
+        return ""
+
     def next(self, *, seed: int | None = None, task_id: str | None = None) -> TaskSpec:
         """Sample task from dataset.
 
@@ -637,10 +661,21 @@ class MBPPTaskSource(TaskSource):
 
         sample = self._data[int(idx) % len(self._data)]
 
+        # Extract function signature from reference solution to provide as a stub
+        # This prevents function name guessing and improves success rate
+        function_signature = self._extract_function_signature(sample["code"])
+
+        # Build prompt with signature stub (following HumanEval's approach)
+        if function_signature:
+            question = f"{sample['text']}\n\n{function_signature}\n    pass"
+        else:
+            # Fallback if signature extraction fails
+            question = sample["text"]
+
         return TaskSpec(
             id=f"{self._split}_{idx}",
             payload={
-                "question": sample["text"],
+                "question": question,
                 "test_list": sample["test_list"],
                 "test_setup_code": sample["test_setup_code"],
                 "test_imports": sample["test_imports"],
