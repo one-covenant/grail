@@ -27,11 +27,13 @@ repos:
         require_serial: true
         exclude: ^(scripts/|research/)
 
-      # NOTE: pyright is intentionally excluded from pre-commit hooks.
-      # It runs on the entire grail/ directory and blocks commits until ALL
-      # type errors are fixed (currently 200+). Type checking is enforced in CI
-      # via .github/workflows/ci.yml instead. Run manually with:
-      #   uv run pyright grail
+      - id: pyright
+        name: pyright (typecheck)
+        entry: uv run pyright grail
+        language: system
+        types: [python]
+        pass_filenames: false
+        require_serial: true
 
   # Basic file quality checks (version-insensitive, safe to use from remote)
   - repo: https://github.com/pre-commit/pre-commit-hooks
