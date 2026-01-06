@@ -43,6 +43,9 @@ class ValidationContext:
     # Environment configuration from checkpoint metadata
     env_id: str | None = None  # Environment identifier from checkpoint
     env_params: dict[str, Any] = field(default_factory=dict)  # Environment params from checkpoint
+    generation_params: dict[str, Any] = field(
+        default_factory=dict
+    )  # Generation params (e.g., max_tokens) from checkpoint
 
     # Cached intermediate results (populated by validators)
     cached_logits: torch.Tensor | None = None

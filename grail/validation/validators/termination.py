@@ -17,7 +17,7 @@ class TerminationValidator(Validator):
     """Verifies rollout terminated via max length or confident EOS.
 
     Rollouts must terminate in one of two ways:
-    1. Reached exactly MAX_NEW_TOKENS (max length termination)
+    1. Reached the expected max completion length (max length termination)
     2. Ended with EOS token having probability >= MIN_EOS_PROBABILITY
     """
 
@@ -35,14 +35,27 @@ class TerminationValidator(Validator):
             rollout = ctx.commit.get("rollout", {})
             completion_len = rollout.get("completion_length")
 
+            # Prefer checkpoint-provided generation max_tokens when available.
+            # This avoids false failures when miners/validators intentionally use
+            # shorter completions (e.g., max_tokens=512 for code tasks).
+            expected_max_new_tokens = MAX_NEW_TOKENS
+            max_tokens_raw = ctx.generation_params.get("max_tokens")
+            if max_tokens_raw is not None:
+                try:
+                    max_tokens_int = int(max_tokens_raw)
+                    if max_tokens_int > 0:
+                        expected_max_new_tokens = min(max_tokens_int, MAX_NEW_TOKENS)
+                except (TypeError, ValueError):
+                    pass
+
             # Reject if exceeds max
-            if isinstance(completion_len, int) and completion_len > MAX_NEW_TOKENS:
-                logger.debug(f"Exceeds max tokens: {completion_len} > {MAX_NEW_TOKENS}")
+            if isinstance(completion_len, int) and completion_len > expected_max_new_tokens:
+                logger.debug("Exceeds max tokens: %s > %s", completion_len, expected_max_new_tokens)
                 ctx.checks[self.check_name] = False
                 return False
 
             # Check max length termination
-            if completion_len == MAX_NEW_TOKENS:
+            if completion_len == expected_max_new_tokens:
                 ctx.checks[self.check_name] = True
                 return True
 

@@ -189,6 +189,7 @@ class MinerValidator:
         # Fetch environment config from checkpoint metadata if checkpoint_manager is available
         env_id = None
         env_params = {}
+        generation_params: dict[str, Any] = {}
         if self._checkpoint_manager is not None and validator_checkpoint_window is not None:
             try:
                 checkpoint_metadata = await self._checkpoint_manager.get_checkpoint_metadata(
@@ -197,9 +198,12 @@ class MinerValidator:
                 if checkpoint_metadata is not None:
                     env_id = checkpoint_metadata.env_id
                     env_params = checkpoint_metadata.env_params or {}
+                    generation_params = checkpoint_metadata.generation_params or {}
                     logger.debug(
-                        f"Loaded env config from checkpoint {validator_checkpoint_window}: "
-                        f"env_id={env_id}"
+                        "Loaded checkpoint config from %s: env_id=%s max_tokens=%s",
+                        validator_checkpoint_window,
+                        env_id,
+                        generation_params.get("max_tokens"),
                     )
                 else:
                     logger.warning(
@@ -234,6 +238,7 @@ class MinerValidator:
             validator_checkpoint_window=validator_checkpoint_window,
             env_id=env_id,
             env_params=env_params,
+            generation_params=generation_params,
         )
 
         # Step 5: Check for early failures
@@ -438,6 +443,7 @@ class MinerValidator:
         validator_checkpoint_window: int | None = None,
         env_id: str | None = None,
         env_params: dict[str, Any] | None = None,
+        generation_params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Validate selected rollouts and accumulate state.
 
@@ -574,6 +580,7 @@ class MinerValidator:
                     device=model.device,
                     env_id=env_id,
                     env_params=env_params or {},
+                    generation_params=generation_params or {},
                 )
 
                 if monitor:
