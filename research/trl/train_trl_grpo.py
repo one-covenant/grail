@@ -48,24 +48,24 @@ load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
 sys.path.insert(0, _PROJECT_ROOT)
 
 # GRAIL imports - reuse task sources and validation logic (after sys.path modification)
+from grail.environments.execution import (  # noqa: E402
+    CodeExecutionPool,
+    check_code_executes,
+    set_global_execution_pool,
+)
 from grail.environments.math_hendrycks_env import _math_answers_equal  # noqa: E402
 from grail.environments.providers import (  # noqa: E402
     GSM8KTaskSource,
     MATHTaskSource,
     MBPPTaskSource,
 )
-from grail.environments.execution import (  # noqa: E402
-    check_code_executes,
-    CodeExecutionPool,
-    set_global_execution_pool,
-)
 from grail.shared.chat_templates import build_qwen_chat_template  # noqa: E402
-from grail.trainer.metrics import KMetricsAggregator, TaskReplicateResult  # noqa: E402
 from grail.trainer.analysis import (  # noqa: E402
     AnalysisConfig,
-    ModelAnalysisManager,
     GradientSparsityMetrics,
+    ModelAnalysisManager,
 )
+from grail.trainer.metrics import KMetricsAggregator, TaskReplicateResult  # noqa: E402
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1565,14 +1565,14 @@ def main() -> None:
         gradient_enabled=True,  # Enable gradient analysis
     )
     sparsity_analyzer = ModelAnalysisManager.create(sparsity_config)
-    
+
     # Add gradient sparsity metric
     gradient_sparsity = GradientSparsityMetrics(
         thresholds=[0.0, 10, 1, 1e-4, 1e-8, 1e-16, 1e-20],  # Only track exact zero gradients
         track_per_layer=False,
     )
     sparsity_analyzer.add_metric(gradient_sparsity)
-    
+
     sparsity_callback = SparsityCallback(sparsity_analyzer)
     print(f"  ✓ Sparsity analysis enabled (interval={sparsity_config.interval})")
 

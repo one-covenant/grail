@@ -1,0 +1,46 @@
+[project]
+name = "grail-trl-experiments"
+version = "0.1.0"
+description = "TRL GRPO experiments for GRAIL reasoning trace learning"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    # Core ML frameworks
+    "torch==2.9.1",
+    "transformers==4.57.1",
+    "trl==0.26.2",
+    "datasets==4.4.2",
+
+    # Training utilities
+    "accelerate==1.12.0",
+    "peft==0.18.0",
+
+    # Logging and monitoring
+    "wandb==0.23.1",
+    "tensorboard==2.20.0",
+
+    # Utilities
+    "python-dotenv==1.2.1",
+    "tqdm==4.67.1",
+    "aiohttp==3.13.3",
+
+    # Math and scientific computing
+    "numpy==2.4.0",
+    "sympy==1.14.0",  # For MATH dataset answer validation
+]
+
+[tool.uv]
+# This is a scripts-only project; avoid building/installing it as a package.
+package = false
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.0.2",
+    "pytest-asyncio==1.3.0",
+    "ruff==0.14.10",
+]
+
+# GPU-specific dependencies (flash-attention, etc.)
+gpu = [
+    "flash-attn==2.8.3",  # Optional: only if flash attention is available
+]
