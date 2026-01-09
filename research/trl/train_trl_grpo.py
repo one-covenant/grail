@@ -103,7 +103,7 @@ class Config:
     # Total training windows (GRAIL_TRAINER_TOTAL_WINDOWS) - controls iteration count
     # Each optimizer step = 32 groups × 16 rollouts = 512 samples
     # total_optimizer_steps calculated below based on total_windows
-    total_steps: int = 81
+    total_steps: int = 400
 
     # ────────────────────────────────────────────────────────────────────────
     # GRPO Loss Configuration (from grail/trainer/algorithms/grpo.py)
@@ -1401,11 +1401,21 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Comma-separated W&B tags (overrides WANDB_TAGS env var)",
     )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Model ID to use (overrides default Qwen/Qwen2.5-1.5B-Instruct)",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+
+    # Override model_id if specified via CLI (takes precedence over default)
+    if args.model:
+        cfg.model_id = args.model
 
     # Set random seeds for reproducibility
     import random
@@ -1417,6 +1427,7 @@ def main() -> None:
 
     print(f"🚀 Starting TRL GRPO training with {args.dataset.upper()} dataset")
     print(f"   Seed: {args.seed} | VLLM Port: {args.vllm_port} | Num Iterations: {args.num_iterations}")
+    print(f"   Model: {cfg.model_id}")
     if args.run_suffix:
         print(f"   Run suffix: {args.run_suffix}")
     print("=" * 80)
