@@ -199,6 +199,7 @@ class ProcessManager:
             "--vllm-port", str(port),
             "--group-port", str(group_port),
             "--run-suffix", f"instance{instance_id}_seed{seed}",
+            "--model", self.model_id,
         ]
         # Add W&B args if provided (CLI takes precedence over env vars)
         if self.wandb_project:
