@@ -6,17 +6,46 @@ using boto3 S3-compatible API with retry logic and progress tracking.
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import time
 from pathlib import Path
-from typing import Optional
 
 import boto3
+from boto3.exceptions import Boto3Error
 from botocore.config import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
+
+
+def _should_exclude(rel_path: Path, exclude_patterns: list[str]) -> bool:
+    """Check whether a relative path should be excluded.
+
+    Notes:
+    - Patterns without "/" are applied to the basename and directory components
+      (e.g., "__pycache__" excludes anything under that directory).
+    - Patterns with "/" are matched against the full relative POSIX path.
+    """
+    if not exclude_patterns:
+        return False
+
+    rel_posix = rel_path.as_posix()
+    for pattern in exclude_patterns:
+        if "/" in pattern:
+            if fnmatch.fnmatch(rel_posix, pattern):
+                return True
+            continue
+
+        if fnmatch.fnmatch(rel_path.name, pattern):
+            return True
+
+        # Allow excluding by directory name (e.g., "__pycache__")
+        if pattern in rel_path.parts:
+            return True
+
+    return False
 
 
 class R2Uploader:
@@ -64,11 +93,14 @@ class R2Uploader:
             retries={"max_attempts": max_retries, "mode": "adaptive"},
             connect_timeout=timeout,
             read_timeout=timeout,
+            # R2 is S3-compatible but works most reliably with path-style addressing.
+            s3={"addressing_style": "path"},
         )
 
         self.s3_client = boto3.client(
             "s3",
             endpoint_url=endpoint_url,
+            region_name="auto",
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
             config=boto_config,
@@ -98,9 +130,12 @@ class R2Uploader:
             logger.error(f"File not found: {local_file}")
             return False
 
-        for attempt in range(self.max_retries):
+        for attempt in range(1, self.max_retries + 1):
             try:
-                logger.debug(f"Uploading {local_file} -> s3://{bucket_name}/{r2_key} (attempt {attempt + 1})")
+                logger.debug(
+                    f"Uploading {local_file} -> s3://{bucket_name}/{r2_key} "
+                    f"(attempt {attempt}/{self.max_retries})"
+                )
 
                 self.s3_client.upload_file(
                     Filename=str(local_file),
@@ -111,20 +146,25 @@ class R2Uploader:
                 logger.info(f"✓ Uploaded: {r2_key}")
                 return True
 
-            except ClientError as e:
-                error_code = e.response.get("Error", {}).get("Code", "Unknown")
+            except (ClientError, BotoCoreError, Boto3Error) as e:
+                if isinstance(e, ClientError):
+                    error_code = e.response.get("Error", {}).get("Code", "Unknown")
+                else:
+                    error_code = type(e).__name__
+
                 logger.warning(
-                    f"Upload failed (attempt {attempt + 1}/{self.max_retries}): "
+                    f"Upload failed (attempt {attempt}/{self.max_retries}): "
                     f"{error_code} - {local_file}"
                 )
 
-                if attempt < self.max_retries - 1:
-                    time.sleep(retry_delay * (2 ** attempt))  # Exponential backoff
-                else:
-                    logger.error(f"✗ Failed to upload {local_file} after {self.max_retries} attempts")
-                    return False
-            except Exception as e:
-                logger.error(f"Unexpected error uploading {local_file}: {type(e).__name__}: {e}")
+                if attempt < self.max_retries:
+                    time.sleep(retry_delay * (2 ** (attempt - 1)))  # Exponential backoff
+                    continue
+
+                logger.error(f"✗ Failed to upload {local_file} after {self.max_retries} attempts")
+                return False
+            except OSError as e:
+                logger.error(f"Local file error uploading {local_file}: {type(e).__name__}: {e}")
                 return False
 
         return False
@@ -134,7 +174,7 @@ class R2Uploader:
         local_dir: Path,
         bucket_name: str,
         r2_prefix: str,
-        exclude_patterns: Optional[list[str]] = None,
+        exclude_patterns: list[str] | None = None,
     ) -> tuple[int, int]:
         """Upload entire directory to R2 recursively.
 
@@ -160,25 +200,23 @@ class R2Uploader:
         exclude_patterns = exclude_patterns or []
 
         for file_path in local_dir.rglob("*"):
-            if file_path.is_file():
-                # Check exclusion patterns
-                should_exclude = False
-                for pattern in exclude_patterns:
-                    if file_path.match(pattern):
-                        should_exclude = True
-                        break
+            if not file_path.is_file() or file_path.is_symlink():
+                continue
 
-                if not should_exclude:
-                    # Compute relative path and R2 key
-                    rel_path = file_path.relative_to(local_dir)
-                    r2_key = f"{r2_prefix.rstrip('/')}/{rel_path.as_posix()}"
-                    files_to_upload.append((file_path, r2_key))
+            rel_path = file_path.relative_to(local_dir)
+            if _should_exclude(rel_path, exclude_patterns):
+                continue
+
+            r2_key = f"{r2_prefix.rstrip('/')}/{rel_path.as_posix()}"
+            files_to_upload.append((file_path, r2_key))
 
         if not files_to_upload:
             logger.warning(f"No files found to upload in {local_dir}")
             return (0, 0)
 
-        logger.info(f"Uploading {len(files_to_upload)} files from {local_dir} to s3://{bucket_name}/{r2_prefix}")
+        logger.info(
+            f"Uploading {len(files_to_upload)} files from {local_dir} to s3://{bucket_name}/{r2_prefix}"
+        )
 
         # Upload with progress bar
         success_count = 0
@@ -212,12 +250,12 @@ class R2Uploader:
             self.s3_client.head_bucket(Bucket=bucket_name)
             logger.info(f"✓ Verified access to bucket: {bucket_name}")
             return True
-        except ClientError as e:
-            error_code = e.response.get("Error", {}).get("Code", "Unknown")
+        except (ClientError, BotoCoreError, Boto3Error) as e:
+            if isinstance(e, ClientError):
+                error_code = e.response.get("Error", {}).get("Code", "Unknown")
+            else:
+                error_code = type(e).__name__
             logger.error(f"✗ Cannot access bucket {bucket_name}: {error_code}")
-            return False
-        except Exception as e:
-            logger.error(f"✗ Unexpected error verifying bucket {bucket_name}: {e}")
             return False
 
 
@@ -228,7 +266,7 @@ def upload_experiment_artifacts(
     account_id: str,
     access_key: str,
     secret_key: str,
-    artifact_dirs: Optional[list[str]] = None,
+    artifact_dirs: list[str] | None = None,
 ) -> bool:
     """Upload all experiment artifacts to R2.
 
@@ -306,7 +344,9 @@ if __name__ == "__main__":
 
     if len(sys.argv) < 3:
         print("Usage: python r2_uploader.py <local_dir> <experiment_name>")
-        print("  Requires env vars: R2_BUCKET_ID, R2_ACCOUNT_ID, R2_WRITE_ACCESS_KEY_ID, R2_WRITE_SECRET_ACCESS_KEY")
+        print(
+            "  Requires env vars: R2_BUCKET_ID, R2_ACCOUNT_ID, R2_WRITE_ACCESS_KEY_ID, R2_WRITE_SECRET_ACCESS_KEY"
+        )
         sys.exit(1)
 
     local_dir = Path(sys.argv[1])

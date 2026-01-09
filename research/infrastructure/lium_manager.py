@@ -285,28 +285,45 @@ class LiumInfra:
             )
 
             pod = self.lium.wait_ready(result, timeout=300)
-            if pod and pod.executor:
-                # Get SSH connection info - use executor IP if pod.host is None
-                ssh_host = pod.host or pod.executor.ip
+            if not pod:
+                print(f"   ❌ Pod creation failed or timed out")
+                continue
 
-                # Wait for SSH port to be accessible (crucial - API reports ready before SSH)
-                print(f"   ⏳ Waiting for SSH ({ssh_host}:{pod.ssh_port})...")
-                if not _wait_for_ssh(ssh_host, pod.ssh_port, timeout=120, interval=5):
-                    print(f"   ⚠️  SSH not accessible after 120s, continuing anyway...")
+            # Get SSH connection info - try multiple sources
+            ssh_host = pod.host
+            if not ssh_host and pod.executor:
+                ssh_host = pod.executor.ip
+            if not ssh_host:
+                # Fallback to executor IP we selected earlier
+                ssh_host = executor.ip if hasattr(executor, "ip") else None
 
-                print(f"   ✅ Ready: {ssh_host}:{pod.ssh_port}")
-                self.state["pods"][name] = {
-                    "id": pod.id,
-                    "spec": spec.__dict__,
-                    "executor_id": executor.id,
-                    "bandwidth": {"upload": upload, "download": download},
-                    "ssh": {"host": ssh_host, "port": pod.ssh_port},
-                }
+            if not ssh_host:
+                print(f"   ❌ Could not determine SSH host for pod")
+                continue
 
-                if spec.ttl_hours:
-                    term_time = datetime.now(timezone.utc) + timedelta(hours=spec.ttl_hours)
-                    self.lium.schedule_termination(pod, termination_time=term_time.isoformat())
-                    print(f"   ⏰ Auto-terminate in {spec.ttl_hours}h")
+            ssh_port = pod.ssh_port
+            if not ssh_port:
+                print(f"   ❌ Could not determine SSH port for pod")
+                continue
+
+            # Wait for SSH port to be accessible (crucial - API reports ready before SSH)
+            print(f"   ⏳ Waiting for SSH ({ssh_host}:{ssh_port})...")
+            if not _wait_for_ssh(ssh_host, ssh_port, timeout=180, interval=5):
+                print(f"   ⚠️  SSH not accessible after 180s, continuing anyway...")
+
+            print(f"   ✅ Ready: {ssh_host}:{ssh_port}")
+            self.state["pods"][name] = {
+                "id": pod.id,
+                "spec": spec.__dict__,
+                "executor_id": executor.id,
+                "bandwidth": {"upload": upload, "download": download},
+                "ssh": {"host": ssh_host, "port": ssh_port},
+            }
+
+            if spec.ttl_hours:
+                term_time = datetime.now(timezone.utc) + timedelta(hours=spec.ttl_hours)
+                self.lium.schedule_termination(pod, termination_time=term_time.isoformat())
+                print(f"   ⏰ Auto-terminate in {spec.ttl_hours}h")
 
         self._save_state()
 
