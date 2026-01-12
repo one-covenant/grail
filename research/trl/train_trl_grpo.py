@@ -90,10 +90,10 @@ class Config:
     # Epochs per training iteration (GRAIL_TRAINER_EPOCHS, constants.py default: 1)
     epochs: int = 1
     # Batch size per device (GRAIL_TRAINER_BATCH_SIZE, constants.py default: 16)
-    batch_size: int = 4
+    batch_size: int = 2
     # Gradient accumulation steps (GRAIL_TRAINER_GRAD_ACCUM_STEPS, constants.py default: 8)
     # Effective batch = batch_size × grad_accum_steps = 4 × 128 = 512
-    grad_accum_steps: int = 128
+    grad_accum_steps: int = 256
     # Max sequence length (GRAIL_TRAINER_MAX_LENGTH, constants.py default: 2048)
     max_length: int = 4096
     # Gradient clipping threshold (GRAIL_TRAINER_GRAD_CLIP, constants.py default: 0.5)
@@ -1407,6 +1407,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Model ID to use (overrides default Qwen/Qwen2.5-1.5B-Instruct)",
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="CUDA device to use for training (e.g., 'cuda:0', 'cuda:1'). "
+        "If not specified, uses CUDA_VISIBLE_DEVICES default.",
+    )
     return parser.parse_args()
 
 
@@ -1487,11 +1494,22 @@ def main() -> None:
 
     # Load model and tokenizer
     print("\n📦 Loading model and tokenizer...")
+    # Determine device for training
+    if args.device:
+        train_device = torch.device(args.device)
+        # Set default CUDA device so model loads to correct GPU
+        if train_device.type == "cuda":
+            torch.cuda.set_device(train_device)
+        print(f"  Using device: {train_device}")
+    else:
+        train_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     try:
         model = AutoModelForCausalLM.from_pretrained(
             cfg.model_id,
             torch_dtype=torch.bfloat16,
             attn_implementation="flash_attention_2",
+            device_map=train_device,
         )
     except (ImportError, RuntimeError) as e:
         print(f"⚠️  Flash Attention 2 unavailable ({type(e).__name__}), using SDPA")
@@ -1499,6 +1517,7 @@ def main() -> None:
             cfg.model_id,
             torch_dtype=torch.bfloat16,  # FP32 master weights, AMP handles FP16 casting
             attn_implementation="sdpa",
+            device_map=train_device,
         )
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_id)
@@ -1554,7 +1573,7 @@ def main() -> None:
         # ─────────────────────────────────────────────────────────────────────
         learning_rate=cfg.lr,  # GRAIL_TRAINER_LR
         warmup_steps=cfg.warmup_steps,  # GRAIL_TRAINER_WARMUP_STEPS
-        lr_scheduler_type="constant",  #  constant
+        lr_scheduler_type="constant_with_warmup",  # warmup then constant
         # Use max_steps to control iterations (matching GRAIL_TRAINER_TOTAL_WINDOWS)
         # num_train_epochs is ignored when max_steps is set
         num_train_epochs=cfg.epochs,
@@ -1610,11 +1629,11 @@ def main() -> None:
         num_completions_to_print=1,
         wandb_log_unique_prompts=True,
         save_strategy="steps",
-        save_steps=25,
+        save_steps=50,
         bf16=True,
         report_to=["wandb"],
         eval_strategy="no",
-        run_name=f"trl_{adapter.name}_grpo_qwen15b_{run_id}",
+        run_name=f"trl_{adapter.name}_grpo_{args.model_id.replace('/', '_')}_{run_id}",
         # ─────────────────────────────────────────────────────────────────────
         # vLLM Configuration
         # ─────────────────────────────────────────────────────────────────────
@@ -1624,6 +1643,19 @@ def main() -> None:
         vllm_importance_sampling_correction=False,
         vllm_importance_sampling_cap=cfg.is_ratio_max,  # GRAIL_TRAINER_IS_RATIO_MAX
     )
+
+    # HuggingFace Trainer will wrap the model in DataParallel when `args.n_gpu > 1`.
+    # In our vLLM-server setup we intentionally keep both GPUs visible (for NCCL peer access),
+    # but training must remain single-GPU to avoid accidentally using the vLLM GPU.
+    _ = grpo_config.device  # trigger device setup + cache it
+    if (
+        grpo_config.use_vllm
+        and grpo_config.vllm_mode == "server"
+        and torch.cuda.is_available()
+        and torch.cuda.device_count() > 1
+    ):
+        grpo_config._n_gpu = 1
+        print("  ✓ Forced Trainer to single-GPU (n_gpu=1) to avoid DataParallel on vLLM GPU")
 
     # Create reward tracker with pass@k logging
     reward_tracker = TrainingPassAtKTracker(
@@ -1686,6 +1718,13 @@ def main() -> None:
 
     vllm_client_module.VLLMClient.__init__ = _patched_init
     print(f"  ✓ VLLMClient patched to use group_port={args.group_port}")
+
+    # Ensure CUDA device is correctly set before GRPOTrainer initialization
+    # GRPOTrainer uses torch.cuda.current_device() for NCCL communicator setup
+    if args.device:
+        device_idx = int(args.device.split(":")[-1]) if ":" in args.device else 0
+        torch.cuda.set_device(device_idx)
+        print(f"  ✓ CUDA device set to {device_idx} for NCCL communicator")
 
     trainer = GRPOTrainer(
         model=model,
