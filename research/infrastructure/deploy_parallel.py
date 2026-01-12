@@ -396,11 +396,21 @@ async def main() -> int:
     """Main entry point."""
     args = parse_args()
 
-    # Configure logging
+    # Configure logging with immediate flush for nohup visibility
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        force=True,  # Reconfigure if already set
     )
+    # Set logging handlers to flush immediately (critical for nohup)
+    for handler in logging.getLogger().handlers:
+        handler.setLevel(logging.INFO)
+    # Force unbuffered stdout/stderr for nohup
+    import sys
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(line_buffering=True)
 
     # List configurations
     if args.list_configs:
