@@ -95,7 +95,7 @@ class NohupExperimentRunner:
         self._conn: Optional[asyncssh.SSHClientConnection] = None
 
     async def connect(self):
-        """Establish SSH connection to the pod."""
+        """Establish SSH connection to the pod with keepalive."""
         logger.info(f"Connecting to {self.ssh_user}@{self.ssh_host}:{self.ssh_port}")
 
         connect_kwargs = {
@@ -103,6 +103,9 @@ class NohupExperimentRunner:
             "port": self.ssh_port,
             "username": self.ssh_user,
             "known_hosts": None,  # Accept any host key (for cloud VMs)
+            # SSH keepalive to prevent connection drops during long training
+            "keepalive_interval": 30,  # Send keepalive every 30 seconds
+            "keepalive_count_max": 5,  # Allow 5 missed keepalives before disconnect
         }
 
         if self.ssh_key_path:
@@ -310,41 +313,82 @@ class NohupExperimentRunner:
         logger.info(f"✓ Training started (PID file: {pid_file})")
         return pid_file
 
-    async def monitor_training(self, pid_file: str, check_interval: int = 60):
-        """Monitor training until completion.
+    async def monitor_training(
+        self,
+        pid_file: str,
+        check_interval: int = 60,
+        max_retries: int = 5,
+    ):
+        """Monitor training until completion with connection recovery.
 
         Polls the PID file to check if the process is still running.
+        Automatically reconnects if SSH connection is lost.
 
         Args:
             pid_file: Path to PID file on remote pod
             check_interval: Seconds between checks (default: 60)
+            max_retries: Maximum reconnection attempts (default: 5)
         """
         logger.info(f"Monitoring training (checking every {check_interval}s)")
+        # Flush logs for visibility under nohup
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+
+        consecutive_failures = 0
 
         while True:
-            # Check if PID file exists
-            stdout, _, exit_code = await self.run_command(
-                f"test -f {pid_file} && cat {pid_file}",
-                check=False,
-            )
+            try:
+                # Check if PID file exists
+                stdout, _, exit_code = await self.run_command(
+                    f"test -f {pid_file} && cat {pid_file}",
+                    check=False,
+                )
 
-            if exit_code != 0:
-                logger.warning("PID file not found, assuming training complete")
-                break
+                if exit_code != 0:
+                    logger.warning("PID file not found, assuming training complete")
+                    break
 
-            pid = stdout.strip()
+                pid = stdout.strip()
 
-            # Check if process is still running
-            _, _, ps_exit = await self.run_command(
-                f"ps -p {pid} > /dev/null 2>&1",
-                check=False,
-            )
+                # Check if process is still running
+                _, _, ps_exit = await self.run_command(
+                    f"ps -p {pid} > /dev/null 2>&1",
+                    check=False,
+                )
 
-            if ps_exit != 0:
-                logger.info(f"✓ Training complete (PID {pid} no longer running)")
-                break
+                if ps_exit != 0:
+                    logger.info(f"✓ Training complete (PID {pid} no longer running)")
+                    break
 
-            logger.info(f"Training still running (PID {pid})")
+                logger.info(f"Training still running (PID {pid})")
+                # Reset failure counter on successful check
+                consecutive_failures = 0
+
+            except (asyncssh.Error, OSError) as e:
+                consecutive_failures += 1
+                logger.warning(
+                    f"SSH connection error (attempt {consecutive_failures}/{max_retries}): "
+                    f"{type(e).__name__}: {e}"
+                )
+                # Flush error logs
+                for handler in logging.getLogger().handlers:
+                    handler.flush()
+
+                if consecutive_failures >= max_retries:
+                    logger.error("Max reconnection attempts reached, giving up")
+                    raise
+
+                # Attempt to reconnect
+                logger.info("Attempting to reconnect...")
+                await self.disconnect()
+                await asyncio.sleep(5)  # Brief pause before reconnect
+                await self.connect()
+                logger.info("Reconnected successfully")
+
+            # Flush logs periodically for visibility under nohup
+            for handler in logging.getLogger().handlers:
+                handler.flush()
+
             await asyncio.sleep(check_interval)
 
     async def download_artifacts(self, local_download_dir: Path) -> Path:
@@ -513,6 +557,12 @@ class NohupExperimentRunner:
             logger.error(f"✗ Experiment {config.name} failed: {type(e).__name__}: {e}")
             import traceback
             traceback.print_exc()
+            # Flush logs to ensure error is captured (especially under nohup)
+            for handler in logging.getLogger().handlers:
+                handler.flush()
+            import sys
+            sys.stdout.flush()
+            sys.stderr.flush()
             return False
 
         finally:
@@ -531,14 +581,23 @@ if __name__ == "__main__":
     async def main():
         if len(sys.argv) < 3:
             print("Usage: python nohup_experiment_runner.py <ssh_host> <ssh_port>")
-            print("  Requires env vars: R2_BUCKET_ID, R2_ACCOUNT_ID, R2_WRITE_ACCESS_KEY_ID, R2_WRITE_SECRET_ACCESS_KEY")
+            print(
+                "  Requires env vars: R2_BUCKET_NAME (preferred) or R2_BUCKET_ID (legacy), "
+                "R2_ACCOUNT_ID, R2_WRITE_ACCESS_KEY_ID, R2_WRITE_SECRET_ACCESS_KEY"
+            )
+            sys.exit(1)
+
+        bucket_name = os.getenv("R2_BUCKET_NAME") or os.getenv("R2_BUCKET_ID")
+        if not bucket_name:
+            print("Missing env var: set R2_BUCKET_NAME (preferred) or R2_BUCKET_ID (legacy)")
             sys.exit(1)
 
         runner = NohupExperimentRunner(
             ssh_host=sys.argv[1],
             ssh_port=int(sys.argv[2]),
             r2_config={
-                "bucket_id": os.environ["R2_BUCKET_ID"],
+                # Legacy key name; value must be the *bucket name* for the S3 API.
+                "bucket_id": bucket_name,
                 "account_id": os.environ["R2_ACCOUNT_ID"],
                 "access_key": os.environ["R2_WRITE_ACCESS_KEY_ID"],
                 "secret_key": os.environ["R2_WRITE_SECRET_ACCESS_KEY"],
