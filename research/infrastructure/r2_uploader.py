@@ -8,16 +8,32 @@ from __future__ import annotations
 
 import fnmatch
 import logging
+import re
 import time
 from pathlib import Path
+from typing import Any, Optional
 
 import boto3
 from boto3.exceptions import Boto3Error
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
-from tqdm import tqdm
+
+try:
+    from tqdm import tqdm
+except ModuleNotFoundError:  # pragma: no cover
+    tqdm = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+_BUCKET_ID_LIKE_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _warn_if_bucket_looks_like_id(bucket_name: str) -> None:
+    if _BUCKET_ID_LIKE_RE.fullmatch(bucket_name):
+        logger.warning(
+            "R2 bucket value looks like an ID. Cloudflare R2's S3 API expects the bucket *name*.",
+            extra={"bucket_value": bucket_name},
+        )
 
 
 def _should_exclude(rel_path: Path, exclude_patterns: list[str]) -> bool:
@@ -73,7 +89,7 @@ class R2Uploader:
         secret_key: str,
         max_retries: int = 3,
         timeout: int = 300,
-    ):
+    ) -> None:
         """Initialize R2 uploader.
 
         Args:
@@ -83,30 +99,35 @@ class R2Uploader:
             max_retries: Maximum number of upload retries (default: 3)
             timeout: Timeout in seconds for each upload (default: 300)
         """
-        self.account_id = account_id
-        self.max_retries = max_retries
+        self.account_id: str = account_id
+        self.max_retries: int = max_retries
 
         # Configure boto3 client for R2
-        endpoint_url = f"https://{account_id}.r2.cloudflarestorage.com"
+        self.endpoint_url: str = f"https://{account_id}.r2.cloudflarestorage.com"
 
         boto_config = Config(
-            retries={"max_attempts": max_retries, "mode": "adaptive"},
+            # We manage retries ourselves (for clearer logs/backoff). Avoid "double retry".
+            retries={"max_attempts": 1, "mode": "standard"},
             connect_timeout=timeout,
             read_timeout=timeout,
             # R2 is S3-compatible but works most reliably with path-style addressing.
             s3={"addressing_style": "path"},
+            signature_version="s3v4",
         )
 
-        self.s3_client = boto3.client(
+        self.s3_client: Any = boto3.client(
             "s3",
-            endpoint_url=endpoint_url,
+            endpoint_url=self.endpoint_url,
             region_name="auto",
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
             config=boto_config,
         )
 
-        logger.info(f"R2 uploader initialized: account={account_id}, endpoint={endpoint_url}")
+        logger.info(
+            "R2 uploader initialized",
+            extra={"account_id": account_id, "endpoint_url": self.endpoint_url},
+        )
 
     def upload_file(
         self,
@@ -119,7 +140,7 @@ class R2Uploader:
 
         Args:
             local_file: Path to local file
-            bucket_name: R2 bucket name (or bucket ID)
+            bucket_name: R2 bucket name
             r2_key: Destination key in R2 (e.g., "experiments/run1/file.txt")
             retry_delay: Delay between retries in seconds (default: 2.0)
 
@@ -127,14 +148,21 @@ class R2Uploader:
             True if upload succeeded, False otherwise
         """
         if not local_file.exists():
-            logger.error(f"File not found: {local_file}")
+            logger.error("File not found", extra={"local_file": str(local_file)})
             return False
 
+        _warn_if_bucket_looks_like_id(bucket_name)
         for attempt in range(1, self.max_retries + 1):
             try:
                 logger.debug(
-                    f"Uploading {local_file} -> s3://{bucket_name}/{r2_key} "
-                    f"(attempt {attempt}/{self.max_retries})"
+                    "Uploading file",
+                    extra={
+                        "local_file": str(local_file),
+                        "bucket": bucket_name,
+                        "key": r2_key,
+                        "attempt": attempt,
+                        "max_retries": self.max_retries,
+                    },
                 )
 
                 self.s3_client.upload_file(
@@ -143,28 +171,42 @@ class R2Uploader:
                     Key=r2_key,
                 )
 
-                logger.info(f"✓ Uploaded: {r2_key}")
+                logger.info("Uploaded", extra={"key": r2_key})
                 return True
 
             except (ClientError, BotoCoreError, Boto3Error) as e:
+                error_code = type(e).__name__
+                error_message: Optional[str] = None
                 if isinstance(e, ClientError):
-                    error_code = e.response.get("Error", {}).get("Code", "Unknown")
-                else:
-                    error_code = type(e).__name__
+                    err = e.response.get("Error", {})
+                    error_code = err.get("Code", "Unknown")
+                    error_message = err.get("Message")
 
                 logger.warning(
-                    f"Upload failed (attempt {attempt}/{self.max_retries}): "
-                    f"{error_code} - {local_file}"
+                    "Upload failed",
+                    extra={
+                        "attempt": attempt,
+                        "max_retries": self.max_retries,
+                        "error_code": error_code,
+                        "error_message": error_message,
+                        "local_file": str(local_file),
+                    },
                 )
 
                 if attempt < self.max_retries:
                     time.sleep(retry_delay * (2 ** (attempt - 1)))  # Exponential backoff
                     continue
 
-                logger.error(f"✗ Failed to upload {local_file} after {self.max_retries} attempts")
+                logger.error(
+                    "Failed to upload after retries",
+                    extra={"local_file": str(local_file), "max_retries": self.max_retries},
+                )
                 return False
             except OSError as e:
-                logger.error(f"Local file error uploading {local_file}: {type(e).__name__}: {e}")
+                logger.error(
+                    "Local file error uploading",
+                    extra={"local_file": str(local_file), "error": str(e), "error_type": type(e).__name__},
+                )
                 return False
 
         return False
@@ -188,11 +230,11 @@ class R2Uploader:
             Tuple of (successful_uploads, failed_uploads)
         """
         if not local_dir.exists():
-            logger.error(f"Directory not found: {local_dir}")
+            logger.error("Directory not found", extra={"local_dir": str(local_dir)})
             return (0, 0)
 
         if not local_dir.is_dir():
-            logger.error(f"Not a directory: {local_dir}")
+            logger.error("Not a directory", extra={"local_dir": str(local_dir)})
             return (0, 0)
 
         # Collect all files to upload
@@ -211,28 +253,46 @@ class R2Uploader:
             files_to_upload.append((file_path, r2_key))
 
         if not files_to_upload:
-            logger.warning(f"No files found to upload in {local_dir}")
+            logger.warning("No files found to upload", extra={"local_dir": str(local_dir)})
             return (0, 0)
 
+        _warn_if_bucket_looks_like_id(bucket_name)
         logger.info(
-            f"Uploading {len(files_to_upload)} files from {local_dir} to s3://{bucket_name}/{r2_prefix}"
+            "Uploading directory",
+            extra={
+                "file_count": len(files_to_upload),
+                "local_dir": str(local_dir),
+                "bucket": bucket_name,
+                "prefix": r2_prefix,
+            },
         )
 
         # Upload with progress bar
         success_count = 0
         fail_count = 0
 
-        with tqdm(total=len(files_to_upload), desc="Uploading", unit="file") as pbar:
+        if tqdm is None:
             for local_file, r2_key in files_to_upload:
                 if self.upload_file(local_file, bucket_name, r2_key):
                     success_count += 1
                 else:
                     fail_count += 1
-                pbar.update(1)
+        else:
+            with tqdm(total=len(files_to_upload), desc="Uploading", unit="file") as pbar:
+                for local_file, r2_key in files_to_upload:
+                    if self.upload_file(local_file, bucket_name, r2_key):
+                        success_count += 1
+                    else:
+                        fail_count += 1
+                    pbar.update(1)
 
         logger.info(
-            f"Upload complete: {success_count} succeeded, {fail_count} failed "
-            f"(total: {len(files_to_upload)})"
+            "Upload complete",
+            extra={
+                "succeeded": success_count,
+                "failed": fail_count,
+                "total": len(files_to_upload),
+            },
         )
 
         return (success_count, fail_count)
@@ -246,16 +306,22 @@ class R2Uploader:
         Returns:
             True if bucket is accessible, False otherwise
         """
+        _warn_if_bucket_looks_like_id(bucket_name)
         try:
             self.s3_client.head_bucket(Bucket=bucket_name)
-            logger.info(f"✓ Verified access to bucket: {bucket_name}")
+            logger.info("Verified bucket access", extra={"bucket": bucket_name})
             return True
         except (ClientError, BotoCoreError, Boto3Error) as e:
+            error_code = type(e).__name__
+            error_message: Optional[str] = None
             if isinstance(e, ClientError):
-                error_code = e.response.get("Error", {}).get("Code", "Unknown")
-            else:
-                error_code = type(e).__name__
-            logger.error(f"✗ Cannot access bucket {bucket_name}: {error_code}")
+                err = e.response.get("Error", {})
+                error_code = err.get("Code", "Unknown")
+                error_message = err.get("Message")
+            logger.error(
+                "Cannot access bucket",
+                extra={"bucket": bucket_name, "error_code": error_code, "error_message": error_message},
+            )
             return False
 
 
@@ -276,7 +342,7 @@ def upload_experiment_artifacts(
     Args:
         local_base_dir: Base directory containing artifact subdirectories
         experiment_name: Name of experiment (used as R2 prefix)
-        bucket_id: R2 bucket ID
+        bucket_id: R2 bucket name (legacy arg/env var name: R2_BUCKET_ID)
         account_id: R2 account ID
         access_key: R2 access key ID
         secret_key: R2 secret access key
@@ -289,13 +355,15 @@ def upload_experiment_artifacts(
         >>> upload_experiment_artifacts(
         ...     local_base_dir=Path("/home/ubuntu/grail/research/trl"),
         ...     experiment_name="qwen2.5-0.5b-iter1",
-        ...     bucket_id="your-bucket-id",
+        ...     bucket_id="your-bucket-name",
         ...     account_id="your-account-id",
         ...     access_key="your-access-key",
         ...     secret_key="your-secret-key",
         ... )
     """
     artifact_dirs = artifact_dirs or ["logs", "outputs", "checkpoints"]
+    bucket_name = bucket_id
+    _warn_if_bucket_looks_like_id(bucket_name)
 
     uploader = R2Uploader(
         account_id=account_id,
@@ -304,7 +372,7 @@ def upload_experiment_artifacts(
     )
 
     # Verify bucket access first
-    if not uploader.verify_bucket_access(bucket_id):
+    if not uploader.verify_bucket_access(bucket_name):
         logger.error("Bucket access verification failed, aborting upload")
         return False
 
@@ -321,7 +389,7 @@ def upload_experiment_artifacts(
 
         success, failed = uploader.upload_directory(
             local_dir=local_dir,
-            bucket_name=bucket_id,
+            bucket_name=bucket_name,
             r2_prefix=r2_prefix,
             exclude_patterns=["*.tmp", "__pycache__", "*.pyc"],
         )
@@ -343,22 +411,27 @@ if __name__ == "__main__":
     )
 
     if len(sys.argv) < 3:
-        print("Usage: python r2_uploader.py <local_dir> <experiment_name>")
-        print(
-            "  Requires env vars: R2_BUCKET_ID, R2_ACCOUNT_ID, R2_WRITE_ACCESS_KEY_ID, R2_WRITE_SECRET_ACCESS_KEY"
+        logger.error("Usage: python r2_uploader.py <local_dir> <experiment_name>")
+        logger.error(
+            "Requires env vars: R2_BUCKET_NAME (preferred) or R2_BUCKET_ID (legacy), "
+            "R2_ACCOUNT_ID, R2_WRITE_ACCESS_KEY_ID, R2_WRITE_SECRET_ACCESS_KEY"
         )
-        sys.exit(1)
+        raise SystemExit(1)
 
     local_dir = Path(sys.argv[1])
     experiment_name = sys.argv[2]
+    bucket_name = os.getenv("R2_BUCKET_NAME") or os.getenv("R2_BUCKET_ID")
+    if not bucket_name:
+        logger.error("Missing bucket env var: set R2_BUCKET_NAME (preferred) or R2_BUCKET_ID (legacy)")
+        raise SystemExit(1)
 
     success = upload_experiment_artifacts(
         local_base_dir=local_dir,
         experiment_name=experiment_name,
-        bucket_id=os.environ["R2_BUCKET_ID"],
+        bucket_id=bucket_name,
         account_id=os.environ["R2_ACCOUNT_ID"],
         access_key=os.environ["R2_WRITE_ACCESS_KEY_ID"],
         secret_key=os.environ["R2_WRITE_SECRET_ACCESS_KEY"],
     )
 
-    sys.exit(0 if success else 1)
+    raise SystemExit(0 if success else 1)
