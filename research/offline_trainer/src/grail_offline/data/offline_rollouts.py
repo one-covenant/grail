@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from grail.environments.core import ChatMessage, MultiTurnEnv
 from grail.environments.gsm8k_env import GSM8KEnv
@@ -83,16 +82,16 @@ class OfflineRolloutGenerator:
         # Choose server backend
         backend_name = (self._cfg.backend or "sglang_server").lower()
 
-        # OPTIMIZATION: Only request logprobs from vLLM if HF model is NOT provided.
-        # When HF model is available, we compute ground-truth logprobs locally,
-        # so requesting them from vLLM wastes bandwidth and computation.
+        # IMPORTANT: GRPOAlgorithm uses behavior-policy logprobs for importance sampling.
+        # Even if we *prefer* HF logprobs (ground truth), HF forward can fail (OOM, etc.).
+        # We therefore keep server chosen-logprob requests enabled when return_logprobs=True
+        # to provide a reliable fallback for training correctness.
         request_server_logprobs = bool(getattr(self._cfg, "return_logprobs", True))
         if hf_model is not None and request_server_logprobs:
             logger.info(
-                "HF model provided - will compute logprobs locally instead of from server. "
-                "Disabling server logprob requests for efficiency."
+                "HF model provided - will compute logprobs locally when possible; "
+                "keeping server logprob requests enabled as a fallback for correctness."
             )
-            request_server_logprobs = False
 
         # Store decision for use in generate_groups
         self._request_server_logprobs = request_server_logprobs
@@ -193,53 +192,81 @@ class OfflineRolloutGenerator:
             List of logprobs for completion tokens only, or None if computation fails.
             Length of returned list equals completion_len.
         """
-        if self._hf_model is None:
+        model = self._hf_model
+        if model is None:
             return None
-
-        try:
-            # Prepare input tensor on model's device
-            input_ids = torch.tensor([token_ids], dtype=torch.long, device=self._hf_model.device)
-
-            # Forward pass without gradients for efficiency
-            with torch.inference_mode():
-                outputs = self._hf_model(input_ids)
-                # Cast to float32 for precise log_softmax computation
-                # This prevents numerical errors when model uses bfloat16
-                logits = outputs.logits[0].float()  # [seq_len, vocab_size]
-
-            # Extract logprobs for completion tokens only
-            # Note: logits[i] predicts token[i+1], so completion logprobs start at logits[prompt_len-1]
-            completion_logprobs: list[float] = []
-            for i in range(completion_len):
-                logit_pos = prompt_len - 1 + i
-                if logit_pos >= logits.shape[0]:
-                    # Out of bounds - shouldn't happen with valid inputs
-                    logger.warning(
-                        "Logit position %d out of bounds (logits shape: %s). "
-                        "Using 0.0 for remaining positions.",
-                        logit_pos,
-                        logits.shape,
-                    )
-                    completion_logprobs.append(0.0)
-                    continue
-
-                token_id = token_ids[prompt_len + i]
-                # Compute log_softmax in float32 for numerical stability
-                log_probs_dist = F.log_softmax(logits[logit_pos], dim=-1)
-                completion_logprobs.append(log_probs_dist[token_id].item())
-
-            return completion_logprobs
-
-        except Exception as e:
-            logger.error(
-                "Failed to compute HF logprobs: %s (prompt_len=%d, completion_len=%d, seq_len=%d)",
-                e,
-                prompt_len,
-                completion_len,
-                len(token_ids),
-                exc_info=True,
+        if completion_len <= 0:
+            return []
+        if prompt_len <= 0:
+            logger.warning(
+                "Invalid prompt_len for HF logprob computation; returning None",
+                extra={"prompt_len": prompt_len, "completion_len": completion_len},
             )
             return None
+
+        # Prepare input tensor on model's device
+        input_ids = torch.tensor([token_ids], dtype=torch.long, device=model.device)
+
+        # Forward pass without gradients for efficiency
+        was_training = model.training
+        model.eval()
+        try:
+            with torch.inference_mode():
+                outputs = model(input_ids)
+        except RuntimeError as exc:
+            logger.error(
+                "Failed to compute HF logprobs due to model forward error",
+                extra={
+                    "error": str(exc),
+                    "prompt_len": prompt_len,
+                    "completion_len": completion_len,
+                    "seq_len": len(token_ids),
+                },
+            )
+            return None
+        finally:
+            if was_training:
+                model.train()
+
+        # Extract logprobs for completion tokens only
+        # Note: logits[i] predicts token[i+1], so completion logprobs start at logits[prompt_len-1].
+        if not hasattr(outputs, "logits"):
+            logger.error(
+                "HF model output missing logits; cannot compute logprobs",
+                extra={"prompt_len": prompt_len, "completion_len": completion_len},
+            )
+            return None
+
+        logits = outputs.logits[0]  # [seq_len, vocab_size] (dtype may be bf16/fp16)
+        seq_len = int(logits.shape[0])
+
+        completion_logprobs: list[float] = []
+        for i in range(completion_len):
+            logit_pos = (prompt_len - 1) + i
+            token_pos = prompt_len + i
+
+            if logit_pos >= seq_len or token_pos >= len(token_ids):
+                logger.warning(
+                    "HF logprob index out of bounds; padding remaining positions with 0.0",
+                    extra={
+                        "logit_pos": logit_pos,
+                        "token_pos": token_pos,
+                        "seq_len_logits": seq_len,
+                        "seq_len_tokens": len(token_ids),
+                        "prompt_len": prompt_len,
+                        "completion_len": completion_len,
+                    },
+                )
+                completion_logprobs.extend([0.0] * (completion_len - i))
+                break
+
+            token_id = int(token_ids[token_pos])
+            # Compute logprob(token) = logit(token) - logsumexp(logits) in float32 for stability.
+            row = logits[logit_pos].float()
+            log_denom = torch.logsumexp(row, dim=-1)
+            completion_logprobs.append(float((row[token_id] - log_denom).item()))
+
+        return completion_logprobs
 
     @staticmethod
     def _generate_replicate_seeds(problem_seed: int, num_rollouts: int) -> list[int]:
@@ -419,12 +446,14 @@ class OfflineRolloutGenerator:
                     max_len = int(TRAINER_MAX_LENGTH) if TRAINER_MAX_LENGTH else None
                     if max_len and len(seq) > max_len:
                         seq = seq[:max_len]
-                        # Also truncate server logprobs to match (if present)
-                        if chosen_logprobs is not None:
-                            chosen_logprobs = chosen_logprobs[:max_len]
 
-                    completion_ids: list[int] = seq[prompt_len:]
+                    # Ensure prompt_len is consistent with any truncation
+                    effective_prompt_len = min(int(prompt_len), len(seq))
+                    completion_ids: list[int] = seq[effective_prompt_len:]
                     completion_len: int = len(completion_ids)
+                    # chosen_logprobs are completion-only; truncate to match any completion truncation
+                    if chosen_logprobs is not None and len(chosen_logprobs) > completion_len:
+                        chosen_logprobs = chosen_logprobs[:completion_len]
                     text: str = self._tokenizer.decode(completion_ids, skip_special_tokens=False)
 
                     # Recreate env per replicate for clean single-turn stepping
@@ -437,7 +466,7 @@ class OfflineRolloutGenerator:
                     rewards.append(float(reward_r))
                     successes.append(bool(info_r.get("success", False)))
                     seqs.append(seq)
-                    prompt_lens.append(int(prompt_len))
+                    prompt_lens.append(int(effective_prompt_len))
                     comp_lens.append(completion_len)
 
                     # Compute logprobs: prefer HF model for ground-truth, fallback to vLLM
@@ -445,7 +474,9 @@ class OfflineRolloutGenerator:
 
                     if self._hf_model is not None:
                         # Use HF model to compute ground-truth logprobs
-                        hf_logprobs = self._compute_hf_logprobs(seq, prompt_len, completion_len)
+                        hf_logprobs = self._compute_hf_logprobs(
+                            seq, effective_prompt_len, completion_len
+                        )
                         if hf_logprobs is not None:
                             final_logprobs = hf_logprobs
 
@@ -463,13 +494,25 @@ class OfflineRolloutGenerator:
                             completion_len,
                         )
 
+                    if (
+                        final_logprobs is None
+                        and bool(getattr(self._cfg, "return_logprobs", True))
+                        and completion_len > 0
+                    ):
+                        raise RuntimeError(
+                            "Missing token logprobs for rollout while return_logprobs=True. "
+                            "This would break importance sampling in GRPOAlgorithm."
+                        )
+
                     # Package logprobs in full-sequence format for GRPO
                     # GRPO expects logprobs aligned with token sequences (prompt + completion)
                     # We pad prompt positions with 0.0 since we only compute/care about completion logprobs
                     if final_logprobs is not None:
                         # final_logprobs contains completion-only logprobs (from HF or vLLM)
                         # Pad with zeros for prompt tokens to create full sequence alignment
-                        full_logprobs: list[float] = [0.0] * prompt_len + list(final_logprobs)
+                        full_logprobs: list[float] = [0.0] * effective_prompt_len + list(
+                            final_logprobs
+                        )
                         all_logprobs.append(full_logprobs)
                     else:
                         # No logprobs available - this rollout cannot be used for IS
