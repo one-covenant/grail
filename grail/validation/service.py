@@ -336,7 +336,27 @@ class ValidationService:
             )
             self._execution_pool.start()
             set_global_execution_pool(self._execution_pool)
-            logger.info("✅ Fast code execution pool initialized: %d workers", 8)
+
+            # Verify pool health after startup to catch initialization issues early
+            health = self._execution_pool.health_check(timeout=15.0)
+            if health.get("healthy"):
+                logger.info(
+                    "✅ Fast code execution pool initialized and verified: "
+                    "%d/%d workers healthy (check took %dms)",
+                    health.get("workers_correct", 0),
+                    health.get("num_workers", 8),
+                    health.get("check_duration_ms", 0),
+                )
+            else:
+                logger.warning(
+                    "⚠️ Code execution pool started but health check failed: %s | "
+                    "workers_responsive=%d/%d, workers_correct=%d | "
+                    "Validation may experience intermittent failures",
+                    health.get("error", "unknown"),
+                    health.get("workers_responsive", 0),
+                    health.get("num_workers", 8),
+                    health.get("workers_correct", 0),
+                )
         except Exception as e:
             logger.warning("⚠️ Failed to init execution pool, using slow path: %s", e)
             self._execution_pool = None

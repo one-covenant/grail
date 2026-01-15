@@ -187,9 +187,63 @@ class RewardValidator(Validator):
                 miner_reward, env_reward, rel_tol=REWARD_REL_TOL, abs_tol=REWARD_ABS_TOL
             )
             ctx.checks[self.check_name] = ok
+
+            if not ok:
+                # Extract detailed diagnostics for debugging reward mismatches
+                miner_uid = ctx.miner_uid or "unknown"
+                window_hash_short = ctx.window_hash[:12] if ctx.window_hash else "?"
+                reward_diff = abs(miner_reward - env_reward)
+                rel_diff = reward_diff / max(abs(miner_reward), abs(env_reward), 1e-9)
+
+                # Get test execution details from env_eval_result
+                tests_passed = env_res.get("tests_passed", "N/A")
+                tests_total = env_res.get("tests_total", "N/A")
+                env_success = env_res.get("success", "N/A")
+
+                # Get miner's claimed test results from rollout
+                miner_success = rollout.get("success", "N/A")
+
+                logger.warning(
+                    "[reward_valid] REWARD MISMATCH | "
+                    "uid=%s | window_hash=%s | "
+                    "miner_reward=%.6f | validator_reward=%.6f | "
+                    "abs_diff=%.6f | rel_diff=%.4f | "
+                    "tolerances=(rel=%.4f, abs=%.2e) | "
+                    "validator_tests=%s/%s | validator_success=%s | miner_success=%s | "
+                    "env_id=%s | "
+                    "This indicates code execution produced different results. "
+                    "Possible causes: (1) timeout boundary race, (2) non-deterministic code, "
+                    "(3) execution pool issues, (4) resource limits",
+                    miner_uid,
+                    window_hash_short,
+                    miner_reward,
+                    env_reward,
+                    reward_diff,
+                    rel_diff,
+                    REWARD_REL_TOL,
+                    REWARD_ABS_TOL,
+                    tests_passed,
+                    tests_total,
+                    env_success,
+                    miner_success,
+                    ctx.env_id or CURRENT_ENV_ID,
+                )
+
+                # Log full env_eval_result at DEBUG level for detailed analysis
+                logger.debug(
+                    "[reward_valid] Full env_eval_result for uid=%s: %s",
+                    miner_uid,
+                    env_res,
+                )
+
             return ok
         except Exception as e:
-            logger.debug(f"Reward validation error: {e}")
+            logger.warning(
+                "[reward_valid] Validation error for uid=%s: %s",
+                ctx.miner_uid or "unknown",
+                e,
+                exc_info=True,
+            )
             ctx.checks[self.check_name] = False
             return False
 

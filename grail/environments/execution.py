@@ -19,6 +19,7 @@ import concurrent.futures
 import contextlib
 import faulthandler
 import io
+import logging
 import multiprocessing
 import os
 import platform
@@ -26,6 +27,7 @@ import signal
 import sys
 import tempfile
 import threading
+import time
 import warnings
 from multiprocessing.connection import Connection
 from typing import Any
@@ -1063,11 +1065,12 @@ class CodeExecutionPool:
                     )
 
                     # Warm up workers - force spawn and apply security now
+                    # Timeout increased to 45s to handle high-load scenarios
                     warmup_futures = [
                         self._executor.submit(_pool_warmup_noop) for _ in range(self.num_workers)
                     ]
                     for f in warmup_futures:
-                        f.result(timeout=30)
+                        f.result(timeout=45)
 
                 finally:
                     # Restore parent's CUDA visibility
@@ -1247,6 +1250,106 @@ class CodeExecutionPool:
 
         return results
 
+    def health_check(self, timeout: float = 10.0) -> dict[str, Any]:
+        """Check pool health by running a simple test on all workers.
+
+        This verifies:
+        - Pool is started and executor exists
+        - All workers are responsive within timeout
+        - Workers can execute simple code correctly
+
+        Args:
+            timeout: Maximum time to wait for health check (default: 10s)
+
+        Returns:
+            Dictionary with:
+                - healthy: bool, True if pool is fully operational
+                - started: bool, True if pool has been started
+                - num_workers: int, configured worker count
+                - workers_responsive: int, number of workers that responded
+                - workers_correct: int, number of workers that returned correct results
+                - error: str | None, error message if unhealthy
+        """
+        logger = logging.getLogger(__name__)
+
+        result: dict[str, Any] = {
+            "healthy": False,
+            "started": self._started,
+            "num_workers": self.num_workers,
+            "workers_responsive": 0,
+            "workers_correct": 0,
+            "error": None,
+            "check_duration_ms": 0,
+        }
+
+        if not self._started:
+            result["error"] = "Pool not started"
+            return result
+
+        if self._executor is None:
+            result["error"] = "Pool executor is None"
+            return result
+
+        start_time = time.time()
+
+        # Submit health check tasks to all workers
+        # Use a simple computation that should complete quickly
+        test_code = "def _health_check_fn(x): return x * 2"
+        test_cases = ["assert _health_check_fn(21) == 42"]
+
+        try:
+            futures = [
+                self._executor.submit(_pool_worker_execute, test_code, test_cases, 2.0)
+                for _ in range(self.num_workers)
+            ]
+
+            responsive = 0
+            correct = 0
+            errors = []
+
+            for i, future in enumerate(futures):
+                try:
+                    res = future.result(timeout=timeout)
+                    responsive += 1
+                    if res.get("status") == "all_passed" and res.get("passed") == 1:
+                        correct += 1
+                    else:
+                        errors.append(f"Worker {i}: unexpected result status={res.get('status')}")
+                except concurrent.futures.TimeoutError:
+                    errors.append(f"Worker {i}: timeout")
+                except Exception as e:
+                    errors.append(f"Worker {i}: {e}")
+
+            result["workers_responsive"] = responsive
+            result["workers_correct"] = correct
+            result["check_duration_ms"] = int((time.time() - start_time) * 1000)
+
+            if responsive == self.num_workers and correct == self.num_workers:
+                result["healthy"] = True
+            else:
+                result["error"] = f"Pool degraded: {responsive}/{self.num_workers} responsive, {correct}/{self.num_workers} correct"
+                if errors:
+                    result["worker_errors"] = errors[:5]  # Limit error list
+
+            logger.info(
+                "Pool health check: healthy=%s workers=%d/%d responsive=%d correct=%d duration=%dms",
+                result["healthy"],
+                self.num_workers,
+                self.num_workers,
+                responsive,
+                correct,
+                result["check_duration_ms"],
+            )
+
+        except concurrent.futures.BrokenExecutor as e:
+            result["error"] = f"Executor broken: {e}"
+            logger.error("Pool health check failed: executor broken: %s", e)
+        except Exception as e:
+            result["error"] = f"Health check error: {e}"
+            logger.error("Pool health check failed: %s", e, exc_info=True)
+
+        return result
+
     def __enter__(self) -> CodeExecutionPool:
         """Context manager entry - starts the pool."""
         self.start()
@@ -1311,43 +1414,88 @@ def check_code_executes_fast(
     Returns:
         Dictionary with passed, total, status, error, test_results
     """
-    import logging
-
     logger = logging.getLogger(__name__)
     pool = get_global_execution_pool()
 
-    # Determine execution method
-    execute_fn = pool.execute if pool is not None else check_code_executes
+    # Log execution method for debugging
+    using_pool = pool is not None
+    execute_fn = pool.execute if using_pool else check_code_executes
+
+    logger.debug(
+        "check_code_executes_fast: using_pool=%s num_tests=%d timeout=%.1f",
+        using_pool,
+        len(test_cases),
+        timeout,
+    )
 
     # Retry loop for process errors only
     result: dict[str, Any] = {"status": "error", "error": "No attempts made"}
+    start_time = time.time()
+
     for attempt in range(max_retries):
+        attempt_start = time.time()
         result = execute_fn(code, test_cases, timeout)
+        attempt_duration_ms = int((time.time() - attempt_start) * 1000)
 
         # Check if this is a process error (infrastructure failure)
         # These are retryable: worker crash, pipe error, executor error
         status = result.get("status", "")
         if status == "process_error":
-            # Last attempt - return the error
+            error_msg = result.get("error", "unknown")
+
+            # Log pool health on process errors to diagnose infrastructure issues
+            pool_health_info = "N/A"
+            if pool is not None:
+                try:
+                    health = pool.health_check(timeout=5.0)
+                    pool_health_info = (
+                        f"healthy={health.get('healthy')}, "
+                        f"workers={health.get('workers_responsive', 0)}/{health.get('num_workers', 0)}, "
+                        f"error={health.get('error')}"
+                    )
+                except Exception as health_err:
+                    pool_health_info = f"health_check_failed: {health_err}"
+
+            # Last attempt - return the error with detailed diagnostics
             if attempt == max_retries - 1:
+                total_duration_ms = int((time.time() - start_time) * 1000)
                 logger.warning(
-                    "Code execution failed with process error after %d attempts: %s",
+                    "[check_code_executes_fast] PROCESS_ERROR after %d attempts | "
+                    "error=%s | attempt_duration=%dms | total_duration=%dms | "
+                    "pool_health=[%s] | num_tests=%d | "
+                    "This may indicate pool degradation or worker crashes",
                     max_retries,
-                    result.get("error", "unknown"),
+                    error_msg,
+                    attempt_duration_ms,
+                    total_duration_ms,
+                    pool_health_info,
+                    len(test_cases),
                 )
                 return result
 
             # Retry on process error
-            logger.debug(
-                "Retrying code execution due to process error (attempt %d/%d): %s",
+            logger.info(
+                "[check_code_executes_fast] Retrying due to process_error (attempt %d/%d) | "
+                "error=%s | duration=%dms | pool_health=[%s]",
                 attempt + 1,
                 max_retries,
-                result.get("error", "unknown"),
+                error_msg,
+                attempt_duration_ms,
+                pool_health_info,
             )
             continue
 
         # Non-retryable result (success, syntax error, runtime error, timeout)
         # These reflect actual code behavior, not infrastructure issues
+        if logger.isEnabledFor(logging.DEBUG):
+            total_duration_ms = int((time.time() - start_time) * 1000)
+            logger.debug(
+                "check_code_executes_fast: status=%s passed=%s/%s duration=%dms",
+                status,
+                result.get("passed", 0),
+                result.get("total", len(test_cases)),
+                total_duration_ms,
+            )
         return result
 
     # Fallback (should never reach here due to return in last attempt)
