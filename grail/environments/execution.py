@@ -1327,7 +1327,9 @@ class CodeExecutionPool:
             if responsive == self.num_workers and correct == self.num_workers:
                 result["healthy"] = True
             else:
-                result["error"] = f"Pool degraded: {responsive}/{self.num_workers} responsive, {correct}/{self.num_workers} correct"
+                result["error"] = (
+                    f"Pool degraded: {responsive}/{self.num_workers} responsive, {correct}/{self.num_workers} correct"
+                )
                 if errors:
                     result["worker_errors"] = errors[:5]  # Limit error list
 

@@ -13,7 +13,16 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pytest
 import torch
+
+# These tests start real vLLM servers and require GPUs + model downloads.
+# Keep them opt-in so the default test suite is fast and reliable.
+if os.getenv("GRAIL_RUN_GPU_TESTS", "0") != "1":
+    pytest.skip(
+        "GPU integration tests are disabled by default. Set GRAIL_RUN_GPU_TESTS=1 to run.",
+        allow_module_level=True,
+    )
 
 # Ensure repo root and src on sys.path BEFORE any imports from these paths
 _THIS_FILE = Path(__file__).resolve()
@@ -24,7 +33,7 @@ if str(_REPO_ROOT) not in sys.path:
 if _SRC_DIR.exists() and str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-from scripts.offline_trainer.offline_rollouts import (  # noqa: E402
+from grail_offline.data.offline_rollouts import (  # noqa: E402
     OfflineRolloutGenerator,
     RolloutGenConfig,
 )
@@ -38,6 +47,9 @@ from grail.trainer.eval_planner import EvaluationPlan  # noqa: E402
 from grail.trainer.evaluator import EvaluatorService  # noqa: E402
 
 
+pytestmark = pytest.mark.asyncio
+
+
 class VLLMServerManager:
     """Manages vLLM server lifecycle for testing."""
 
@@ -45,11 +57,17 @@ class VLLMServerManager:
         self.model_id = model_id
         self.port = port
         self.gpu_id = gpu_id
-        self.process: subprocess.Popen[bytes] | None = None
+        self.process: subprocess.Popen[str] | None = None
         self.base_url = f"http://127.0.0.1:{port}"
 
     def start(self, timeout: float = 180.0) -> None:
         """Start vLLM server and wait for readiness."""
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+        if self.gpu_id < 0 or self.gpu_id >= torch.cuda.device_count():
+            pytest.skip(
+                f"Requested GPU {self.gpu_id} but only {torch.cuda.device_count()} GPUs available"
+            )
         print(
             f"Starting vLLM server on port {self.port} with {self.model_id} on GPU {self.gpu_id}..."
         )
@@ -60,7 +78,7 @@ class VLLMServerManager:
 
         # Start vLLM server
         cmd = [
-            "python3",
+            sys.executable,
             "-m",
             "vllm.entrypoints.openai.api_server",
             "--model",
@@ -90,7 +108,16 @@ class VLLMServerManager:
         ready = False
         while time.time() - start_time < timeout:
             if self.process.poll() is not None:
-                raise RuntimeError("vLLM server process terminated unexpectedly")
+                output = ""
+                if self.process.stdout is not None:
+                    try:
+                        output = self.process.stdout.read()[-8_000:]
+                    except Exception:
+                        output = ""
+                raise RuntimeError(
+                    "vLLM server process terminated unexpectedly. "
+                    f"Tail output:\n{output}"
+                )
 
             try:
                 # Check if server is responding
@@ -344,7 +371,7 @@ async def test_end_to_end_iteration() -> None:
 
         generator = OfflineRolloutGenerator(tokenizer=tokenizer, config=cfg)
         train_seeds = [5001, 5002, 5003, 5004]
-        groups = generator.generate_groups(train_seeds)
+        groups = await generator.generate_groups(train_seeds)
         print(f"  Generated {len(groups)} groups")
 
         print("🔄 Phase 2: Train epoch")

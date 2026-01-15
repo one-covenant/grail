@@ -147,11 +147,19 @@ class TrainingService:
         # Training state
         self.epoch_counter: int = 0
         self.last_loaded_window: int = INITIAL_LAST_LOADED_WINDOW
-        self._full_checkpoint_saved: bool = False  # Track if full checkpoint was saved at TOTAL_TRAINING_WINDOWS
+        self._full_checkpoint_saved: bool = (
+            False  # Track if full checkpoint was saved at TOTAL_TRAINING_WINDOWS
+        )
         self._epochs_this_window: int = 0  # Track epochs within current window for wandb logging
-        self._current_training_window: int = INITIAL_LAST_LOADED_WINDOW  # Current window being trained
-        self._windows_completed: int = 0  # Track total windows completed for HuggingFace upload trigger
-        self._background_upload_task: asyncio.Task[bool] | None = None  # Keep reference to prevent GC
+        self._current_training_window: int = (
+            INITIAL_LAST_LOADED_WINDOW  # Current window being trained
+        )
+        self._windows_completed: int = (
+            0  # Track total windows completed for HuggingFace upload trigger
+        )
+        self._background_upload_task: asyncio.Task[bool] | None = (
+            None  # Keep reference to prevent GC
+        )
 
         # Initialize replay buffer
         if config.replay_buffer_enabled:
@@ -672,7 +680,9 @@ class TrainingService:
         # This ensures vLLM can load the model without disk I/O contention
         if self._ipc is not None:
             self._ipc.confirm_pause()
-            logger.info("🔄 STATE: pause_confirmed - signaled orchestrator via IPC (snapshot saved, GPU freed)")
+            logger.info(
+                "🔄 STATE: pause_confirmed - signaled orchestrator via IPC (snapshot saved, GPU freed)"
+            )
         else:
             logger.info("🔄 STATE: models_on_cpu_waiting - GPU freed (filesystem mode)")
 
@@ -1134,7 +1144,9 @@ class TrainingService:
                     "total_training_windows": TOTAL_TRAINING_WINDOWS,
                     "warmup_fraction": WARMUP_FRACTION,
                     "eta_min": SCHEDULER_ETA_MIN,
-                    "current_lr": self.scheduler.get_last_lr()[0] if self.scheduler else self.config.lr,
+                    "current_lr": self.scheduler.get_last_lr()[0]
+                    if self.scheduler
+                    else self.config.lr,
                 },
                 # Training config
                 "training_config": {
@@ -1192,8 +1204,7 @@ class TrainingService:
         repo_name = f"grail-trained-{clean_name}"
 
         commit_message = (
-            f"GRAIL trained model - {TOTAL_TRAINING_WINDOWS} windows, "
-            f"epoch {self.epoch_counter}"
+            f"GRAIL trained model - {TOTAL_TRAINING_WINDOWS} windows, epoch {self.epoch_counter}"
         )
 
         logger.info(

@@ -581,9 +581,7 @@ class CheckpointPublisher:
         cache_hits = sum(1 for d in deltas_to_keep if d in self._anchor_cache)
         cache_size_before = len(self._anchor_cache)
 
-        keep_windows = await _compute_keep_windows(
-            inventory, self.credentials, self._anchor_cache
-        )
+        keep_windows = await _compute_keep_windows(inventory, self.credentials, self._anchor_cache)
 
         # Cache misses = new entries added (may undercount if some fetches failed)
         cache_misses = len(self._anchor_cache) - cache_size_before
