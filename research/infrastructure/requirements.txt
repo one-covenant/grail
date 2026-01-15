@@ -1,0 +1,15 @@
+# Lium Infrastructure Requirements
+# Install with: pip install -r requirements.txt
+
+# Lium SDK for infrastructure management
+lium-sdk>=0.1.0
+
+# AsyncSSH for remote execution
+asyncssh>=2.14.0
+
+# Standard library alternatives (already in Python 3.11+)
+# These are typically included but listed for completeness
+# - asyncio (built-in)
+# - dataclasses (built-in)
+# - pathlib (built-in)
+# - json (built-in)

@@ -1,0 +1,25 @@
+[project]
+name = "grail-vllm-server"
+version = "0.1.0"
+description = "Isolated vLLM server environment for GRAIL evaluation"
+requires-python = ">=3.10,<3.12"
+dependencies = [
+    # Latest stable vLLM with CUDA support
+    "vllm==0.10.2",
+    # Compatible torch (vLLM handles flash-attn, pydantic deps)
+    "torch>=2.4.1",
+    # Server compatibility
+    "openai>=1.0.0",
+    "trl>=0.22.0",
+    "wandb>=0.22.3",
+    # Evaluation harness with vLLM support
+    "lm-eval>=0.4.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP"]
+ignore = ["E501", "B008", "C901", "W191"]

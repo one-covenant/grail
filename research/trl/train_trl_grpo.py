@@ -48,24 +48,27 @@ load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
 sys.path.insert(0, _PROJECT_ROOT)
 
 # GRAIL imports - reuse task sources and validation logic (after sys.path modification)
+from grail.environments.execution import (  # noqa: E402
+    CodeExecutionPool,
+    check_code_executes,
+    set_global_execution_pool,
+)
 from grail.environments.math_hendrycks_env import _math_answers_equal  # noqa: E402
 from grail.environments.providers import (  # noqa: E402
     GSM8KTaskSource,
     MATHTaskSource,
     MBPPTaskSource,
 )
-from grail.environments.execution import (  # noqa: E402
-    check_code_executes,
-    CodeExecutionPool,
-    set_global_execution_pool,
-)
 from grail.shared.chat_templates import build_qwen_chat_template  # noqa: E402
-from grail.trainer.metrics import KMetricsAggregator, TaskReplicateResult  # noqa: E402
 from grail.trainer.analysis import (  # noqa: E402
     AnalysisConfig,
-    ModelAnalysisManager,
     GradientSparsityMetrics,
+    ModelAnalysisManager,
 )
+from grail.trainer.metrics import KMetricsAggregator, TaskReplicateResult  # noqa: E402
+
+# Local imports (research/trl specific)
+from delta_checkpoint_callback import DeltaCheckpointCallback  # noqa: E402
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -87,10 +90,10 @@ class Config:
     # Epochs per training iteration (GRAIL_TRAINER_EPOCHS, constants.py default: 1)
     epochs: int = 1
     # Batch size per device (GRAIL_TRAINER_BATCH_SIZE, constants.py default: 16)
-    batch_size: int = 4
+    batch_size: int = 2
     # Gradient accumulation steps (GRAIL_TRAINER_GRAD_ACCUM_STEPS, constants.py default: 8)
     # Effective batch = batch_size × grad_accum_steps = 4 × 128 = 512
-    grad_accum_steps: int = 128
+    grad_accum_steps: int = 256
     # Max sequence length (GRAIL_TRAINER_MAX_LENGTH, constants.py default: 2048)
     max_length: int = 4096
     # Gradient clipping threshold (GRAIL_TRAINER_GRAD_CLIP, constants.py default: 0.5)
@@ -100,7 +103,7 @@ class Config:
     # Total training windows (GRAIL_TRAINER_TOTAL_WINDOWS) - controls iteration count
     # Each optimizer step = 32 groups × 16 rollouts = 512 samples
     # total_optimizer_steps calculated below based on total_windows
-    total_steps: int = 100
+    total_steps: int = 400
 
     # ────────────────────────────────────────────────────────────────────────
     # GRPO Loss Configuration (from grail/trainer/algorithms/grpo.py)
@@ -156,6 +159,14 @@ class Config:
     report_ks: tuple[int, ...] = (1, 5, 10)
     eval_batch_size: int = 128
     eval_num_workers: int = 4
+
+    # ────────────────────────────────────────────────────────────────────────
+    # Delta Checkpoint Configuration
+    # ────────────────────────────────────────────────────────────────────────
+    # Enable delta checkpointing (saves sparse weight updates after each step)
+    delta_checkpoint_enabled: bool = True
+    # Dtype for storing delta values ("bfloat16" or "float32")
+    delta_checkpoint_dtype: str = "bfloat16"
 
 
 cfg = Config()
@@ -1347,13 +1358,85 @@ def parse_args() -> argparse.Namespace:
         default=40,
         help="Run evaluation every N steps (default: 30)",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility (default: 42)",
+    )
+    parser.add_argument(
+        "--vllm-port",
+        type=int,
+        default=8000,
+        help="VLLM server port (default: 8000)",
+    )
+    parser.add_argument(
+        "--group-port",
+        type=int,
+        default=51216,
+        help="NCCL group coordination port for vLLM weight sync (default: 51216). "
+             "Must be unique per parallel instance.",
+    )
+    parser.add_argument(
+        "--run-suffix",
+        type=str,
+        default="",
+        help="Suffix for run name and output directories (default: empty)",
+    )
+    parser.add_argument(
+        "--num-iterations",
+        type=int,
+        default=1,
+        help="Number of training updates per batch of rollouts (default: 1)",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default=None,
+        help="W&B project name (overrides WANDB_PROJECT env var)",
+    )
+    parser.add_argument(
+        "--wandb-tags",
+        type=str,
+        default=None,
+        help="Comma-separated W&B tags (overrides WANDB_TAGS env var)",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Model ID to use (overrides default Qwen/Qwen2.5-1.5B-Instruct)",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="CUDA device to use for training (e.g., 'cuda:0', 'cuda:1'). "
+        "If not specified, uses CUDA_VISIBLE_DEVICES default.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
 
+    # Override model_id if specified via CLI (takes precedence over default)
+    if args.model:
+        cfg.model_id = args.model
+
+    # Set random seeds for reproducibility
+    import random
+    import numpy as np
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+
     print(f"🚀 Starting TRL GRPO training with {args.dataset.upper()} dataset")
+    print(f"   Seed: {args.seed} | VLLM Port: {args.vllm_port} | Num Iterations: {args.num_iterations}")
+    print(f"   Model: {cfg.model_id}")
+    if args.run_suffix:
+        print(f"   Run suffix: {args.run_suffix}")
     print("=" * 80)
 
     # Initialize fast code execution pool for MBPP dataset
@@ -1411,18 +1494,30 @@ def main() -> None:
 
     # Load model and tokenizer
     print("\n📦 Loading model and tokenizer...")
+    # Determine device for training
+    if args.device:
+        train_device = torch.device(args.device)
+        # Set default CUDA device so model loads to correct GPU
+        if train_device.type == "cuda":
+            torch.cuda.set_device(train_device)
+        print(f"  Using device: {train_device}")
+    else:
+        train_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     try:
         model = AutoModelForCausalLM.from_pretrained(
             cfg.model_id,
             torch_dtype=torch.bfloat16,
             attn_implementation="flash_attention_2",
+            device_map=train_device,
         )
     except (ImportError, RuntimeError) as e:
         print(f"⚠️  Flash Attention 2 unavailable ({type(e).__name__}), using SDPA")
         model = AutoModelForCausalLM.from_pretrained(
             cfg.model_id,
-            torch_dtype=torch.float32,  # FP32 master weights, AMP handles FP16 casting
+            torch_dtype=torch.bfloat16,  # FP32 master weights, AMP handles FP16 casting
             attn_implementation="sdpa",
+            device_map=train_device,
         )
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_id)
@@ -1443,7 +1538,8 @@ def main() -> None:
     wandb_api_key = os.getenv("WANDB_API_KEY")
     if wandb_api_key:
         wandb.login(key=wandb_api_key)
-        print(f"  ✓ WandB logged in (project: {os.getenv('WANDB_PROJECT', 'grail')})")
+        effective_project = args.wandb_project or os.getenv("WANDB_PROJECT", "grail")
+        print(f"  ✓ WandB logged in (project: {effective_project})")
 
     # Calculate max_prompt_length (GRAIL_TRAINER_MAX_LENGTH - GRPO_MAX_COMPLETION_TOKENS)
     max_prompt_length = cfg.max_length - cfg.max_new_tokens
@@ -1467,14 +1563,17 @@ def main() -> None:
     print(f"  • Rollouts per group: {cfg.rollouts_per_problem}")
     print(f"  • Total optimizer steps: {total_optimizer_steps}")
 
+    # Build run identifiers with seed and suffix
+    run_id = f"seed{args.seed}" if not args.run_suffix else args.run_suffix
+
     grpo_config = GRPOConfig(
-        output_dir=f"./outputs/trl_{adapter.name}_final",
+        output_dir=f"./outputs/trl_{adapter.name}_{run_id}",
         # ─────────────────────────────────────────────────────────────────────
         # Learning Rate & Schedule (matching GRAIL trainer config)
         # ─────────────────────────────────────────────────────────────────────
         learning_rate=cfg.lr,  # GRAIL_TRAINER_LR
         warmup_steps=cfg.warmup_steps,  # GRAIL_TRAINER_WARMUP_STEPS
-        lr_scheduler_type="constant",  #  constant
+        lr_scheduler_type="constant_with_warmup",  # warmup then constant
         # Use max_steps to control iterations (matching GRAIL_TRAINER_TOTAL_WINDOWS)
         # num_train_epochs is ignored when max_steps is set
         num_train_epochs=cfg.epochs,
@@ -1496,7 +1595,7 @@ def main() -> None:
         # ─────────────────────────────────────────────────────────────────────
         # GRPO Loss Configuration (matching grail/trainer/algorithms/grpo.py)
         # ─────────────────────────────────────────────────────────────────────
-        num_iterations=16,  # Number of training updates on generated rollouts (μ in GRPO)
+        num_iterations=args.num_iterations,  # Number of training updates on generated rollouts (μ in GRPO)
         beta=cfg.kl_coef,  # GRAIL_TRAINER_KL_COEF (KL divergence coefficient)
         epsilon=cfg.epsilon,  # TRAINER_PPO_CLIP_EPS (lower clip bound)
         epsilon_high=cfg.epsilon_high,  # TRAINER_PPO_CLIP_EPS_UPPER (DAPO asymmetric)
@@ -1530,20 +1629,33 @@ def main() -> None:
         num_completions_to_print=1,
         wandb_log_unique_prompts=True,
         save_strategy="steps",
-        save_steps=25,
-        fp16=True,
+        save_steps=50,
+        bf16=True,
         report_to=["wandb"],
         eval_strategy="no",
-        run_name=f"trl_{adapter.name}_grpo_qwen15b_grail_matched_final",
+        run_name=f"trl_{adapter.name}_grpo_{args.model_id.replace('/', '_')}_{run_id}",
         # ─────────────────────────────────────────────────────────────────────
         # vLLM Configuration
         # ─────────────────────────────────────────────────────────────────────
         use_vllm=True,
         vllm_mode="server",
-        vllm_server_base_url="http://127.0.0.1:8000",
+        vllm_server_base_url=f"http://127.0.0.1:{args.vllm_port}",
         vllm_importance_sampling_correction=False,
         vllm_importance_sampling_cap=cfg.is_ratio_max,  # GRAIL_TRAINER_IS_RATIO_MAX
     )
+
+    # HuggingFace Trainer will wrap the model in DataParallel when `args.n_gpu > 1`.
+    # In our vLLM-server setup we intentionally keep both GPUs visible (for NCCL peer access),
+    # but training must remain single-GPU to avoid accidentally using the vLLM GPU.
+    _ = grpo_config.device  # trigger device setup + cache it
+    if (
+        grpo_config.use_vllm
+        and grpo_config.vllm_mode == "server"
+        and torch.cuda.is_available()
+        and torch.cuda.device_count() > 1
+    ):
+        grpo_config._n_gpu = 1
+        print("  ✓ Forced Trainer to single-GPU (n_gpu=1) to avoid DataParallel on vLLM GPU")
 
     # Create reward tracker with pass@k logging
     reward_tracker = TrainingPassAtKTracker(
@@ -1576,6 +1688,17 @@ def main() -> None:
     sparsity_callback = SparsityCallback(sparsity_analyzer)
     print(f"  ✓ Sparsity analysis enabled (interval={sparsity_config.interval})")
 
+    # Initialize delta checkpoint callback
+    delta_checkpoint_callback = DeltaCheckpointCallback(
+        output_dir=f"./checkpoints/deltas_{adapter.name}_{run_id}",
+        enabled=cfg.delta_checkpoint_enabled,
+        snapshot_dtype=cfg.delta_checkpoint_dtype,
+    )
+    if cfg.delta_checkpoint_enabled:
+        print(f"  ✓ Delta checkpointing enabled (threshold=0.0, exact sparsity, dtype={cfg.delta_checkpoint_dtype})")
+    else:
+        print(f"  ✗ Delta checkpointing disabled (set cfg.delta_checkpoint_enabled=True to enable)")
+
     # Initialize evaluation callback
     vllm_eval_callback = VLLMEvalCallback(
         adapter=adapter,
@@ -1585,25 +1708,49 @@ def main() -> None:
         eval_every_n_steps=args.eval_every,
     )
 
+    # Monkey-patch VLLMClient to use custom group_port (avoids port conflicts in parallel runs)
+    from trl.extras import vllm_client as vllm_client_module
+    _original_init = vllm_client_module.VLLMClient.__init__
+
+    def _patched_init(self, *init_args, **init_kwargs):
+        init_kwargs.setdefault("group_port", args.group_port)
+        return _original_init(self, *init_args, **init_kwargs)
+
+    vllm_client_module.VLLMClient.__init__ = _patched_init
+    print(f"  ✓ VLLMClient patched to use group_port={args.group_port}")
+
+    # Ensure CUDA device is correctly set before GRPOTrainer initialization
+    # GRPOTrainer uses torch.cuda.current_device() for NCCL communicator setup
+    if args.device:
+        device_idx = int(args.device.split(":")[-1]) if ":" in args.device else 0
+        torch.cuda.set_device(device_idx)
+        print(f"  ✓ CUDA device set to {device_idx} for NCCL communicator")
+
     trainer = GRPOTrainer(
         model=model,
         reward_funcs=reward_tracker,
         args=grpo_config,
         train_dataset=train_ds,
         processing_class=tokenizer,
-        callbacks=[vllm_eval_callback, sparsity_callback],
+        callbacks=[vllm_eval_callback, sparsity_callback, delta_checkpoint_callback],
     )
 
     # Initialize WandB explicitly before baseline eval (GRPOTrainer does it lazily in .train())
     import wandb
 
     if wandb.run is None and grpo_config.report_to and "wandb" in grpo_config.report_to:
+        # CLI args take precedence over env vars
+        wandb_project = args.wandb_project or os.getenv("WANDB_PROJECT", "grail")
+        wandb_tags_str = args.wandb_tags or os.getenv("WANDB_TAGS", "")
+        wandb_tags = [t.strip() for t in wandb_tags_str.split(",") if t.strip()]
+
         wandb.init(
-            project=os.getenv("WANDB_PROJECT", "grail"),
+            project=wandb_project,
             name=grpo_config.run_name,
             config=grpo_config.to_dict(),
+            tags=wandb_tags if wandb_tags else None,
         )
-        print("  ✓ WandB initialized explicitly for baseline eval")
+        print(f"  ✓ WandB initialized (project: {wandb_project}, tags: {wandb_tags})")
 
     # Baseline evaluation
     vllm_eval_callback.run_and_log(step=0, label="BASELINE EVAL")
