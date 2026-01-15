@@ -18,11 +18,11 @@ gpu:
   # - single: Run everything on one GPU (good for small models, limited memory)
   # - multi: Use separate GPUs for vLLM server and training (recommended for production)
   strategy: "multi"  # single|multi
-  
+
   # GPU assignments (only used when strategy="multi")
   vllm_gpu: 1  # GPU ID for vLLM inference server
   training_gpu: 0  # GPU ID for training model
-  
+
   # vLLM memory settings (adjusted based on strategy)
   # For multi-GPU: can use more memory since vLLM has dedicated GPU
   # For single-GPU: must leave room for training model
@@ -55,22 +55,22 @@ train:
   grad_accum_steps: 32  # Increased to maintain effective batch size of 128
   warmup_steps: 50  # GRAIL_TRAINER_WARMUP_STEPS
   max_length: 1536  # GRAIL_TRAINER_MAX_LENGTH
-  
+
   # Loss coefficients
   kl_coef: 0.00  # GRAIL_TRAINER_KL_COEF (disabled)
   entropy_coef: 0.0005  # GRAIL_TRAINER_ENTROPY_COEF
-  
+
   # Advantage and clipping
   adv_clip_percentile: 98.0  # More aggressive outlier removal (optimized from 99.0)
   group_adv_sum_tol: 0.01  # TRAINER_GROUP_ADV_SUM_TOL
-  
+
   # Importance sampling and PPO clipping
   use_is: true  # TRAINER_USE_IS
   ppo_clip_eps: 0.2  # TRAINER_PPO_CLIP_EPS
   ppo_clip_eps_upper: 0.28  # TRAINER_PPO_CLIP_EPS_UPPER
   is_ratio_max: 2.5  # GRAIL_TRAINER_IS_RATIO_MAX
   logratio_clamp: 0.92  # GRAIL_TRAINER_LOGRATIO_CLAMP
-  
+
   # Adaptive KL (disabled when kl_coef=0)
   adaptive_kl: false  # Disabled since kl_coef=0
   kl_target: 0.04  # TRAINER_KL_TARGET (inactive)
@@ -124,5 +124,3 @@ logging:
 checkpoint:
   save_interval: 1  # Save checkpoint every N iterations
   keep_last_k: 3  # Keep only the last K checkpoints
-
-
