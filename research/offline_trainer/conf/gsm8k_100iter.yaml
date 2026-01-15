@@ -17,10 +17,10 @@ train:
   warmup_steps: 50  # 5% warmup for better convergence
   max_length: 1024
   group_adv_sum_tol: 0.01
-  
+
   # Advantage clipping
   adv_clip_percentile: 98.0  # More aggressive outlier removal
-  
+
   # KL divergence (disabled for pure policy gradient)
   kl_coef: 0.0  # Disabled - pure on-policy GRPO
   entropy_coef: 0.001  # Exploration bonus for math problems
@@ -29,7 +29,7 @@ train:
   kl_adapt_rate: 1.5
   kl_min: 0.001
   kl_max: 0.2
-  
+
   # Importance sampling and PPO clipping (tight trust region for math)
   use_is: true  # Enable importance sampling
   ppo_clip_eps: 0.2  # TRAINER_PPO_CLIP_EPS
@@ -66,4 +66,3 @@ logging:
     project: "grail-offline"
     entity: "tplr"
     tags: ["gsm8k", "grpo", "100-iter", "1.5b", "optimized"]
-

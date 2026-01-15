@@ -13,16 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-import pytest
 import torch
-
-# These tests start real vLLM servers and require GPUs + model downloads.
-# Keep them opt-in so the default test suite is fast and reliable.
-if os.getenv("GRAIL_RUN_GPU_TESTS", "0") != "1":
-    pytest.skip(
-        "GPU integration tests are disabled by default. Set GRAIL_RUN_GPU_TESTS=1 to run.",
-        allow_module_level=True,
-    )
 
 # Ensure repo root and src on sys.path BEFORE any imports from these paths
 _THIS_FILE = Path(__file__).resolve()
@@ -47,27 +38,19 @@ from grail.trainer.eval_planner import EvaluationPlan  # noqa: E402
 from grail.trainer.evaluator import EvaluatorService  # noqa: E402
 
 
-pytestmark = pytest.mark.asyncio
-
-
 class VLLMServerManager:
     """Manages vLLM server lifecycle for testing."""
 
     def __init__(self, model_id: str, port: int, gpu_id: int = 0) -> None:
         self.model_id = model_id
         self.port = port
-        self.gpu_id = gpu_id
-        self.process: subprocess.Popen[str] | None = None
+        # Clamp to a valid device index for the current machine
+        self.gpu_id = max(0, min(int(gpu_id), max(0, torch.cuda.device_count() - 1)))
+        self.process: subprocess.Popen[bytes] | None = None
         self.base_url = f"http://127.0.0.1:{port}"
 
     def start(self, timeout: float = 180.0) -> None:
         """Start vLLM server and wait for readiness."""
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
-        if self.gpu_id < 0 or self.gpu_id >= torch.cuda.device_count():
-            pytest.skip(
-                f"Requested GPU {self.gpu_id} but only {torch.cuda.device_count()} GPUs available"
-            )
         print(
             f"Starting vLLM server on port {self.port} with {self.model_id} on GPU {self.gpu_id}..."
         )
@@ -78,11 +61,13 @@ class VLLMServerManager:
 
         # Start vLLM server
         cmd = [
-            sys.executable,
+            "python3",
             "-m",
             "vllm.entrypoints.openai.api_server",
             "--model",
             self.model_id,
+            "--host",
+            "127.0.0.1",
             "--port",
             str(self.port),
             "--dtype",
@@ -92,6 +77,7 @@ class VLLMServerManager:
             "--gpu-memory-utilization",
             "0.4",
             "--disable-log-requests",
+            "--trust-remote-code",
         ]
 
         self.process = subprocess.Popen(
@@ -108,16 +94,7 @@ class VLLMServerManager:
         ready = False
         while time.time() - start_time < timeout:
             if self.process.poll() is not None:
-                output = ""
-                if self.process.stdout is not None:
-                    try:
-                        output = self.process.stdout.read()[-8_000:]
-                    except Exception:
-                        output = ""
-                raise RuntimeError(
-                    "vLLM server process terminated unexpectedly. "
-                    f"Tail output:\n{output}"
-                )
+                raise RuntimeError("vLLM server process terminated unexpectedly")
 
             try:
                 # Check if server is responding
@@ -291,7 +268,7 @@ async def test_vllm_server_evaluator() -> None:
 
     model_id = "Qwen/Qwen2.5-0.5B"
     port = 30102
-    device = "cuda:2"
+    device = "cuda:0"
 
     with VLLMServerManager(model_id, port, gpu_id=3):
         # Load model and tokenizer
