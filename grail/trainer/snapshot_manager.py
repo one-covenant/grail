@@ -42,7 +42,7 @@ class SnapshotManager:
         Args:
             cache_root: Root directory for snapshot storage
         """
-        self.cache_root = Path(cache_root)
+        self.cache_root = Path(cache_root).expanduser()
         self.snapshot_dir = self.cache_root / "snapshots"
         self.staging_dir = self.cache_root / "staging"
         self.locks_dir = self.cache_root / "locks"
@@ -103,13 +103,23 @@ class SnapshotManager:
                 # fsync on directory not supported on all platforms
                 pass
 
-            # Atomic rename: remove old target if exists, then rename
-            if target_dir.exists():
-                # Remove old snapshot
-                shutil.rmtree(target_dir)
+            # Atomic rename chain: rename old to backup, rename temp to target, delete backup
+            # This ensures target_dir is NEVER missing - it's either old version or new version
+            backup_dir = self.snapshot_dir / f"latest.backup.{uuid.uuid4().hex[:8]}"
 
-            # Rename temp to target (atomic on POSIX)
+            if target_dir.exists():
+                # Step 1: Atomically rename old target to backup (target still accessible)
+                target_dir.rename(backup_dir)
+
+            # Step 2: Atomically rename temp to target (target now points to new snapshot)
             temp_dir.rename(target_dir)
+
+            # Step 3: Clean up backup (safe - new target is already in place)
+            if backup_dir.exists():
+                try:
+                    shutil.rmtree(backup_dir)
+                except Exception as cleanup_exc:
+                    logger.warning("Failed to cleanup backup snapshot: %s", cleanup_exc)
 
             # Set SNAPSHOT_READY marker
             self._snapshot_ready_marker.touch()
