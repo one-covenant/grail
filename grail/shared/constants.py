@@ -128,6 +128,10 @@ CHECKPOINT_MILESTONE_INTERVAL = int(os.getenv("GRAIL_CHECKPOINT_MILESTONE_INTERV
 BASE_CHECKPOINT_RETENTION_LIMIT = int(os.getenv("GRAIL_BASE_CHECKPOINT_RETENTION_LIMIT", "3"))
 DELTA_CHECKPOINT_RETENTION_LIMIT = int(os.getenv("GRAIL_DELTA_CHECKPOINT_RETENTION_LIMIT", "15"))
 
+# Cleanup frequency control: run cleanup every N uploads instead of every upload
+# Set to 1 to run on every upload (old behavior), higher values reduce overhead
+CLEANUP_INTERVAL_UPLOADS = int(os.getenv("GRAIL_CLEANUP_INTERVAL_UPLOADS", "10"))
+
 # Trainer identity used for checkpoint publication
 TRAINER_UID = 0
 
@@ -344,3 +348,13 @@ def is_kl_enabled() -> bool:
 
 # Only for testing purposes; going to be removed later on
 GRAIL_CHECKPOINT_MOD10 = False
+
+
+# ────────────────  TRAINING COMPLETION  ────────────────
+
+# Total training windows before completing training
+TOTAL_TRAINING_WINDOWS = int(os.getenv("GRAIL_TRAINER_TOTAL_WINDOWS", "100"))
+
+# Hugging Face credentials for model upload after training completion
+HF_TOKEN = os.getenv("HF_TOKEN", "")
+HF_USERNAME = os.getenv("HF_USERNAME", "")

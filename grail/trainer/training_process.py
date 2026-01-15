@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import json
 import logging
 import multiprocessing
 import os
@@ -18,6 +19,7 @@ import random
 import sys
 import time
 from multiprocessing.synchronize import Event
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -38,7 +40,7 @@ from grail.infrastructure.checkpoint_consumer import (
 from grail.infrastructure.network import create_subtensor
 from grail.model.train_loading import ModelLoadSpec, load_training_artifacts
 from grail.monitoring import initialize_subprocess_monitoring
-from grail.shared.constants import NETUID, WINDOW_LENGTH, is_kl_enabled
+from grail.shared.constants import NETUID, TOTAL_TRAINING_WINDOWS, WINDOW_LENGTH, is_kl_enabled
 from grail.trainer.algorithms import GRPOAlgorithm, TrainingAlgorithm
 from grail.trainer.algorithms.grpo import load_grpo_groups
 from grail.trainer.config import TrainingConfig
@@ -58,9 +60,10 @@ OPTIMIZER_BETAS = (0.9, 0.95)
 OPTIMIZER_WEIGHT_DECAY = 0.1
 
 # Scheduler hyperparameters
-TOTAL_TRAINING_WINDOWS = 1000
 WARMUP_FRACTION = float(os.getenv("GRAIL_WARMUP_FRACTION", "0.05"))
 SCHEDULER_ETA_MIN = float(os.getenv("GRAIL_SCHEDULER_ETA_MIN", "1e-7"))
+# LR scheduler type: "constant" (warmup then constant) or "cosine" (warmup then cosine decay)
+LR_SCHEDULER_TYPE = os.getenv("GRAIL_LR_SCHEDULER_TYPE", "constant").strip().lower()
 
 # Training loop constants
 PAUSE_CHECK_INTERVAL_SECONDS = 5
@@ -144,6 +147,11 @@ class TrainingService:
         # Training state
         self.epoch_counter: int = 0
         self.last_loaded_window: int = INITIAL_LAST_LOADED_WINDOW
+        self._full_checkpoint_saved: bool = False  # Track if full checkpoint was saved at TOTAL_TRAINING_WINDOWS
+        self._epochs_this_window: int = 0  # Track epochs within current window for wandb logging
+        self._current_training_window: int = INITIAL_LAST_LOADED_WINDOW  # Current window being trained
+        self._windows_completed: int = 0  # Track total windows completed for HuggingFace upload trigger
+        self._background_upload_task: asyncio.Task[bool] | None = None  # Keep reference to prevent GC
 
         # Initialize replay buffer
         if config.replay_buffer_enabled:
@@ -345,7 +353,11 @@ class TrainingService:
         )
 
     def _create_scheduler(self) -> torch.optim.lr_scheduler.LRScheduler:
-        """Create learning rate scheduler with warmup and cosine annealing.
+        """Create learning rate scheduler with warmup phase.
+
+        Supports two scheduler types via GRAIL_LR_SCHEDULER_TYPE:
+        - "constant": Warmup then constant LR (recommended for RL/GRPO)
+        - "cosine": Warmup then cosine annealing decay (common for SFT)
 
         Returns:
             Configured scheduler instance
@@ -353,23 +365,38 @@ class TrainingService:
         assert self.optimizer is not None, "Optimizer must be initialized before creating scheduler"
         warmup_steps = max(1, int(WARMUP_FRACTION * TOTAL_TRAINING_WINDOWS))
 
+        # Warmup lambda: linear ramp from 0 to 1 over warmup_steps, then constant 1.0
         def lr_lambda_warmup(current_step: int) -> float:
             if current_step < warmup_steps:
                 return float(current_step) / float(max(1, warmup_steps))
             return 1.0
 
         warmup_scheduler = LambdaLR(self.optimizer, lr_lambda_warmup)
-        cosine_scheduler = CosineAnnealingLR(
-            self.optimizer,
-            T_max=TOTAL_TRAINING_WINDOWS - warmup_steps,
-            eta_min=SCHEDULER_ETA_MIN,
-        )
 
-        return SequentialLR(
-            self.optimizer,
-            schedulers=[warmup_scheduler, cosine_scheduler],
-            milestones=[warmup_steps],
-        )
+        if LR_SCHEDULER_TYPE == "cosine":
+            # Warmup + Cosine Annealing
+            cosine_scheduler = CosineAnnealingLR(
+                self.optimizer,
+                T_max=TOTAL_TRAINING_WINDOWS - warmup_steps,
+                eta_min=SCHEDULER_ETA_MIN,
+            )
+            scheduler = SequentialLR(
+                self.optimizer,
+                schedulers=[warmup_scheduler, cosine_scheduler],
+                milestones=[warmup_steps],
+            )
+            logger.info(
+                "LR scheduler: warmup (%d steps) + cosine (T_max=%d, eta_min=%.2e)",
+                warmup_steps,
+                TOTAL_TRAINING_WINDOWS - warmup_steps,
+                SCHEDULER_ETA_MIN,
+            )
+        else:
+            # Warmup + Constant LR (default, recommended for GRPO)
+            scheduler = warmup_scheduler
+            logger.info("LR scheduler: warmup (%d steps) + constant", warmup_steps)
+
+        return scheduler
 
     async def _upload_initial_checkpoint(self, stop_event: Event) -> None:
         """Save initial checkpoint and queue for upload worker.
@@ -464,6 +491,36 @@ class TrainingService:
                 # Load GRPO groups only if window changed (skip trusted miners query if not needed)
                 target_data_window = current_window - WINDOW_LENGTH
                 if target_data_window != self.last_loaded_window and target_data_window >= 0:
+                    # Log epochs from previous window before switching (if any training occurred)
+                    if self._epochs_this_window > 0 and self._current_training_window >= 0:
+                        await self._log_window_epochs(
+                            self._current_training_window, self._epochs_this_window
+                        )
+                        self._windows_completed += 1
+                        logger.info(
+                            "Window %d complete: %d epochs trained (total windows: %d)",
+                            self._current_training_window,
+                            self._epochs_this_window,
+                            self._windows_completed,
+                        )
+
+                        # Check if we've reached TOTAL_TRAINING_WINDOWS - save checkpoint immediately
+                        if (
+                            self._windows_completed >= TOTAL_TRAINING_WINDOWS
+                            and not self._full_checkpoint_saved
+                        ):
+                            logger.info(
+                                "Reached TOTAL_TRAINING_WINDOWS (%d windows), saving full checkpoint",
+                                TOTAL_TRAINING_WINDOWS,
+                            )
+                            await self._save_full_checkpoint(
+                                train_model, accelerator, current_window
+                            )
+
+                    # Reset counter for new window
+                    self._epochs_this_window = 0
+                    self._current_training_window = target_data_window
+
                     # Get trusted miners only when we need to fetch new data
                     trusted_hotkeys = await self._get_trusted_miners()
                     if not trusted_hotkeys:
@@ -596,17 +653,10 @@ class TrainingService:
             free_gb, _ = torch.cuda.mem_get_info()
             logger.info("GPU memory freed: %.2f GB available", free_gb / (1024**3))
 
-        # Signal pause confirmed via IPC (primary) BEFORE snapshot save
-        # The GPU is now freed and evaluation can start while we save the snapshot
-        # This prevents the orchestrator from timing out waiting for confirmation
-        if self._ipc is not None:
-            self._ipc.confirm_pause()
-            logger.info("🔄 STATE: pause_confirmed - signaled orchestrator via IPC (GPU freed)")
-        else:
-            logger.info("🔄 STATE: models_on_cpu_waiting - GPU freed (filesystem mode)")
-
-        # Save current state during pause (non-blocking for orchestrator)
-        # This can take 30-90s but evaluation can run in parallel
+        # Save snapshot BEFORE confirming pause to avoid disk I/O contention
+        # If evaluation starts while snapshot is being saved, vLLM model loading
+        # competes with the ~15GB write, causing startup timeouts (120s+)
+        logger.info("🔄 STATE: saving_snapshot - saving model before evaluation starts")
         self.snapshot_manager.save_snapshot_atomic(
             train_model_cpu,
             self.tokenizer,
@@ -617,6 +667,14 @@ class TrainingService:
             },
         )
         logger.info("🔄 STATE: pause_snapshot_saved - snapshot saved during pause")
+
+        # Signal pause confirmed via IPC AFTER snapshot save completes
+        # This ensures vLLM can load the model without disk I/O contention
+        if self._ipc is not None:
+            self._ipc.confirm_pause()
+            logger.info("🔄 STATE: pause_confirmed - signaled orchestrator via IPC (snapshot saved, GPU freed)")
+        else:
+            logger.info("🔄 STATE: models_on_cpu_waiting - GPU freed (filesystem mode)")
 
         # Close subtensor connection before long idle period (prevents 10s timeout)
         if self.subtensor:
@@ -729,6 +787,25 @@ class TrainingService:
         except Exception as exc:
             logger.warning("Failed to get current block: %s", exc)
             return self.epoch_counter * WINDOW_LENGTH
+
+    async def _log_window_epochs(self, window: int, epochs: int) -> None:
+        """Log the number of training epochs completed in a window to wandb.
+
+        Args:
+            window: Window number that was trained
+            epochs: Number of epochs completed in that window
+        """
+        if self.monitor is None:
+            return
+
+        try:
+            await self.monitor.log_gauge(
+                "training/prefilter/per_epochs_per_window",
+                float(epochs),
+                tags={"window_number": str(window)},
+            )
+        except Exception as exc:
+            logger.debug("Failed to log epochs_per_window metric: %s", exc)
 
     async def _get_trusted_miners(self) -> set[str]:
         """Get trusted miner hotkeys from metagraph with fallback to cache.
@@ -926,6 +1003,7 @@ class TrainingService:
             )
 
             self.epoch_counter += 1
+            self._epochs_this_window += 1
             return metrics
 
         except Exception as exc:
@@ -977,6 +1055,199 @@ class TrainingService:
         except Exception as exc:
             logger.error("Failed to save snapshot: %s", exc)
             # Continue training even if snapshot fails
+
+    async def _save_full_checkpoint(
+        self,
+        train_model: Any,
+        accelerator: Accelerator,
+        current_window: int,
+    ) -> None:
+        """Save complete training checkpoint including optimizer and scheduler state.
+
+        This saves everything needed to fully resume training:
+        - Model weights (safetensors format)
+        - Tokenizer
+        - Optimizer state (momentum buffers, variance estimates)
+        - Scheduler state
+        - Training configuration and hyperparameters
+        - Epoch counter and training state
+
+        Called when _windows_completed reaches TOTAL_TRAINING_WINDOWS.
+
+        Args:
+            train_model: Training model (wrapped by accelerator)
+            accelerator: Accelerator instance
+            current_window: Current window number
+        """
+        checkpoint_dir = self.snapshot_manager.cache_root / "checkpoints"
+        checkpoint_path = checkpoint_dir / f"checkpoint_window_{self._windows_completed}"
+
+        try:
+            checkpoint_path.mkdir(parents=True, exist_ok=True)
+
+            # Unwrap model from accelerator
+            unwrapped_train = accelerator.unwrap_model(train_model)
+
+            # Save model and tokenizer
+            logger.info(
+                "Saving full checkpoint to %s (windows=%d, TOTAL_TRAINING_WINDOWS=%d)",
+                checkpoint_path,
+                self._windows_completed,
+                TOTAL_TRAINING_WINDOWS,
+            )
+            unwrapped_train.save_pretrained(
+                str(checkpoint_path),
+                safe_serialization=True,
+            )
+            self.tokenizer.save_pretrained(str(checkpoint_path))
+
+            # Save optimizer state
+            assert self.optimizer is not None
+            optimizer_path = checkpoint_path / "optimizer.pt"
+            torch.save(self.optimizer.state_dict(), optimizer_path)
+            logger.info("Optimizer state saved to %s", optimizer_path)
+
+            # Save scheduler state
+            if self.scheduler is not None:
+                scheduler_path = checkpoint_path / "scheduler.pt"
+                torch.save(self.scheduler.state_dict(), scheduler_path)
+                logger.info("Scheduler state saved to %s", scheduler_path)
+
+            # Save complete training state and hyperparameters
+            training_state = {
+                "epoch": self.epoch_counter,
+                "windows_completed": self._windows_completed,
+                "last_loaded_window": self.last_loaded_window,
+                "current_window": current_window,
+                "timestamp": time.time(),
+                "total_training_windows": TOTAL_TRAINING_WINDOWS,
+                # Optimizer hyperparameters
+                "optimizer_config": {
+                    "type": "AdamW",
+                    "lr": self.config.lr,
+                    "betas": list(OPTIMIZER_BETAS),
+                    "weight_decay": OPTIMIZER_WEIGHT_DECAY,
+                },
+                # Scheduler hyperparameters
+                "scheduler_config": {
+                    "type": "SequentialLR(LambdaLR+CosineAnnealingLR)",
+                    "total_training_windows": TOTAL_TRAINING_WINDOWS,
+                    "warmup_fraction": WARMUP_FRACTION,
+                    "eta_min": SCHEDULER_ETA_MIN,
+                    "current_lr": self.scheduler.get_last_lr()[0] if self.scheduler else self.config.lr,
+                },
+                # Training config
+                "training_config": {
+                    "lr": self.config.lr,
+                    "batch_size": self.config.batch_size,
+                    "grad_accum_steps": self.config.grad_accum_steps,
+                    "grad_clip": self.config.grad_clip,
+                    "use_gradient_checkpointing": self.config.use_gradient_checkpointing,
+                    "replay_buffer_enabled": self.config.replay_buffer_enabled,
+                    "replay_buffer_max_windows": self.config.replay_buffer_max_windows,
+                    "replay_buffer_max_groups_per_epoch": self.config.replay_buffer_max_groups_per_epoch,
+                    "replay_buffer_recent_fraction": self.config.replay_buffer_recent_fraction,
+                    "replay_buffer_decay_factor": self.config.replay_buffer_decay_factor,
+                },
+            }
+
+            state_path = checkpoint_path / "training_state.json"
+            with open(state_path, "w", encoding="utf-8") as f:
+                json.dump(training_state, f, indent=2)
+
+            logger.info(
+                "Full checkpoint saved successfully: windows=%d, path=%s",
+                self._windows_completed,
+                checkpoint_path,
+            )
+            self._full_checkpoint_saved = True
+
+            # Upload model to HuggingFace in background (non-blocking)
+            # Training continues while upload happens asynchronously
+            self._start_background_huggingface_upload(checkpoint_path)
+
+        except Exception as exc:
+            logger.error("Failed to save full checkpoint: %s", exc)
+            # Continue training even if checkpoint save fails
+
+    def _start_background_huggingface_upload(self, checkpoint_path: Path) -> None:
+        """Start HuggingFace upload as a background task (non-blocking).
+
+        Args:
+            checkpoint_path: Path to the saved checkpoint directory
+        """
+        from grail.shared.constants import HF_TOKEN, HF_USERNAME
+
+        if not HF_TOKEN or not HF_USERNAME:
+            logger.warning(
+                "HuggingFace credentials not configured. "
+                "Set HF_TOKEN and HF_USERNAME in .env to enable model upload."
+            )
+            return
+
+        # Generate repository name based on model and training info
+        model_name = getattr(self.train_model, "name_or_path", "grail-model")
+        # Clean model name for repo (replace / with -)
+        clean_name = model_name.replace("/", "-").lower()
+        repo_name = f"grail-trained-{clean_name}"
+
+        commit_message = (
+            f"GRAIL trained model - {TOTAL_TRAINING_WINDOWS} windows, "
+            f"epoch {self.epoch_counter}"
+        )
+
+        logger.info(
+            "Starting background HuggingFace upload: %s/%s (non-blocking)",
+            HF_USERNAME,
+            repo_name,
+        )
+
+        # Create background task for upload (store reference to prevent GC)
+        self._background_upload_task = asyncio.create_task(
+            self._upload_to_huggingface_async(checkpoint_path, repo_name, commit_message)
+        )
+
+        # Add callback to log completion/failure
+        def _on_upload_done(t: asyncio.Task[bool]) -> None:
+            try:
+                success = t.result()
+                if success:
+                    logger.info(
+                        "✅ Background HuggingFace upload completed: https://huggingface.co/%s/%s",
+                        HF_USERNAME,
+                        repo_name,
+                    )
+                else:
+                    logger.error("Background HuggingFace upload failed for %s", repo_name)
+            except Exception as exc:
+                logger.error("Background HuggingFace upload error: %s", exc)
+
+        self._background_upload_task.add_done_callback(_on_upload_done)
+
+    async def _upload_to_huggingface_async(
+        self,
+        checkpoint_path: Path,
+        repo_name: str,
+        commit_message: str,
+    ) -> bool:
+        """Upload trained model to HuggingFace Hub (async worker).
+
+        Args:
+            checkpoint_path: Path to the saved checkpoint directory
+            repo_name: Repository name (without username)
+            commit_message: Commit message for the upload
+
+        Returns:
+            True if upload succeeded, False otherwise
+        """
+        from grail.infrastructure.comms import upload_model_to_huggingface
+
+        return await upload_model_to_huggingface(
+            model_path=checkpoint_path,
+            repo_name=repo_name,
+            commit_message=commit_message,
+            private=False,
+        )
 
 
 # ────────────────────────────────────────────────────────────────────────────────

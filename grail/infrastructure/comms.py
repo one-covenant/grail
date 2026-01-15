@@ -9,6 +9,7 @@ import os
 import tempfile
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import bittensor as bt
@@ -1619,3 +1620,80 @@ async def download_from_huggingface(
     except Exception as e:
         logger.error(f"Failed to download from Hugging Face: {e}")
         return []
+
+
+# --------------------------------------------------------------------------- #
+#                   Hugging Face Model Upload                                  #
+# --------------------------------------------------------------------------- #
+
+
+async def upload_model_to_huggingface(
+    model_path: Path,
+    repo_name: str,
+    commit_message: str | None = None,
+    private: bool = False,
+) -> bool:
+    """Upload a trained model to Hugging Face Hub.
+
+    Args:
+        model_path: Path to the directory containing model files (safetensors, config, tokenizer)
+        repo_name: Repository name (without username prefix, e.g., 'grail-trained-model')
+        commit_message: Optional commit message for the upload
+        private: Whether to create a private repository
+
+    Returns:
+        True if upload succeeded, False otherwise
+    """
+    from grail.shared.constants import HF_TOKEN, HF_USERNAME
+
+    if not HF_TOKEN:
+        logger.error("HF_TOKEN not set. Cannot upload model to HuggingFace.")
+        return False
+
+    if not HF_USERNAME:
+        logger.error("HF_USERNAME not set. Cannot upload model to HuggingFace.")
+        return False
+
+    model_path = Path(model_path)
+    if not model_path.exists():
+        logger.error("Model path does not exist: %s", model_path)
+        return False
+
+    full_repo_id = f"{HF_USERNAME}/{repo_name}"
+    if commit_message is None:
+        commit_message = "Upload trained GRAIL model"
+
+    try:
+        from huggingface_hub import HfApi, create_repo, repo_exists
+
+        api = HfApi(token=HF_TOKEN)
+
+        # Create repository if it doesn't exist
+        if not repo_exists(repo_id=full_repo_id, repo_type="model", token=HF_TOKEN):
+            logger.info("Creating new model repository: %s", full_repo_id)
+            create_repo(
+                repo_id=full_repo_id,
+                token=HF_TOKEN,
+                private=private,
+                repo_type="model",
+                exist_ok=True,
+            )
+
+        # Upload model directory, excluding training-only files
+        # optimizer.pt (~30GB) and scheduler.pt are only needed for training resumption
+        # training_state.json contains internal training state, not needed for inference
+        logger.info("Uploading model to HuggingFace: %s", full_repo_id)
+        api.upload_folder(
+            folder_path=str(model_path),
+            repo_id=full_repo_id,
+            repo_type="model",
+            commit_message=commit_message,
+            ignore_patterns=["optimizer.pt", "scheduler.pt", "training_state.json"],
+        )
+
+        logger.info("✅ Successfully uploaded model to HuggingFace: %s", full_repo_id)
+        return True
+
+    except Exception as exc:
+        logger.exception("Failed to upload model to HuggingFace: %s", exc)
+        return False
