@@ -52,6 +52,7 @@ from grail.shared.constants import (
     CHECKPOINT_PREFIX,
     CHECKPOINT_TYPE_DELTA,
     CHECKPOINT_TYPE_FULL,
+    CLEANUP_INTERVAL_UPLOADS,
     CURRENT_ENV_ID,
     DELTA_CHECKPOINT_RETENTION_LIMIT,
     DELTA_THRESHOLD,
@@ -323,6 +324,7 @@ def _parse_checkpoint_inventory(keys: list[str]) -> tuple[list[int], list[int], 
 async def _fetch_delta_anchor_window(
     delta_window: int,
     credentials: Any,
+    anchor_cache: dict[int, int] | None = None,
 ) -> int | None:
     """Fetch the anchor_window a delta checkpoint depends on for recovery.
 
@@ -336,10 +338,17 @@ async def _fetch_delta_anchor_window(
     Args:
         delta_window: The delta checkpoint window
         credentials: R2 credentials
+        anchor_cache: Optional cache of {delta_window: anchor_window} mappings.
+            If provided and delta_window is in cache, returns cached value
+            without network call. If not in cache, fetches and caches the result.
 
     Returns:
         The anchor_window from metadata, or None if unavailable
     """
+    # Check cache first to avoid redundant downloads
+    if anchor_cache is not None and delta_window in anchor_cache:
+        return anchor_cache[delta_window]
+
     from grail.infrastructure.comms import download_file_chunked
 
     # Delta checkpoints store their metadata under the DELTA sub-prefix so they can
@@ -355,7 +364,11 @@ async def _fetch_delta_anchor_window(
         )
         if metadata_bytes:
             metadata = json.loads(metadata_bytes.decode("utf-8"))
-            return metadata.get("anchor_window")
+            anchor = metadata.get("anchor_window")
+            # Cache the result if cache is provided
+            if anchor_cache is not None and anchor is not None:
+                anchor_cache[delta_window] = anchor
+            return anchor
     except Exception as exc:
         logger.warning("Failed to read metadata for delta %d: %s", delta_window, exc)
     return None
@@ -364,6 +377,7 @@ async def _fetch_delta_anchor_window(
 async def _compute_keep_windows(
     inventory: tuple[list[int], list[int], list[int]],
     credentials: Any,
+    anchor_cache: dict[int, int] | None = None,
 ) -> set[int]:
     """Calculate which checkpoint windows to retain with DELTA dependency tracking.
 
@@ -377,6 +391,8 @@ async def _compute_keep_windows(
     Args:
         inventory: Parsed checkpoint inventory (all_windows, full_windows, delta_windows)
         credentials: R2 credentials for querying checkpoint metadata
+        anchor_cache: Optional cache of {delta_window: anchor_window} mappings.
+            Reused across cleanup calls to avoid redundant metadata downloads.
 
     Returns:
         Set of window numbers to retain
@@ -408,21 +424,36 @@ async def _compute_keep_windows(
     keep.update(deltas_to_keep)
 
     # Ensure any retained DELTA has its anchor FULL kept
+    # Use cache to avoid redundant metadata downloads
     anchor_windows = await asyncio.gather(
-        *(_fetch_delta_anchor_window(delta_window, credentials) for delta_window in deltas_to_keep)
+        *(
+            _fetch_delta_anchor_window(delta_window, credentials, anchor_cache)
+            for delta_window in deltas_to_keep
+        )
     )
+    anchors_kept: set[int] = set()
+    fallback_anchors_kept: set[int] = set()
     for delta_window, anchor_window in zip(deltas_to_keep, anchor_windows, strict=False):
         if anchor_window is not None:
             keep.add(int(anchor_window))
-            logger.debug("Keeping anchor %d (required by delta %d)", anchor_window, delta_window)
+            anchors_kept.add(int(anchor_window))
             continue
 
         # Fallback: keep nearest FULL checkpoint before this delta
         for full_window in full_windows:
             if full_window < delta_window:
                 keep.add(full_window)
-                logger.debug("Keeping fallback anchor %d for delta %d", full_window, delta_window)
+                fallback_anchors_kept.add(full_window)
                 break
+
+    # Log anchor retention summary once (instead of per-delta)
+    if anchors_kept or fallback_anchors_kept:
+        logger.debug(
+            "Anchor retention: %d anchors kept for %d deltas (fallback: %d)",
+            len(anchors_kept),
+            len(deltas_to_keep),
+            len(fallback_anchors_kept),
+        )
 
     logger.info(
         "Retention: keeping %d checkpoints (%d FULL, %d DELTA)",
@@ -443,7 +474,7 @@ class CheckpointPublisher:
     - Cleaning up old checkpoints per retention policy
 
     Design:
-    - Stateless operations (no instance state)
+    - Maintains minimal state for optimization (anchor cache, upload counter)
     - All methods are async for I/O operations
     - Clean separation from CheckpointManager (consumer role)
     """
@@ -458,9 +489,19 @@ class CheckpointPublisher:
         self.credentials = credentials
         self.wallet = wallet
 
+        # Optimization: Cache {delta_window: anchor_window} mappings to avoid
+        # redundant metadata downloads during cleanup. Anchor windows never change
+        # after a delta is uploaded.
+        self._anchor_cache: dict[int, int] = {}
+
+        # Optimization: Track upload count to run cleanup less frequently.
+        # Cleanup runs every CLEANUP_INTERVAL_UPLOADS uploads instead of every upload.
+        self._upload_count: int = 0
+
     async def cleanup_old_checkpoints(
         self,
         current_window: int,
+        force: bool = False,
     ) -> None:
         """Delete remote checkpoints outside retention policy.
 
@@ -474,9 +515,38 @@ class CheckpointPublisher:
 
         This prevents orphaned deltas whose base was deleted.
 
+        Optimization: Runs only every CLEANUP_INTERVAL_UPLOADS uploads to reduce
+        overhead. Uses cached anchor_window mappings to avoid redundant metadata
+        downloads.
+
         Args:
             current_window: Current window number
+            force: If True, run cleanup regardless of upload count interval
         """
+        # Increment upload counter
+        self._upload_count += 1
+
+        # Check if we should run cleanup this time
+        # Run on first upload (to handle restarts) and every N uploads thereafter
+        # Guard against CLEANUP_INTERVAL_UPLOADS <= 0
+        interval = max(1, CLEANUP_INTERVAL_UPLOADS)
+        is_first_upload = self._upload_count == 1
+        is_interval_upload = self._upload_count % interval == 0
+        should_run = force or is_first_upload or is_interval_upload
+        if not should_run:
+            logger.debug(
+                "Cleanup skipped: upload %d (runs on 1st and every %d uploads)",
+                self._upload_count,
+                interval,
+            )
+            return
+
+        logger.info(
+            "Running checkpoint cleanup (upload %d, interval=%d)",
+            self._upload_count,
+            interval,
+        )
+
         from grail.infrastructure.comms import list_bucket_files
 
         # List remote checkpoint keys once (fail-safe: empty means "skip cleanup")
@@ -493,10 +563,38 @@ class CheckpointPublisher:
             return
 
         inventory = _parse_checkpoint_inventory(keys)
-        remote_windows, _, _ = inventory
+        remote_windows, _, delta_windows = inventory
+
+        # Prune cache: remove entries for deltas that no longer exist in R2
+        # This prevents unbounded cache growth
+        delta_set = set(delta_windows)
+        stale_keys = [k for k in self._anchor_cache if k not in delta_set]
+        for k in stale_keys:
+            del self._anchor_cache[k]
+        if stale_keys:
+            logger.debug("Pruned %d stale entries from anchor cache", len(stale_keys))
 
         # Calculate windows to keep with proper dependency tracking
-        keep_windows = await _compute_keep_windows(inventory, self.credentials)
+        # Pass anchor cache to avoid redundant metadata downloads
+        # Count cache hits: how many deltas_to_keep are already in cache
+        deltas_to_keep = delta_windows[:DELTA_CHECKPOINT_RETENTION_LIMIT]
+        cache_hits = sum(1 for d in deltas_to_keep if d in self._anchor_cache)
+        cache_size_before = len(self._anchor_cache)
+
+        keep_windows = await _compute_keep_windows(
+            inventory, self.credentials, self._anchor_cache
+        )
+
+        # Cache misses = new entries added (may undercount if some fetches failed)
+        cache_misses = len(self._anchor_cache) - cache_size_before
+        logger.debug(
+            "Anchor cache: %d hits, %d misses, %d queried (total cached: %d)",
+            cache_hits,
+            cache_misses,
+            len(deltas_to_keep),
+            len(self._anchor_cache),
+        )
+
         if not keep_windows:
             logger.warning(
                 "Checkpoint cleanup skipped: keep set is empty (current_window=%d). "
