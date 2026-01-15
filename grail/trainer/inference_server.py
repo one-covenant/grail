@@ -391,17 +391,18 @@ class VLLMServerManager(InferenceServerManager):
     async def _start_server(self) -> None:
         """Launch vLLM server in isolated environment."""
         if not self._config.model_path:
-            logger.warning("No model_path provided, skipping vLLM server launch")
-            return
+            raise ValueError("No model_path provided for vLLM server")
 
         if not os.path.exists(self._config.model_path):
-            logger.error("Model path does not exist: %s", self._config.model_path)
-            return
+            raise FileNotFoundError(f"Model path does not exist: {self._config.model_path}")
 
         # Resolve Python executable to absolute path
         python_path = self._resolve_executable()
         if not python_path:
-            return
+            raise FileNotFoundError(
+                f"vLLM Python executable not found: {self._python_executable}. "
+                "Run scripts/setup_vllm_env.sh to set up the vLLM environment."
+            )
 
         # Allocate port and build command
         self._bound_port = self._allocate_port()
@@ -442,17 +443,27 @@ class VLLMServerManager(InferenceServerManager):
                 self._start_process_logger("vllm")
         except Exception as exc:
             logger.error("Failed to launch vLLM server: %s", exc)
-            return
+            raise RuntimeError(f"Failed to launch vLLM server subprocess: {exc}") from exc
 
         # Wait for readiness
         ready_url = f"{self.base_url}/v1/models"
         is_ready = await self._wait_for_server_ready(ready_url, self._config.timeout_s)
 
         if not is_ready:
+            logger.error(
+                "vLLM server failed to start (pid=%s, port=%s, model=%s)",
+                self._process.pid if self._process else None,
+                self._bound_port,
+                self._config.model_path,
+            )
             await self._terminate_process(self._process, wait_for_gpu=False)
             self._process = None
             self._bound_port = None
-            return
+            raise RuntimeError(
+                f"vLLM server failed to start within {self._config.timeout_s}s. "
+                f"Model path: {self._config.model_path}. "
+                "Enable stream_server_logs=True in EvalConfig to see vLLM stderr."
+            )
 
         # Discover model id from server to ensure correct model_name for requests
         try:
@@ -626,12 +637,10 @@ class SGLangServerManager(InferenceServerManager):
     async def _start_server(self) -> None:
         """Launch SGLang server with optimized memory settings."""
         if not self._config.model_path:
-            logger.warning("No model_path provided, skipping SGLang server launch")
-            return
+            raise ValueError("No model_path provided for SGLang server")
 
         if not os.path.exists(self._config.model_path):
-            logger.error("Model path does not exist: %s", self._config.model_path)
-            return
+            raise FileNotFoundError(f"Model path does not exist: {self._config.model_path}")
 
         # Allocate port and build command
         self._bound_port = self._allocate_port()
@@ -671,16 +680,27 @@ class SGLangServerManager(InferenceServerManager):
                 self._start_process_logger("sglang")
         except Exception as exc:
             logger.error("Failed to launch SGLang server: %s", exc)
-            return
+            raise RuntimeError(f"Failed to launch SGLang server subprocess: {exc}") from exc
 
         # Wait for readiness
         ready_url = f"{self.base_url}/v1/models"
         is_ready = await self._wait_for_server_ready(ready_url, self._config.timeout_s)
 
         if not is_ready:
+            logger.error(
+                "SGLang server failed to start (pid=%s, port=%s, model=%s)",
+                self._process.pid if self._process else None,
+                self._bound_port,
+                self._config.model_path,
+            )
             await self._terminate_process(self._process, wait_for_gpu=False)
             self._process = None
             self._bound_port = None
+            raise RuntimeError(
+                f"SGLang server failed to start within {self._config.timeout_s}s. "
+                f"Model path: {self._config.model_path}. "
+                "Enable stream_server_logs=True in EvalConfig to see SGLang stderr."
+            )
 
     async def _stop_server(self) -> None:
         """Terminate SGLang server and wait for GPU memory release."""
