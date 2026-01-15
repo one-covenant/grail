@@ -26,7 +26,7 @@ from grail.environments.gsm8k_env import GSM8KEnv
 from grail.environments.sat_env import SATEnv
 from grail.model.provider import get_model, get_tokenizer
 from grail.shared.chat_templates import build_qwen_chat_template
-from grail.shared.prompt_constants import REASONING_START, SYSTEM_PROMPT
+from grail.shared.prompt_constants import SYSTEM_PROMPT
 from grail.trainer.algorithms.grpo import GRPOAlgorithm
 from grail.trainer.config import EvalConfig, TrainingConfig
 from grail.trainer.eval_planner import EvaluationPlan
@@ -93,6 +93,17 @@ def _save_checkpoint_for_vllm(
 
     model.save_pretrained(checkpoint_dir, safe_serialization=True)
     tokenizer.save_pretrained(checkpoint_dir)
+
+    # vLLM expects a chat template file when launched with --chat-template.
+    # Persist the tokenizer chat template (if present) alongside the checkpoint.
+    chat_template = getattr(tokenizer, "chat_template", None)
+    if isinstance(chat_template, str) and chat_template.strip():
+        (checkpoint_dir / "chat_template.jinja").write_text(chat_template)
+    else:
+        logger.warning(
+            "Tokenizer has no chat_template; vLLM may not format prompts correctly",
+            extra={"iteration": iteration, "path": str(checkpoint_dir)},
+        )
 
     logger.info(
         "Saved vLLM checkpoint",
@@ -309,7 +320,7 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     # Build tokenizer with chat template
-    chat_template = build_qwen_chat_template(SYSTEM_PROMPT, REASONING_START)
+    chat_template = build_qwen_chat_template(SYSTEM_PROMPT)
     train_id = str(cfg.model.train_id)
     ref_id = str(cfg.model.ref_id)
 
