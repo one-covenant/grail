@@ -32,11 +32,13 @@ __all__ = [
     "REASONING_END_TOKEN",
     "SOLUTION_START_TOKEN",
     "SOLUTION_END_TOKEN",
+
     # bracketed
     "REASONING_START",
     "REASONING_END",
     "SOLUTION_START",
     "SOLUTION_END",
+    
     # prompt
     "SYSTEM_PROMPT",
 ]

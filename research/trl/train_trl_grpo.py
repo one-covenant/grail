@@ -1565,14 +1565,14 @@ def main() -> None:
         gradient_enabled=True,  # Enable gradient analysis
     )
     sparsity_analyzer = ModelAnalysisManager.create(sparsity_config)
-    
+
     # Add gradient sparsity metric
     gradient_sparsity = GradientSparsityMetrics(
         thresholds=[0.0, 10, 1, 1e-4, 1e-8, 1e-16, 1e-20],  # Only track exact zero gradients
         track_per_layer=False,
     )
     sparsity_analyzer.add_metric(gradient_sparsity)
-    
+
     sparsity_callback = SparsityCallback(sparsity_analyzer)
     print(f"  ✓ Sparsity analysis enabled (interval={sparsity_config.interval})")
 
