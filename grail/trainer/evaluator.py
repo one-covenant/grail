@@ -18,6 +18,7 @@ from typing import Any
 
 import torch
 from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeRemainingColumn
+from tenacity import before_sleep_log, retry, stop_after_attempt, wait_exponential
 
 from grail.environments.core import ChatMessage, MultiTurnEnv
 from grail.environments.execution import CodeExecutionPool, set_global_execution_pool
@@ -113,26 +114,51 @@ class EvaluatorService:
         self._current_window_number: int | None = None
 
     def _init_execution_pool(self) -> None:
-        """Initialize the fast code execution pool.
+        """Initialize the fast code execution pool with retry logic.
 
         Workers are spawned immediately and warmed up to eliminate first-call latency.
         The pool is set as the global execution pool so environments can use it.
+        Uses tenacity for retry logic to handle transient initialization failures.
         """
-        try:
-            # Use 8 workers - enough parallelism without exhausting resources
-            # max_tasks_per_child=50 recycles workers to prevent memory leaks
-            self._execution_pool = CodeExecutionPool(
+
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=2, max=10),
+            before_sleep=before_sleep_log(logger, logging.WARNING),
+            reraise=True,
+        )
+        def _create_and_start_pool() -> CodeExecutionPool:
+            """Create and start a fresh pool, cleaning up on failure."""
+            pool = CodeExecutionPool(
                 num_workers=8,
                 max_tasks_per_child=50,
             )
-            self._execution_pool.start()
+            try:
+                pool.start()
+                return pool
+            except Exception:
+                # Clean up the partially initialized pool before retrying
+                try:
+                    pool.shutdown()
+                except Exception:
+                    pass
+                raise
+
+        try:
+            self._execution_pool = _create_and_start_pool()
             set_global_execution_pool(self._execution_pool)
             logger.info(
                 "Fast code execution pool initialized: %d workers",
                 self._execution_pool.num_workers,
             )
         except Exception as e:
-            logger.warning("Failed to initialize execution pool, falling back to slow path: %s", e)
+            logger.warning(
+                "Failed to initialize execution pool after retries, falling back to slow path. "
+                "Exception type: %s, message: %s",
+                type(e).__name__,
+                str(e),
+                exc_info=True,  # Log full traceback
+            )
             self._execution_pool = None
 
     def _create_sglang_backend(self, base_url: str, model_name: str | None) -> Any | None:
