@@ -6,15 +6,20 @@ Runs 4 parallel training instances, each with:
 - Dedicated training GPU
 - Unique random seed
 - Unique port
+- NCCL weight sync between trainer and vLLM server (via TCP store)
 
 NOTE: This script is designed to run in nohup mode. Use:
     ./run_parallel_training_nohup.sh [dataset] [eval_every]
 
 GPU allocation (8 GPUs total):
-- Instance 0: VLLM GPU 0, Training GPU 1, Port 8000, Seed 42
-- Instance 1: VLLM GPU 2, Training GPU 3, Port 8001, Seed 1337
-- Instance 2: VLLM GPU 4, Training GPU 5, Port 8002, Seed 2024
-- Instance 3: VLLM GPU 6, Training GPU 7, Port 8003, Seed 9999
+- Instance 0: VLLM on GPU 0, Training on GPU 1, Port 8000, Seed 42
+- Instance 1: VLLM on GPU 2, Training on GPU 3, Port 8001, Seed 1337
+- Instance 2: VLLM on GPU 4, Training on GPU 5, Port 8002, Seed 2024
+- Instance 3: VLLM on GPU 6, Training on GPU 7, Port 8003, Seed 9999
+
+NCCL weight sync between trainer and vLLM server requires both GPUs to be visible
+in each process. To keep HuggingFace Trainer from accidentally using DataParallel
+on the vLLM GPU, the training script forces `n_gpu=1` after device setup.
 
 Usage:
     python run_parallel_training.py --dataset gsm8k
@@ -22,12 +27,6 @@ Usage:
 """
 
 from __future__ import annotations
-
-# Force unbuffered output for nohup mode
-import sys
-import os
-sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
-sys.stderr = os.fdopen(sys.stderr.fileno(), 'w', buffering=1)
 
 import argparse
 import os
@@ -38,7 +37,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-import requests
+# Force unbuffered output for nohup mode
+sys.stdout = os.fdopen(sys.stdout.fileno(), "w", buffering=1)
+sys.stderr = os.fdopen(sys.stderr.fileno(), "w", buffering=1)
 
 
 # Fixed seeds for reproducibility across experiments
@@ -92,33 +93,45 @@ class ProcessManager:
         self.shutdown_all()
         sys.exit(0)
 
-    def start_vllm_server(self, instance_id: int, gpu_id: int, port: int) -> subprocess.Popen:
+    def start_vllm_server(
+        self, instance_id: int, vllm_gpu: int, training_gpu: int, port: int
+    ) -> subprocess.Popen:
         """Start VLLM server on specified GPU and port.
 
         Args:
             instance_id: Instance identifier (0-3)
-            gpu_id: GPU ID for VLLM server
+            vllm_gpu: Physical GPU ID for VLLM server
+            training_gpu: Physical GPU ID for training (needed for NCCL visibility)
             port: Port number for server
 
         Returns:
             Popen object for the server process
         """
-        log_file = self.log_dir / f"vllm_instance{instance_id}_gpu{gpu_id}_port{port}.log"
+        log_file = self.log_dir / f"vllm_instance{instance_id}_gpu{vllm_gpu}_port{port}.log"
 
         # Use tools/vllm-server venv for vLLM (isolated environment with compatible versions)
         repo_root = Path(__file__).parent.parent.parent
         trl_path = repo_root / "tools" / "vllm-server" / ".venv" / "bin" / "trl"
+        # VLLM will use device 0 by default (first GPU in CUDA_VISIBLE_DEVICES)
         cmd = [
-            str(trl_path), "vllm-serve",
-            "--model", self.model_id,
-            "--port", str(port),
-            "--max-model-len", "4096",
-            "--gpu-memory-utilization", "0.9",
-            "--tensor-parallel-size", "1",
+            str(trl_path),
+            "vllm-serve",
+            "--model",
+            self.model_id,
+            "--port",
+            str(port),
+            "--max-model-len",
+            "4096",
+            "--gpu-memory-utilization",
+            "0.9",
+            "--tensor-parallel-size",
+            "1",
         ]
 
         env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        # NCCL weight sync requires both GPUs visible to enable peer access.
+        # Order matters: vLLM must run on cuda:0 in this process.
+        env["CUDA_VISIBLE_DEVICES"] = f"{vllm_gpu},{training_gpu}"
         # Unique cache directories per instance to avoid race conditions
         cache_base = f"/tmp/vllm_cache_instance{instance_id}"
         env["VLLM_CACHE_ROOT"] = cache_base
@@ -126,7 +139,9 @@ class ProcessManager:
         env["TORCH_COMPILE_CACHE_DIR"] = f"{cache_base}/torch_compile"
 
         print(f"[Instance {instance_id}] Starting VLLM server:")
-        print(f"  GPU: {gpu_id}, Port: {port}, Cache: {cache_base}, Log: {log_file}")
+        print(
+            f"  GPUs visible: {vllm_gpu},{training_gpu}, Using: cuda:0, Port: {port}, Log: {log_file}"
+        )
 
         with open(log_file, "w") as f:
             process = subprocess.Popen(
@@ -141,7 +156,11 @@ class ProcessManager:
         return process
 
     def wait_for_vllm_ready(
-        self, port: int, timeout: int = 60, instance_id: int = 0, process: subprocess.Popen = None
+        self,
+        port: int,
+        timeout: int = 60,
+        instance_id: int = 0,
+        process: subprocess.Popen[str] | None = None,
     ) -> bool:
         """Wait for VLLM server to be ready.
 
@@ -161,7 +180,9 @@ class ProcessManager:
 
         # Check if process is still alive
         if process and process.poll() is not None:
-            print(f"[Instance {instance_id}] ✗ VLLM server died during startup (exit: {process.returncode})")
+            print(
+                f"[Instance {instance_id}] ✗ VLLM server died during startup (exit: {process.returncode})"
+            )
             return False
 
         print(f"[Instance {instance_id}] ✓ VLLM server ready!")
@@ -170,7 +191,8 @@ class ProcessManager:
     def start_training(
         self,
         instance_id: int,
-        gpu_id: int,
+        vllm_gpu: int,
+        training_gpu: int,
         port: int,
         seed: int,
     ) -> subprocess.Popen:
@@ -178,28 +200,41 @@ class ProcessManager:
 
         Args:
             instance_id: Instance identifier (0-3)
-            gpu_id: GPU ID for training
+            vllm_gpu: Physical GPU ID for VLLM (needed for NCCL visibility)
+            training_gpu: Physical GPU ID for training
             port: VLLM server port to connect to
             seed: Random seed
 
         Returns:
             Popen object for the training process
         """
-        log_file = self.log_dir / f"training_instance{instance_id}_gpu{gpu_id}_seed{seed}.log"
+        log_file = self.log_dir / f"training_instance{instance_id}_gpu{training_gpu}_seed{seed}.log"
 
         # Use local .venv python
         python_path = Path(__file__).parent / ".venv" / "bin" / "python"
         group_port = BASE_GROUP_PORT + instance_id  # Unique port per instance
         cmd = [
-            str(python_path), "train_trl_grpo.py",
-            "--dataset", self.dataset,
-            "--eval-every", str(self.eval_every),
-            "--num-iterations", str(self.num_iterations),
-            "--seed", str(seed),
-            "--vllm-port", str(port),
-            "--group-port", str(group_port),
-            "--run-suffix", f"instance{instance_id}_seed{seed}",
-            "--model", self.model_id,
+            str(python_path),
+            "train_trl_grpo.py",
+            "--dataset",
+            self.dataset,
+            "--eval-every",
+            str(self.eval_every),
+            "--num-iterations",
+            str(self.num_iterations),
+            "--seed",
+            str(seed),
+            "--vllm-port",
+            str(port),
+            "--group-port",
+            str(group_port),
+            "--run-suffix",
+            f"instance{instance_id}_seed{seed}",
+            "--model",
+            self.model_id,
+            # Ensure training uses cuda:0 in this process (the training GPU).
+            "--device",
+            "cuda:0",
         ]
         # Add W&B args if provided (CLI takes precedence over env vars)
         if self.wandb_project:
@@ -208,10 +243,15 @@ class ProcessManager:
             cmd.extend(["--wandb-tags", self.wandb_tags])
 
         env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        # NCCL weight sync requires both GPUs visible to enable peer access.
+        # Order matters: training must run on cuda:0 in this process, so we put the
+        # training GPU first.
+        env["CUDA_VISIBLE_DEVICES"] = f"{training_gpu},{vllm_gpu}"
 
         print(f"[Instance {instance_id}] Starting training:")
-        print(f"  GPU: {gpu_id}, Seed: {seed}, VLLM Port: {port}, Group Port: {group_port}, Log: {log_file}")
+        print(
+            f"  GPUs visible: {training_gpu},{vllm_gpu}, Using: cuda:0, Seed: {seed}, Log: {log_file}"
+        )
 
         with open(log_file, "w") as f:
             process = subprocess.Popen(
@@ -256,7 +296,9 @@ class ProcessManager:
 
             # Print brief status
             running = sum(1 for p in self.training_processes if p.poll() is None)
-            print(f"[{time.strftime('%H:%M:%S')}] Training processes: {running}/{len(self.training_processes)} running")
+            print(
+                f"[{time.strftime('%H:%M:%S')}] Training processes: {running}/{len(self.training_processes)} running"
+            )
 
     def shutdown_all(self) -> None:
         """Shutdown all processes gracefully."""
@@ -304,9 +346,9 @@ class ProcessManager:
         try:
             # Phase 1: Start all VLLM servers
             print("\n📡 Phase 1: Starting VLLM servers...")
-            for i, (vllm_gpu, _) in enumerate(GPU_PAIRS):
+            for i, (vllm_gpu, training_gpu) in enumerate(GPU_PAIRS):
                 port = BASE_PORT + i
-                self.start_vllm_server(i, vllm_gpu, port)
+                self.start_vllm_server(i, vllm_gpu, training_gpu, port)
                 time.sleep(2)  # Stagger startup
 
             # Phase 2: Wait for all servers to be ready (60s for model loading)
@@ -331,10 +373,10 @@ class ProcessManager:
 
             # Phase 3: Start all training processes
             print("\n🏋️  Phase 3: Starting training processes...")
-            for i, (_, training_gpu) in enumerate(GPU_PAIRS):
+            for i, (vllm_gpu, training_gpu) in enumerate(GPU_PAIRS):
                 port = BASE_PORT + i
                 seed = SEEDS[i]
-                self.start_training(i, training_gpu, port, seed)
+                self.start_training(i, vllm_gpu, training_gpu, port, seed)
                 time.sleep(5)  # Stagger startup
 
             print("\n✅ All training processes started!")
@@ -345,6 +387,7 @@ class ProcessManager:
         except Exception as e:
             print(f"\n❌ Error: {e}")
             import traceback
+
             traceback.print_exc()
         finally:
             self.shutdown_all()
@@ -401,6 +444,7 @@ def main() -> None:
 
     # Verify we have 8 GPUs
     import torch
+
     num_gpus = torch.cuda.device_count()
     if num_gpus < 8:
         print(f"⚠️  Warning: Only {num_gpus} GPUs detected. This script expects 8 GPUs.")

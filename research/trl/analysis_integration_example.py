@@ -21,10 +21,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from transformers import TrainerCallback
-
 # Import the analysis framework
 from grail.trainer.analysis import AnalysisConfig, ModelAnalysisManager
+from transformers import TrainerCallback
 
 if TYPE_CHECKING:
     from transformers import TrainingArguments
@@ -100,8 +99,7 @@ class ModelAnalysisCallback(TrainerCallback):
         model = kwargs.get("model")
         if model is None:
             logger.warning(
-                "Model not available in callback kwargs at step %d. "
-                "Skipping analysis.",
+                "Model not available in callback kwargs at step %d. Skipping analysis.",
                 state.global_step,
             )
             return

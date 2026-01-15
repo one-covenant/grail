@@ -167,7 +167,7 @@ def main():
     if args.inspect_executors:
         print(f"\n=== Executor Specs ({args.gpu_type}) ===\n")
         infra.inspect_executor_specs(gpu_type=args.gpu_type)
-        print(f"\n=== Executors with Bandwidth Info ===\n")
+        print("\n=== Executors with Bandwidth Info ===\n")
         infra.list_executors_with_bandwidth(
             gpu_type=args.gpu_type,
             min_upload=0,
@@ -195,17 +195,17 @@ def main():
         print(f"Error: {e}")
         return 1
 
-    print(f"Configuration loaded:")
+    print("Configuration loaded:")
     print(f"  - Pods: {len(pod_specs)}")
     print(f"  - Total experiments: {sum(len(exps) for exps in pod_experiments.values())}")
 
     # Deploy pods
     if not args.no_deploy:
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print("🚀 DEPLOYING PODS")
-        print(f"{'='*80}\n")
+        print(f"{'=' * 80}\n")
         infra.apply(pod_specs)
-        print(f"\n✅ Pod deployment complete\n")
+        print("\n✅ Pod deployment complete\n")
 
     if args.deploy_only:
         print("Pod deployment complete (--deploy-only specified, skipping experiments)")
@@ -255,9 +255,9 @@ def main():
             print(f"Found .env file at: {local_env_path}")
 
     # Run experiments
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("🧪 RUNNING EXPERIMENTS")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     if args.use_rsync:
         print(f"Code deployment: rsync from {local_code_path}")
     else:
@@ -281,9 +281,9 @@ def main():
         )
     )
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("✅ ALL EXPERIMENTS COMPLETED")
-    print(f"{'='*80}\n")
+    print(f"{'=' * 80}\n")
 
     return 0
 

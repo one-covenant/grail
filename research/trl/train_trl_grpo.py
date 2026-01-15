@@ -43,7 +43,8 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", ".."))
 
 # Load environment from .env for WandB
-load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
+# Use override=False so CLI/deployment env vars take precedence over .env
+load_dotenv(os.path.join(_PROJECT_ROOT, ".env"), override=False)
 
 sys.path.insert(0, _PROJECT_ROOT)
 
@@ -90,7 +91,17 @@ class Config:
     # Epochs per training iteration (GRAIL_TRAINER_EPOCHS, constants.py default: 1)
     epochs: int = 1
     # Batch size per device (GRAIL_TRAINER_BATCH_SIZE, constants.py default: 16)
+    # For 7B models on 80GB GPU with gradient checkpointing: batch_size=2 is safe
+    # For 1.5B models: batch_size=4-8 is feasible
     batch_size: int = 2
+    # ────────────────────────────────────────────────────────────────────────
+    # Memory Optimization
+    # ────────────────────────────────────────────────────────────────────────
+    # Gradient checkpointing trades compute for memory by recomputing activations
+    # during backward pass. Essential for 7B+ models on 80GB GPUs.
+    # Memory savings: ~60-80% activation memory reduction
+    # Cost: ~20-30% slower training
+    gradient_checkpointing: bool = True
     # Gradient accumulation steps (GRAIL_TRAINER_GRAD_ACCUM_STEPS, constants.py default: 8)
     # Effective batch = batch_size × grad_accum_steps = 4 × 128 = 512
     grad_accum_steps: int = 256
@@ -615,13 +626,15 @@ class MBPPAdapter(DatasetAdapter):
         assert self._train_source._data is not None
         data = []
         for sample in self._train_source._data:
-            data.append({
-                "question": sample["text"],
-                "test_list": sample["test_list"],
-                "test_setup_code": sample["test_setup_code"],
-                "test_imports": sample["test_imports"],
-                "reference_solution": sample["code"],
-            })
+            data.append(
+                {
+                    "question": sample["text"],
+                    "test_list": sample["test_list"],
+                    "test_setup_code": sample["test_setup_code"],
+                    "test_imports": sample["test_imports"],
+                    "reference_solution": sample["code"],
+                }
+            )
         return data
 
     def load_eval_data(self) -> list[dict[str, Any]]:
@@ -630,13 +643,15 @@ class MBPPAdapter(DatasetAdapter):
         assert self._eval_source._data is not None
         data = []
         for sample in self._eval_source._data:
-            data.append({
-                "question": sample["text"],
-                "test_list": sample["test_list"],
-                "test_setup_code": sample["test_setup_code"],
-                "test_imports": sample["test_imports"],
-                "reference_solution": sample["code"],
-            })
+            data.append(
+                {
+                    "question": sample["text"],
+                    "test_list": sample["test_list"],
+                    "test_setup_code": sample["test_setup_code"],
+                    "test_imports": sample["test_imports"],
+                    "reference_solution": sample["code"],
+                }
+            )
         return data
 
     def parse_gold_answer(self, raw_answer: Any) -> Any:
@@ -983,10 +998,12 @@ def prepare_train_dataset(adapter: DatasetAdapter, tokenizer: PreTrainedTokenize
         else:
             gold_data = sample[adapter.answer_field]
 
-        formatted.append({
-            "prompt": prompt,
-            "gold_answer": gold_data,
-        })
+        formatted.append(
+            {
+                "prompt": prompt,
+                "gold_answer": gold_data,
+            }
+        )
 
     print(f"  Training dataset ({adapter.name}): {len(formatted)} samples")
     return Dataset.from_list(formatted)
@@ -1130,7 +1147,9 @@ class VLLMEvalCallback(TrainerCallback):
                             gold_display = gold[:50] + "..." if len(gold) > 50 else gold
                         else:
                             # MBPP: show test count instead of raw dict
-                            test_count = len(gold.get("test_list", [])) if isinstance(gold, dict) else 0
+                            test_count = (
+                                len(gold.get("test_list", [])) if isinstance(gold, dict) else 0
+                            )
                             gold_display = f"[{test_count} test cases]"
                         print(f"\n  Sample {i + 1}:")
                         print(f"    Question: {q_display}")
@@ -1338,6 +1357,117 @@ class SparsityCallback(TrainerCallback):
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# MEMORY ESTIMATION
+# ════════════════════════════════════════════════════════════════════════════
+def estimate_memory_requirements(
+    model_size_b: float,
+    batch_size: int,
+    seq_len: int,
+    gradient_checkpointing: bool,
+) -> dict[str, float]:
+    """Estimate GPU memory requirements for training.
+
+    Args:
+        model_size_b: Model size in billions of parameters (e.g., 7.0 for 7B)
+        batch_size: Microbatch size per device
+        seq_len: Maximum sequence length
+        gradient_checkpointing: Whether gradient checkpointing is enabled
+
+    Returns:
+        Dict with memory estimates in GB
+    """
+    # Model parameters in bf16
+    model_gb = model_size_b * 2  # 2 bytes per param in bf16
+
+    # AdamW optimizer states in fp32 (m and v)
+    optimizer_gb = model_size_b * 4 * 2  # 4 bytes × 2 states
+
+    # Gradients in bf16
+    gradients_gb = model_size_b * 2
+
+    # Activation memory estimation (rough heuristic)
+    # Scales with batch × seq × model_size
+    # Gradient checkpointing reduces by ~5-10x
+    base_activation_gb = batch_size * (seq_len / 1024) * (model_size_b / 7) * 4
+    if gradient_checkpointing:
+        activation_gb = base_activation_gb * 0.15  # ~85% reduction
+    else:
+        activation_gb = base_activation_gb
+
+    # Overhead (CUDA context, fragmentation, etc.)
+    overhead_gb = 2.0
+
+    total_gb = model_gb + optimizer_gb + gradients_gb + activation_gb + overhead_gb
+
+    return {
+        "model_gb": model_gb,
+        "optimizer_gb": optimizer_gb,
+        "gradients_gb": gradients_gb,
+        "activation_gb": activation_gb,
+        "overhead_gb": overhead_gb,
+        "total_gb": total_gb,
+    }
+
+
+def print_memory_estimate(model_id: str) -> None:
+    """Print memory estimation and warnings for current config."""
+    # Estimate model size from model_id
+    model_id_lower = model_id.lower()
+    if "72b" in model_id_lower:
+        model_size_b = 72.0
+    elif "32b" in model_id_lower:
+        model_size_b = 32.0
+    elif "14b" in model_id_lower:
+        model_size_b = 14.0
+    elif "7b" in model_id_lower:
+        model_size_b = 7.0
+    elif "3b" in model_id_lower:
+        model_size_b = 3.0
+    elif "1.5b" in model_id_lower or "1b" in model_id_lower:
+        model_size_b = 1.5
+    elif "0.5b" in model_id_lower or "500m" in model_id_lower:
+        model_size_b = 0.5
+    else:
+        # Default assumption for unknown models
+        model_size_b = 7.0
+
+    mem = estimate_memory_requirements(
+        model_size_b=model_size_b,
+        batch_size=cfg.batch_size,
+        seq_len=cfg.max_length,
+        gradient_checkpointing=cfg.gradient_checkpointing,
+    )
+
+    # Get available GPU memory
+    if torch.cuda.is_available():
+        gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+    else:
+        gpu_memory_gb = 80.0  # Assume A100
+
+    print("\n💾 Memory Estimation:")
+    print("─" * 60)
+    print(f"  Model ({model_size_b:.1f}B params, bf16):    {mem['model_gb']:.1f} GB")
+    print(f"  Optimizer states (fp32):        {mem['optimizer_gb']:.1f} GB")
+    print(f"  Gradients (bf16):               {mem['gradients_gb']:.1f} GB")
+    ckpt_status = "enabled" if cfg.gradient_checkpointing else "disabled"
+    print(f"  Activations (checkpointing {ckpt_status}): {mem['activation_gb']:.1f} GB")
+    print(f"  Overhead:                       {mem['overhead_gb']:.1f} GB")
+    print("─" * 60)
+    print(f"  Estimated total:                {mem['total_gb']:.1f} GB")
+    print(f"  Available GPU memory:           {gpu_memory_gb:.1f} GB")
+
+    headroom = gpu_memory_gb - mem["total_gb"]
+    if headroom < 0:
+        print(f"  ⚠️  WARNING: Estimated {-headroom:.1f} GB OVER capacity!")
+        print("     → Try: --batch-size 1 or reduce --max-length")
+    elif headroom < 5:
+        print(f"  ⚠️  TIGHT: Only {headroom:.1f} GB headroom - may OOM on long sequences")
+    else:
+        print(f"  ✓ Headroom: {headroom:.1f} GB")
+    print("─" * 60)
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # MAIN TRAINING
 # ════════════════════════════════════════════════════════════════════════════
 def parse_args() -> argparse.Namespace:
@@ -1375,7 +1505,7 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=51216,
         help="NCCL group coordination port for vLLM weight sync (default: 51216). "
-             "Must be unique per parallel instance.",
+        "Must be unique per parallel instance.",
     )
     parser.add_argument(
         "--run-suffix",
@@ -1414,27 +1544,48 @@ def parse_args() -> argparse.Namespace:
         help="CUDA device to use for training (e.g., 'cuda:0', 'cuda:1'). "
         "If not specified, uses CUDA_VISIBLE_DEVICES default.",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Override batch size per device. For 7B models on 80GB GPU: use 1-2. "
+        "For 1.5B models: use 2-4. Default from config.",
+    )
+    parser.add_argument(
+        "--no-gradient-checkpointing",
+        action="store_true",
+        help="Disable gradient checkpointing (uses more memory but faster training).",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
 
-    # Override model_id if specified via CLI (takes precedence over default)
+    # Override config via CLI (takes precedence over defaults)
     if args.model:
         cfg.model_id = args.model
+    if args.batch_size is not None:
+        cfg.batch_size = args.batch_size
+    if args.no_gradient_checkpointing:
+        cfg.gradient_checkpointing = False
 
     # Set random seeds for reproducibility
     import random
+
     import numpy as np
+
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
 
     print(f"🚀 Starting TRL GRPO training with {args.dataset.upper()} dataset")
-    print(f"   Seed: {args.seed} | VLLM Port: {args.vllm_port} | Num Iterations: {args.num_iterations}")
+    print(
+        f"   Seed: {args.seed} | VLLM Port: {args.vllm_port} | Num Iterations: {args.num_iterations}"
+    )
     print(f"   Model: {cfg.model_id}")
+    print(f"   Batch size: {cfg.batch_size} | Gradient checkpointing: {cfg.gradient_checkpointing}")
     if args.run_suffix:
         print(f"   Run suffix: {args.run_suffix}")
     print("=" * 80)
@@ -1475,15 +1626,19 @@ def main() -> None:
     print(f"  {'KL Coefficient':<40} {cfg.kl_coef:<15} GRAIL_TRAINER_KL_COEF")
     print(f"  {'Entropy Coefficient':<40} {cfg.entropy_coef:<15} GRAIL_TRAINER_ENTROPY_COEF")
     print(f"  {'PPO Clip Epsilon':<40} {cfg.epsilon:<15} TRAINER_PPO_CLIP_EPS")
-    print(
-        f"  {'PPO Clip Epsilon Upper':<40} {cfg.epsilon_high:<15} TRAINER_PPO_CLIP_EPS_UPPER"
-    )
+    print(f"  {'PPO Clip Epsilon Upper':<40} {cfg.epsilon_high:<15} TRAINER_PPO_CLIP_EPS_UPPER")
     print(f"  {'IS Ratio Max':<40} {cfg.is_ratio_max:<15} GRAIL_TRAINER_IS_RATIO_MAX")
     print(f"  {'GRPO Variant':<40} {cfg.grpo_variant:<15} GRAIL_GRPO_VARIANT")
     print(f"  {'IS Level':<40} {cfg.importance_sampling_level:<15} GRAIL_IMPORTANCE_SAMPLING_LEVEL")
     print(f"  {'Max Groups':<40} {cfg.max_groups:<15} GRPO_MAX_GROUPS")
     print(f"  {'Rollouts per Problem':<40} {cfg.rollouts_per_problem:<15} ROLLOUTS_PER_PROBLEM")
+    print(
+        f"  {'Gradient Checkpointing':<40} {cfg.gradient_checkpointing!s:<15} Memory optimization"
+    )
     print("─" * 80)
+
+    # Print memory estimation
+    print_memory_estimate(cfg.model_id)
 
     # Get dataset adapter
     adapter = get_dataset_adapter(args.dataset)
@@ -1631,9 +1786,14 @@ def main() -> None:
         save_strategy="steps",
         save_steps=50,
         bf16=True,
+        # ─────────────────────────────────────────────────────────────────────
+        # Memory Optimization
+        # ─────────────────────────────────────────────────────────────────────
+        gradient_checkpointing=cfg.gradient_checkpointing,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         report_to=["wandb"],
         eval_strategy="no",
-        run_name=f"trl_{adapter.name}_grpo_{args.model_id.replace('/', '_')}_{run_id}",
+        run_name=f"trl_{adapter.name}_grpo_{cfg.model_id.replace('/', '_')}_{run_id}",
         # ─────────────────────────────────────────────────────────────────────
         # vLLM Configuration
         # ─────────────────────────────────────────────────────────────────────
@@ -1695,9 +1855,11 @@ def main() -> None:
         snapshot_dtype=cfg.delta_checkpoint_dtype,
     )
     if cfg.delta_checkpoint_enabled:
-        print(f"  ✓ Delta checkpointing enabled (threshold=0.0, exact sparsity, dtype={cfg.delta_checkpoint_dtype})")
+        print(
+            f"  ✓ Delta checkpointing enabled (threshold=0.0, exact sparsity, dtype={cfg.delta_checkpoint_dtype})"
+        )
     else:
-        print(f"  ✗ Delta checkpointing disabled (set cfg.delta_checkpoint_enabled=True to enable)")
+        print("  ✗ Delta checkpointing disabled (set cfg.delta_checkpoint_enabled=True to enable)")
 
     # Initialize evaluation callback
     vllm_eval_callback = VLLMEvalCallback(
@@ -1710,6 +1872,7 @@ def main() -> None:
 
     # Monkey-patch VLLMClient to use custom group_port (avoids port conflicts in parallel runs)
     from trl.extras import vllm_client as vllm_client_module
+
     _original_init = vllm_client_module.VLLMClient.__init__
 
     def _patched_init(self, *init_args, **init_kwargs):
