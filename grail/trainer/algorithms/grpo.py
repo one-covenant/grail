@@ -2066,7 +2066,37 @@ class GRPOAlgorithm(TrainingAlgorithm):
                     self.param_tracker.clear_snapshot()
                     self.param_tracker.capture_snapshot(model)
 
-                logger.info(f"Optimizer step completed. Current KL coef: {current_kl_coef}")
+                # Log comprehensive optimizer step summary
+                logger.info(
+                    "Optimizer step %d | loss=%.4f (pg=%.4f, kl=%.4f, ent=%.4f) | "
+                    "grad_norm=%.3f | kl_div=%.4f | kl_coef=%.4f | "
+                    "clip_frac=%.2f%% | ceiling_frac=%.2f%%",
+                    self.optimizer_step_count,
+                    loss_total.item(),
+                    loss_pg.item(),
+                    loss_kl.item(),
+                    loss_entropy.item(),
+                    grad_norm_scalar if grad_norm_scalar is not None else 0.0,
+                    kl_value,
+                    current_kl_coef,
+                    ratio_clip_frac_val * 100.0,
+                    ratio_ceiling_frac_val * 100.0,
+                    extra={
+                        "optimizer_step": self.optimizer_step_count,
+                        "window": window,
+                        "loss_total": loss_total.item(),
+                        "loss_pg": loss_pg.item(),
+                        "loss_kl": loss_kl.item(),
+                        "loss_entropy": loss_entropy.item(),
+                        "grad_norm": grad_norm_scalar,
+                        "kl_divergence": kl_value,
+                        "kl_coef": current_kl_coef,
+                        "ratio_clip_frac": ratio_clip_frac_val,
+                        "ratio_ceiling_frac": ratio_ceiling_frac_val,
+                        "micro_batch": micro_idx + 1,
+                        "total_micro_batches": num_micro_batches,
+                    },
+                )
 
                 # Adaptive KL adjustment after each optimizer step based on observed KL
                 if kl_enabled and self.adaptive_kl_enabled:
