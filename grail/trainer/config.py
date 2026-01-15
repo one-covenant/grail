@@ -112,7 +112,7 @@ class EvalConfig:
     server_host: str = "127.0.0.1"
     server_port: int = 30000
     start_server: bool = True  # Server runs in subprocess (avoids Gloo socket issues)
-    server_timeout: float = 120.0
+    server_timeout: float = 180.0  # Increased from 120s to handle edge cases
     server_trust_remote_code: bool = False
     # vLLM server options (used when backend == "vllm")
     # Path to isolated vLLM environment Python executable
@@ -150,9 +150,9 @@ class EvalConfig:
     # Sample storage: save k successful + k failed samples for debugging
     sample_storage_k: int = 30
     # Logging controls
-    # - Disable noisy external server stdout (vLLM/SGLang) by default
+    # - Enable server logs to capture vLLM/SGLang startup errors for debugging
     # - Optionally log a few sample completions per batch for visibility
-    stream_server_logs: bool = False
+    stream_server_logs: bool = True
     log_completions_n: int = 1
     log_completions_max_chars: int = 4096
     # vLLM: request chosen-token logprobs via OpenAI-compatible API (disabled by default)
