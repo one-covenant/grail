@@ -6,7 +6,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from lium_manager import LiumInfra, PodSpec
+from lium_manager import LiumInfra
 
 # Setup logging
 logging.basicConfig(
@@ -66,6 +66,7 @@ def test_lium_infra() -> None:
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback
+
         traceback.print_exc()
         exit(1)
 

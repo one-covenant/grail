@@ -27,6 +27,10 @@ Typical storage:
 
 from __future__ import annotations
 
+import os
+
+# Import existing snapshot infrastructure
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -34,14 +38,11 @@ from typing import Any
 import torch
 from transformers import TrainerCallback
 
-# Import existing snapshot infrastructure
-import sys
-import os
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", ".."))
 sys.path.insert(0, _PROJECT_ROOT)
 
-from grail.trainer.analysis.primitives import ParameterSnapshot, ParameterDelta
+from grail.trainer.analysis.primitives import ParameterDelta, ParameterSnapshot  # noqa: E402
 
 
 class DeltaCheckpointCallback(TrainerCallback):
@@ -151,7 +152,7 @@ class DeltaCheckpointCallback(TrainerCallback):
             Dictionary with sparse COO representation
         """
         # Find non-zero elements (EXACT comparison with 0.0)
-        mask = (delta_tensor != 0.0)
+        mask = delta_tensor != 0.0
 
         # Extract non-zero indices and values
         indices = mask.nonzero(as_tuple=False).t()  # Shape: [ndim, nnz]
@@ -237,7 +238,7 @@ class DeltaCheckpointCallback(TrainerCallback):
 
         # Load existing metadata
         if metadata_path.exists():
-            with open(metadata_path, "r") as f:
+            with open(metadata_path) as f:
                 metadata = json.load(f)
         else:
             metadata = {
@@ -247,13 +248,15 @@ class DeltaCheckpointCallback(TrainerCallback):
             }
 
         # Add new checkpoint info
-        metadata["checkpoints"].append({
-            "step": step,
-            "path": str(path.name),
-            "sparsity": checkpoint_meta["sparsity"],
-            "nonzero": checkpoint_meta["total_nonzero"],
-            "changed_layers": checkpoint_meta["num_changed_layers"],
-        })
+        metadata["checkpoints"].append(
+            {
+                "step": step,
+                "path": str(path.name),
+                "sparsity": checkpoint_meta["sparsity"],
+                "nonzero": checkpoint_meta["total_nonzero"],
+                "changed_layers": checkpoint_meta["num_changed_layers"],
+            }
+        )
 
         # Save updated metadata
         with open(metadata_path, "w") as f:

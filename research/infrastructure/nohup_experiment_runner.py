@@ -13,7 +13,6 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import asyncssh
 
@@ -73,7 +72,7 @@ class NohupExperimentRunner:
         ssh_port: int,
         r2_config: dict[str, str],
         ssh_user: str = "root",
-        ssh_key_path: Optional[str] = None,
+        ssh_key_path: str | None = None,
         remote_path: str = "~/grail",
     ):
         """Initialize experiment runner.
@@ -92,7 +91,7 @@ class NohupExperimentRunner:
         self.ssh_key_path = ssh_key_path
         self.remote_path = remote_path
         self.r2_config = r2_config
-        self._conn: Optional[asyncssh.SSHClientConnection] = None
+        self._conn: asyncssh.SSHClientConnection | None = None
 
     async def connect(self):
         """Establish SSH connection to the pod with keepalive."""
@@ -125,7 +124,7 @@ class NohupExperimentRunner:
     async def run_command(
         self,
         command: str,
-        timeout: Optional[int] = None,
+        timeout: int | None = None,
         check: bool = True,
     ) -> tuple[str, str, int]:
         """Run a command on the remote pod.
@@ -219,7 +218,8 @@ class NohupExperimentRunner:
             "--exclude=.DS_Store",
             # Lock files (will be regenerated)
             "--exclude=uv.lock",
-            "-e", f"ssh -p {self.ssh_port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
+            "-e",
+            f"ssh -p {self.ssh_port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
             f"{local_path}/",
             f"{self.ssh_user}@{self.ssh_host}:{self.remote_path}/",
         ]
@@ -243,11 +243,12 @@ class NohupExperimentRunner:
         1. Install uv (if not present)
         2. Run uv sync in research/trl
         3. Run uv sync in tools/vllm-server
+        4. Login to HuggingFace (for gated models like Llama)
         """
         logger.info("Setting up Python environment")
 
         # Step 1: Install uv (new installer puts it in ~/.local/bin)
-        logger.info("  [1/3] Installing uv...")
+        logger.info("  [1/4] Installing uv...")
         await self.run_command(
             "command -v uv || curl -LsSf https://astral.sh/uv/install.sh | sh",
             timeout=180,
@@ -258,20 +259,53 @@ class NohupExperimentRunner:
         uv_cmd = "$(command -v uv || echo $HOME/.local/bin/uv)"
 
         # Step 2: Sync TRL research dependencies (with all extras)
-        logger.info("  [2/3] Installing TRL research dependencies (with --all-extras)...")
+        logger.info("  [2/4] Installing TRL research dependencies (with --all-extras)...")
         await self.run_command(
             f"cd {self.remote_path}/research/trl && {uv_cmd} sync --all-extras",
             timeout=600,
         )
 
         # Step 3: Sync vllm-server dependencies (with all extras)
-        logger.info("  [3/3] Installing VLLM server dependencies (with --all-extras)...")
+        logger.info("  [3/4] Installing VLLM server dependencies (with --all-extras)...")
         await self.run_command(
             f"cd {self.remote_path}/tools/vllm-server && {uv_cmd} sync --all-extras",
             timeout=600,
         )
 
+        # Step 4: Login to HuggingFace if token is available (required for gated models like Llama)
+        logger.info("  [4/4] Setting up HuggingFace authentication...")
+        await self._setup_huggingface_auth()
+
         logger.info("✓ Environment setup complete")
+
+    async def _setup_huggingface_auth(self):
+        """Setup HuggingFace authentication on remote pod.
+
+        Reads HF_TOKEN from the .env file and logs in using huggingface-cli.
+        This is required for downloading gated models like Llama.
+        """
+        # Extract HF_TOKEN from .env file on remote pod
+        hf_token_cmd = f"grep -E '^HF_TOKEN=' {self.remote_path}/.env 2>/dev/null | cut -d'=' -f2 | tr -d '\"' | tr -d \"'\""
+        stdout, _, exit_code = await self.run_command(hf_token_cmd, check=False)
+
+        hf_token = stdout.strip()
+        if not hf_token:
+            logger.warning("HF_TOKEN not found in .env - gated models may not be accessible")
+            return
+
+        # Login to HuggingFace using the token
+        # Use huggingface-cli which should be installed with transformers
+        login_cmd = (
+            f"cd {self.remote_path}/research/trl && "
+            f"source .venv/bin/activate 2>/dev/null || true && "
+            f"python -c \"from huggingface_hub import login; login(token='{hf_token}', add_to_git_credential=False)\""
+        )
+
+        try:
+            await self.run_command(login_cmd, timeout=60, check=True)
+            logger.info("✓ HuggingFace authentication configured")
+        except Exception as e:
+            logger.warning(f"HuggingFace login failed (gated models may not work): {e}")
 
     async def start_training(self, config: ExperimentConfig) -> str:
         """Start nohup training on remote pod.
@@ -293,9 +327,18 @@ class NohupExperimentRunner:
         if config.wandb_tags:
             env_exports += f"export WANDB_TAGS='{config.wandb_tags}' && "
 
-        # Run the nohup script with W&B config
+        # Source .env file to get HF_TOKEN and other environment variables
+        # This ensures HuggingFace token is available for gated model downloads
+        source_env = (
+            f"set -a && "
+            f"[ -f {self.remote_path}/.env ] && source {self.remote_path}/.env && "
+            f"set +a && "
+        )
+
+        # Run the nohup script with W&B config and sourced environment
         script_cmd = (
             f"cd {self.remote_path}/research/trl && "
+            f"{source_env}"
             f"{env_exports}"
             f"./run_parallel_training_nohup.sh "
             f"{config.dataset} {config.eval_every} {config.model_id} {config.num_iterations}"
@@ -426,7 +469,8 @@ class NohupExperimentRunner:
             rsync_cmd = [
                 "rsync",
                 "-avz",
-                f"-e", f"ssh -p {self.ssh_port} -o StrictHostKeyChecking=no",
+                "-e",
+                f"ssh -p {self.ssh_port} -o StrictHostKeyChecking=no",
                 f"{self.ssh_user}@{self.ssh_host}:{remote_dir}/",
                 f"{local_dir}/",
             ]
@@ -477,10 +521,10 @@ class NohupExperimentRunner:
         self,
         config: ExperimentConfig,
         local_code_path: Path,
-        local_env_path: Optional[Path] = None,
+        local_env_path: Path | None = None,
         sync_code: bool = True,
         setup_env: bool = True,
-        download_dir: Optional[Path] = None,
+        download_dir: Path | None = None,
         upload_to_r2: bool = True,
         cleanup_local: bool = False,
     ) -> bool:
@@ -556,11 +600,13 @@ class NohupExperimentRunner:
         except Exception as e:
             logger.error(f"✗ Experiment {config.name} failed: {type(e).__name__}: {e}")
             import traceback
+
             traceback.print_exc()
             # Flush logs to ensure error is captured (especially under nohup)
             for handler in logging.getLogger().handlers:
                 handler.flush()
             import sys
+
             sys.stdout.flush()
             sys.stderr.flush()
             return False

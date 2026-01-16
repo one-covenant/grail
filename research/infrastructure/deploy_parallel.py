@@ -23,7 +23,6 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -61,24 +60,24 @@ MODEL_CONFIGS = {
         "wandb_project": "grail-lium-sweep",
         "wandb_tags": "qwen-1.5b,iter1,lium",
     },
-    "qwen2.5-7b-iter1": {
-        "model": "Qwen/Qwen2.5-7B-Instruct",
-        "num_iterations": 1,
-        "wandb_project": "grail-lium-sweep",
-        "wandb_tags": "qwen-7b,iter1,lium",
-    },
-    "qwen2.5-7b-iter8": {
-        "model": "Qwen/Qwen2.5-7B-Instruct",
-        "num_iterations": 8,
-        "wandb_project": "grail-lium-sweep",
-        "wandb_tags": "qwen-7b,iter8,lium",
-    },
-    "qwen2.5-7b-iter16": {
-        "model": "Qwen/Qwen2.5-7B-Instruct",
-        "num_iterations": 16,
-        "wandb_project": "grail-lium-sweep",
-        "wandb_tags": "qwen-7b,iter16,lium",
-    },
+    # "qwen2.5-7b-iter1": {
+    #     "model": "Qwen/Qwen2.5-7B-Instruct",
+    #     "num_iterations": 1,
+    #     "wandb_project": "grail-lium-sweep",
+    #     "wandb_tags": "qwen-7b,iter1,lium",
+    # },
+    # "qwen2.5-7b-iter8": {
+    #     "model": "Qwen/Qwen2.5-7B-Instruct",
+    #     "num_iterations": 8,
+    #     "wandb_project": "grail-lium-sweep",
+    #     "wandb_tags": "qwen-7b,iter8,lium",
+    # },
+    # "qwen2.5-7b-iter16": {
+    #     "model": "Qwen/Qwen2.5-7B-Instruct",
+    #     "num_iterations": 16,
+    #     "wandb_project": "grail-lium-sweep",
+    #     "wandb_tags": "qwen-7b,iter16,lium",
+    # },
     "llama3.2-1b-iter1": {
         "model": "meta-llama/Llama-3.2-1B-Instruct",
         "num_iterations": 1,
@@ -151,12 +150,12 @@ async def run_pod_experiment(
         wandb_tags=model_config.get("wandb_tags", ""),
     )
 
-    logger.info(f"\n{'='*80}")
+    logger.info(f"\n{'=' * 80}")
     logger.info(f"Starting experiment on pod: {pod_name}")
     logger.info(f"  Model: {config.model_id}")
     logger.info(f"  Num Iterations: {config.num_iterations}")
     logger.info(f"  Dataset: {config.dataset}")
-    logger.info(f"{'='*80}\n")
+    logger.info(f"{'=' * 80}\n")
 
     # Create runner
     ssh_info = pod_info["ssh"]
@@ -219,24 +218,45 @@ async def deploy_and_run(
 
     # Deploy pods (unless skipped)
     if not no_deploy:
-        logger.info(f"\n{'='*80}")
+        logger.info(f"\n{'=' * 80}")
         logger.info(f"Deploying {len(pods)} pods...")
-        logger.info(f"{'='*80}\n")
+        logger.info(f"{'=' * 80}\n")
 
+        # First, apply to create/track pods
         deployed_pods = infra.apply(pods)
 
         if not deployed_pods:
             logger.error("Failed to deploy pods")
             return False
 
-        logger.info(f"\n✓ Deployed {len(deployed_pods)} pods successfully")
+        logger.info(f"\n✓ Initial deployment: {len(deployed_pods)} pods")
+
+        # Verify SSH connectivity and replace any unhealthy pods
+        logger.info(f"\n{'=' * 80}")
+        logger.info("Verifying pod health and replacing unhealthy pods...")
+        logger.info(f"{'=' * 80}\n")
+
+        deployed_pods = infra.verify_and_replace_unhealthy(pods, max_retries=3)
+
+        if not deployed_pods:
+            logger.error("Failed to create any healthy pods")
+            return False
+
+        logger.info(f"\n✓ {len(deployed_pods)} healthy pods ready")
 
         # Print pod information
         for pod_name, pod_info in deployed_pods.items():
             ssh_info = pod_info["ssh"]
             logger.info(f"\n  Pod: {pod_name}")
             logger.info(f"    SSH: {ssh_info['host']}:{ssh_info['port']}")
-            logger.info(f"    GPUs: {pod_info['spec']['gpu_count']} × {pod_info['spec']['gpu_type']}")
+            logger.info(
+                f"    GPUs: {pod_info['spec']['gpu_count']} × {pod_info['spec']['gpu_type']}"
+            )
+
+        # Report any pods that couldn't be created
+        failed_pods = [pod.name for pod in pods if pod.name not in deployed_pods]
+        if failed_pods:
+            logger.warning(f"\n⚠️  Could not create healthy pods for: {', '.join(failed_pods)}")
 
         if deploy_only:
             logger.info("\n✓ Deploy-only mode: pods created, skipping experiments")
@@ -244,11 +264,28 @@ async def deploy_and_run(
 
     else:
         logger.info("Skipping pod deployment (using existing pods)")
-        deployed_pods = {pod.name: infra.get_pod(pod.name) for pod in pods}
+        deployed_pods = {
+            pod.name: infra.get_pod_info(pod.name) for pod in pods if infra.get_pod_info(pod.name)
+        }
 
     # Load R2 configuration from environment
+    # Prefer R2_BUCKET_NAME (human-readable name) over R2_BUCKET_ID (legacy/incorrect)
+    bucket_name = os.getenv("R2_BUCKET_NAME") or os.getenv("R2_BUCKET_ID")
+
+    # Validate and warn if bucket looks like an ID (32-char hex string)
+    if (
+        bucket_name
+        and len(bucket_name) == 32
+        and all(c in "0123456789abcdef" for c in bucket_name.lower())
+    ):
+        logger.warning(
+            f"R2 bucket value '{bucket_name}' looks like an account ID, not a bucket name. "
+            "Cloudflare R2's S3 API requires the bucket NAME (e.g., 'my-bucket'), not the ID. "
+            "Set R2_BUCKET_NAME in your .env file to the actual bucket name."
+        )
+
     r2_config = {
-        "bucket_id": os.getenv("R2_BUCKET_ID"),
+        "bucket_id": bucket_name,  # Note: This is actually the bucket NAME for S3 API
         "account_id": os.getenv("R2_ACCOUNT_ID"),
         "access_key": os.getenv("R2_WRITE_ACCESS_KEY_ID"),
         "secret_key": os.getenv("R2_WRITE_SECRET_ACCESS_KEY"),
@@ -257,7 +294,9 @@ async def deploy_and_run(
     # Validate R2 config
     if not all(r2_config.values()):
         logger.error("Missing R2 configuration in environment variables")
-        logger.error("Required: R2_BUCKET_ID, R2_ACCOUNT_ID, R2_WRITE_ACCESS_KEY_ID, R2_WRITE_SECRET_ACCESS_KEY")
+        logger.error(
+            "Required: R2_BUCKET_NAME (or R2_BUCKET_ID), R2_ACCOUNT_ID, R2_WRITE_ACCESS_KEY_ID, R2_WRITE_SECRET_ACCESS_KEY"
+        )
         return False
 
     # Paths
@@ -265,9 +304,9 @@ async def deploy_and_run(
     local_env_path = PROJECT_ROOT / ".env"
 
     # Run experiments on all pods in parallel
-    logger.info(f"\n{'='*80}")
+    logger.info(f"\n{'=' * 80}")
     logger.info(f"Running experiments on {len(deployed_pods)} pods in parallel...")
-    logger.info(f"{'='*80}\n")
+    logger.info(f"{'=' * 80}\n")
 
     tasks = [
         run_pod_experiment(
@@ -290,9 +329,9 @@ async def deploy_and_run(
     success_count = sum(1 for r in results if r is True)
     failed_count = len(results) - success_count
 
-    logger.info(f"\n{'='*80}")
+    logger.info(f"\n{'=' * 80}")
     logger.info(f"RESULTS: {success_count} succeeded, {failed_count} failed")
-    logger.info(f"{'='*80}\n")
+    logger.info(f"{'=' * 80}\n")
 
     return failed_count == 0
 
@@ -304,19 +343,15 @@ def destroy_pods(state_file: str = ".lium_state.json") -> bool:
         state_file: Path to lium state file (default: .lium_state.json)
 
     Returns:
-        True if all pods destroyed successfully, False otherwise
+        True always (destroy() does not report failures individually)
     """
     logger.info("Destroying all managed pods...")
 
     infra = LiumInfra(state_file=state_file)
-    success = infra.destroy()
+    infra.destroy()  # destroy() returns None, logs errors internally
 
-    if success:
-        logger.info("✓ All pods destroyed successfully")
-    else:
-        logger.error("✗ Failed to destroy some pods")
-
-    return success
+    logger.info("✓ All pods destroyed")
+    return True
 
 
 def parse_args() -> argparse.Namespace:
@@ -407,6 +442,7 @@ async def main() -> int:
         handler.setLevel(logging.INFO)
     # Force unbuffered stdout/stderr for nohup
     import sys
+
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
     if hasattr(sys.stderr, "reconfigure"):

@@ -192,10 +192,10 @@ def batch_size_grid_search() -> tuple[list[PodSpec], dict[str, list[ExperimentCo
 
     # Grid: (batch_size, grad_accum_steps) pairs that give effective_batch=512
     grid = [
-        (2, 256),   # 2 * 256 = 512
-        (4, 128),   # 4 * 128 = 512
-        (8, 64),    # 8 * 64 = 512
-        (16, 32),   # 16 * 32 = 512
+        (2, 256),  # 2 * 256 = 512
+        (4, 128),  # 4 * 128 = 512
+        (8, 64),  # 8 * 64 = 512
+        (16, 32),  # 16 * 32 = 512
     ]
 
     experiments = []
@@ -390,8 +390,16 @@ def multi_model_grpo_sweep() -> tuple[list[PodSpec], dict[str, list[ExperimentCo
         {"name": "qwen2.5-7b-iter1", "model": "Qwen/Qwen2.5-7B-Instruct", "num_iterations": 1},
         {"name": "qwen2.5-7b-iter8", "model": "Qwen/Qwen2.5-7B-Instruct", "num_iterations": 8},
         {"name": "qwen2.5-7b-iter16", "model": "Qwen/Qwen2.5-7B-Instruct", "num_iterations": 16},
-        {"name": "llama3.2-1b-iter1", "model": "meta-llama/Llama-3.2-1B-Instruct", "num_iterations": 1},
-        {"name": "llama3.2-3b-iter1", "model": "meta-llama/Llama-3.2-3B-Instruct", "num_iterations": 1},
+        {
+            "name": "llama3.2-1b-iter1",
+            "model": "meta-llama/Llama-3.2-1B-Instruct",
+            "num_iterations": 1,
+        },
+        {
+            "name": "llama3.2-3b-iter1",
+            "model": "meta-llama/Llama-3.2-3B-Instruct",
+            "num_iterations": 1,
+        },
         {"name": "gemma3-1b-iter1", "model": "google/gemma-3-1b-it", "num_iterations": 1},
         {"name": "gemma3-4b-iter1", "model": "google/gemma-3-4b-it", "num_iterations": 1},
     ]
@@ -410,9 +418,59 @@ def multi_model_grpo_sweep() -> tuple[list[PodSpec], dict[str, list[ExperimentCo
 
     # Empty experiments list - actual execution handled by deploy_parallel.py
     # which uses nohup_experiment_runner.py with the model configs
-    pod_experiments = {
-        config["name"]: [] for config in model_configs
-    }
+    pod_experiments = {config["name"]: [] for config in model_configs}
+
+    return pods, pod_experiments
+
+
+# ============================================================================
+# Example 8: Active Models GRPO Sweep (6 pods - matches MODEL_CONFIGS)
+# ============================================================================
+def active_models_grpo_sweep() -> tuple[list[PodSpec], dict[str, list[ExperimentConfig]]]:
+    """Active models GRPO experiments (matches deploy_parallel.py MODEL_CONFIGS).
+
+    Runs 6 model configurations across 6 pods (each 8xA100):
+    - Qwen2.5-Instruct: 0.5B, 1.5B
+    - Llama-3.2-Instruct: 1B, 3B
+    - Gemma-3-it: 1B, 4B
+
+    Each pod runs 4 seeds in parallel via run_parallel_training_nohup.sh.
+    Note: Excludes test-qwen-0.5b and commented-out 7B models.
+
+    Returns:
+        Tuple of (pod_specs, pod_to_experiments mapping)
+    """
+    # Only models that are active (non-commented) in deploy_parallel.py MODEL_CONFIGS
+    # Excludes: test-qwen-0.5b, qwen2.5-7b-iter1, qwen2.5-7b-iter8, qwen2.5-7b-iter16
+    model_configs = [
+        {"name": "qwen2.5-0.5b-iter1", "model": "Qwen/Qwen2.5-0.5B-Instruct", "num_iterations": 1},
+        {"name": "qwen2.5-1.5b-iter1", "model": "Qwen/Qwen2.5-1.5B-Instruct", "num_iterations": 1},
+        {
+            "name": "llama3.2-1b-iter1",
+            "model": "meta-llama/Llama-3.2-1B-Instruct",
+            "num_iterations": 1,
+        },
+        {
+            "name": "llama3.2-3b-iter1",
+            "model": "meta-llama/Llama-3.2-3B-Instruct",
+            "num_iterations": 1,
+        },
+        {"name": "gemma3-1b-iter1", "model": "google/gemma-3-1b-it", "num_iterations": 1},
+        {"name": "gemma3-4b-iter1", "model": "google/gemma-3-4b-it", "num_iterations": 1},
+    ]
+
+    # Create one pod per model configuration
+    pods = [
+        PodSpec(
+            name=config["name"],
+            gpu_type="A100",
+            gpu_count=8,
+            ttl_hours=124,
+        )
+        for config in model_configs
+    ]
+
+    pod_experiments = {config["name"]: [] for config in model_configs}
 
     return pods, pod_experiments
 
@@ -440,13 +498,11 @@ def get_config(name: str) -> tuple[list[PodSpec], dict[str, list[ExperimentConfi
         "custom_advanced": custom_advanced_sweep,
         "test_qwen_0.5b": test_qwen_0_5b,
         "multi_model": multi_model_grpo_sweep,
+        "active_models": active_models_grpo_sweep,
     }
 
     if name not in configs:
-        raise ValueError(
-            f"Unknown configuration: {name}. "
-            f"Available: {list(configs.keys())}"
-        )
+        raise ValueError(f"Unknown configuration: {name}. Available: {list(configs.keys())}")
 
     return configs[name]()
 
@@ -465,4 +521,5 @@ def list_configs() -> list[str]:
         "custom_advanced",
         "test_qwen_0.5b",
         "multi_model",
+        "active_models",
     ]
