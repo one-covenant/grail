@@ -27,10 +27,7 @@ Typical storage:
 
 from __future__ import annotations
 
-import os
-
-# Import existing snapshot infrastructure
-import sys
+import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -38,11 +35,16 @@ from typing import Any
 import torch
 from transformers import TrainerCallback
 
+logger = logging.getLogger(__name__)
+
+# Import existing snapshot infrastructure
+import sys
+import os
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", ".."))
 sys.path.insert(0, _PROJECT_ROOT)
 
-from grail.trainer.analysis.primitives import ParameterDelta, ParameterSnapshot  # noqa: E402
+from grail.trainer.analysis.primitives import ParameterSnapshot, ParameterDelta
 
 
 class DeltaCheckpointCallback(TrainerCallback):
@@ -69,12 +71,14 @@ class DeltaCheckpointCallback(TrainerCallback):
         enabled: bool = True,
         snapshot_dtype: str = "bfloat16",
         save_metadata: bool = True,
+        profiler: Any | None = None,
     ) -> None:
         self.output_dir = Path(output_dir)
         self.enabled = enabled
         self.save_metadata = save_metadata
         self.old_snapshot: ParameterSnapshot | None = None
         self.step_count = 0
+        self._profiler = profiler
 
         # Configure storage dtype
         dtype_map = {
@@ -86,9 +90,9 @@ class DeltaCheckpointCallback(TrainerCallback):
 
         if self.enabled:
             self.output_dir.mkdir(parents=True, exist_ok=True)
-            print(f"[DeltaCheckpoint] Initialized: output_dir={output_dir}, dtype={snapshot_dtype}")
+            logger.info(f"[DeltaCheckpoint] Initialized: output_dir={output_dir}, dtype={snapshot_dtype}")
         else:
-            print("[DeltaCheckpoint] Disabled (enabled=False)")
+            logger.info("[DeltaCheckpoint] Disabled (enabled=False)")
 
     def on_optimizer_step(
         self,
@@ -110,30 +114,48 @@ class DeltaCheckpointCallback(TrainerCallback):
         if not is_world_process_zero:
             return
 
+        profiler = self._profiler
+
         # Capture current snapshot (float32 internally for precision)
-        current_snapshot = ParameterSnapshot(
-            model,
-            device="cpu",
-            dtype=torch.float32,  # Compute deltas in float32 for precision
-        )
+        if profiler:
+            with profiler.track("delta_checkpoint_snapshot"):
+                current_snapshot = ParameterSnapshot(
+                    model,
+                    device="cpu",
+                    dtype=torch.float32,  # Compute deltas in float32 for precision
+                )
+        else:
+            current_snapshot = ParameterSnapshot(
+                model,
+                device="cpu",
+                dtype=torch.float32,
+            )
 
         # First step: just capture snapshot, no delta yet
         if self.old_snapshot is None:
             self.old_snapshot = current_snapshot
-            print(f"[DeltaCheckpoint] Step {self.step_count}: Initial snapshot captured")
+            logger.info(f"[DeltaCheckpoint] Step {self.step_count}: Initial snapshot captured")
             return
 
         # Compute delta (W_new - W_old)
         try:
-            delta = self.old_snapshot.compute_delta(current_snapshot)
+            if profiler:
+                with profiler.track("delta_checkpoint_compute"):
+                    delta = self.old_snapshot.compute_delta(current_snapshot)
+            else:
+                delta = self.old_snapshot.compute_delta(current_snapshot)
         except ValueError as e:
-            print(f"[DeltaCheckpoint] ⚠️  Failed to compute delta: {e}")
+            logger.warning(f"[DeltaCheckpoint] ⚠️  Failed to compute delta: {e}")
             self.old_snapshot = current_snapshot
             self.step_count += 1
             return
 
         # Convert to sparse and save
-        self._save_sparse_delta(delta, step=self.step_count)
+        if profiler:
+            with profiler.track("delta_checkpoint_save"):
+                self._save_sparse_delta(delta, step=self.step_count)
+        else:
+            self._save_sparse_delta(delta, step=self.step_count)
 
         # Update for next iteration
         self.old_snapshot = current_snapshot
@@ -152,7 +174,7 @@ class DeltaCheckpointCallback(TrainerCallback):
             Dictionary with sparse COO representation
         """
         # Find non-zero elements (EXACT comparison with 0.0)
-        mask = delta_tensor != 0.0
+        mask = (delta_tensor != 0.0)
 
         # Extract non-zero indices and values
         indices = mask.nonzero(as_tuple=False).t()  # Shape: [ndim, nnz]
@@ -219,7 +241,7 @@ class DeltaCheckpointCallback(TrainerCallback):
 
         # Log statistics
         sparsity = checkpoint["metadata"]["sparsity"]
-        print(
+        logger.info(
             f"[DeltaCheckpoint] Step {step}: "
             f"{sparsity:.2%} sparse, "
             f"{total_nonzero:,}/{total_params:,} non-zero, "
@@ -238,7 +260,7 @@ class DeltaCheckpointCallback(TrainerCallback):
 
         # Load existing metadata
         if metadata_path.exists():
-            with open(metadata_path) as f:
+            with open(metadata_path, "r") as f:
                 metadata = json.load(f)
         else:
             metadata = {
@@ -248,15 +270,13 @@ class DeltaCheckpointCallback(TrainerCallback):
             }
 
         # Add new checkpoint info
-        metadata["checkpoints"].append(
-            {
-                "step": step,
-                "path": str(path.name),
-                "sparsity": checkpoint_meta["sparsity"],
-                "nonzero": checkpoint_meta["total_nonzero"],
-                "changed_layers": checkpoint_meta["num_changed_layers"],
-            }
-        )
+        metadata["checkpoints"].append({
+            "step": step,
+            "path": str(path.name),
+            "sparsity": checkpoint_meta["sparsity"],
+            "nonzero": checkpoint_meta["total_nonzero"],
+            "changed_layers": checkpoint_meta["num_changed_layers"],
+        })
 
         # Save updated metadata
         with open(metadata_path, "w") as f:
