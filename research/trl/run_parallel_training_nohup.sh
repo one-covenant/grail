@@ -8,6 +8,7 @@ DATASET=${1:-math}
 EVAL_EVERY=${2:-40}
 MODEL=${3:-Qwen/Qwen2.5-1.5B-Instruct}
 NUM_ITERATIONS=${4:-1}
+NUM_INSTANCES=${5:-1}  # Default to 1 instance for stability (avoids NCCL conflicts)
 
 # W&B configuration (inherited from environment or defaults)
 WANDB_PROJECT_VAL=${WANDB_PROJECT:-grail-lium-sweep}
@@ -31,6 +32,7 @@ echo "Dataset: $DATASET"
 echo "Eval every: $EVAL_EVERY steps"
 echo "Model: $MODEL"
 echo "Num Iterations: $NUM_ITERATIONS"
+echo "Num Instances: $NUM_INSTANCES"
 echo "W&B Project: $WANDB_PROJECT_VAL"
 echo "W&B Tags: $WANDB_TAGS_VAL"
 echo "Launcher log: $LAUNCHER_LOG"
@@ -59,9 +61,11 @@ nohup python -u run_parallel_training.py \
     --eval-every "$EVAL_EVERY" \
     --model "$MODEL" \
     --num-iterations "$NUM_ITERATIONS" \
+    --num-instances "$NUM_INSTANCES" \
     --wandb-project "$WANDB_PROJECT_VAL" \
     --wandb-tags "$WANDB_TAGS_VAL" \
     > "$LAUNCHER_LOG" 2>&1 &
+
 
 LAUNCHER_PID=$!
 echo $LAUNCHER_PID > "$PID_FILE"

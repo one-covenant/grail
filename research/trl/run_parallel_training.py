@@ -38,8 +38,8 @@ from pathlib import Path
 from typing import Any
 
 # Force unbuffered output for nohup mode
-sys.stdout = os.fdopen(sys.stdout.fileno(), "w", buffering=1)
-sys.stderr = os.fdopen(sys.stderr.fileno(), "w", buffering=1)
+sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
+sys.stderr = os.fdopen(sys.stderr.fileno(), 'w', buffering=1)
 
 
 # Fixed seeds for reproducibility across experiments
@@ -57,7 +57,9 @@ GPU_PAIRS = [
 BASE_PORT = 8000
 
 # Base port for NCCL group coordination (each instance needs unique port)
-BASE_GROUP_PORT = 51216
+# Use large spacing (100 ports apart) to avoid any potential conflicts
+BASE_GROUP_PORT = 51200
+GROUP_PORT_SPACING = 100  # Port increment per instance
 
 
 class ProcessManager:
@@ -69,19 +71,29 @@ class ProcessManager:
         eval_every: int,
         model_id: str,
         num_iterations: int = 1,
+        num_instances: int = 1,
         wandb_project: str | None = None,
         wandb_tags: str | None = None,
+        output_base: str | None = None,
     ):
         self.dataset = dataset
         self.eval_every = eval_every
         self.model_id = model_id
         self.num_iterations = num_iterations
+        self.num_instances = num_instances
         self.wandb_project = wandb_project
         self.wandb_tags = wandb_tags
+        # Output base directory for checkpoints, wandb, etc.
+        # Use /ephemeral on cloud instances with limited home storage
+        self.output_base = output_base or os.getenv("GRAIL_OUTPUT_BASE", ".")
         self.vllm_processes: list[subprocess.Popen] = []
         self.training_processes: list[subprocess.Popen] = []
         self.log_dir = Path("./logs/parallel_training")
         self.log_dir.mkdir(parents=True, exist_ok=True)
+
+        # Limit GPU_PAIRS and SEEDS to num_instances
+        self.gpu_pairs = GPU_PAIRS[:num_instances]
+        self.seeds = SEEDS[:num_instances]
 
         # Register signal handlers for clean shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -114,18 +126,12 @@ class ProcessManager:
         trl_path = repo_root / "tools" / "vllm-server" / ".venv" / "bin" / "trl"
         # VLLM will use device 0 by default (first GPU in CUDA_VISIBLE_DEVICES)
         cmd = [
-            str(trl_path),
-            "vllm-serve",
-            "--model",
-            self.model_id,
-            "--port",
-            str(port),
-            "--max-model-len",
-            "4096",
-            "--gpu-memory-utilization",
-            "0.9",
-            "--tensor-parallel-size",
-            "1",
+            str(trl_path), "vllm-serve",
+            "--model", self.model_id,
+            "--port", str(port),
+            "--max-model-len", "4096",
+            "--gpu-memory-utilization", "0.9",
+            "--tensor-parallel-size", "1",
         ]
 
         env = os.environ.copy()
@@ -137,11 +143,14 @@ class ProcessManager:
         env["VLLM_CACHE_ROOT"] = cache_base
         env["TORCHINDUCTOR_CACHE_DIR"] = f"{cache_base}/inductor"
         env["TORCH_COMPILE_CACHE_DIR"] = f"{cache_base}/torch_compile"
+        # CRITICAL: Unique ports per instance to avoid NCCL/collective conflicts
+        # Without this, multiple vLLM instances try to bind to the same ports
+        env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(5557 + instance_id * 10)
+        env["VLLM_DP_MASTER_PORT"] = str(29500 + instance_id * 10)
+        env["MASTER_PORT"] = str(29500 + instance_id * 10)
 
         print(f"[Instance {instance_id}] Starting VLLM server:")
-        print(
-            f"  GPUs visible: {vllm_gpu},{training_gpu}, Using: cuda:0, Port: {port}, Log: {log_file}"
-        )
+        print(f"  GPUs visible: {vllm_gpu},{training_gpu}, Using: cuda:0, Port: {port}, Log: {log_file}")
 
         with open(log_file, "w") as f:
             process = subprocess.Popen(
@@ -180,9 +189,7 @@ class ProcessManager:
 
         # Check if process is still alive
         if process and process.poll() is not None:
-            print(
-                f"[Instance {instance_id}] ✗ VLLM server died during startup (exit: {process.returncode})"
-            )
+            print(f"[Instance {instance_id}] ✗ VLLM server died during startup (exit: {process.returncode})")
             return False
 
         print(f"[Instance {instance_id}] ✓ VLLM server ready!")
@@ -212,29 +219,19 @@ class ProcessManager:
 
         # Use local .venv python
         python_path = Path(__file__).parent / ".venv" / "bin" / "python"
-        group_port = BASE_GROUP_PORT + instance_id  # Unique port per instance
+        group_port = BASE_GROUP_PORT + (instance_id * GROUP_PORT_SPACING)  # Unique port per instance
         cmd = [
-            str(python_path),
-            "train_trl_grpo.py",
-            "--dataset",
-            self.dataset,
-            "--eval-every",
-            str(self.eval_every),
-            "--num-iterations",
-            str(self.num_iterations),
-            "--seed",
-            str(seed),
-            "--vllm-port",
-            str(port),
-            "--group-port",
-            str(group_port),
-            "--run-suffix",
-            f"instance{instance_id}_seed{seed}",
-            "--model",
-            self.model_id,
+            str(python_path), "train_trl_grpo.py",
+            "--dataset", self.dataset,
+            "--eval-every", str(self.eval_every),
+            "--num-iterations", str(self.num_iterations),
+            "--seed", str(seed),
+            "--vllm-port", str(port),
+            "--group-port", str(group_port),
+            "--run-suffix", f"instance{instance_id}_seed{seed}",
+            "--model", self.model_id,
             # Ensure training uses cuda:0 in this process (the training GPU).
-            "--device",
-            "cuda:0",
+            "--device", "cuda:0",
         ]
         # Add W&B args if provided (CLI takes precedence over env vars)
         if self.wandb_project:
@@ -247,11 +244,13 @@ class ProcessManager:
         # Order matters: training must run on cuda:0 in this process, so we put the
         # training GPU first.
         env["CUDA_VISIBLE_DEVICES"] = f"{training_gpu},{vllm_gpu}"
+        # Set output directories for checkpoints, wandb, etc.
+        env["GRAIL_OUTPUT_BASE"] = self.output_base
+        env["WANDB_DIR"] = f"{self.output_base}/wandb"
 
         print(f"[Instance {instance_id}] Starting training:")
-        print(
-            f"  GPUs visible: {training_gpu},{vllm_gpu}, Using: cuda:0, Seed: {seed}, Log: {log_file}"
-        )
+        print(f"  GPUs visible: {training_gpu},{vllm_gpu}, Using: cuda:0, Seed: {seed}, Log: {log_file}")
+        print(f"  Output base: {self.output_base}")
 
         with open(log_file, "w") as f:
             process = subprocess.Popen(
@@ -296,9 +295,7 @@ class ProcessManager:
 
             # Print brief status
             running = sum(1 for p in self.training_processes if p.poll() is None)
-            print(
-                f"[{time.strftime('%H:%M:%S')}] Training processes: {running}/{len(self.training_processes)} running"
-            )
+            print(f"[{time.strftime('%H:%M:%S')}] Training processes: {running}/{len(self.training_processes)} running")
 
     def shutdown_all(self) -> None:
         """Shutdown all processes gracefully."""
@@ -336,17 +333,17 @@ class ProcessManager:
         print(f"Dataset: {self.dataset}")
         print(f"Model: {self.model_id}")
         print(f"Num Iterations: {self.num_iterations}")
-        print(f"Instances: {len(SEEDS)}")
-        print(f"Seeds: {SEEDS}")
-        print(f"GPU pairs: {GPU_PAIRS}")
-        print(f"Ports: {[BASE_PORT + i for i in range(len(SEEDS))]}")
+        print(f"Instances: {len(self.seeds)}")
+        print(f"Seeds: {self.seeds}")
+        print(f"GPU pairs: {self.gpu_pairs}")
+        print(f"Ports: {[BASE_PORT + i for i in range(len(self.seeds))]}")
         print(f"Logs: {self.log_dir}")
         print("=" * 80)
 
         try:
             # Phase 1: Start all VLLM servers
             print("\n📡 Phase 1: Starting VLLM servers...")
-            for i, (vllm_gpu, training_gpu) in enumerate(GPU_PAIRS):
+            for i, (vllm_gpu, training_gpu) in enumerate(self.gpu_pairs):
                 port = BASE_PORT + i
                 self.start_vllm_server(i, vllm_gpu, training_gpu, port)
                 time.sleep(2)  # Stagger startup
@@ -372,12 +369,19 @@ class ProcessManager:
             print("\n✅ All VLLM servers ready!")
 
             # Phase 3: Start all training processes
+            # IMPORTANT: NCCL communicator initialization between trainer and VLLM
+            # is prone to race conditions. We stagger startups by 30s to ensure
+            # each instance fully initializes before the next one starts.
             print("\n🏋️  Phase 3: Starting training processes...")
-            for i, (vllm_gpu, training_gpu) in enumerate(GPU_PAIRS):
+            for i, (vllm_gpu, training_gpu) in enumerate(self.gpu_pairs):
                 port = BASE_PORT + i
-                seed = SEEDS[i]
+                seed = self.seeds[i]
                 self.start_training(i, vllm_gpu, training_gpu, port, seed)
-                time.sleep(5)  # Stagger startup
+                if i < len(self.gpu_pairs) - 1:  # Don't sleep after the last one
+                    # Longer delay (45s) to ensure init_communicator completes fully
+                    # before next instance starts (vLLM uses fire_and_forget async RPC)
+                    print(f"   ⏳ Waiting 45s for NCCL init before next instance...")
+                    time.sleep(45)
 
             print("\n✅ All training processes started!")
 
@@ -387,7 +391,6 @@ class ProcessManager:
         except Exception as e:
             print(f"\n❌ Error: {e}")
             import traceback
-
             traceback.print_exc()
         finally:
             self.shutdown_all()
@@ -424,6 +427,14 @@ def parse_args() -> argparse.Namespace:
         help="Number of training updates per batch of rollouts (default: 1)",
     )
     parser.add_argument(
+        "--num-instances",
+        type=int,
+        default=1,
+        choices=[1, 2, 4],
+        help="Number of parallel training instances (default: 1). "
+             "Higher values risk NCCL conflicts.",
+    )
+    parser.add_argument(
         "--wandb-project",
         type=str,
         default=None,
@@ -435,6 +446,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Comma-separated W&B tags (overrides env var)",
     )
+    parser.add_argument(
+        "--output-base",
+        type=str,
+        default=None,
+        help="Base directory for outputs, checkpoints, wandb (default: current dir). "
+             "Set to /ephemeral on cloud instances with limited home storage.",
+    )
     return parser.parse_args()
 
 
@@ -442,12 +460,12 @@ def main() -> None:
     """Main entry point."""
     args = parse_args()
 
-    # Verify we have 8 GPUs
+    # Verify we have enough GPUs for requested instances
     import torch
-
     num_gpus = torch.cuda.device_count()
-    if num_gpus < 8:
-        print(f"⚠️  Warning: Only {num_gpus} GPUs detected. This script expects 8 GPUs.")
+    required_gpus = args.num_instances * 2
+    if num_gpus < required_gpus:
+        print(f"⚠️  Warning: Only {num_gpus} GPUs detected, but {required_gpus} required for {args.num_instances} instance(s).")
         response = input("Continue anyway? [y/N]: ")
         if response.lower() != "y":
             sys.exit(1)
@@ -457,8 +475,10 @@ def main() -> None:
         eval_every=args.eval_every,
         model_id=args.model,
         num_iterations=args.num_iterations,
+        num_instances=args.num_instances,
         wandb_project=args.wandb_project,
         wandb_tags=args.wandb_tags,
+        output_base=args.output_base,
     )
     manager.run()
 

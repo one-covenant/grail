@@ -1915,8 +1915,12 @@ def main() -> None:
     # Build run identifiers with seed and suffix
     run_id = f"seed{args.seed}" if not args.run_suffix else args.run_suffix
 
+    # Use GRAIL_OUTPUT_BASE env var for output directories (default: current dir)
+    # Set to /ephemeral on cloud instances with limited home storage
+    output_base = os.getenv("GRAIL_OUTPUT_BASE", ".")
+
     grpo_config = GRPOConfig(
-        output_dir=f"./outputs/trl_{adapter.name}_{run_id}",
+        output_dir=f"{output_base}/outputs/trl_{adapter.name}_{run_id}",
         # ─────────────────────────────────────────────────────────────────────
         # Learning Rate & Schedule (matching GRAIL trainer config)
         # ─────────────────────────────────────────────────────────────────────
@@ -1976,7 +1980,6 @@ def main() -> None:
         logging_steps=1,
         log_completions=True,
         num_completions_to_print=1,
-        wandb_log_unique_prompts=True,
         save_strategy="steps",
         save_steps=50,
         bf16=True,
@@ -1994,6 +1997,7 @@ def main() -> None:
         use_vllm=True,
         vllm_mode="server",
         vllm_server_base_url=f"http://127.0.0.1:{args.vllm_port}",
+        vllm_group_port=args.group_port,  # CRITICAL: unique port per instance for parallel runs
         vllm_importance_sampling_correction=False,
         vllm_importance_sampling_cap=cfg.is_ratio_max,  # GRAIL_TRAINER_IS_RATIO_MAX
     )
@@ -2044,7 +2048,7 @@ def main() -> None:
 
     # Initialize delta checkpoint callback
     delta_checkpoint_callback = DeltaCheckpointCallback(
-        output_dir=f"./checkpoints/deltas_{adapter.name}_{run_id}",
+        output_dir=f"{output_base}/checkpoints/deltas_{adapter.name}_{run_id}",
         enabled=cfg.delta_checkpoint_enabled,
         snapshot_dtype=cfg.delta_checkpoint_dtype,
         profiler=profiler,
