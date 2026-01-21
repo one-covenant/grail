@@ -5,6 +5,8 @@
 # All Python tools (ruff, pyright) use uv run to match exact versions in uv.lock
 # This ensures local pre-commit checks match CI exactly.
 
+default_install_hook_types: [pre-commit]
+
 repos:
   # Local hooks using uv run - matches CI exactly
   - repo: local
@@ -35,7 +37,7 @@ repos:
 
   # Basic file quality checks (version-insensitive, safe to use from remote)
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.5.0
+    rev: v5.0.0
     hooks:
       - id: trailing-whitespace
         name: trim trailing whitespace

@@ -17,6 +17,7 @@ from __future__ import annotations
 import abc
 import argparse
 import asyncio
+import logging
 import os
 import re
 import sys
@@ -35,8 +36,16 @@ from transformers import (
 from trl import GRPOConfig, GRPOTrainer
 
 # Force unbuffered output for better logging in nohup mode
-sys.stdout = open(sys.stdout.fileno(), mode="w", buffering=1)
-sys.stderr = open(sys.stderr.fileno(), mode="w", buffering=1)
+# Use PYTHONUNBUFFERED-style approach that's safer than reopening file descriptors
+try:
+    # Check if stdout/stderr are valid before attempting to reconfigure
+    if hasattr(sys.stdout, "fileno") and sys.stdout.fileno() >= 0:
+        sys.stdout.reconfigure(line_buffering=True)
+    if hasattr(sys.stderr, "fileno") and sys.stderr.fileno() >= 0:
+        sys.stderr.reconfigure(line_buffering=True)
+except (OSError, AttributeError, ValueError):
+    # File descriptor invalid or reconfigure not available - continue without unbuffering
+    pass
 
 # Determine project root dynamically (research/trl/ -> project root)
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -46,6 +55,7 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", ".."))
 # Use override=False so CLI/deployment env vars take precedence over .env
 load_dotenv(os.path.join(_PROJECT_ROOT, ".env"), override=False)
 
+sys.path.insert(0, _SCRIPT_DIR)
 sys.path.insert(0, _PROJECT_ROOT)
 
 # GRAIL imports - reuse task sources and validation logic (after sys.path modification)
@@ -70,6 +80,172 @@ from grail.trainer.metrics import KMetricsAggregator, TaskReplicateResult  # noq
 
 # Local imports (research/trl specific)
 from delta_checkpoint_callback import DeltaCheckpointCallback  # noqa: E402
+
+# ════════════════════════════════════════════════════════════════════════════
+# LOGGING CONFIGURATION
+# ════════════════════════════════════════════════════════════════════════════
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    force=True,  # Override any existing configuration
+)
+logger = logging.getLogger(__name__)
+
+# ════════════════════════════════════════════════════════════════════════════
+# PROFILING UTILITIES
+# ════════════════════════════════════════════════════════════════════════════
+import time
+from contextlib import contextmanager
+
+
+@dataclass
+class TimingStats:
+    """Accumulates timing statistics for a named operation."""
+
+    name: str
+    total_seconds: float = 0.0
+    call_count: int = 0
+    min_seconds: float = float("inf")
+    max_seconds: float = 0.0
+
+    def record(self, elapsed: float) -> None:
+        """Record a timing measurement."""
+        self.total_seconds += elapsed
+        self.call_count += 1
+        self.min_seconds = min(self.min_seconds, elapsed)
+        self.max_seconds = max(self.max_seconds, elapsed)
+
+    @property
+    def mean_seconds(self) -> float:
+        """Average time per call."""
+        return self.total_seconds / self.call_count if self.call_count > 0 else 0.0
+
+    def summary(self) -> str:
+        """Human-readable summary."""
+        if self.call_count == 0:
+            return f"{self.name}: never called"
+        if self.call_count == 1:
+            return f"{self.name}: {self.total_seconds:.2f}s"
+        return (
+            f"{self.name}: {self.total_seconds:.2f}s total, "
+            f"{self.call_count} calls, "
+            f"{self.mean_seconds:.2f}s avg, "
+            f"{self.min_seconds:.2f}s min, "
+            f"{self.max_seconds:.2f}s max"
+        )
+
+
+class Profiler:
+    """Simple profiler for tracking time spent in major operations.
+
+    Usage:
+        profiler = Profiler()
+
+        with profiler.track("model_loading"):
+            model = load_model()
+
+        with profiler.track("training_step"):
+            trainer.train()
+
+        profiler.print_summary()
+        profiler.log_to_wandb()
+    """
+
+    def __init__(self) -> None:
+        self._stats: dict[str, TimingStats] = {}
+        self._active_timers: dict[str, float] = {}
+
+    @contextmanager
+    def track(self, name: str):
+        """Context manager to track time for a named operation."""
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            elapsed = time.perf_counter() - start
+            if name not in self._stats:
+                self._stats[name] = TimingStats(name=name)
+            self._stats[name].record(elapsed)
+
+    def start(self, name: str) -> None:
+        """Start a timer (for non-context-manager usage)."""
+        self._active_timers[name] = time.perf_counter()
+
+    def stop(self, name: str) -> float:
+        """Stop a timer and record the elapsed time."""
+        if name not in self._active_timers:
+            return 0.0
+        elapsed = time.perf_counter() - self._active_timers.pop(name)
+        if name not in self._stats:
+            self._stats[name] = TimingStats(name=name)
+        self._stats[name].record(elapsed)
+        return elapsed
+
+    def get_stats(self, name: str) -> TimingStats | None:
+        """Get stats for a specific operation."""
+        return self._stats.get(name)
+
+    def get_all_stats(self) -> dict[str, TimingStats]:
+        """Get all timing stats."""
+        return self._stats.copy()
+
+    def to_dict(self) -> dict[str, float]:
+        """Convert to flat dict for logging (prefixed with 'profiler/')."""
+        result = {}
+        for name, stats in self._stats.items():
+            prefix = f"profiler/{name}"
+            result[f"{prefix}/total_seconds"] = stats.total_seconds
+            result[f"{prefix}/call_count"] = float(stats.call_count)
+            result[f"{prefix}/mean_seconds"] = stats.mean_seconds
+            if stats.call_count > 1:
+                result[f"{prefix}/min_seconds"] = stats.min_seconds
+                result[f"{prefix}/max_seconds"] = stats.max_seconds
+        return result
+
+    def print_summary(self) -> None:
+        """Print timing summary to console."""
+        if not self._stats:
+            logger.info("⏱️  No profiling data collected")
+            return
+
+        logger.info("\n" + "=" * 70)
+        logger.info("⏱️  PROFILING SUMMARY")
+        logger.info("=" * 70)
+
+        # Sort by total time descending
+        sorted_stats = sorted(
+            self._stats.values(), key=lambda s: s.total_seconds, reverse=True
+        )
+        for stats in sorted_stats:
+            logger.info(f"  {stats.summary()}")
+
+        total_tracked = sum(s.total_seconds for s in self._stats.values())
+        logger.info("-" * 70)
+        logger.info(f"  Total tracked time: {total_tracked:.2f}s")
+        logger.info("=" * 70 + "\n")
+
+    def log_to_wandb(self) -> None:
+        """Log timing stats to WandB."""
+        try:
+            import wandb
+
+            if wandb.run is not None:
+                wandb.log(self.to_dict())
+        except Exception:
+            pass
+
+
+# Global profiler instance
+_profiler: Profiler | None = None
+
+
+def get_profiler() -> Profiler:
+    """Get the global profiler instance (creates one if needed)."""
+    global _profiler
+    if _profiler is None:
+        _profiler = Profiler()
+    return _profiler
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -626,15 +802,13 @@ class MBPPAdapter(DatasetAdapter):
         assert self._train_source._data is not None
         data = []
         for sample in self._train_source._data:
-            data.append(
-                {
-                    "question": sample["text"],
-                    "test_list": sample["test_list"],
-                    "test_setup_code": sample["test_setup_code"],
-                    "test_imports": sample["test_imports"],
-                    "reference_solution": sample["code"],
-                }
-            )
+            data.append({
+                "question": sample["text"],
+                "test_list": sample["test_list"],
+                "test_setup_code": sample["test_setup_code"],
+                "test_imports": sample["test_imports"],
+                "reference_solution": sample["code"],
+            })
         return data
 
     def load_eval_data(self) -> list[dict[str, Any]]:
@@ -643,15 +817,13 @@ class MBPPAdapter(DatasetAdapter):
         assert self._eval_source._data is not None
         data = []
         for sample in self._eval_source._data:
-            data.append(
-                {
-                    "question": sample["text"],
-                    "test_list": sample["test_list"],
-                    "test_setup_code": sample["test_setup_code"],
-                    "test_imports": sample["test_imports"],
-                    "reference_solution": sample["code"],
-                }
-            )
+            data.append({
+                "question": sample["text"],
+                "test_list": sample["test_list"],
+                "test_setup_code": sample["test_setup_code"],
+                "test_imports": sample["test_imports"],
+                "reference_solution": sample["code"],
+            })
         return data
 
     def parse_gold_answer(self, raw_answer: Any) -> Any:
@@ -921,13 +1093,13 @@ class TrainingPassAtKTracker:
         group_count = len(prompt_groups)
         expected_groups = cfg.max_groups
         step_index = self._step_count + 1
-        print(
+        logger.info(
             "[TrainingPassAtKTracker] "
             f"Step {step_index}: grouped {group_count} prompts "
             f"(max_groups={expected_groups})"
         )
         if group_count != expected_groups:
-            print(
+            logger.warning(
                 "[TrainingPassAtKTracker] ⚠️ "
                 f"group_count ({group_count}) != max_groups ({expected_groups})"
             )
@@ -998,14 +1170,12 @@ def prepare_train_dataset(adapter: DatasetAdapter, tokenizer: PreTrainedTokenize
         else:
             gold_data = sample[adapter.answer_field]
 
-        formatted.append(
-            {
-                "prompt": prompt,
-                "gold_answer": gold_data,
-            }
-        )
+        formatted.append({
+            "prompt": prompt,
+            "gold_answer": gold_data,
+        })
 
-    print(f"  Training dataset ({adapter.name}): {len(formatted)} samples")
+    logger.info(f"  Training dataset ({adapter.name}): {len(formatted)} samples")
     return Dataset.from_list(formatted)
 
 
@@ -1023,7 +1193,7 @@ def prepare_eval_dataset(adapter: DatasetAdapter) -> tuple[Dataset, list[dict[st
     if cfg.num_eval_samples is not None:
         raw_data = raw_data[: cfg.num_eval_samples]
 
-    print(f"  Eval dataset ({adapter.name}): {len(raw_data)} samples")
+    logger.info(f"  Eval dataset ({adapter.name}): {len(raw_data)} samples")
     return Dataset.from_list(raw_data), raw_data
 
 
@@ -1048,18 +1218,20 @@ class VLLMEvalCallback(TrainerCallback):
         self.base_url = vllm_base_url.rstrip("/")
         self._wandb_configured = False
 
-        print(
+        logger.info(
             f"✓ VLLMEvalCallback initialized: dataset={adapter.name}, "
             f"url={vllm_base_url}, eval_every={eval_every_n_steps}"
         )
 
     def run_and_log(self, step: int, label: str = "VLLM EVAL") -> dict[str, float]:
         """Run evaluation and log to WandB."""
-        print(f"\n{'=' * 80}")
-        print(f"[{label}] Step {step}: Starting {self.adapter.name.upper()} evaluation...")
-        print(f"{'=' * 80}")
+        logger.info(f"\n{'=' * 80}")
+        logger.info(f"[{label}] Step {step}: Starting {self.adapter.name.upper()} evaluation...")
+        logger.info(f"{'=' * 80}")
 
-        metrics = asyncio.run(self._run_eval())
+        profiler = get_profiler()
+        with profiler.track("evaluation"):
+            metrics = asyncio.run(self._run_eval())
 
         try:
             import wandb
@@ -1076,10 +1248,10 @@ class VLLMEvalCallback(TrainerCallback):
                 wandb_data.update({f"eval/{k}": v for k, v in metrics.items()})
                 wandb.log(wandb_data)
         except Exception as e:
-            print(f"⚠️  WandB logging failed: {e}")
+            logger.warning(f"⚠️  WandB logging failed: {e}")
 
-        print(f"[{label}] Results: {metrics}")
-        print(f"{'=' * 80}\n")
+        logger.info(f"[{label}] Results: {metrics}")
+        logger.info(f"{'=' * 80}\n")
         return metrics
 
     def on_step_end(self, args: Any, state: Any, control: Any, **kwargs: Any) -> None:
@@ -1130,7 +1302,7 @@ class VLLMEvalCallback(TrainerCallback):
 
                 # Log sample completions
                 if batch_start == 0:
-                    print("\n  ━━━ Sample Completions ━━━")
+                    logger.info("\n  ━━━ Sample Completions ━━━")
                     for i in range(min(3, len(completions))):
                         question = tasks_to_generate[i]
                         completion = completions[i]
@@ -1147,15 +1319,13 @@ class VLLMEvalCallback(TrainerCallback):
                             gold_display = gold[:50] + "..." if len(gold) > 50 else gold
                         else:
                             # MBPP: show test count instead of raw dict
-                            test_count = (
-                                len(gold.get("test_list", [])) if isinstance(gold, dict) else 0
-                            )
+                            test_count = len(gold.get("test_list", [])) if isinstance(gold, dict) else 0
                             gold_display = f"[{test_count} test cases]"
-                        print(f"\n  Sample {i + 1}:")
-                        print(f"    Question: {q_display}")
-                        print(f"    Completion: {c_display}")
-                        print(f"    Reward: {reward:.3f} | Gold: {gold_display}")
-                    print("  ━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+                        logger.info(f"\n  Sample {i + 1}:")
+                        logger.info(f"    Question: {q_display}")
+                        logger.info(f"    Completion: {c_display}")
+                        logger.info(f"    Reward: {reward:.3f} | Gold: {gold_display}")
+                    logger.info("  ━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
                 # Compute rewards and aggregate
                 for completion_text, metadata in zip(completions, task_metadata, strict=False):
@@ -1182,7 +1352,7 @@ class VLLMEvalCallback(TrainerCallback):
         elapsed = time.time() - start_time
         throughput = (total_tasks * cfg.eval_replicates) / elapsed if elapsed > 0 else 0
 
-        print(
+        logger.info(
             f"  ✓ Evaluated {total_tasks} tasks × {cfg.eval_replicates} reps in {elapsed:.2f}s "
             f"({throughput:.1f} completions/sec)"
         )
@@ -1198,7 +1368,7 @@ class VLLMEvalCallback(TrainerCallback):
         vllm_batch_size = 64
         total = len(questions)
         num_requests = (total + vllm_batch_size - 1) // vllm_batch_size
-        print(f"    Generating {total} completions via {num_requests} batched requests")
+        logger.info(f"    Generating {total} completions via {num_requests} batched requests")
 
         async def generate_batch_request(
             session: aiohttp.ClientSession, batch_questions: list[str], start_idx: int
@@ -1242,7 +1412,7 @@ class VLLMEvalCallback(TrainerCallback):
                         backoff = base_backoff * (2**attempt)
                         await asyncio.sleep(backoff)
                     else:
-                        print(f"  ⚠️  Batch {start_idx} failed: {type(e).__name__}")
+                        logger.warning(f"  ⚠️  Batch {start_idx} failed: {type(e).__name__}")
                         return (start_idx, [[] for _ in batch_questions])
             return (start_idx, [[] for _ in batch_questions])
 
@@ -1282,6 +1452,9 @@ class SparsityCallback(TrainerCallback):
     /home/ubuntu/grail/.venv/lib/python3.11/site-packages/transformers/trainer.py:2740-2752
     """
 
+    # Prefix for histogram data from GradientSparsityMetrics
+    HISTOGRAM_KEY_PREFIX = "gradient/_histogram/"
+
     def __init__(self, analyzer: ModelAnalysisManager):
         self.analyzer = analyzer
         self._wandb_configured = False
@@ -1301,12 +1474,14 @@ class SparsityCallback(TrainerCallback):
         inputs = kwargs.get("inputs")
 
         # Run analysis manager (computes metrics only at configured interval).
+        profiler = get_profiler()
         try:
-            analysis_metrics = self.analyzer.on_optimizer_step(
-                model=model,
-                inputs=inputs,
-                optimizer=optimizer,
-            )
+            with profiler.track("sparsity_analysis"):
+                analysis_metrics = self.analyzer.on_optimizer_step(
+                    model=model,
+                    inputs=inputs,
+                    optimizer=optimizer,
+                )
         except Exception:
             return
 
@@ -1315,15 +1490,25 @@ class SparsityCallback(TrainerCallback):
         if not (analysis_metrics or is_measurement_step):
             return
 
-        metrics: dict[str, float] = dict(analysis_metrics)
+        # Separate scalar metrics from histogram data
+        scalar_metrics: dict[str, float] = {}
+        histogram_data: dict[str, Any] = {}
+
+        for key, value in analysis_metrics.items():
+            if key.startswith(self.HISTOGRAM_KEY_PREFIX):
+                # Strip prefix for cleaner wandb key
+                hist_name = key[len(self.HISTOGRAM_KEY_PREFIX) :]
+                histogram_data[hist_name] = value
+            elif isinstance(value, (int, float)):
+                scalar_metrics[key] = float(value)
 
         # Capture gradient statistics (available here, before zero_grad) but only at measurement steps.
         if is_measurement_step:
             grad_norm = self._compute_gradient_norm(model)
             if grad_norm is not None:
-                metrics["param_change/gradient_norm"] = grad_norm
+                scalar_metrics["param_change/gradient_norm"] = grad_norm
 
-        if not metrics:
+        if not scalar_metrics and not histogram_data:
             return
 
         # Log to WandB with custom x-axis (optimizer_step).
@@ -1339,8 +1524,16 @@ class SparsityCallback(TrainerCallback):
 
                 # Log with our own step counter
                 optimizer_step = self.analyzer.step_count
-                wandb_data = {"optimizer_step": optimizer_step}
-                wandb_data.update({f"sparsity/{k}": v for k, v in metrics.items()})
+                wandb_data: dict[str, Any] = {"optimizer_step": optimizer_step}
+
+                # Add scalar metrics with sparsity/ prefix
+                for k, v in scalar_metrics.items():
+                    wandb_data[f"sparsity/{k}"] = v
+
+                # Add histograms with sparsity/gradient/ prefix
+                for hist_name, hist_values in histogram_data.items():
+                    wandb_data[f"sparsity/gradient/{hist_name}"] = wandb.Histogram(hist_values)
+
                 wandb.log(wandb_data)
         except Exception:
             pass
@@ -1444,27 +1637,27 @@ def print_memory_estimate(model_id: str) -> None:
     else:
         gpu_memory_gb = 80.0  # Assume A100
 
-    print("\n💾 Memory Estimation:")
-    print("─" * 60)
-    print(f"  Model ({model_size_b:.1f}B params, bf16):    {mem['model_gb']:.1f} GB")
-    print(f"  Optimizer states (fp32):        {mem['optimizer_gb']:.1f} GB")
-    print(f"  Gradients (bf16):               {mem['gradients_gb']:.1f} GB")
+    logger.info("\n💾 Memory Estimation:")
+    logger.info("─" * 60)
+    logger.info(f"  Model ({model_size_b:.1f}B params, bf16):    {mem['model_gb']:.1f} GB")
+    logger.info(f"  Optimizer states (fp32):        {mem['optimizer_gb']:.1f} GB")
+    logger.info(f"  Gradients (bf16):               {mem['gradients_gb']:.1f} GB")
     ckpt_status = "enabled" if cfg.gradient_checkpointing else "disabled"
-    print(f"  Activations (checkpointing {ckpt_status}): {mem['activation_gb']:.1f} GB")
-    print(f"  Overhead:                       {mem['overhead_gb']:.1f} GB")
-    print("─" * 60)
-    print(f"  Estimated total:                {mem['total_gb']:.1f} GB")
-    print(f"  Available GPU memory:           {gpu_memory_gb:.1f} GB")
+    logger.info(f"  Activations (checkpointing {ckpt_status}): {mem['activation_gb']:.1f} GB")
+    logger.info(f"  Overhead:                       {mem['overhead_gb']:.1f} GB")
+    logger.info("─" * 60)
+    logger.info(f"  Estimated total:                {mem['total_gb']:.1f} GB")
+    logger.info(f"  Available GPU memory:           {gpu_memory_gb:.1f} GB")
 
     headroom = gpu_memory_gb - mem["total_gb"]
     if headroom < 0:
-        print(f"  ⚠️  WARNING: Estimated {-headroom:.1f} GB OVER capacity!")
-        print("     → Try: --batch-size 1 or reduce --max-length")
+        logger.warning(f"  ⚠️  WARNING: Estimated {-headroom:.1f} GB OVER capacity!")
+        logger.warning("     → Try: --batch-size 1 or reduce --max-length")
     elif headroom < 5:
-        print(f"  ⚠️  TIGHT: Only {headroom:.1f} GB headroom - may OOM on long sequences")
+        logger.warning(f"  ⚠️  TIGHT: Only {headroom:.1f} GB headroom - may OOM on long sequences")
     else:
-        print(f"  ✓ Headroom: {headroom:.1f} GB")
-    print("─" * 60)
+        logger.info(f"  ✓ Headroom: {headroom:.1f} GB")
+    logger.info("─" * 60)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1505,7 +1698,7 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=51216,
         help="NCCL group coordination port for vLLM weight sync (default: 51216). "
-        "Must be unique per parallel instance.",
+             "Must be unique per parallel instance.",
     )
     parser.add_argument(
         "--run-suffix",
@@ -1572,23 +1765,19 @@ def main() -> None:
 
     # Set random seeds for reproducibility
     import random
-
     import numpy as np
-
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
 
-    print(f"🚀 Starting TRL GRPO training with {args.dataset.upper()} dataset")
-    print(
-        f"   Seed: {args.seed} | VLLM Port: {args.vllm_port} | Num Iterations: {args.num_iterations}"
-    )
-    print(f"   Model: {cfg.model_id}")
-    print(f"   Batch size: {cfg.batch_size} | Gradient checkpointing: {cfg.gradient_checkpointing}")
+    logger.info(f"🚀 Starting TRL GRPO training with {args.dataset.upper()} dataset")
+    logger.info(f"   Seed: {args.seed} | VLLM Port: {args.vllm_port} | Num Iterations: {args.num_iterations}")
+    logger.info(f"   Model: {cfg.model_id}")
+    logger.info(f"   Batch size: {cfg.batch_size} | Gradient checkpointing: {cfg.gradient_checkpointing}")
     if args.run_suffix:
-        print(f"   Run suffix: {args.run_suffix}")
-    print("=" * 80)
+        logger.info(f"   Run suffix: {args.run_suffix}")
+    logger.info("=" * 80)
 
     # Initialize fast code execution pool for MBPP dataset
     # This eliminates ~6s spawn overhead per code execution (7000x speedup)
@@ -1601,100 +1790,105 @@ def main() -> None:
             )
             execution_pool.start()
             set_global_execution_pool(execution_pool)
-            print("✅ Fast code execution pool initialized: 8 workers")
+            logger.info("✅ Fast code execution pool initialized: 8 workers")
         except Exception as e:
-            print(f"⚠️  Failed to init execution pool, using slow path: {e}")
+            logger.warning(f"⚠️  Failed to init execution pool, using slow path: {e}")
             execution_pool = None
 
     # Print hyperparameter alignment summary
-    print("\n📋 GRAIL Hyperparameter Alignment Summary:")
-    print("─" * 80)
-    print(f"  {'Parameter':<40} {'Value':<15} {'GRAIL Env Var'}")
-    print("─" * 80)
-    print(f"  {'Model ID':<40} {cfg.model_id:<15} GRAIL_TRAIN_MODEL_ID")
-    print(f"  {'Learning Rate':<40} {cfg.lr:<15} GRAIL_TRAINER_LR")
-    print(f"  {'Epochs (per window)':<40} {cfg.epochs:<15} GRAIL_TRAINER_EPOCHS")
-    print(f"  {'Batch Size':<40} {cfg.batch_size:<15} GRAIL_TRAINER_BATCH_SIZE")
-    print(
+    logger.info("\n📋 GRAIL Hyperparameter Alignment Summary:")
+    logger.info("─" * 80)
+    logger.info(f"  {'Parameter':<40} {'Value':<15} {'GRAIL Env Var'}")
+    logger.info("─" * 80)
+    logger.info(f"  {'Model ID':<40} {cfg.model_id:<15} GRAIL_TRAIN_MODEL_ID")
+    logger.info(f"  {'Learning Rate':<40} {cfg.lr:<15} GRAIL_TRAINER_LR")
+    logger.info(f"  {'Epochs (per window)':<40} {cfg.epochs:<15} GRAIL_TRAINER_EPOCHS")
+    logger.info(f"  {'Batch Size':<40} {cfg.batch_size:<15} GRAIL_TRAINER_BATCH_SIZE")
+    logger.info(
         f"  {'Gradient Accum Steps':<40} {cfg.grad_accum_steps:<15} GRAIL_TRAINER_GRAD_ACCUM_STEPS"
     )
-    print(f"  {'Max Length':<40} {cfg.max_length:<15} GRAIL_TRAINER_MAX_LENGTH")
-    print(f"  {'Max Completion Tokens':<40} {cfg.max_new_tokens:<15} GRPO_MAX_COMPLETION_TOKENS")
-    print(f"  {'Gradient Clip':<40} {cfg.grad_clip:<15} GRAIL_TRAINER_GRAD_CLIP")
-    print(f"  {'Warmup Steps':<40} {cfg.warmup_steps:<15} GRAIL_TRAINER_WARMUP_STEPS")
-    print(f"  {'Total Steps':<40} {cfg.total_steps:<15} GRAIL_TRAINER_TOTAL_STEPS")
-    print(f"  {'KL Coefficient':<40} {cfg.kl_coef:<15} GRAIL_TRAINER_KL_COEF")
-    print(f"  {'Entropy Coefficient':<40} {cfg.entropy_coef:<15} GRAIL_TRAINER_ENTROPY_COEF")
-    print(f"  {'PPO Clip Epsilon':<40} {cfg.epsilon:<15} TRAINER_PPO_CLIP_EPS")
-    print(f"  {'PPO Clip Epsilon Upper':<40} {cfg.epsilon_high:<15} TRAINER_PPO_CLIP_EPS_UPPER")
-    print(f"  {'IS Ratio Max':<40} {cfg.is_ratio_max:<15} GRAIL_TRAINER_IS_RATIO_MAX")
-    print(f"  {'GRPO Variant':<40} {cfg.grpo_variant:<15} GRAIL_GRPO_VARIANT")
-    print(f"  {'IS Level':<40} {cfg.importance_sampling_level:<15} GRAIL_IMPORTANCE_SAMPLING_LEVEL")
-    print(f"  {'Max Groups':<40} {cfg.max_groups:<15} GRPO_MAX_GROUPS")
-    print(f"  {'Rollouts per Problem':<40} {cfg.rollouts_per_problem:<15} ROLLOUTS_PER_PROBLEM")
-    print(
-        f"  {'Gradient Checkpointing':<40} {cfg.gradient_checkpointing!s:<15} Memory optimization"
+    logger.info(f"  {'Max Length':<40} {cfg.max_length:<15} GRAIL_TRAINER_MAX_LENGTH")
+    logger.info(f"  {'Max Completion Tokens':<40} {cfg.max_new_tokens:<15} GRPO_MAX_COMPLETION_TOKENS")
+    logger.info(f"  {'Gradient Clip':<40} {cfg.grad_clip:<15} GRAIL_TRAINER_GRAD_CLIP")
+    logger.info(f"  {'Warmup Steps':<40} {cfg.warmup_steps:<15} GRAIL_TRAINER_WARMUP_STEPS")
+    logger.info(f"  {'Total Steps':<40} {cfg.total_steps:<15} GRAIL_TRAINER_TOTAL_STEPS")
+    logger.info(f"  {'KL Coefficient':<40} {cfg.kl_coef:<15} GRAIL_TRAINER_KL_COEF")
+    logger.info(f"  {'Entropy Coefficient':<40} {cfg.entropy_coef:<15} GRAIL_TRAINER_ENTROPY_COEF")
+    logger.info(f"  {'PPO Clip Epsilon':<40} {cfg.epsilon:<15} TRAINER_PPO_CLIP_EPS")
+    logger.info(
+        f"  {'PPO Clip Epsilon Upper':<40} {cfg.epsilon_high:<15} TRAINER_PPO_CLIP_EPS_UPPER"
     )
-    print("─" * 80)
+    logger.info(f"  {'IS Ratio Max':<40} {cfg.is_ratio_max:<15} GRAIL_TRAINER_IS_RATIO_MAX")
+    logger.info(f"  {'GRPO Variant':<40} {cfg.grpo_variant:<15} GRAIL_GRPO_VARIANT")
+    logger.info(f"  {'IS Level':<40} {cfg.importance_sampling_level:<15} GRAIL_IMPORTANCE_SAMPLING_LEVEL")
+    logger.info(f"  {'Max Groups':<40} {cfg.max_groups:<15} GRPO_MAX_GROUPS")
+    logger.info(f"  {'Rollouts per Problem':<40} {cfg.rollouts_per_problem:<15} ROLLOUTS_PER_PROBLEM")
+    logger.info(f"  {'Gradient Checkpointing':<40} {cfg.gradient_checkpointing!s:<15} Memory optimization")
+    logger.info("─" * 80)
 
     # Print memory estimation
     print_memory_estimate(cfg.model_id)
 
     # Get dataset adapter
     adapter = get_dataset_adapter(args.dataset)
-    print("\n📚 Dataset Configuration:")
-    print(f"  Dataset: {adapter.name}")
-    print(f"  Correctness weight: {adapter.correctness_weight}")
-    print(f"  Success threshold: {adapter.success_threshold}")
+    logger.info("\n📚 Dataset Configuration:")
+    logger.info(f"  Dataset: {adapter.name}")
+    logger.info(f"  Correctness weight: {adapter.correctness_weight}")
+    logger.info(f"  Success threshold: {adapter.success_threshold}")
+
+    # Initialize profiler
+    profiler = get_profiler()
 
     # Load model and tokenizer
-    print("\n📦 Loading model and tokenizer...")
+    logger.info("\n📦 Loading model and tokenizer...")
     # Determine device for training
     if args.device:
         train_device = torch.device(args.device)
         # Set default CUDA device so model loads to correct GPU
         if train_device.type == "cuda":
             torch.cuda.set_device(train_device)
-        print(f"  Using device: {train_device}")
+        logger.info(f"  Using device: {train_device}")
     else:
         train_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    try:
-        model = AutoModelForCausalLM.from_pretrained(
-            cfg.model_id,
-            torch_dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2",
-            device_map=train_device,
-        )
-    except (ImportError, RuntimeError) as e:
-        print(f"⚠️  Flash Attention 2 unavailable ({type(e).__name__}), using SDPA")
-        model = AutoModelForCausalLM.from_pretrained(
-            cfg.model_id,
-            torch_dtype=torch.bfloat16,  # FP32 master weights, AMP handles FP16 casting
-            attn_implementation="sdpa",
-            device_map=train_device,
-        )
+    with profiler.track("model_loading"):
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                cfg.model_id,
+                torch_dtype=torch.bfloat16,
+                attn_implementation="flash_attention_2",
+                device_map=train_device,
+            )
+        except (ImportError, RuntimeError) as e:
+            logger.warning(f"⚠️  Flash Attention 2 unavailable ({type(e).__name__}), using SDPA")
+            model = AutoModelForCausalLM.from_pretrained(
+                cfg.model_id,
+                torch_dtype=torch.bfloat16,  # FP32 master weights, AMP handles FP16 casting
+                attn_implementation="sdpa",
+                device_map=train_device,
+            )
 
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model_id)
-    tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "left"
-    tokenizer.chat_template = QWEN_CHAT_TEMPLATE
+        tokenizer = AutoTokenizer.from_pretrained(cfg.model_id)
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.padding_side = "left"
+        tokenizer.chat_template = QWEN_CHAT_TEMPLATE
 
     # Prepare datasets
-    print("\n📊 Preparing datasets...")
-    train_ds = prepare_train_dataset(adapter, tokenizer)
-    eval_ds, eval_data = prepare_eval_dataset(adapter)
-    prompt_to_answer = {row["prompt"]: row["gold_answer"] for row in train_ds}
+    logger.info("\n📊 Preparing datasets...")
+    with profiler.track("dataset_preparation"):
+        train_ds = prepare_train_dataset(adapter, tokenizer)
+        eval_ds, eval_data = prepare_eval_dataset(adapter)
+        prompt_to_answer = {row["prompt"]: row["gold_answer"] for row in train_ds}
 
     # WandB setup
-    print("\n⚙️  Configuring GRPO trainer...")
+    logger.info("\n⚙️  Configuring GRPO trainer...")
     import wandb
 
     wandb_api_key = os.getenv("WANDB_API_KEY")
     if wandb_api_key:
         wandb.login(key=wandb_api_key)
         effective_project = args.wandb_project or os.getenv("WANDB_PROJECT", "grail")
-        print(f"  ✓ WandB logged in (project: {effective_project})")
+        logger.info(f"  ✓ WandB logged in (project: {effective_project})")
 
     # Calculate max_prompt_length (GRAIL_TRAINER_MAX_LENGTH - GRPO_MAX_COMPLETION_TOKENS)
     max_prompt_length = cfg.max_length - cfg.max_new_tokens
@@ -1712,17 +1906,21 @@ def main() -> None:
     groups_per_step = effective_batch // cfg.rollouts_per_problem  # 512 / 16 = 32
     total_optimizer_steps = cfg.total_steps  # Fixed: maintains original training duration
 
-    print("\n📊 Training Schedule:")
-    print(f"  • Effective batch size: {effective_batch} samples")
-    print(f"  • Groups per optimizer step: {groups_per_step}")
-    print(f"  • Rollouts per group: {cfg.rollouts_per_problem}")
-    print(f"  • Total optimizer steps: {total_optimizer_steps}")
+    logger.info("\n📊 Training Schedule:")
+    logger.info(f"  • Effective batch size: {effective_batch} samples")
+    logger.info(f"  • Groups per optimizer step: {groups_per_step}")
+    logger.info(f"  • Rollouts per group: {cfg.rollouts_per_problem}")
+    logger.info(f"  • Total optimizer steps: {total_optimizer_steps}")
 
     # Build run identifiers with seed and suffix
     run_id = f"seed{args.seed}" if not args.run_suffix else args.run_suffix
 
+    # Use GRAIL_OUTPUT_BASE env var for output directories (default: current dir)
+    # Set to /ephemeral on cloud instances with limited home storage
+    output_base = os.getenv("GRAIL_OUTPUT_BASE", ".")
+
     grpo_config = GRPOConfig(
-        output_dir=f"./outputs/trl_{adapter.name}_{run_id}",
+        output_dir=f"{output_base}/outputs/trl_{adapter.name}_{run_id}",
         # ─────────────────────────────────────────────────────────────────────
         # Learning Rate & Schedule (matching GRAIL trainer config)
         # ─────────────────────────────────────────────────────────────────────
@@ -1782,7 +1980,6 @@ def main() -> None:
         logging_steps=1,
         log_completions=True,
         num_completions_to_print=1,
-        wandb_log_unique_prompts=True,
         save_strategy="steps",
         save_steps=50,
         bf16=True,
@@ -1800,6 +1997,7 @@ def main() -> None:
         use_vllm=True,
         vllm_mode="server",
         vllm_server_base_url=f"http://127.0.0.1:{args.vllm_port}",
+        vllm_group_port=args.group_port,  # CRITICAL: unique port per instance for parallel runs
         vllm_importance_sampling_correction=False,
         vllm_importance_sampling_cap=cfg.is_ratio_max,  # GRAIL_TRAINER_IS_RATIO_MAX
     )
@@ -1815,7 +2013,7 @@ def main() -> None:
         and torch.cuda.device_count() > 1
     ):
         grpo_config._n_gpu = 1
-        print("  ✓ Forced Trainer to single-GPU (n_gpu=1) to avoid DataParallel on vLLM GPU")
+        logger.info("  ✓ Forced Trainer to single-GPU (n_gpu=1) to avoid DataParallel on vLLM GPU")
 
     # Create reward tracker with pass@k logging
     reward_tracker = TrainingPassAtKTracker(
@@ -1823,9 +2021,9 @@ def main() -> None:
         prompt_to_answer=prompt_to_answer,
         report_ks=cfg.report_ks,
     )
-    print(f"  ✓ TrainingPassAtKTracker initialized (report_ks={cfg.report_ks})")
+    logger.info(f"  ✓ TrainingPassAtKTracker initialized (report_ks={cfg.report_ks})")
 
-    print(f"\n🏋️  Training with GRPO on {adapter.name.upper()}...")
+    logger.info(f"\n🏋️  Training with GRPO on {adapter.name.upper()}...")
 
     # Initialize sparsity analysis (parameter change tracking + gradient sparsity)
     sparsity_config = AnalysisConfig(
@@ -1846,20 +2044,19 @@ def main() -> None:
     sparsity_analyzer.add_metric(gradient_sparsity)
 
     sparsity_callback = SparsityCallback(sparsity_analyzer)
-    print(f"  ✓ Sparsity analysis enabled (interval={sparsity_config.interval})")
+    logger.info(f"  ✓ Sparsity analysis enabled (interval={sparsity_config.interval})")
 
     # Initialize delta checkpoint callback
     delta_checkpoint_callback = DeltaCheckpointCallback(
-        output_dir=f"./checkpoints/deltas_{adapter.name}_{run_id}",
+        output_dir=f"{output_base}/checkpoints/deltas_{adapter.name}_{run_id}",
         enabled=cfg.delta_checkpoint_enabled,
         snapshot_dtype=cfg.delta_checkpoint_dtype,
+        profiler=profiler,
     )
     if cfg.delta_checkpoint_enabled:
-        print(
-            f"  ✓ Delta checkpointing enabled (threshold=0.0, exact sparsity, dtype={cfg.delta_checkpoint_dtype})"
-        )
+        logger.info(f"  ✓ Delta checkpointing enabled (threshold=0.0, exact sparsity, dtype={cfg.delta_checkpoint_dtype})")
     else:
-        print("  ✗ Delta checkpointing disabled (set cfg.delta_checkpoint_enabled=True to enable)")
+        logger.info(f"  ✗ Delta checkpointing disabled (set cfg.delta_checkpoint_enabled=True to enable)")
 
     # Initialize evaluation callback
     vllm_eval_callback = VLLMEvalCallback(
@@ -1872,7 +2069,6 @@ def main() -> None:
 
     # Monkey-patch VLLMClient to use custom group_port (avoids port conflicts in parallel runs)
     from trl.extras import vllm_client as vllm_client_module
-
     _original_init = vllm_client_module.VLLMClient.__init__
 
     def _patched_init(self, *init_args, **init_kwargs):
@@ -1880,14 +2076,14 @@ def main() -> None:
         return _original_init(self, *init_args, **init_kwargs)
 
     vllm_client_module.VLLMClient.__init__ = _patched_init
-    print(f"  ✓ VLLMClient patched to use group_port={args.group_port}")
+    logger.info(f"  ✓ VLLMClient patched to use group_port={args.group_port}")
 
     # Ensure CUDA device is correctly set before GRPOTrainer initialization
     # GRPOTrainer uses torch.cuda.current_device() for NCCL communicator setup
     if args.device:
         device_idx = int(args.device.split(":")[-1]) if ":" in args.device else 0
         torch.cuda.set_device(device_idx)
-        print(f"  ✓ CUDA device set to {device_idx} for NCCL communicator")
+        logger.info(f"  ✓ CUDA device set to {device_idx} for NCCL communicator")
 
     trainer = GRPOTrainer(
         model=model,
@@ -1913,43 +2109,48 @@ def main() -> None:
             config=grpo_config.to_dict(),
             tags=wandb_tags if wandb_tags else None,
         )
-        print(f"  ✓ WandB initialized (project: {wandb_project}, tags: {wandb_tags})")
+        logger.info(f"  ✓ WandB initialized (project: {wandb_project}, tags: {wandb_tags})")
 
     # Baseline evaluation
     vllm_eval_callback.run_and_log(step=0, label="BASELINE EVAL")
 
     # Train
-    trainer.train()
+    with profiler.track("training"):
+        trainer.train()
 
     # Final evaluation
     final_step = trainer.state.global_step if hasattr(trainer, "state") else 9999
     final_metrics = vllm_eval_callback.run_and_log(step=final_step, label="FINAL EVAL")
 
-    # Print summary
-    print("\n" + "=" * 60)
-    print(f"FINAL RESULTS SUMMARY ({adapter.name.upper()})")
-    print("=" * 60)
+    # Print profiling summary
+    profiler.print_summary()
+    profiler.log_to_wandb()
+
+    # Print results summary
+    logger.info("\n" + "=" * 60)
+    logger.info(f"FINAL RESULTS SUMMARY ({adapter.name.upper()})")
+    logger.info("=" * 60)
     for k in cfg.report_ks:
         if k > cfg.eval_replicates:
             continue
-        print(f"\nMetrics @ k={k}:")
-        print(f"  pass@{k}:        {final_metrics[f'pass@{k}']:.3f}")
-        print(f"  pass_ordered@{k}: {final_metrics[f'pass_ordered@{k}']:.3f}")
-        print(f"  mean@{k}:        {final_metrics[f'mean@{k}']:.3f}")
-        print(f"  best@{k}:        {final_metrics[f'best@{k}']:.3f}")
-    print("\nGlobal metrics:")
-    print(f"  reward_mean_all: {final_metrics['reward_mean_all']:.3f}")
-    print(f"  success_rate_all: {final_metrics['success_rate_all']:.3f}")
+        logger.info(f"\nMetrics @ k={k}:")
+        logger.info(f"  pass@{k}:        {final_metrics[f'pass@{k}']:.3f}")
+        logger.info(f"  pass_ordered@{k}: {final_metrics[f'pass_ordered@{k}']:.3f}")
+        logger.info(f"  mean@{k}:        {final_metrics[f'mean@{k}']:.3f}")
+        logger.info(f"  best@{k}:        {final_metrics[f'best@{k}']:.3f}")
+    logger.info("\nGlobal metrics:")
+    logger.info(f"  reward_mean_all: {final_metrics['reward_mean_all']:.3f}")
+    logger.info(f"  success_rate_all: {final_metrics['success_rate_all']:.3f}")
 
     # Cleanup execution pool
     if execution_pool is not None:
         try:
-            print("\n🧹 Shutting down code execution pool...")
+            logger.info("\n🧹 Shutting down code execution pool...")
             set_global_execution_pool(None)
             execution_pool.shutdown()
-            print("✅ Code execution pool shutdown complete")
+            logger.info("✅ Code execution pool shutdown complete")
         except Exception as e:
-            print(f"⚠️  Error shutting down execution pool: {e}")
+            logger.warning(f"⚠️  Error shutting down execution pool: {e}")
 
 
 if __name__ == "__main__":
