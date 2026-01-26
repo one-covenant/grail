@@ -53,13 +53,21 @@ GPU_PAIRS = [
     (6, 7),  # Instance 3
 ]
 
-# Base port for VLLM servers
-BASE_PORT = 8000
+# Base port for VLLM servers (can be overridden via GRAIL_BASE_PORT env var)
+BASE_PORT = int(os.environ.get("GRAIL_BASE_PORT", 8000))
 
 # Base port for NCCL group coordination (each instance needs unique port)
 # Use large spacing (100 ports apart) to avoid any potential conflicts
-BASE_GROUP_PORT = 51200
+# Can be overridden via GRAIL_BASE_GROUP_PORT env var
+BASE_GROUP_PORT = int(os.environ.get("GRAIL_BASE_GROUP_PORT", 51200))
 GROUP_PORT_SPACING = 100  # Port increment per instance
+
+# Base ports for vLLM internal communication (can be overridden via env vars)
+VLLM_NIXL_PORT_BASE = int(os.environ.get("GRAIL_VLLM_NIXL_PORT_BASE", 5557))
+VLLM_MASTER_PORT_BASE = int(os.environ.get("GRAIL_VLLM_MASTER_PORT_BASE", 29500))
+
+# Run prefix for unique run names (used to differentiate parallel experiments)
+RUN_PREFIX = os.environ.get("GRAIL_RUN_PREFIX", "")
 
 
 class ProcessManager:
@@ -75,6 +83,11 @@ class ProcessManager:
         wandb_project: str | None = None,
         wandb_tags: str | None = None,
         output_base: str | None = None,
+        batch_size: int | None = None,
+        grad_accum_steps: int | None = None,
+        resume_from_checkpoint: str | None = None,
+        seed_override: int | None = None,
+        lr: float | None = None,
     ):
         self.dataset = dataset
         self.eval_every = eval_every
@@ -83,6 +96,11 @@ class ProcessManager:
         self.num_instances = num_instances
         self.wandb_project = wandb_project
         self.wandb_tags = wandb_tags
+        self.batch_size = batch_size
+        self.grad_accum_steps = grad_accum_steps
+        self.resume_from_checkpoint = resume_from_checkpoint
+        self.seed_override = seed_override
+        self.lr = lr
         # Output base directory for checkpoints, wandb, etc.
         # Use /ephemeral on cloud instances with limited home storage
         self.output_base = output_base or os.getenv("GRAIL_OUTPUT_BASE", ".")
@@ -91,9 +109,16 @@ class ProcessManager:
         self.log_dir = Path("./logs/parallel_training")
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
-        # Limit GPU_PAIRS and SEEDS to num_instances
-        self.gpu_pairs = GPU_PAIRS[:num_instances]
-        self.seeds = SEEDS[:num_instances]
+        # Start instance index (for running on different GPU pairs)
+        self.start_instance = int(os.environ.get("GRAIL_START_INSTANCE", 0))
+
+        # Limit GPU_PAIRS and SEEDS to num_instances, starting from start_instance
+        self.gpu_pairs = GPU_PAIRS[self.start_instance:self.start_instance + num_instances]
+        # Override seeds if seed_override is provided (for single-instance resume)
+        if self.seed_override is not None and num_instances == 1:
+            self.seeds = [self.seed_override]
+        else:
+            self.seeds = SEEDS[self.start_instance:self.start_instance + num_instances]
 
         # Register signal handlers for clean shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -145,9 +170,9 @@ class ProcessManager:
         env["TORCH_COMPILE_CACHE_DIR"] = f"{cache_base}/torch_compile"
         # CRITICAL: Unique ports per instance to avoid NCCL/collective conflicts
         # Without this, multiple vLLM instances try to bind to the same ports
-        env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(5557 + instance_id * 10)
-        env["VLLM_DP_MASTER_PORT"] = str(29500 + instance_id * 10)
-        env["MASTER_PORT"] = str(29500 + instance_id * 10)
+        env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(VLLM_NIXL_PORT_BASE + instance_id * 10)
+        env["VLLM_DP_MASTER_PORT"] = str(VLLM_MASTER_PORT_BASE + instance_id * 10)
+        env["MASTER_PORT"] = str(VLLM_MASTER_PORT_BASE + instance_id * 10)
 
         print(f"[Instance {instance_id}] Starting VLLM server:")
         print(f"  GPUs visible: {vllm_gpu},{training_gpu}, Using: cuda:0, Port: {port}, Log: {log_file}")
@@ -228,16 +253,27 @@ class ProcessManager:
             "--seed", str(seed),
             "--vllm-port", str(port),
             "--group-port", str(group_port),
-            "--run-suffix", f"instance{instance_id}_seed{seed}",
+            "--run-suffix", f"{RUN_PREFIX}instance{instance_id}_seed{seed}",
             "--model", self.model_id,
             # Ensure training uses cuda:0 in this process (the training GPU).
             "--device", "cuda:0",
         ]
+        # Add batch size and grad accum steps if provided
+        if self.batch_size is not None:
+            cmd.extend(["--batch-size", str(self.batch_size)])
+        if self.grad_accum_steps is not None:
+            cmd.extend(["--grad-accum-steps", str(self.grad_accum_steps)])
+        # Add resume checkpoint if provided
+        if self.resume_from_checkpoint:
+            cmd.extend(["--resume-from-checkpoint", self.resume_from_checkpoint])
         # Add W&B args if provided (CLI takes precedence over env vars)
         if self.wandb_project:
             cmd.extend(["--wandb-project", self.wandb_project])
         if self.wandb_tags:
             cmd.extend(["--wandb-tags", self.wandb_tags])
+        # Add learning rate if provided
+        if self.lr is not None:
+            cmd.extend(["--lr", str(self.lr)])
 
         env = os.environ.copy()
         # NCCL weight sync requires both GPUs visible to enable peer access.
@@ -333,10 +369,12 @@ class ProcessManager:
         print(f"Dataset: {self.dataset}")
         print(f"Model: {self.model_id}")
         print(f"Num Iterations: {self.num_iterations}")
-        print(f"Instances: {len(self.seeds)}")
+        print(f"Instances: {len(self.seeds)} (starting at index {self.start_instance})")
         print(f"Seeds: {self.seeds}")
         print(f"GPU pairs: {self.gpu_pairs}")
-        print(f"Ports: {[BASE_PORT + i for i in range(len(self.seeds))]}")
+        print(f"vLLM Ports: {[BASE_PORT + i for i in range(len(self.seeds))]}")
+        print(f"Group Ports: {[BASE_GROUP_PORT + i * GROUP_PORT_SPACING for i in range(len(self.seeds))]}")
+        print(f"Run Prefix: {RUN_PREFIX or '(none)'}")
         print(f"Logs: {self.log_dir}")
         print("=" * 80)
 
@@ -453,6 +491,36 @@ def parse_args() -> argparse.Namespace:
         help="Base directory for outputs, checkpoints, wandb (default: current dir). "
              "Set to /ephemeral on cloud instances with limited home storage.",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Override batch size per device. Effective batch = batch_size * grad_accum_steps.",
+    )
+    parser.add_argument(
+        "--grad-accum-steps",
+        type=int,
+        default=None,
+        help="Override gradient accumulation steps. Effective batch = batch_size * grad_accum_steps.",
+    )
+    parser.add_argument(
+        "--resume-from-checkpoint",
+        type=str,
+        default=None,
+        help="Path to TRL checkpoint to resume training from.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Override the seed for single-instance runs (for resuming specific seed).",
+    )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=None,
+        help="Override learning rate (default: 3e-6).",
+    )
     return parser.parse_args()
 
 
@@ -479,6 +547,11 @@ def main() -> None:
         wandb_project=args.wandb_project,
         wandb_tags=args.wandb_tags,
         output_base=args.output_base,
+        batch_size=args.batch_size,
+        grad_accum_steps=args.grad_accum_steps,
+        resume_from_checkpoint=args.resume_from_checkpoint,
+        seed_override=args.seed,
+        lr=args.lr,
     )
     manager.run()
 

@@ -9,6 +9,8 @@ EVAL_EVERY=${2:-40}
 MODEL=${3:-Qwen/Qwen2.5-1.5B-Instruct}
 NUM_ITERATIONS=${4:-1}
 NUM_INSTANCES=${5:-1}  # Default to 1 instance for stability (avoids NCCL conflicts)
+BATCH_SIZE=${6:-}  # Optional: batch size per device
+GRAD_ACCUM_STEPS=${7:-}  # Optional: gradient accumulation steps
 
 # W&B configuration (inherited from environment or defaults)
 WANDB_PROJECT_VAL=${WANDB_PROJECT:-grail-lium-sweep}
@@ -17,13 +19,20 @@ WANDB_TAGS_VAL=${WANDB_TAGS:-}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Activate virtual environment if it exists
+if [ -f ".venv/bin/activate" ]; then
+    source .venv/bin/activate
+fi
+
 # Create logs directory
 mkdir -p logs/parallel_training
 
 # Generate timestamp for this run
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-LAUNCHER_LOG="logs/parallel_training/launcher_${TIMESTAMP}.log"
-PID_FILE="logs/parallel_training/launcher.pid"
+# Use GRAIL_RUN_PREFIX for unique launcher logs and PID files when running multiple experiments
+RUN_PREFIX_LABEL=${GRAIL_RUN_PREFIX:-default}
+LAUNCHER_LOG="logs/parallel_training/launcher_${RUN_PREFIX_LABEL}_${TIMESTAMP}.log"
+PID_FILE="logs/parallel_training/launcher_${RUN_PREFIX_LABEL}.pid"
 
 echo "=================================================="
 echo "PARALLEL TRAINING LAUNCHER (NOHUP MODE)"
@@ -33,8 +42,14 @@ echo "Eval every: $EVAL_EVERY steps"
 echo "Model: $MODEL"
 echo "Num Iterations: $NUM_ITERATIONS"
 echo "Num Instances: $NUM_INSTANCES"
+echo "Batch Size: ${BATCH_SIZE:-default}"
+echo "Grad Accum Steps: ${GRAD_ACCUM_STEPS:-default}"
 echo "W&B Project: $WANDB_PROJECT_VAL"
 echo "W&B Tags: $WANDB_TAGS_VAL"
+echo "Run Prefix: $RUN_PREFIX_LABEL"
+echo "Start Instance: ${GRAIL_START_INSTANCE:-0}"
+echo "Seed Override: ${GRAIL_SEED:-default}"
+echo "Base Ports: vLLM=${GRAIL_BASE_PORT:-8000}, Group=${GRAIL_BASE_GROUP_PORT:-51200}"
 echo "Launcher log: $LAUNCHER_LOG"
 echo "PID file: $PID_FILE"
 echo "=================================================="
@@ -56,15 +71,46 @@ fi
 # Run in nohup mode with W&B config passed as CLI args (takes precedence over env)
 echo ""
 echo "Starting parallel training in background..."
-nohup python -u run_parallel_training.py \
-    --dataset "$DATASET" \
-    --eval-every "$EVAL_EVERY" \
-    --model "$MODEL" \
-    --num-iterations "$NUM_ITERATIONS" \
-    --num-instances "$NUM_INSTANCES" \
-    --wandb-project "$WANDB_PROJECT_VAL" \
-    --wandb-tags "$WANDB_TAGS_VAL" \
-    > "$LAUNCHER_LOG" 2>&1 &
+
+# Build command with optional parameters
+CMD="python -u run_parallel_training.py \
+    --dataset $DATASET \
+    --eval-every $EVAL_EVERY \
+    --model $MODEL \
+    --num-iterations $NUM_ITERATIONS \
+    --num-instances $NUM_INSTANCES"
+
+# Add W&B project if provided
+if [ -n "$WANDB_PROJECT_VAL" ]; then
+    CMD="$CMD --wandb-project $WANDB_PROJECT_VAL"
+fi
+
+# Add W&B tags if provided
+if [ -n "$WANDB_TAGS_VAL" ]; then
+    CMD="$CMD --wandb-tags $WANDB_TAGS_VAL"
+fi
+
+# Add optional batch size if provided
+if [ -n "$BATCH_SIZE" ]; then
+    CMD="$CMD --batch-size $BATCH_SIZE"
+fi
+
+# Add optional grad accum steps if provided
+if [ -n "$GRAD_ACCUM_STEPS" ]; then
+    CMD="$CMD --grad-accum-steps $GRAD_ACCUM_STEPS"
+fi
+
+# Add seed override if provided (GRAIL_SEED env var)
+if [ -n "$GRAIL_SEED" ]; then
+    CMD="$CMD --seed $GRAIL_SEED"
+fi
+
+# Add learning rate override if provided (GRAIL_TRAINER_LR env var)
+if [ -n "$GRAIL_TRAINER_LR" ]; then
+    CMD="$CMD --lr $GRAIL_TRAINER_LR"
+fi
+
+nohup $CMD > "$LAUNCHER_LOG" 2>&1 &
 
 
 LAUNCHER_PID=$!
