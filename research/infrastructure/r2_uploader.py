@@ -11,7 +11,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import boto3
 from boto3.exceptions import Boto3Error
@@ -176,7 +176,7 @@ class R2Uploader:
 
             except (ClientError, BotoCoreError, Boto3Error) as e:
                 error_code = type(e).__name__
-                error_message: str | None = None
+                error_message: Optional[str] = None
                 if isinstance(e, ClientError):
                     err = e.response.get("Error", {})
                     error_code = err.get("Code", "Unknown")
@@ -205,11 +205,7 @@ class R2Uploader:
             except OSError as e:
                 logger.error(
                     "Local file error uploading",
-                    extra={
-                        "local_file": str(local_file),
-                        "error": str(e),
-                        "error_type": type(e).__name__,
-                    },
+                    extra={"local_file": str(local_file), "error": str(e), "error_type": type(e).__name__},
                 )
                 return False
 
@@ -317,18 +313,14 @@ class R2Uploader:
             return True
         except (ClientError, BotoCoreError, Boto3Error) as e:
             error_code = type(e).__name__
-            error_message: str | None = None
+            error_message: Optional[str] = None
             if isinstance(e, ClientError):
                 err = e.response.get("Error", {})
                 error_code = err.get("Code", "Unknown")
                 error_message = err.get("Message")
             logger.error(
                 "Cannot access bucket",
-                extra={
-                    "bucket": bucket_name,
-                    "error_code": error_code,
-                    "error_message": error_message,
-                },
+                extra={"bucket": bucket_name, "error_code": error_code, "error_message": error_message},
             )
             return False
 
@@ -430,9 +422,7 @@ if __name__ == "__main__":
     experiment_name = sys.argv[2]
     bucket_name = os.getenv("R2_BUCKET_NAME") or os.getenv("R2_BUCKET_ID")
     if not bucket_name:
-        logger.error(
-            "Missing bucket env var: set R2_BUCKET_NAME (preferred) or R2_BUCKET_ID (legacy)"
-        )
+        logger.error("Missing bucket env var: set R2_BUCKET_NAME (preferred) or R2_BUCKET_ID (legacy)")
         raise SystemExit(1)
 
     success = upload_experiment_artifacts(

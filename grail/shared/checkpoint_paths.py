@@ -11,7 +11,7 @@ Directory Structure:
         │   ├── metadata.json
         │   ├── manifest.sig
         │   ├── delta_metadata.json
-        │   └── delta_sparse.safetensors.zst
+        │   └── delta_sparse.bin.zst
         └── FULL/               # Full checkpoint (for new joiners/bootstrap)
             ├── metadata.json
             ├── manifest.sig

@@ -42,8 +42,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import zstandard as zstd
-
+from grail.infrastructure.sparse_codec import (
+    decode_sparse_delta_v2,
+    decode_sparse_delta_v3,
+    decode_sparse_delta_v3_1,
+)
 from grail.shared.safetensors_utils import load_model_state_dict
 
 from ..shared.checkpoint_paths import (
@@ -1246,8 +1249,6 @@ class CheckpointManager:
         Returns:
             Tuple of (sparse_tensors, shapes, delta_info) or None on failure
         """
-        from safetensors.torch import load_file
-
         # Download delta files to temp directory
         delta_tmp = _unique_partial_dir(self.cache_root, f"delta-{delta_meta.window}")
         delta_tmp.mkdir(parents=True, exist_ok=True)
@@ -1260,38 +1261,44 @@ class CheckpointManager:
                 logger.error("Delta integrity check failed for window %s", delta_meta.window)
                 return None
 
-            # Load sparse delta (handle both compressed and uncompressed formats)
-            delta_sparse_path = delta_tmp / "delta_sparse.safetensors"
-            delta_compressed_path = delta_tmp / "delta_sparse.safetensors.zst"
-
-            if delta_compressed_path.exists():
-                # Decompress zstd-compressed delta
-                logger.debug("Decompressing delta_sparse.safetensors.zst")
-                decompressor = zstd.ZstdDecompressor()
-                compressed_data = delta_compressed_path.read_bytes()
-                decompressed_data = decompressor.decompress(compressed_data)
-                delta_sparse_path.write_bytes(decompressed_data)
-                logger.debug(
-                    "🗜️ Decompressed delta: %.2f MB → %.2f MB",
-                    len(compressed_data) / (1024 * 1024),
-                    len(decompressed_data) / (1024 * 1024),
-                )
-
-            if not delta_sparse_path.exists():
-                logger.error(
-                    "Delta checkpoint missing delta_sparse.safetensors: %s",
-                    delta_tmp,
-                )
-                return None
-            sparse_tensors = load_file(delta_sparse_path)
-
-            # Load delta metadata for shapes
+            # Load delta metadata first to determine format
             delta_meta_path = delta_tmp / "delta_metadata.json"
             if not delta_meta_path.exists():
                 logger.error("Delta checkpoint missing delta_metadata.json: %s", delta_tmp)
                 return None
             delta_info = json.loads(delta_meta_path.read_text())
             shapes = delta_info.get("shapes", {})
+            delta_format = delta_info.get("format")
+
+            # Load sparse delta based on format
+            if delta_format in {"sparse_codec_v2", "sparse_codec_v3", "sparse_codec_v3.1"}:
+                # Optimized formats (8-18x compression)
+                delta_compressed_path = delta_tmp / "delta_sparse.bin.zst"
+                if not delta_compressed_path.exists():
+                    logger.error(
+                        "Delta checkpoint missing delta_sparse.bin.zst: %s",
+                        delta_tmp,
+                    )
+                    return None
+                compressed_data = delta_compressed_path.read_bytes()
+                if delta_format == "sparse_codec_v2":
+                    sparse_tensors, shapes = decode_sparse_delta_v2(compressed_data)
+                elif delta_format == "sparse_codec_v3":
+                    sparse_tensors, shapes = decode_sparse_delta_v3(compressed_data)
+                else:  # sparse_codec_v3.1
+                    sparse_tensors, shapes = decode_sparse_delta_v3_1(compressed_data)
+                logger.debug(
+                    "🗜️ Decoded optimized sparse delta (%s): %.2f MB compressed",
+                    delta_format,
+                    len(compressed_data) / (1024 * 1024),
+                )
+            else:
+                logger.error(
+                    "Unsupported delta format '%s' for window %s",
+                    delta_format,
+                    delta_meta.window,
+                )
+                return None
 
             return (sparse_tensors, shapes, delta_info)
 

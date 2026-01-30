@@ -1,19 +1,22 @@
 #!/bin/bash
-# Wrapper script to run parallel training in nohup mode
+# Wrapper script to run parallel SFT training in nohup mode
 # This allows training to continue even after logout
+#
+# Unlike GRPO, SFT doesn't need vLLM servers - one GPU per training instance.
+# Can run up to 8 instances on an 8-GPU node.
 
 set -e
 
 DATASET=${1:-math}
 EVAL_EVERY=${2:-40}
 MODEL=${3:-Qwen/Qwen2.5-1.5B-Instruct}
-NUM_ITERATIONS=${4:-1}
-NUM_INSTANCES=${5:-1}  # Default to 1 instance for stability (avoids NCCL conflicts)
+MAX_STEPS=${4:-400}
+NUM_INSTANCES=${5:-4}  # Default to 4 instances
 BATCH_SIZE=${6:-}  # Optional: batch size per device
 GRAD_ACCUM_STEPS=${7:-}  # Optional: gradient accumulation steps
 
 # W&B configuration (inherited from environment or defaults)
-WANDB_PROJECT_VAL=${WANDB_PROJECT:-grail-lium-sweep}
+WANDB_PROJECT_VAL=${WANDB_PROJECT:-grail-basilica-sweep}
 WANDB_TAGS_VAL=${WANDB_TAGS:-}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,22 +28,22 @@ if [ -f ".venv/bin/activate" ]; then
 fi
 
 # Create logs directory
-mkdir -p logs/parallel_training
+mkdir -p logs/parallel_sft
 
 # Generate timestamp for this run
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 # Use GRAIL_RUN_PREFIX for unique launcher logs and PID files when running multiple experiments
 RUN_PREFIX_LABEL=${GRAIL_RUN_PREFIX:-default}
-LAUNCHER_LOG="logs/parallel_training/launcher_${RUN_PREFIX_LABEL}_${TIMESTAMP}.log"
-PID_FILE="logs/parallel_training/launcher_${RUN_PREFIX_LABEL}.pid"
+LAUNCHER_LOG="logs/parallel_sft/launcher_${RUN_PREFIX_LABEL}_${TIMESTAMP}.log"
+PID_FILE="logs/parallel_sft/launcher_${RUN_PREFIX_LABEL}.pid"
 
 echo "=================================================="
-echo "PARALLEL TRAINING LAUNCHER (NOHUP MODE)"
+echo "PARALLEL SFT TRAINING LAUNCHER (NOHUP MODE)"
 echo "=================================================="
 echo "Dataset: $DATASET"
 echo "Eval every: $EVAL_EVERY steps"
 echo "Model: $MODEL"
-echo "Num Iterations: $NUM_ITERATIONS"
+echo "Max Steps: $MAX_STEPS"
 echo "Num Instances: $NUM_INSTANCES"
 echo "Batch Size: ${BATCH_SIZE:-default}"
 echo "Grad Accum Steps: ${GRAD_ACCUM_STEPS:-default}"
@@ -49,7 +52,6 @@ echo "W&B Tags: $WANDB_TAGS_VAL"
 echo "Run Prefix: $RUN_PREFIX_LABEL"
 echo "Start Instance: ${GRAIL_START_INSTANCE:-0}"
 echo "Seed Override: ${GRAIL_SEED:-default}"
-echo "Base Ports: vLLM=${GRAIL_BASE_PORT:-8000}, Group=${GRAIL_BASE_GROUP_PORT:-51200}"
 echo "Launcher log: $LAUNCHER_LOG"
 echo "PID file: $PID_FILE"
 echo "=================================================="
@@ -58,7 +60,7 @@ echo "=================================================="
 if [ -f "$PID_FILE" ]; then
     OLD_PID=$(cat "$PID_FILE")
     if ps -p "$OLD_PID" > /dev/null 2>&1; then
-        echo "⚠️  Launcher already running with PID $OLD_PID"
+        echo "  Launcher already running with PID $OLD_PID"
         echo "   To stop it: kill $OLD_PID"
         echo "   Or wait for it to complete"
         exit 1
@@ -70,14 +72,14 @@ fi
 
 # Run in nohup mode with W&B config passed as CLI args (takes precedence over env)
 echo ""
-echo "Starting parallel training in background..."
+echo "Starting parallel SFT training in background..."
 
 # Build command with optional parameters
-CMD="python -u run_parallel_training.py \
+CMD="python -u run_parallel_sft.py \
     --dataset $DATASET \
     --eval-every $EVAL_EVERY \
     --model $MODEL \
-    --num-iterations $NUM_ITERATIONS \
+    --max-steps $MAX_STEPS \
     --num-instances $NUM_INSTANCES"
 
 # Add W&B project if provided
@@ -116,11 +118,11 @@ nohup $CMD > "$LAUNCHER_LOG" 2>&1 &
 LAUNCHER_PID=$!
 echo $LAUNCHER_PID > "$PID_FILE"
 
-echo "✓ Launcher started with PID: $LAUNCHER_PID"
+echo "  Launcher started with PID: $LAUNCHER_PID"
 echo ""
 echo "Monitor progress:"
 echo "  tail -f $LAUNCHER_LOG"
-echo "  tail -f logs/parallel_training/training_instance*.log"
+echo "  tail -f logs/parallel_sft/sft_instance*.log"
 echo ""
 echo "Check status:"
 echo "  ps -p $LAUNCHER_PID"
@@ -128,7 +130,6 @@ echo "  nvidia-smi"
 echo ""
 echo "Stop training:"
 echo "  kill $LAUNCHER_PID"
-echo "  # Or use: ./stop_parallel_training.sh"
 echo ""
 echo "Training will continue even if you logout."
 echo "Log out safely: exit"

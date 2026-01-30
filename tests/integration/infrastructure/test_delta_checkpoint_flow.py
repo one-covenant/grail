@@ -27,6 +27,7 @@ from grail.infrastructure.delta_checkpoint import (
     compute_sparse_delta,
     compute_weights_hash,
 )
+from grail.infrastructure.sparse_codec import decode_sparse_delta_v3, encode_sparse_delta_v3
 
 
 @pytest.fixture
@@ -135,7 +136,7 @@ class TestDeltaCheckpointFilesystem:
         sample_model_state: dict[str, torch.Tensor],
         updated_model_state: dict[str, torch.Tensor],
     ) -> None:
-        """Test saving sparse delta to safetensors and loading back."""
+        """Test saving sparse delta to v3 codec and loading back."""
         # Compute delta
         sparse_tensors, shapes, stats = compute_sparse_delta(
             updated_model_state,
@@ -143,13 +144,14 @@ class TestDeltaCheckpointFilesystem:
             threshold=0.0,
         )
 
-        # Save sparse delta
-        delta_path = temp_cache / "delta_sparse.safetensors"
-        save_file(sparse_tensors, delta_path)
+        # Save sparse delta (v3 codec)
+        delta_path = temp_cache / "delta_sparse.bin.zst"
+        compressed = encode_sparse_delta_v3(sparse_tensors, shapes)
+        delta_path.write_bytes(compressed)
 
         # Save metadata
         delta_meta = {
-            "format": "sparse_coo",
+            "format": "sparse_codec_v3",
             "threshold": 0.0,
             "shapes": shapes,
             **stats,
@@ -158,13 +160,14 @@ class TestDeltaCheckpointFilesystem:
         meta_path.write_text(json.dumps(delta_meta))
 
         # Load and apply
-        loaded_sparse = load_file(delta_path)
         loaded_meta = json.loads(meta_path.read_text())
+        decoded_sparse, decoded_shapes = decode_sparse_delta_v3(delta_path.read_bytes())
+        assert decoded_shapes == loaded_meta["shapes"]
 
         reconstructed = apply_sparse_delta(
             sample_model_state,
-            loaded_sparse,
-            loaded_meta["shapes"],
+            decoded_sparse,
+            decoded_shapes,
             target_dtype=torch.float32,
         )
 
@@ -235,12 +238,13 @@ class TestDeltaCheckpointFilesystem:
         delta_dir = temp_cache / "checkpoint-110"
         delta_dir.mkdir(parents=True)
 
-        # Save sparse delta
-        save_file(sparse_tensors, delta_dir / "delta_sparse.safetensors")
+        # Save sparse delta (v3 codec)
+        delta_path = delta_dir / "delta_sparse.bin.zst"
+        delta_path.write_bytes(encode_sparse_delta_v3(sparse_tensors, shapes))
 
         # Save delta metadata
         delta_meta = {
-            "format": "sparse_coo",
+            "format": "sparse_codec_v3",
             "threshold": 0.0,
             "base_window": 100,
             "shapes": shapes,
@@ -260,19 +264,20 @@ class TestDeltaCheckpointFilesystem:
         (delta_dir / "DELTA").write_text("")
 
         # Verify structure
-        assert (delta_dir / "delta_sparse.safetensors").exists()
+        assert (delta_dir / "delta_sparse.bin.zst").exists()
         assert (delta_dir / "delta_metadata.json").exists()
         assert (delta_dir / "DELTA").exists()
 
         # Simulate reconstruction
         base_state = load_file(base_dir / "model.safetensors")
-        loaded_sparse = load_file(delta_dir / "delta_sparse.safetensors")
-        loaded_delta_meta = json.loads((delta_dir / "delta_metadata.json").read_text())
+        loaded_sparse, loaded_shapes = decode_sparse_delta_v3(
+            (delta_dir / "delta_sparse.bin.zst").read_bytes()
+        )
 
         reconstructed = apply_sparse_delta(
             base_state,
             loaded_sparse,
-            loaded_delta_meta["shapes"],
+            loaded_shapes,
             target_dtype=torch.float32,
         )
 
@@ -306,7 +311,7 @@ class TestCheckpointMetadata:
         """Test that metadata with delta fields can be serialized."""
         metadata = CheckpointMetadata(
             window=110,
-            file_manifest={"delta_sparse.safetensors": "hash123"},
+            file_manifest={"delta_sparse.bin.zst": "hash123"},
             checkpoint_type="DELTA",
             anchor_window=100,
             weights_hash="abcdef1234567890",
@@ -397,4 +402,5 @@ class TestEdgeCases:
 
         assert stats["nonzero_params"] == 1
         assert f"{first_key}.indices" in sparse_tensors
-        assert sparse_tensors[f"{first_key}.indices"].shape[0] == 1
+        # 2D COO format: shape is (2, nnz) where nnz=1
+        assert sparse_tensors[f"{first_key}.indices"].shape == (2, 1)

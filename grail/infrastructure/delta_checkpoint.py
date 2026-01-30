@@ -3,8 +3,8 @@
 Provides functions for computing and applying sparse delta checkpoints,
 enabling ~99% bandwidth reduction by only transmitting changed weights.
 
-Format: Sparse COO (Coordinate) encoding in safetensors
-- For each parameter: {name}.indices (int32) and {name}.values (original dtype)
+Format: Sparse COO (2D) encoding
+- For each parameter: {name}.indices (int32, shape [2, nnz]) and {name}.values
 - Shapes stored separately in delta_metadata.json
 
 Key insight: We store the ACTUAL VALUES at changed positions (not deltas).
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 from typing import Any
 
 import torch
@@ -43,7 +44,7 @@ def compute_sparse_delta(
         threshold: Minimum absolute change to include (0 = all changes)
 
     Returns:
-        sparse_tensors: Dict with {name}.indices (int32) and {name}.values (original dtype)
+        sparse_tensors: Dict with {name}.indices (int32, [2, nnz]) and {name}.values
         shapes: Dict mapping parameter names to original shapes
         stats: Dict with total_params, nonzero_params, sparsity_ratio
     """
@@ -59,29 +60,35 @@ def compute_sparse_delta(
 
         current_tensor = current_state[name].cpu()
         base_tensor = base_state[name].cpu()
+        shape = list(current_tensor.shape)
 
-        # Compute diff in float32 to find changed positions
-        diff = current_tensor.float() - base_tensor.float()
-        flat_diff = diff.flatten()
-        total_params += flat_diff.numel()
+        rows = int(shape[0]) if shape else 1
+        cols = int(math.prod(shape[1:])) if len(shape) > 1 else 1
+
+        current_2d = current_tensor.reshape(rows, cols)
+        base_2d = base_tensor.reshape(rows, cols)
+        total_params += current_2d.numel()
 
         # Find indices where values changed
         if threshold > 0:
-            changed_mask = flat_diff.abs() > threshold
+            # Need actual diff values for threshold comparison
+            diff = current_2d.float() - base_2d.float()
+            changed_mask = diff.abs() > threshold
         else:
-            changed_mask = flat_diff != 0
+            # Direct comparison: faster, less memory, handles Inf correctly
+            # (Inf - Inf = NaN which != 0, but Inf == Inf is True)
+            changed_mask = current_2d != base_2d
 
-        indices = changed_mask.nonzero(as_tuple=True)[0].to(torch.int32)
-        changed_params += len(indices)
+        row_idx, col_idx = changed_mask.nonzero(as_tuple=True)
+        changed_params += row_idx.numel()
 
-        if len(indices) > 0:
-            # Store ACTUAL values at changed positions (not deltas)
-            flat_current = current_tensor.flatten()
-            values = flat_current[changed_mask]
+        if row_idx.numel() > 0:
+            indices = torch.stack([row_idx, col_idx], dim=0).to(torch.int32)
+            values = current_2d[row_idx, col_idx].contiguous()
 
             sparse_tensors[f"{name}.indices"] = indices
             sparse_tensors[f"{name}.values"] = values
-            shapes[name] = list(current_tensor.shape)
+            shapes[name] = shape
 
     sparsity_ratio = 1.0 - (changed_params / total_params) if total_params > 0 else 1.0
 
@@ -133,17 +140,33 @@ def apply_sparse_delta(
         indices_key = f"{name}.indices"
         values_key = f"{name}.values"
 
-        if indices_key in sparse_tensors:
-            # Replace values at changed positions (direct assignment, no arithmetic)
-            reconstructed = base_tensor.to(target_dtype).cpu().flatten()
-            indices = sparse_tensors[indices_key].long()
-            values = sparse_tensors[values_key].to(target_dtype)
-            reconstructed[indices] = values
-        else:
-            # No changes - just copy base tensor
-            reconstructed = base_tensor.to(target_dtype).cpu().flatten()
-
         original_shape = shapes.get(name, list(base_tensor.shape))
+        rows = int(original_shape[0]) if original_shape else 1
+        cols = int(math.prod(original_shape[1:])) if len(original_shape) > 1 else 1
+
+        if indices_key in sparse_tensors:
+            indices = sparse_tensors[indices_key]
+            values = sparse_tensors[values_key].to(target_dtype)
+            reconstructed = base_tensor.to(target_dtype).cpu().reshape(rows, cols)
+
+            if indices.ndim == 2:
+                if indices.shape[0] != 2:
+                    raise ValueError(f"Invalid COO indices shape for {name}: {indices.shape}")
+                row_idx = indices[0].long()
+                col_idx = indices[1].long()
+                if values.numel() != row_idx.numel():
+                    raise ValueError(
+                        f"Index/value mismatch for {name}: {row_idx.numel()} indices vs "
+                        f"{values.numel()} values"
+                    )
+                reconstructed[row_idx, col_idx] = values
+            else:
+                flat = reconstructed.flatten()
+                flat[indices.long()] = values
+                reconstructed = flat.reshape(rows, cols)
+        else:
+            reconstructed = base_tensor.to(target_dtype).cpu().reshape(rows, cols)
+
         result[name] = reconstructed.reshape(original_shape)
 
     return result
@@ -449,6 +472,7 @@ def estimate_sparse_size(
     nonzero_params: int,
     index_dtype: torch.dtype = torch.int32,
     value_dtype: torch.dtype = torch.float32,
+    index_components: int = 2,
 ) -> int:
     """Estimate size of sparse delta in bytes.
 
@@ -456,10 +480,13 @@ def estimate_sparse_size(
         nonzero_params: Number of non-zero parameters
         index_dtype: Dtype for indices (typically int32)
         value_dtype: Dtype for values (typically float32)
+        index_components: Indices per element (2 for COO row/col)
 
     Returns:
         Estimated size in bytes
     """
-    index_size = nonzero_params * torch.tensor([], dtype=index_dtype).element_size()
+    index_size = (
+        nonzero_params * index_components * torch.tensor([], dtype=index_dtype).element_size()
+    )
     value_size = nonzero_params * torch.tensor([], dtype=value_dtype).element_size()
     return index_size + value_size
