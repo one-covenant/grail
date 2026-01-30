@@ -74,7 +74,8 @@ class TestComputeSparseDelta:
 
         sparse_tensors, shapes, stats = compute_sparse_delta(current_state, base_state)
 
-        assert sparse_tensors["layer.weight.indices"].shape[0] == 4
+        indices = sparse_tensors["layer.weight.indices"]
+        assert indices.shape == (2, 4)
         assert sparse_tensors["layer.weight.values"].shape[0] == 4
         assert stats["sparsity_ratio"] == 0.0
 
@@ -92,7 +93,8 @@ class TestComputeSparseDelta:
             current_state, base_state, threshold=0.01
         )
 
-        assert sparse_tensors["layer.weight.indices"].shape[0] == 1
+        indices = sparse_tensors["layer.weight.indices"]
+        assert indices.shape == (2, 1)
         # Now stores actual value (3.5), not the delta (0.5)
         assert sparse_tensors["layer.weight.values"].item() == pytest.approx(3.5)
 
@@ -112,9 +114,9 @@ class TestComputeSparseDelta:
         assert shapes["weight"] == [3, 4]
         assert stats["nonzero_params"] == 3
 
-        # Check indices are flat
+        # Check indices are COO (row, col)
         indices = sparse_tensors["weight.indices"]
-        assert indices.tolist() == [0, 6, 11]  # Flat indices
+        assert indices.tolist() == [[0, 1, 2], [0, 2, 3]]
 
     def test_preserves_original_dtype(self) -> None:
         """Test that values preserve the original dtype."""
@@ -166,13 +168,16 @@ class TestApplySparseDelta:
         assert torch.allclose(result["layer.weight"], base_state["layer.weight"])
 
     def test_multidimensional_reconstruction(self) -> None:
-        """Test reconstruction of 2D tensors from flat sparse values."""
+        """Test reconstruction of 2D tensors from COO sparse values."""
         base_state = {
             "weight": torch.zeros(2, 3),
         }
-        # Values are the actual values to place at those flat indices
+        # Values are the actual values to place at those row/col indices
         sparse_tensors = {
-            "weight.indices": torch.tensor([0, 5], dtype=torch.int32),  # (0,0) and (1,2)
+            "weight.indices": torch.tensor(
+                [[0, 1], [0, 2]],
+                dtype=torch.int32,
+            ),
             "weight.values": torch.tensor([1.0, 2.0], dtype=torch.float32),
         }
         shapes = {"weight": [2, 3]}
@@ -339,15 +344,15 @@ class TestEstimateSparseSize:
 
     def test_size_estimation(self) -> None:
         """Test sparse size estimation."""
-        # 1000 non-zero params: 4 bytes per index + 4 bytes per value = 8000 bytes
+        # 1000 non-zero params: 2 * 4 bytes per index + 4 bytes per value = 12000 bytes
         size = estimate_sparse_size(1000)
-        assert size == 8000
+        assert size == 12000
 
     def test_size_with_different_dtypes(self) -> None:
         """Test size estimation with different dtypes."""
         size = estimate_sparse_size(1000, index_dtype=torch.int64, value_dtype=torch.float64)
-        # 8 bytes per index + 8 bytes per value = 16000 bytes
-        assert size == 16000
+        # 2 * 8 bytes per index + 8 bytes per value = 24000 bytes
+        assert size == 24000
 
 
 class TestSafetensorsIntegration:

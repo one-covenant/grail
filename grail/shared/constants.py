@@ -309,6 +309,9 @@ DELTA_THRESHOLD = float(os.getenv("GRAIL_DELTA_THRESHOLD", "0.0"))
 # Enable/disable delta checkpoint uploads (fallback to full if disabled)
 DELTA_CHECKPOINT_ENABLED = os.getenv("GRAIL_DELTA_CHECKPOINT_ENABLED", "1") == "1"
 
+# Delta codec format for trainer uploads ("sparse_codec_v3.1", "sparse_codec_v3", or "sparse_codec_v2")
+DELTA_CODEC_FORMAT = os.getenv("GRAIL_DELTA_FORMAT", "sparse_codec_v3.1")
+
 # ──────────────── INVARIANT VALIDATION ────────────────────────────────────────
 # Ensure DELTA_CHECKPOINT_RETENTION_LIMIT >= DELTA_BASE_INTERVAL
 # This guarantees that retained deltas always have their base checkpoint available.

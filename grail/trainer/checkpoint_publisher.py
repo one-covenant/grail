@@ -27,19 +27,24 @@ import os
 import shutil
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import bittensor as bt
 import torch
-import zstandard as zstd
 
 from grail.infrastructure.checkpoint_consumer import CheckpointMetadata
 from grail.infrastructure.comms import delete_prefix, get_file_size, upload_file_chunked
 from grail.infrastructure.delta_checkpoint import (
     compute_sparse_delta,
     compute_weights_hash,
+)
+from grail.infrastructure.sparse_codec import (
+    encode_sparse_delta_v2,
+    encode_sparse_delta_v3,
+    encode_sparse_delta_v3_1,
 )
 from grail.shared.checkpoint_paths import (
     checkpoint_delta_prefix,
@@ -55,6 +60,7 @@ from grail.shared.constants import (
     CLEANUP_INTERVAL_UPLOADS,
     CURRENT_ENV_ID,
     DELTA_CHECKPOINT_RETENTION_LIMIT,
+    DELTA_CODEC_FORMAT,
     DELTA_THRESHOLD,
     TRAINER_BATCH_SIZE,
     TRAINER_ENTROPY_COEF,
@@ -70,6 +76,31 @@ from grail.shared.constants import (
 from grail.shared.safetensors_utils import load_model_state_dict
 
 logger = logging.getLogger(__name__)
+# ──────────────────────────────────────────────────────────────────────────────
+# Delta Format Selection
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _select_delta_format() -> tuple[
+    str, Callable[[dict[str, torch.Tensor], dict[str, list[int]]], bytes]
+]:
+    """Select delta codec format and encoder from environment.
+
+    Supported values for GRAIL_DELTA_FORMAT:
+    - "sparse_codec_v2" or "v2"
+    - "sparse_codec_v3" or "v3"
+    - "sparse_codec_v3.1" or "v3.1" (default) - v3 with index downscaling
+    """
+    raw = DELTA_CODEC_FORMAT.strip().lower()
+    if raw in {"v2", "sparse_codec_v2"}:
+        return "sparse_codec_v2", encode_sparse_delta_v2
+    if raw in {"v3", "sparse_codec_v3"}:
+        return "sparse_codec_v3", encode_sparse_delta_v3
+    if raw in {"v3.1", "sparse_codec_v3.1"}:
+        return "sparse_codec_v3.1", encode_sparse_delta_v3_1
+
+    logger.warning("Unknown GRAIL_DELTA_FORMAT=%s, defaulting to v3.1", raw)
+    return "sparse_codec_v3.1", encode_sparse_delta_v3_1
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1071,8 +1102,6 @@ class CheckpointPublisher:
         Raises:
             UploadError: If the upload fails.
         """
-        from safetensors.torch import save_file
-
         temp_dir = Path(tempfile.mkdtemp(prefix=f"delta-{target_window}-"))
 
         # Timing breakdown for granular metrics
@@ -1112,34 +1141,29 @@ class CheckpointPublisher:
             )
             compute_delta_s = time.time() - compute_start
 
-            # Save sparse delta to temp directory and compress with zstd
+            # Encode sparse delta with selected codec (delta encoding + zstd)
+            # This achieves 8-18x compression vs 1.3x with naive safetensors+zstd
             compress_start = time.time()
-            delta_safetensors_path = temp_dir / "delta_sparse.safetensors"
-            if sparse_tensors:
-                save_file(sparse_tensors, delta_safetensors_path)
-            else:
-                # No changes - create empty safetensors file
-                save_file({}, delta_safetensors_path)
+            delta_format, encoder = _select_delta_format()
 
-            # Compress safetensors with zstd for bandwidth reduction
-            raw_bytes = delta_safetensors_path.read_bytes()
-            delta_raw_size = len(raw_bytes)
+            # Estimate raw size for logging (indices + values in original format)
+            delta_raw_size = sum(t.numel() * t.element_size() for t in sparse_tensors.values())
 
-            compressor = zstd.ZstdCompressor(level=3)  # Level 3: good balance of speed/ratio
-            compressed_bytes = compressor.compress(raw_bytes)
+            # Encode with selected sparse codec (includes zstd compression)
+            compressed_bytes = encoder(sparse_tensors, shapes)
             delta_compressed_size = len(compressed_bytes)
             compression_s = time.time() - compress_start
 
-            # Write compressed file and remove original
-            delta_compressed_path = temp_dir / "delta_sparse.safetensors.zst"
+            # Write compressed file
+            delta_compressed_path = temp_dir / "delta_sparse.bin.zst"
             delta_compressed_path.write_bytes(compressed_bytes)
-            delta_safetensors_path.unlink()
 
             compression_ratio = (
                 delta_raw_size / delta_compressed_size if delta_compressed_size > 0 else 1.0
             )
             logger.info(
-                "🗜️ Delta compression: %.2f MB → %.2f MB (%.1fx ratio, %.1f%% reduction)",
+                "🗜️ Delta compression (%s): %.2f MB → %.2f MB (%.1fx ratio, %.1f%% reduction)",
+                delta_format,
                 delta_raw_size / (1024 * 1024),
                 delta_compressed_size / (1024 * 1024),
                 compression_ratio,
@@ -1148,7 +1172,7 @@ class CheckpointPublisher:
 
             # Save delta metadata (includes prev_window for chain verification)
             delta_meta = {
-                "format": "sparse_coo",
+                "format": delta_format,
                 "threshold": DELTA_THRESHOLD,
                 "prev_window": prev_window,
                 "anchor_window": anchor_window,
