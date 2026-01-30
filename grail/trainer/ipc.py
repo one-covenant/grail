@@ -85,8 +85,13 @@ class IPCChannels:
     # ────────────────────────────────────────────────────────────────────────────
 
     def request_pause(self) -> None:
-        """Signal training process to pause for evaluation."""
-        self.pause_confirmed.clear()  # Clear stale confirmation
+        """Signal training process to pause for evaluation.
+
+        Note: We intentionally do NOT clear pause_confirmed here. If training
+        is already paused (confirmation set), that's a valid state and the
+        orchestrator can proceed immediately. Confirmation is cleared by the
+        training process when it resumes (see training_process.py).
+        """
         self.pause_requested.set()
 
     def clear_pause(self) -> None:

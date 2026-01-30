@@ -442,6 +442,15 @@ class TrainerNeuron(BaseNeuron):
         Returns:
             True if training paused successfully, False if timeout/failure
         """
+        # If training is already paused (confirmation still set from prior request),
+        # we can proceed immediately. This prevents a deadlock where the orchestrator
+        # requests pause while training is already paused and waiting for resume.
+        if self._ipc.pause_confirmed.is_set():
+            logger.info(
+                "Training already paused (confirmation from prior request), proceeding immediately"
+            )
+            return True
+
         start_wait = time.time()
         timeout = PAUSE_CONFIRMATION_TIMEOUT_SECONDS
 
