@@ -720,7 +720,7 @@ def _filter_valid_groups(
                 )
 
         # Stage 5: Rank by combined efficiency score and select top-k groups
-        max_groups: int = int(getattr(config, "grpo_max_groups_per_window", 10000))
+        max_groups: int = int(getattr(config, "grpo_max_groups", 10000))
         if len(refined_groups) > max_groups:
             # Get ranking weights from config or fall back to constants
             reward_weight: float = float(
