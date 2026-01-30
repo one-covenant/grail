@@ -389,6 +389,32 @@ async def upload_worker_loop(
 
             upload_duration = time.time() - upload_start_time
 
+            if upload_result is not None:
+                timing = upload_result.timing
+                logger.info(
+                    "Upload timing breakdown (s): load=%.2f, compute=%.2f, compress=%.2f, "
+                    "prep=%.2f, network=%.2f, cleanup=%.2f, total=%.2f",
+                    timing.load_state_s,
+                    timing.compute_delta_s,
+                    timing.compression_s,
+                    timing.prep_metadata_s,
+                    timing.network_upload_s,
+                    timing.cleanup_s,
+                    timing.total_s,
+                )
+                if upload_result.is_delta:
+                    raw_bytes = upload_result.delta_raw_bytes
+                    compressed_bytes = upload_result.delta_compressed_bytes
+                    if raw_bytes is not None and compressed_bytes is not None:
+                        ratio = upload_result.compression_ratio or 0.0
+                        logger.info(
+                            "Delta compression size (COO baseline): raw=%.2f MB, "
+                            "compressed=%.2f MB (%.1fx)",
+                            raw_bytes / (1024 * 1024),
+                            compressed_bytes / (1024 * 1024),
+                            ratio,
+                        )
+
             # Calculate ready_window based on FINISH time
             # ResilientSubtensor will auto-double timeout due to idle period during upload
             logger.info(

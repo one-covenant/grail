@@ -53,16 +53,20 @@ FORMAT_VERSION_V2 = 2
 FORMAT_VERSION_V3 = 3
 FORMAT_VERSION_V3_1 = 31  # v3.1 with index downscaling
 
+# COO baseline sizing (flattening is part of compression)
+COO_INDEX_COMPONENTS = 2
+COO_INDEX_BYTES = np.dtype(np.int32).itemsize
+
 # Index dtype constants for v3.1
 INDEX_DTYPE_INT32 = "int32"
 INDEX_DTYPE_UINT16 = "uint16"
 INDEX_DTYPE_UINT8 = "uint8"
 
 # Numpy dtype mapping for index types
-_INDEX_NP_DTYPES = {
-    INDEX_DTYPE_INT32: np.int32,
-    INDEX_DTYPE_UINT16: np.uint16,
-    INDEX_DTYPE_UINT8: np.uint8,
+_INDEX_NP_DTYPES: dict[str, np.dtype[np.generic]] = {
+    INDEX_DTYPE_INT32: np.dtype(np.int32),
+    INDEX_DTYPE_UINT16: np.dtype(np.uint16),
+    INDEX_DTYPE_UINT8: np.dtype(np.uint8),
 }
 
 # Compression settings (level 1 is optimal speed/ratio tradeoff from benchmarks)
@@ -206,7 +210,7 @@ def _values_to_numpy(values: torch.Tensor) -> tuple[np.ndarray, str]:
 def _select_index_dtype(
     delta_values: np.ndarray,
     prefer_uint8: bool = True,
-) -> tuple[str, np.dtype]:
+) -> tuple[str, np.dtype[np.generic]]:
     """Select the smallest safe dtype for delta-encoded indices.
 
     Delta-encoded COO indices are always non-negative after lexsort:
@@ -224,7 +228,7 @@ def _select_index_dtype(
     """
     if delta_values.size == 0:
         # Empty array - use smallest type
-        return INDEX_DTYPE_UINT8, np.uint8
+        return INDEX_DTYPE_UINT8, np.dtype(np.uint8)
 
     max_val = delta_values.max()
     min_val = delta_values.min()
@@ -235,16 +239,16 @@ def _select_index_dtype(
             "Unexpected negative delta value: min=%d. Falling back to int32.",
             min_val,
         )
-        return INDEX_DTYPE_INT32, np.int32
+        return INDEX_DTYPE_INT32, np.dtype(np.int32)
 
     # Select smallest fitting unsigned type
     if prefer_uint8 and max_val <= np.iinfo(np.uint8).max:
-        return INDEX_DTYPE_UINT8, np.uint8
+        return INDEX_DTYPE_UINT8, np.dtype(np.uint8)
     if max_val <= np.iinfo(np.uint16).max:
-        return INDEX_DTYPE_UINT16, np.uint16
+        return INDEX_DTYPE_UINT16, np.dtype(np.uint16)
 
     # Fallback to int32 for very large values
-    return INDEX_DTYPE_INT32, np.int32
+    return INDEX_DTYPE_INT32, np.dtype(np.int32)
 
 
 def encode_sparse_delta_v2(
@@ -281,6 +285,7 @@ def encode_sparse_delta_v2(
     tensors_meta: list[dict[str, Any]] = []
     all_data_chunks: list[bytes] = []
     current_offset = 0
+    coo_raw_bytes = 0
 
     for name in tensor_names:
         indices_key = f"{name}.indices"
@@ -297,6 +302,10 @@ def encode_sparse_delta_v2(
         # Shape is required for reconstruction
         if not shape:
             raise ValueError(f"Shape missing for tensor {name}")
+
+        # COO baseline size: indices are 2x int32 + values (flattening is compression)
+        nnz = values.numel()
+        coo_raw_bytes += nnz * (COO_INDEX_COMPONENTS * COO_INDEX_BYTES + values.element_size())
 
         # Convert indices to flat numpy array for v2 compatibility
         indices_np = indices.detach().cpu().numpy()
@@ -360,14 +369,13 @@ def encode_sparse_delta_v2(
     compressor = zstd.ZstdCompressor(level=ZSTD_LEVEL, threads=ZSTD_THREADS)
     compressed = compressor.compress(uncompressed)
 
-    raw_size = len(uncompressed)
     comp_size = len(compressed)
-    ratio = raw_size / comp_size if comp_size > 0 else 1.0
+    ratio = coo_raw_bytes / comp_size if comp_size > 0 else 1.0
 
     logger.debug(
-        "Sparse delta encoded: %d tensors | %.2f MB -> %.2f MB (%.1fx ratio)",
+        "Sparse delta encoded (v2, COO baseline): %d tensors | %.2f MB -> %.2f MB (%.1fx ratio)",
         len(tensors_meta),
-        raw_size / (1024 * 1024),
+        coo_raw_bytes / (1024 * 1024),
         comp_size / (1024 * 1024),
         ratio,
     )
@@ -484,6 +492,7 @@ def encode_sparse_delta_v3(
     tensors_meta: list[dict[str, Any]] = []
     all_data_chunks: list[bytes] = []
     current_offset = 0
+    coo_raw_bytes = 0
 
     for name in tensor_names:
         indices_key = f"{name}.indices"
@@ -499,6 +508,12 @@ def encode_sparse_delta_v3(
         values_tensor = sparse_tensors[values_key]
         if values_tensor.numel() == 0:
             continue
+
+        # COO baseline size: indices are 2x int32 + values (flattening is compression)
+        nnz = values_tensor.numel()
+        coo_raw_bytes += nnz * (
+            COO_INDEX_COMPONENTS * COO_INDEX_BYTES + values_tensor.element_size()
+        )
 
         indices_np = indices_tensor.detach().cpu().numpy()
         rows, cols = _coo_rows_cols_from_indices(indices_np, shape)
@@ -550,14 +565,13 @@ def encode_sparse_delta_v3(
     compressor = zstd.ZstdCompressor(level=ZSTD_LEVEL, threads=ZSTD_THREADS)
     compressed = compressor.compress(uncompressed)
 
-    raw_size = len(uncompressed)
     comp_size = len(compressed)
-    ratio = raw_size / comp_size if comp_size > 0 else 1.0
+    ratio = coo_raw_bytes / comp_size if comp_size > 0 else 1.0
 
     logger.debug(
-        "Sparse delta encoded (v3): %d tensors | %.2f MB -> %.2f MB (%.1fx ratio)",
+        "Sparse delta encoded (v3, COO baseline): %d tensors | %.2f MB -> %.2f MB (%.1fx ratio)",
         len(tensors_meta),
-        raw_size / (1024 * 1024),
+        coo_raw_bytes / (1024 * 1024),
         comp_size / (1024 * 1024),
         ratio,
     )
@@ -672,6 +686,7 @@ def encode_sparse_delta_v3_1(
     tensors_meta: list[dict[str, Any]] = []
     all_data_chunks: list[bytes] = []
     current_offset = 0
+    coo_raw_bytes = 0
 
     for name in tensor_names:
         indices_key = f"{name}.indices"
@@ -687,6 +702,12 @@ def encode_sparse_delta_v3_1(
         values_tensor = sparse_tensors[values_key]
         if values_tensor.numel() == 0:
             continue
+
+        # COO baseline size: indices are 2x int32 + values (flattening is compression)
+        nnz = values_tensor.numel()
+        coo_raw_bytes += nnz * (
+            COO_INDEX_COMPONENTS * COO_INDEX_BYTES + values_tensor.element_size()
+        )
 
         indices_np = indices_tensor.detach().cpu().numpy()
         rows, cols = _coo_rows_cols_from_indices(indices_np, shape)
@@ -745,14 +766,13 @@ def encode_sparse_delta_v3_1(
     compressor = zstd.ZstdCompressor(level=ZSTD_LEVEL, threads=ZSTD_THREADS)
     compressed = compressor.compress(uncompressed)
 
-    raw_size = len(uncompressed)
     comp_size = len(compressed)
-    ratio = raw_size / comp_size if comp_size > 0 else 1.0
+    ratio = coo_raw_bytes / comp_size if comp_size > 0 else 1.0
 
     logger.debug(
-        "Sparse delta encoded (v3.1): %d tensors | %.2f MB -> %.2f MB (%.1fx ratio)",
+        "Sparse delta encoded (v3.1, COO baseline): %d tensors | %.2f MB -> %.2f MB (%.1fx ratio)",
         len(tensors_meta),
-        raw_size / (1024 * 1024),
+        coo_raw_bytes / (1024 * 1024),
         comp_size / (1024 * 1024),
         ratio,
     )
@@ -802,8 +822,8 @@ def decode_sparse_delta_v3_1(
         values_size = meta["values_size"]
 
         # Get numpy dtypes for indices
-        row_np_dtype = _INDEX_NP_DTYPES.get(row_dtype_name, np.int32)
-        col_np_dtype = _INDEX_NP_DTYPES.get(col_dtype_name, np.int32)
+        row_np_dtype = _INDEX_NP_DTYPES.get(row_dtype_name, np.dtype(np.int32))
+        col_np_dtype = _INDEX_NP_DTYPES.get(col_dtype_name, np.dtype(np.int32))
 
         rows_bytes = uncompressed[
             data_start + indices_offset : data_start + indices_offset + rows_size

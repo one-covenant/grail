@@ -87,9 +87,9 @@ def _select_delta_format() -> tuple[
     """Select delta codec format and encoder from environment.
 
     Supported values for GRAIL_DELTA_FORMAT:
-    - "sparse_codec_v2" or "v2"
+    - "sparse_codec_v2" or "v2" (default)
     - "sparse_codec_v3" or "v3"
-    - "sparse_codec_v3.1" or "v3.1" (default) - v3 with index downscaling
+    - "sparse_codec_v3.1" or "v3.1"
     """
     raw = DELTA_CODEC_FORMAT.strip().lower()
     if raw in {"v2", "sparse_codec_v2"}:
@@ -99,8 +99,20 @@ def _select_delta_format() -> tuple[
     if raw in {"v3.1", "sparse_codec_v3.1"}:
         return "sparse_codec_v3.1", encode_sparse_delta_v3_1
 
-    logger.warning("Unknown GRAIL_DELTA_FORMAT=%s, defaulting to v3.1", raw)
-    return "sparse_codec_v3.1", encode_sparse_delta_v3_1
+    logger.warning("Unknown GRAIL_DELTA_FORMAT=%s, defaulting to v2", raw)
+    return "sparse_codec_v2", encode_sparse_delta_v2
+
+
+# COO baseline sizing (flattening is part of compression)
+def _estimate_coo_raw_bytes(sparse_tensors: dict[str, torch.Tensor]) -> int:
+    index_bytes = torch.tensor([], dtype=torch.int32).element_size()
+    total = 0
+    for key, values in sparse_tensors.items():
+        if not key.endswith(".values"):
+            continue
+        nnz = values.numel()
+        total += nnz * (2 * index_bytes + values.element_size())
+    return total
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1146,8 +1158,8 @@ class CheckpointPublisher:
             compress_start = time.time()
             delta_format, encoder = _select_delta_format()
 
-            # Estimate raw size for logging (indices + values in original format)
-            delta_raw_size = sum(t.numel() * t.element_size() for t in sparse_tensors.values())
+            # Estimate raw size for logging (COO baseline; flattening is compression)
+            delta_raw_size = _estimate_coo_raw_bytes(sparse_tensors)
 
             # Encode with selected sparse codec (includes zstd compression)
             compressed_bytes = encoder(sparse_tensors, shapes)
@@ -1162,7 +1174,7 @@ class CheckpointPublisher:
                 delta_raw_size / delta_compressed_size if delta_compressed_size > 0 else 1.0
             )
             logger.info(
-                "🗜️ Delta compression (%s): %.2f MB → %.2f MB (%.1fx ratio, %.1f%% reduction)",
+                "🗜️ Delta compression (%s, COO baseline): %.2f MB → %.2f MB (%.1fx ratio, %.1f%% reduction)",
                 delta_format,
                 delta_raw_size / (1024 * 1024),
                 delta_compressed_size / (1024 * 1024),
