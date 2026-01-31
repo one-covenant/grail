@@ -2,8 +2,8 @@
 """Deploy only the Qwen models."""
 
 import asyncio
+import os
 from pathlib import Path
-
 from dotenv import load_dotenv
 
 from lium_manager import LiumInfra, PodSpec
@@ -26,7 +26,6 @@ MODEL_CONFIGS = {
         "wandb_tags": "qwen-1.5b,iter1,lium",
     },
 }
-
 
 async def main():
     lium = LiumInfra(state_file=".lium_state_qwen_only.json")
@@ -72,7 +71,7 @@ async def main():
 
     if tasks:
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        for pod_name, result in zip(MODEL_CONFIGS.keys(), results, strict=False):
+        for pod_name, result in zip(MODEL_CONFIGS.keys(), results):
             if isinstance(result, Exception):
                 print(f"❌ {pod_name} failed: {result}")
             else:
@@ -81,7 +80,6 @@ async def main():
     print("\n" + "=" * 70)
     print("Done!")
     print("=" * 70)
-
 
 if __name__ == "__main__":
     asyncio.run(main())

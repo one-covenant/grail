@@ -60,11 +60,9 @@ def main():
         print("Error: Failed to deploy pod")
         return 1
 
-    print("\nPod deployed successfully:")
+    print(f"\nPod deployed successfully:")
     print(f"  SSH: {pod_info['ssh']['host']}:{pod_info['ssh']['port']}")
-    print(
-        f"  Bandwidth: ↑{pod_info['bandwidth']['upload']:.0f} ↓{pod_info['bandwidth']['download']:.0f} Mbps"
-    )
+    print(f"  Bandwidth: ↑{pod_info['bandwidth']['upload']:.0f} ↓{pod_info['bandwidth']['download']:.0f} Mbps")
 
     # Step 3: Run the experiment
     print("\n[2/3] Running experiment...")
@@ -90,8 +88,8 @@ def main():
         infra.destroy()
         print("✅ Pod destroyed")
     else:
-        print("⚠️  Pod still running. To destroy later, run:")
-        print("    python deploy.py --destroy --state-file .lium_state_example.json")
+        print(f"⚠️  Pod still running. To destroy later, run:")
+        print(f"    python deploy.py --destroy --state-file .lium_state_example.json")
 
     print("\n" + "=" * 80)
     print("EXAMPLE COMPLETE")
