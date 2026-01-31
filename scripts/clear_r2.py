@@ -7,45 +7,52 @@ Uses Cloudflare R2 credentials from environment variables.
 import os
 import sys
 
-import boto3
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from botocore.config import Config
 from botocore.exceptions import ClientError
+from botocore.session import get_session
 
 # Get R2 credentials from environment
-R2_BUCKET_ID = os.getenv("R2_BUCKET_ID")
+R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME") or os.getenv("R2_BUCKET_ID")
 R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID")
 R2_WRITE_ACCESS_KEY_ID = os.getenv("R2_WRITE_ACCESS_KEY_ID")
 R2_WRITE_SECRET_ACCESS_KEY = os.getenv("R2_WRITE_SECRET_ACCESS_KEY")
 R2_FORCE_PATH_STYLE = os.getenv("R2_FORCE_PATH_STYLE", "true").lower() == "true"
 
 # Validate credentials
-if not all([R2_BUCKET_ID, R2_ACCOUNT_ID, R2_WRITE_ACCESS_KEY_ID, R2_WRITE_SECRET_ACCESS_KEY]):
+if not all([R2_BUCKET_NAME, R2_ACCOUNT_ID, R2_WRITE_ACCESS_KEY_ID, R2_WRITE_SECRET_ACCESS_KEY]):
     print("Error: Missing R2 credentials in environment variables")
     sys.exit(1)
 
 # R2 API endpoint
 R2_ENDPOINT = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 
-# Create S3 client
-s3_client = boto3.client(
+# Create S3 client using botocore
+session = get_session()
+config = Config(
+    s3={"addressing_style": "path" if R2_FORCE_PATH_STYLE else "virtual"},
+    region_name="auto",
+)
+s3_client = session.create_client(
     "s3",
     endpoint_url=R2_ENDPOINT,
     aws_access_key_id=R2_WRITE_ACCESS_KEY_ID,
     aws_secret_access_key=R2_WRITE_SECRET_ACCESS_KEY,
-    region_name="auto",
-    config=boto3.session.Config(
-        s3={"addressing_style": "path" if R2_FORCE_PATH_STYLE else "virtual"}
-    ),
+    config=config,
 )
 
 
-def delete_all_objects(bucket_name, prefix="grail/"):
-    """Delete all objects under the specified prefix in the bucket."""
-    print(f"Starting deletion of all objects in bucket: {bucket_name} with prefix: {prefix}")
+def delete_all_objects(bucket_name: str) -> int:
+    """Delete all objects in the bucket."""
+    print(f"Starting deletion of all objects in bucket: {bucket_name}")
 
     try:
-        # List all objects under prefix
+        # List all objects
         paginator = s3_client.get_paginator("list_objects_v2")
-        pages = paginator.paginate(Bucket=bucket_name, Prefix=prefix)
+        pages = paginator.paginate(Bucket=bucket_name)
 
         total_deleted = 0
 
@@ -78,13 +85,13 @@ def delete_all_objects(bucket_name, prefix="grail/"):
         sys.exit(1)
 
 
-def delete_all_versions(bucket_name, prefix="grail/"):
-    """Delete all versions of all objects under the specified prefix (for versioned buckets)."""
-    print(f"Checking for versioned objects in bucket: {bucket_name} with prefix: {prefix}")
+def delete_all_versions(bucket_name: str) -> int:
+    """Delete all versions of all objects (for versioned buckets)."""
+    print(f"Checking for versioned objects in bucket: {bucket_name}")
 
     try:
         paginator = s3_client.get_paginator("list_object_versions")
-        pages = paginator.paginate(Bucket=bucket_name, Prefix=prefix)
+        pages = paginator.paginate(Bucket=bucket_name)
 
         total_deleted = 0
 
@@ -129,41 +136,39 @@ def delete_all_versions(bucket_name, prefix="grail/"):
         return 0
 
 
-def main():
-    bucket_name = R2_BUCKET_ID
+def main() -> None:
+    bucket_name = R2_BUCKET_NAME
 
     print("R2 Configuration:")
     print(f"  Account ID: {R2_ACCOUNT_ID}")
-    print(f"  Bucket ID: {R2_BUCKET_ID}")
+    print(f"  Bucket: {bucket_name}")
     print(f"  Endpoint: {R2_ENDPOINT}")
     print(f"  Force Path Style: {R2_FORCE_PATH_STYLE}")
     print()
 
-    prefix = "grail/"
-
     # Confirm deletion (skip if --force flag is passed)
     if "--force" not in sys.argv:
         response = input(
-            f"WARNING: This will delete ALL objects under '{prefix}' in bucket '{bucket_name}'. Continue? (yes/no): "
+            f"WARNING: This will delete ALL objects in bucket '{bucket_name}'. Continue? (yes/no): "
         )
         if response.lower() != "yes":
             print("Operation cancelled.")
             sys.exit(0)
     else:
-        print(f"WARNING: This will delete ALL objects under '{prefix}' in bucket '{bucket_name}'.")
+        print(f"WARNING: This will delete ALL objects in bucket '{bucket_name}'.")
         print("Proceeding with --force flag...")
 
     print()
 
-    # Delete all objects under grail/
-    count1 = delete_all_objects(bucket_name, prefix)
+    # Delete all objects
+    count1 = delete_all_objects(bucket_name)
 
     # Delete all versions (in case of versioned bucket)
-    count2 = delete_all_versions(bucket_name, prefix)
+    count2 = delete_all_versions(bucket_name)
 
     total = count1 + count2
     print()
-    print(f"✓ Successfully deleted {total} total objects from '{prefix}' in R2 bucket")
+    print(f"✓ Successfully deleted {total} total objects from R2 bucket")
 
 
 if __name__ == "__main__":

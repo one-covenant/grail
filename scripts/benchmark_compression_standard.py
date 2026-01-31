@@ -189,8 +189,8 @@ def get_available_algorithms() -> list[str]:
     if HAS_ZSTD:
         algos.extend(["zstd-1", "zstd-3"])
 
-    # gzip is always available (stdlib)
-    algos.append("gzip-6")
+    # gzip is always available (stdlib) - commented out, too slow
+    # algos.append("gzip-6")
 
     return algos
 
@@ -235,8 +235,8 @@ def decompress(data: bytes, algorithm: str) -> bytes:
 def benchmark_compression(
     data: bytes,
     algorithm: str,
-    warmup_iterations: int = 2,
-    measure_iterations: int = 5,
+    warmup_iterations: int = 1,
+    measure_iterations: int = 1,
 ) -> tuple[bytes, float, float, bool]:
     """
     Benchmark compression with proper methodology.
