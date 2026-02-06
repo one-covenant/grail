@@ -1308,6 +1308,7 @@ def estimate_memory_requirements(
     batch_size: int,
     seq_len: int,
     gradient_checkpointing: bool,
+    fp32_master_weights: bool = False,
 ) -> dict[str, float]:
     """Estimate GPU memory requirements for training.
 
@@ -1316,18 +1317,21 @@ def estimate_memory_requirements(
         batch_size: Microbatch size per device
         seq_len: Maximum sequence length
         gradient_checkpointing: Whether gradient checkpointing is enabled
+        fp32_master_weights: Whether using FP32 master weights (vs BF16)
 
     Returns:
         Dict with memory estimates in GB
     """
-    # Model parameters in bf16
-    model_gb = model_size_b * 2  # 2 bytes per param in bf16
-
-    # AdamW optimizer states in fp32 (m and v)
-    optimizer_gb = model_size_b * 4 * 2  # 4 bytes × 2 states
-
-    # Gradients in bf16
-    gradients_gb = model_size_b * 2
+    if fp32_master_weights:
+        # FP32 master weights: model in FP32, optimizer states in FP32
+        model_gb = model_size_b * 4  # 4 bytes per param in fp32
+        optimizer_gb = model_size_b * 4 * 2  # 4 bytes × 2 states (fp32)
+        gradients_gb = model_size_b * 4  # Gradients accumulated in fp32
+    else:
+        # BF16 training: model in BF16, optimizer states in BF16
+        model_gb = model_size_b * 2  # 2 bytes per param in bf16
+        optimizer_gb = model_size_b * 2 * 2  # 2 bytes × 2 states (bf16)
+        gradients_gb = model_size_b * 2  # Gradients in bf16
 
     # Activation memory estimation (rough heuristic)
     # Scales with batch × seq × model_size
@@ -1358,6 +1362,7 @@ def print_memory_estimate(
     batch_size: int | None = None,
     seq_len: int | None = None,
     gradient_checkpointing: bool | None = None,
+    fp32_master_weights: bool = False,
 ) -> None:
     """Print memory estimation and warnings for current config.
 
@@ -1366,6 +1371,7 @@ def print_memory_estimate(
         batch_size: Override batch size used in estimate.
         seq_len: Override sequence length used in estimate.
         gradient_checkpointing: Override gradient checkpointing flag.
+        fp32_master_weights: Whether using FP32 master weights.
     """
     # Estimate model size from model_id
     model_id_lower = model_id.lower()
@@ -1398,6 +1404,7 @@ def print_memory_estimate(
         batch_size=effective_batch_size,
         seq_len=effective_seq_len,
         gradient_checkpointing=effective_gradient_checkpointing,
+        fp32_master_weights=fp32_master_weights,
     )
 
     # Get available GPU memory
@@ -1406,11 +1413,16 @@ def print_memory_estimate(
     else:
         gpu_memory_gb = 80.0  # Assume A100
 
+    # Determine dtype labels based on master weight setting
+    model_dtype = "fp32" if fp32_master_weights else "bf16"
+    optim_dtype = "fp32" if fp32_master_weights else "bf16"
+    grad_dtype = "fp32" if fp32_master_weights else "bf16"
+
     logger.info("\n💾 Memory Estimation:")
     logger.info("─" * 60)
-    logger.info(f"  Model ({model_size_b:.1f}B params, bf16):    {mem['model_gb']:.1f} GB")
-    logger.info(f"  Optimizer states (fp32):        {mem['optimizer_gb']:.1f} GB")
-    logger.info(f"  Gradients (bf16):               {mem['gradients_gb']:.1f} GB")
+    logger.info(f"  Model ({model_size_b:.1f}B params, {model_dtype}):    {mem['model_gb']:.1f} GB")
+    logger.info(f"  Optimizer states ({optim_dtype}):        {mem['optimizer_gb']:.1f} GB")
+    logger.info(f"  Gradients ({grad_dtype}):               {mem['gradients_gb']:.1f} GB")
     ckpt_status = "enabled" if cfg.gradient_checkpointing else "disabled"
     logger.info(f"  Activations (checkpointing {ckpt_status}): {mem['activation_gb']:.1f} GB")
     logger.info(f"  Overhead:                       {mem['overhead_gb']:.1f} GB")
@@ -1561,6 +1573,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override learning rate (default: 3e-6 or GRAIL_TRAINER_LR env var).",
     )
+    parser.add_argument(
+        "--fp32-master-weights",
+        action="store_true",
+        help="Use FP32 master weights with BF16 training. Model weights and optimizer "
+        "states are kept in FP32 for numerical stability, while forward/backward "
+        "passes use BF16 via autocast. Increases memory by ~2x for model+optimizer.",
+    )
     return parser.parse_args()
 
 
@@ -1592,6 +1611,7 @@ def main() -> None:
     logger.info(f"   Model: {cfg.model_id}")
     logger.info(f"   Batch size: {cfg.batch_size} | Grad accum: {cfg.grad_accum_steps} | Effective batch: {cfg.batch_size * cfg.grad_accum_steps}")
     logger.info(f"   Gradient checkpointing: {cfg.gradient_checkpointing}")
+    logger.info(f"   FP32 master weights: {args.fp32_master_weights}")
     if args.run_suffix:
         logger.info(f"   Run suffix: {args.run_suffix}")
     logger.info("=" * 80)
@@ -1641,10 +1661,11 @@ def main() -> None:
     logger.info(f"  {'Max Groups':<40} {cfg.max_groups:<15} GRPO_MAX_GROUPS")
     logger.info(f"  {'Rollouts per Problem':<40} {cfg.rollouts_per_problem:<15} ROLLOUTS_PER_PROBLEM")
     logger.info(f"  {'Gradient Checkpointing':<40} {cfg.gradient_checkpointing!s:<15} Memory optimization")
+    logger.info(f"  {'FP32 Master Weights':<40} {args.fp32_master_weights!s:<15} Numerical precision")
     logger.info("─" * 80)
 
     # Print memory estimation
-    print_memory_estimate(cfg.model_id)
+    print_memory_estimate(cfg.model_id, fp32_master_weights=args.fp32_master_weights)
 
     # Get dataset adapter
     adapter = get_dataset_adapter(args.dataset)
@@ -1668,11 +1689,20 @@ def main() -> None:
     else:
         train_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # Determine model dtype: FP32 for master weights, BF16 otherwise
+    # When using FP32 master weights:
+    #   - Model weights stored in FP32 for numerical stability
+    #   - Optimizer states (momentum, variance) also in FP32
+    #   - Forward/backward use BF16 via autocast (bf16=True in GRPOConfig)
+    #   - vLLM receives FP32 weights, converts to BF16 internally
+    model_dtype = torch.float32 if args.fp32_master_weights else torch.bfloat16
+    logger.info(f"  Model dtype: {model_dtype}")
+
     with profiler.track("model_loading"):
         try:
             model = AutoModelForCausalLM.from_pretrained(
                 cfg.model_id,
-                torch_dtype=torch.bfloat16,
+                torch_dtype=model_dtype,
                 attn_implementation="flash_attention_2",
                 device_map=train_device,
             )
@@ -1680,7 +1710,7 @@ def main() -> None:
             logger.warning(f"⚠️  Flash Attention 2 unavailable ({type(e).__name__}), using SDPA")
             model = AutoModelForCausalLM.from_pretrained(
                 cfg.model_id,
-                torch_dtype=torch.bfloat16,  # FP32 master weights, AMP handles FP16 casting
+                torch_dtype=model_dtype,
                 attn_implementation="sdpa",
                 device_map=train_device,
             )
@@ -1950,6 +1980,7 @@ def main() -> None:
             "grail/seed": args.seed,
             "grail/dataset": args.dataset,
             "grail/eval_every": args.eval_every,
+            "grail/fp32_master_weights": args.fp32_master_weights,
             # TRL GRPOConfig (for reference)
             **{f"trl/{k}": v for k, v in grpo_config.to_dict().items()},
         }
