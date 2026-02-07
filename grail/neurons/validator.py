@@ -25,6 +25,7 @@ from grail.shared.constants import (
     GRAIL_BURN_UID,
     NETUID,
     SUPERLINEAR_EXPONENT,
+    UNIQUE_ROLLOUTS_CAP_ENABLED,
     WINDOW_LENGTH,
 )
 from grail.validation import create_env_validation_pipeline
@@ -96,6 +97,7 @@ class ValidatorNeuron(BaseNeuron):
             superlinear_exponent=SUPERLINEAR_EXPONENT,
             burn_uid=GRAIL_BURN_UID,
             burn_percentage=GRAIL_BURN_PERCENTAGE,
+            cap_enabled=UNIQUE_ROLLOUTS_CAP_ENABLED,
         )
 
         # Create checkpoint manager
