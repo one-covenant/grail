@@ -1198,10 +1198,12 @@ class TrainingService:
             return
 
         # Generate repository name based on model and training info
+        # Include timestamp to avoid overwriting prior uploads
         model_name = getattr(self.train_model, "name_or_path", "grail-model")
         # Clean model name for repo (replace / with -)
         clean_name = model_name.replace("/", "-").lower()
-        repo_name = f"grail-trained-{clean_name}"
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        repo_name = f"grail-trained-{clean_name}-{timestamp}"
 
         commit_message = (
             f"GRAIL trained model - {TOTAL_TRAINING_WINDOWS} windows, epoch {self.epoch_counter}"
