@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import logging
+import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -32,6 +34,7 @@ from ..model.provider import (
     get_tokenizer,
 )
 from ..scoring.weights import WeightComputer
+from ..infrastructure.comms import upload_file_chunked
 from ..shared.constants import (
     FAILURE_LOOKBACK_WINDOWS,
     MINER_SAMPLE_MAX,
@@ -39,6 +42,8 @@ from ..shared.constants import (
     MINER_SAMPLE_RATE,
     MINER_SAMPLING_ENABLED,
     TRAINER_UID,
+    TRUST_LIST_KEY_PREFIX,
+    TRUST_LIST_VERSION,
     WINDOW_LENGTH,
 )
 from ..shared.window_utils import (
@@ -645,6 +650,12 @@ class ValidationService:
             f"{window_results.files_found}/{len(hotkeys_to_check)} files found"
         )
 
+        # Publish trust list to R2 for trainer (non-fatal on failure)
+        try:
+            await self._publish_trust_list(target_window, active_hotkeys)
+        except Exception:
+            logger.debug("Failed to publish trust list", exc_info=True)
+
         # Log aggregated window metrics to monitoring (W&B)
         if self._monitor:
             try:
@@ -675,6 +686,46 @@ class ValidationService:
                 )
             except Exception:
                 logger.debug("Failed to log aggregated window metrics", exc_info=True)
+
+    async def _publish_trust_list(self, window: int, active_hotkeys: list[str]) -> None:
+        """Publish trust list to R2 for trainer consumption.
+
+        Builds a JSON document listing eligible miners (those without recent
+        failures) and uploads it to the validator's own R2 bucket under a
+        per-window key.
+
+        Args:
+            window: Window start block
+            active_hotkeys: All active miner hotkeys discovered this window
+        """
+        eligible = self._filter_hotkeys_without_failures(active_hotkeys)
+        validator_hotkey = self._wallet.hotkey.ss58_address
+
+        trust_list = {
+            "version": TRUST_LIST_VERSION,
+            "window": window,
+            "timestamp": time.time(),
+            "validator_hotkey": validator_hotkey,
+            "eligible_hotkeys": eligible,
+            "active_count": len(active_hotkeys),
+            "excluded_failure_count": len(active_hotkeys) - len(eligible),
+        }
+
+        key = f"{TRUST_LIST_KEY_PREFIX}{window}.json"
+        data = json.dumps(trust_list).encode()
+
+        success = await upload_file_chunked(
+            key, data, credentials=self._credentials, use_write=True
+        )
+        if success:
+            logger.info(
+                "Published trust list for window %d: %d eligible / %d active",
+                window,
+                len(eligible),
+                len(active_hotkeys),
+            )
+        else:
+            logger.warning("Failed to upload trust list for window %d", window)
 
     async def _submit_weights_if_ready(
         self, current_block: int, target_window: int, meta: Any
