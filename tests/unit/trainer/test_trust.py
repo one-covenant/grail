@@ -7,7 +7,6 @@ Covers:
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,7 +15,6 @@ import pytest
 
 from grail.shared.constants import (
     TRUST_LIST_KEY_PREFIX,
-    TRUST_LIST_MAX_STALENESS_WINDOWS,
     TRUST_LIST_VERSION,
     WINDOW_LENGTH,
 )
@@ -25,10 +23,10 @@ from grail.trainer.trust import (
     get_trust_list_from_validator,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_metagraph(stakes: list[float], permits: list[bool]) -> SimpleNamespace:
     """Build a minimal metagraph-like object."""
@@ -44,6 +42,7 @@ def _make_metagraph(stakes: list[float], permits: list[bool]) -> SimpleNamespace
 # ---------------------------------------------------------------------------
 # _find_highest_stake_validator
 # ---------------------------------------------------------------------------
+
 
 class TestFindHighestStakeValidator:
     def test_single_validator(self):
@@ -78,6 +77,7 @@ class TestFindHighestStakeValidator:
 # ---------------------------------------------------------------------------
 # get_trust_list_from_validator
 # ---------------------------------------------------------------------------
+
 
 def _trust_list_dict(window: int, eligible: list[str], version: int = TRUST_LIST_VERSION) -> dict:
     return {

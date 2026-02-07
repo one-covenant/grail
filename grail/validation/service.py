@@ -26,6 +26,7 @@ from ..environments.execution import (
 )
 from ..infrastructure.chain import GrailChainManager
 from ..infrastructure.checkpoint_consumer import CheckpointManager
+from ..infrastructure.comms import upload_file_chunked
 from ..infrastructure.credentials import BucketCredentials
 from ..logging_utils import dump_asyncio_stacks
 from ..model.provider import (
@@ -34,7 +35,6 @@ from ..model.provider import (
     get_tokenizer,
 )
 from ..scoring.weights import WeightComputer
-from ..infrastructure.comms import upload_file_chunked
 from ..shared.constants import (
     FAILURE_LOOKBACK_WINDOWS,
     MINER_SAMPLE_MAX,
