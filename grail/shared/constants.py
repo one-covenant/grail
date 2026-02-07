@@ -206,6 +206,7 @@ GRAIL_BURN_PERCENTAGE = 80.0
 # Miners are rewarded proportionally to how close they are to this cap.
 # This cap covers the full 12-window rolling period (5120 per window × 12 windows).
 UNIQUE_ROLLOUTS_CAP = 61440
+UNIQUE_ROLLOUTS_CAP_ENABLED = os.getenv("GRAIL_UNIQUE_ROLLOUTS_CAP_ENABLED", "0") == "1"
 
 # ────────────────  MINER SAMPLING (VALIDATION COST CONTROL)  ────────────────
 
@@ -230,6 +231,11 @@ FAILURE_LOOKBACK_WINDOWS = 14
 # Empty window files are ~170 bytes (just JSON structure with empty array).
 # Files below this threshold are considered to have 0 rollouts and are filtered.
 MIN_ROLLOUT_FILE_SIZE_BYTES = 200
+
+# ────────────────  TRUST LIST (VALIDATOR → TRAINER)  ────────────────
+TRUST_LIST_KEY_PREFIX = "grail/trust/trust_list_"
+TRUST_LIST_VERSION = 1
+TRUST_LIST_MAX_STALENESS_WINDOWS = int(os.getenv("GRAIL_TRUST_LIST_MAX_STALENESS_WINDOWS", "5"))
 
 # ────────────────  GRAIL PROOF VERIFICATION  ────────────────
 

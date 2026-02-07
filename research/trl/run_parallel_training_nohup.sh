@@ -11,6 +11,7 @@ NUM_ITERATIONS=${4:-1}
 NUM_INSTANCES=${5:-1}  # Default to 1 instance for stability (avoids NCCL conflicts)
 BATCH_SIZE=${6:-}  # Optional: batch size per device
 GRAD_ACCUM_STEPS=${7:-}  # Optional: gradient accumulation steps
+FP32_MASTER_WEIGHTS=${GRAIL_FP32_MASTER_WEIGHTS:-}  # Optional: use FP32 master weights
 
 # W&B configuration (inherited from environment or defaults)
 WANDB_PROJECT_VAL=${WANDB_PROJECT:-grail-lium-sweep}
@@ -44,6 +45,7 @@ echo "Num Iterations: $NUM_ITERATIONS"
 echo "Num Instances: $NUM_INSTANCES"
 echo "Batch Size: ${BATCH_SIZE:-default}"
 echo "Grad Accum Steps: ${GRAD_ACCUM_STEPS:-default}"
+echo "FP32 Master Weights: ${FP32_MASTER_WEIGHTS:-false}"
 echo "W&B Project: $WANDB_PROJECT_VAL"
 echo "W&B Tags: $WANDB_TAGS_VAL"
 echo "Run Prefix: $RUN_PREFIX_LABEL"
@@ -108,6 +110,11 @@ fi
 # Add learning rate override if provided (GRAIL_TRAINER_LR env var)
 if [ -n "$GRAIL_TRAINER_LR" ]; then
     CMD="$CMD --lr $GRAIL_TRAINER_LR"
+fi
+
+# Add FP32 master weights flag if enabled
+if [ -n "$FP32_MASTER_WEIGHTS" ] && [ "$FP32_MASTER_WEIGHTS" = "true" ]; then
+    CMD="$CMD --fp32-master-weights"
 fi
 
 nohup $CMD > "$LAUNCHER_LOG" 2>&1 &

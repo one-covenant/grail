@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
 """Delta checkpoint callback for storing sparse parameter updates.
 
-Captures parameter deltas after each optimizer step using the existing
-ParameterSnapshot infrastructure. Stores only non-zero changes in sparse
-COO format for extreme storage efficiency.
+Stores changed parameter VALUES (not deltas) after each optimizer step.
+Compares parameters in BF16 to find exact changes, stores new BF16 values
+at changed positions in sparse COO format.
+
+Key design:
+    - Compare in BF16: Matches what vLLM sees after weight sync
+    - Store values, not deltas: W_new at changed positions
+    - Single snapshot: Only keep one BF16 snapshot (~2 bytes/param)
+    - Exact comparison: w_t != w_{t-1} finds bitwise changes in BF16
 
 Storage format per checkpoint:
     {
         "step": int,
         "timestamp": float,
+        "format": "values",  # Indicates we store values, not deltas
         "layers": {
             "layer.name": {
-                "indices": torch.LongTensor,    # COO sparse indices
-                "values": torch.BFloat16Tensor,  # Non-zero delta values
+                "indices": torch.Int32Tensor,    # COO sparse indices
+                "values": torch.BFloat16Tensor,  # NEW values at changed positions
                 "shape": tuple,                  # Original tensor shape
                 "nnz": int,                      # Non-zero count
             }
@@ -21,8 +28,14 @@ Storage format per checkpoint:
 
 Typical storage:
     - Dense checkpoint: ~3GB (1.5B params)
-    - Sparse delta (99% sparse): ~30MB
+    - Sparse values (99% unchanged): ~30MB
     - 100 steps: ~3GB vs 300GB (100x savings)
+
+Reconstruction:
+    To get weights at step T:
+    1. Start with base weights W_0
+    2. For each checkpoint, directly replace values at stored indices
+    (No accumulation needed - each checkpoint has final values)
 """
 
 from __future__ import annotations
@@ -37,21 +50,18 @@ from transformers import TrainerCallback
 
 logger = logging.getLogger(__name__)
 
-# Import existing snapshot infrastructure
-import sys
-import os
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", ".."))
-sys.path.insert(0, _PROJECT_ROOT)
-
-from grail.trainer.analysis.primitives import ParameterSnapshot, ParameterDelta
-
 
 class DeltaCheckpointCallback(TrainerCallback):
-    """Save sparse parameter deltas after each optimizer step.
+    """Save sparse parameter changes after each optimizer step.
 
-    Captures W_new - W_old using ParameterSnapshot infrastructure,
-    converts to sparse COO format, saves only non-zero deltas.
+    Compares parameters in BF16 to find changed positions, stores the
+    actual new BF16 values (not deltas) at those positions.
+
+    Why BF16 comparison:
+        - Training may use FP32 master weights
+        - vLLM receives BF16 weights after sync
+        - We track what actually changes from vLLM's perspective
+        - Storing actual BF16 values enables direct reconstruction
 
     Timing (verified in transformers.Trainer:2740-2752):
         1. optimizer.step() is called (weights updated)
@@ -61,36 +71,30 @@ class DeltaCheckpointCallback(TrainerCallback):
     Args:
         output_dir: Directory to save delta checkpoints
         enabled: Enable/disable delta checkpointing (default: True)
-        snapshot_dtype: Dtype for storing delta values ("bfloat16" or "float32")
         save_metadata: Save metadata.json with checkpoint list (default: True)
+        profiler: Optional profiler for timing measurements
     """
 
     def __init__(
         self,
         output_dir: str,
         enabled: bool = True,
-        snapshot_dtype: str = "bfloat16",
+        snapshot_dtype: str = "bfloat16",  # Kept for API compat, always uses BF16
         save_metadata: bool = True,
         profiler: Any | None = None,
     ) -> None:
         self.output_dir = Path(output_dir)
         self.enabled = enabled
         self.save_metadata = save_metadata
-        self.old_snapshot: ParameterSnapshot | None = None
         self.step_count = 0
         self._profiler = profiler
 
-        # Configure storage dtype
-        dtype_map = {
-            "bfloat16": torch.bfloat16,
-            "float32": torch.float32,
-            "float16": torch.float16,
-        }
-        self._snapshot_dtype = dtype_map.get(snapshot_dtype, torch.bfloat16)
+        # BF16 snapshot of previous weights (single copy, ~2 bytes/param)
+        self._old_bf16: dict[str, torch.Tensor] = {}
 
         if self.enabled:
             self.output_dir.mkdir(parents=True, exist_ok=True)
-            logger.info(f"[DeltaCheckpoint] Initialized: output_dir={output_dir}, dtype={snapshot_dtype}")
+            logger.info(f"[DeltaCheckpoint] Initialized: output_dir={output_dir}, format=bf16_values")
         else:
             logger.info("[DeltaCheckpoint] Disabled (enabled=False)")
 
@@ -104,7 +108,8 @@ class DeltaCheckpointCallback(TrainerCallback):
     ) -> None:
         """Called after optimizer.step() but before zero_grad().
 
-        This is the perfect time to capture post-update weights.
+        Compares current weights (as BF16) against previous BF16 snapshot,
+        finds changed positions, stores new BF16 values at those positions.
         """
         if not self.enabled or model is None:
             return
@@ -116,122 +121,84 @@ class DeltaCheckpointCallback(TrainerCallback):
 
         profiler = self._profiler
 
-        # Capture current snapshot (float32 internally for precision)
-        if profiler:
-            with profiler.track("delta_checkpoint_snapshot"):
-                current_snapshot = ParameterSnapshot(
-                    model,
-                    device="cpu",
-                    dtype=torch.float32,  # Compute deltas in float32 for precision
-                )
-        else:
-            current_snapshot = ParameterSnapshot(
-                model,
-                device="cpu",
-                dtype=torch.float32,
-            )
-
-        # First step: just capture snapshot, no delta yet
-        if self.old_snapshot is None:
-            self.old_snapshot = current_snapshot
-            logger.info(f"[DeltaCheckpoint] Step {self.step_count}: Initial snapshot captured")
-            return
-
-        # Compute delta (W_new - W_old)
-        try:
+        # First step: just capture BF16 snapshot, no comparison yet
+        if not self._old_bf16:
             if profiler:
-                with profiler.track("delta_checkpoint_compute"):
-                    delta = self.old_snapshot.compute_delta(current_snapshot)
+                with profiler.track("delta_checkpoint_init"):
+                    self._capture_bf16_snapshot(model)
             else:
-                delta = self.old_snapshot.compute_delta(current_snapshot)
-        except ValueError as e:
-            logger.warning(f"[DeltaCheckpoint] ⚠️  Failed to compute delta: {e}")
-            self.old_snapshot = current_snapshot
-            self.step_count += 1
+                self._capture_bf16_snapshot(model)
+            logger.info(f"[DeltaCheckpoint] Step {self.step_count}: Initial BF16 snapshot captured")
             return
 
-        # Convert to sparse and save
+        # Compare and save changed values
         if profiler:
-            with profiler.track("delta_checkpoint_save"):
-                self._save_sparse_delta(delta, step=self.step_count)
+            with profiler.track("delta_checkpoint_compare_save"):
+                self._compare_and_save(model, step=self.step_count)
         else:
-            self._save_sparse_delta(delta, step=self.step_count)
+            self._compare_and_save(model, step=self.step_count)
 
-        # Update for next iteration
-        self.old_snapshot = current_snapshot
         self.step_count += 1
 
-    def _to_sparse_coo(self, delta_tensor: torch.Tensor) -> dict[str, Any]:
-        """Convert dense delta to sparse COO format with threshold=0.0.
+    def _capture_bf16_snapshot(self, model: Any) -> None:
+        """Capture all model parameters as BF16 on CPU."""
+        self._old_bf16.clear()
+        for name, param in model.named_parameters():
+            self._old_bf16[name] = param.data.detach().to(
+                device="cpu", dtype=torch.bfloat16
+            ).clone()
 
-        CRITICAL: threshold=0.0 means we only skip EXACT zeros.
-        Uses `!= 0.0` for exact floating-point comparison.
-
-        Args:
-            delta_tensor: Dense parameter delta tensor
-
-        Returns:
-            Dictionary with sparse COO representation
-        """
-        # Find non-zero elements (EXACT comparison with 0.0)
-        mask = (delta_tensor != 0.0)
-
-        # Extract non-zero indices and values
-        indices = mask.nonzero(as_tuple=False).t()  # Shape: [ndim, nnz]
-        values = delta_tensor[mask]
-
-        # VERIFICATION: Ensure we captured exactly the non-zero elements
-        expected_nnz = (delta_tensor != 0.0).sum().item()
-        actual_nnz = values.numel()
-        if actual_nnz != expected_nnz:
-            raise RuntimeError(
-                f"Sparsity computation bug detected: "
-                f"expected {expected_nnz} non-zeros, got {actual_nnz}"
-            )
-
-        # Convert values to target dtype for storage
-        values_stored = values.to(dtype=self._snapshot_dtype)
-
-        return {
-            "indices": indices.to(torch.int32),  # Compact indices (int32 vs int64)
-            "values": values_stored,
-            "shape": tuple(delta_tensor.shape),
-            "nnz": values.numel(),
-        }
-
-    def _save_sparse_delta(self, delta: ParameterDelta, step: int) -> None:
-        """Save sparse delta checkpoint to disk.
-
-        Args:
-            delta: ParameterDelta computed from old -> new snapshot
-            step: Optimizer step number
-        """
+    def _compare_and_save(self, model: Any, step: int) -> None:
+        """Compare current weights to old BF16 snapshot, save changed values."""
         sparse_layers = {}
         total_params = 0
-        total_nonzero = 0
+        total_changed = 0
 
-        for name, delta_tensor in delta.deltas.items():
-            total_params += delta_tensor.numel()
+        for name, param in model.named_parameters():
+            # Convert current param to BF16 on CPU
+            new_bf16 = param.data.detach().to(device="cpu", dtype=torch.bfloat16)
+            total_params += new_bf16.numel()
 
-            # Convert to sparse COO
-            sparse_data = self._to_sparse_coo(delta_tensor)
+            # Get old BF16 value
+            old_bf16 = self._old_bf16.get(name)
+            if old_bf16 is None:
+                # New parameter (shouldn't happen in normal training)
+                self._old_bf16[name] = new_bf16.clone()
+                continue
 
-            # Only save layers that have non-zero changes
-            if sparse_data["nnz"] > 0:
-                sparse_layers[name] = sparse_data
-                total_nonzero += sparse_data["nnz"]
+            # Find changed positions: exact BF16 comparison
+            # This catches any bit-level change in the BF16 representation
+            mask = (new_bf16 != old_bf16)
+            nnz = mask.sum().item()
 
-        # Create checkpoint
+            if nnz > 0:
+                # Extract indices and NEW values (not deltas)
+                indices = mask.nonzero(as_tuple=False).t()  # Shape: [ndim, nnz]
+                values = new_bf16[mask]  # Actual new BF16 values
+
+                sparse_layers[name] = {
+                    "indices": indices.to(torch.int32),  # Compact indices
+                    "values": values,  # Already BF16
+                    "shape": tuple(new_bf16.shape),
+                    "nnz": nnz,
+                }
+                total_changed += nnz
+
+            # Update old snapshot for next comparison
+            self._old_bf16[name] = new_bf16.clone()
+
+        # Create and save checkpoint
         checkpoint = {
             "step": step,
             "timestamp": time.time(),
+            "format": "values",  # Indicates we store values, not deltas
             "layers": sparse_layers,
             "metadata": {
                 "total_params": total_params,
-                "total_nonzero": total_nonzero,
-                "sparsity": 1.0 - (total_nonzero / total_params) if total_params > 0 else 0.0,
+                "total_changed": total_changed,
+                "change_ratio": total_changed / total_params if total_params > 0 else 0.0,
                 "num_changed_layers": len(sparse_layers),
-                "dtype": str(self._snapshot_dtype),
+                "dtype": "bfloat16",
             },
         }
 
@@ -240,12 +207,13 @@ class DeltaCheckpointCallback(TrainerCallback):
         torch.save(checkpoint, path, _use_new_zipfile_serialization=True)
 
         # Log statistics
-        sparsity = checkpoint["metadata"]["sparsity"]
+        change_ratio = checkpoint["metadata"]["change_ratio"]
+        unchanged_ratio = 1.0 - change_ratio
         logger.info(
             f"[DeltaCheckpoint] Step {step}: "
-            f"{sparsity:.2%} sparse, "
-            f"{total_nonzero:,}/{total_params:,} non-zero, "
-            f"{len(sparse_layers)}/{len(delta.deltas)} layers changed"
+            f"{unchanged_ratio:.2%} unchanged, "
+            f"{total_changed:,}/{total_params:,} changed, "
+            f"{len(sparse_layers)}/{len(self._old_bf16)} layers"
         )
 
         # Update metadata file
@@ -264,6 +232,7 @@ class DeltaCheckpointCallback(TrainerCallback):
                 metadata = json.load(f)
         else:
             metadata = {
+                "format": "values",  # Indicates we store values, not deltas
                 "checkpoints": [],
                 "total_params": checkpoint_meta["total_params"],
                 "dtype": checkpoint_meta["dtype"],
@@ -273,8 +242,8 @@ class DeltaCheckpointCallback(TrainerCallback):
         metadata["checkpoints"].append({
             "step": step,
             "path": str(path.name),
-            "sparsity": checkpoint_meta["sparsity"],
-            "nonzero": checkpoint_meta["total_nonzero"],
+            "change_ratio": checkpoint_meta["change_ratio"],
+            "changed": checkpoint_meta["total_changed"],
             "changed_layers": checkpoint_meta["num_changed_layers"],
         })
 
@@ -283,41 +252,79 @@ class DeltaCheckpointCallback(TrainerCallback):
             json.dump(metadata, f, indent=2)
 
 
-def load_sparse_delta(checkpoint_path: str | Path) -> dict[str, torch.Tensor]:
-    """Load a sparse delta checkpoint and reconstruct dense tensors.
+def load_checkpoint_values(checkpoint_path: str | Path) -> tuple[dict[str, Any], str]:
+    """Load a checkpoint and return sparse layer data with format info.
 
     Args:
-        checkpoint_path: Path to delta checkpoint file
+        checkpoint_path: Path to checkpoint file
 
     Returns:
-        Dictionary mapping layer name to dense delta tensor
+        Tuple of (layers dict, format string: "values" or "deltas")
 
     Example:
-        >>> delta = load_sparse_delta("checkpoints/delta_000042.pt")
-        >>> print(delta.keys())
-        >>> print(delta["model.layers.0.self_attn.q_proj.weight"].shape)
+        >>> layers, fmt = load_checkpoint_values("checkpoints/delta_000042.pt")
+        >>> print(f"Format: {fmt}, Layers: {len(layers)}")
     """
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    fmt = checkpoint.get("format", "deltas")  # Old format didn't have this field
+    return checkpoint["layers"], fmt
 
-    dense_deltas = {}
-    for name, sparse_data in checkpoint["layers"].items():
-        # Reconstruct dense tensor from sparse COO
+
+def apply_sparse_values(
+    weights: dict[str, torch.Tensor],
+    sparse_layers: dict[str, Any],
+) -> None:
+    """Apply sparse values to weights dict (in-place).
+
+    For "values" format: directly replaces values at specified indices.
+    The sparse_layers contains actual new values, not deltas.
+
+    Args:
+        weights: Dictionary of weight tensors to modify in-place
+        sparse_layers: Sparse layer data from checkpoint
+    """
+    for name, sparse_data in sparse_layers.items():
+        if name not in weights:
+            continue
+
+        indices = sparse_data["indices"]
+        values = sparse_data["values"]
+
+        if indices.numel() > 0:
+            # Convert indices to tuple for advanced indexing
+            idx_tuple = tuple(indices[i].long() for i in range(indices.size(0)))
+            # Directly set values (not add - these are the new values)
+            weights[name][idx_tuple] = values.to(weights[name].dtype)
+
+
+def apply_sparse_deltas(
+    weights: dict[str, torch.Tensor],
+    sparse_layers: dict[str, Any],
+) -> None:
+    """Apply sparse deltas to weights dict (in-place).
+
+    For "deltas" format: adds delta values at specified indices.
+
+    Args:
+        weights: Dictionary of weight tensors to modify in-place
+        sparse_layers: Sparse layer data from checkpoint
+    """
+    for name, sparse_data in sparse_layers.items():
+        if name not in weights:
+            continue
+
         indices = sparse_data["indices"]
         values = sparse_data["values"]
         shape = sparse_data["shape"]
 
-        # Create dense tensor
-        dense = torch.zeros(shape, dtype=values.dtype)
-
-        # Fill in non-zero values
         if indices.numel() > 0:
-            # Convert indices to tuple for advanced indexing
-            idx_tuple = tuple(indices[i] for i in range(indices.size(0)))
-            dense[idx_tuple] = values
+            # Reconstruct dense delta
+            dense_delta = torch.zeros(shape, dtype=values.dtype)
+            idx_tuple = tuple(indices[i].long() for i in range(indices.size(0)))
+            dense_delta[idx_tuple] = values
 
-        dense_deltas[name] = dense
-
-    return dense_deltas
+            # Add to weights
+            weights[name] = weights[name] + dense_delta.to(weights[name].dtype)
 
 
 def reconstruct_weights_at_step(
@@ -325,7 +332,11 @@ def reconstruct_weights_at_step(
     delta_dir: str | Path,
     target_step: int,
 ) -> dict[str, torch.Tensor]:
-    """Reconstruct model weights at a specific step from base + deltas.
+    """Reconstruct model weights at a specific step from base + changes.
+
+    Handles both formats:
+    - "values" format: Directly applies new values at each step
+    - "deltas" format (legacy): Accumulates W_0 + Σ(deltas)
 
     Args:
         base_weights: Initial model weights (step 0)
@@ -333,12 +344,11 @@ def reconstruct_weights_at_step(
         target_step: Target step to reconstruct
 
     Returns:
-        Reconstructed weights: W_target = W_0 + Σ(delta_0...delta_target-1)
+        Reconstructed weights at target_step
 
     Example:
         >>> base = {name: param.clone() for name, param in model.named_parameters()}
         >>> weights_100 = reconstruct_weights_at_step(base, "checkpoints/deltas", 100)
-        >>> # Load into model:
         >>> model.load_state_dict(weights_100, strict=False)
     """
     delta_dir = Path(delta_dir)
@@ -346,17 +356,48 @@ def reconstruct_weights_at_step(
     # Start with base weights
     weights = {name: tensor.clone() for name, tensor in base_weights.items()}
 
-    # Apply deltas sequentially
+    # Apply changes sequentially
     for step in range(target_step):
         delta_path = delta_dir / f"delta_{step:06d}.pt"
         if not delta_path.exists():
-            raise FileNotFoundError(f"Missing delta checkpoint: {delta_path}")
+            raise FileNotFoundError(f"Missing checkpoint: {delta_path}")
 
-        deltas = load_sparse_delta(delta_path)
+        sparse_layers, fmt = load_checkpoint_values(delta_path)
 
-        # Add deltas to current weights
-        for name, delta in deltas.items():
-            if name in weights:
-                weights[name] = weights[name] + delta.to(weights[name].dtype)
+        if fmt == "values":
+            # New format: directly replace values
+            apply_sparse_values(weights, sparse_layers)
+        else:
+            # Legacy format: add deltas
+            apply_sparse_deltas(weights, sparse_layers)
 
     return weights
+
+
+# Backward compatibility alias
+def load_sparse_delta(checkpoint_path: str | Path) -> dict[str, torch.Tensor]:
+    """Load a sparse checkpoint and reconstruct dense tensors.
+
+    DEPRECATED: Use load_checkpoint_values() for new code.
+
+    Returns dense tensors - for "values" format these are the new values,
+    for "deltas" format these are the delta values.
+    """
+    sparse_layers, _ = load_checkpoint_values(checkpoint_path)
+
+    dense_tensors = {}
+    for name, sparse_data in sparse_layers.items():
+        indices = sparse_data["indices"]
+        values = sparse_data["values"]
+        shape = sparse_data["shape"]
+
+        # Create dense tensor
+        dense = torch.zeros(shape, dtype=values.dtype)
+
+        if indices.numel() > 0:
+            idx_tuple = tuple(indices[i].long() for i in range(indices.size(0)))
+            dense[idx_tuple] = values
+
+        dense_tensors[name] = dense
+
+    return dense_tensors

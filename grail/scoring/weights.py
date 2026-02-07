@@ -24,12 +24,14 @@ class WeightComputer:
         superlinear_exponent: float,
         burn_uid: int | None,
         burn_percentage: float,
+        cap_enabled: bool = True,
     ):
         self.rolling_windows = rolling_windows
         self.window_length = window_length
         self.superlinear_exponent = superlinear_exponent
         self.burn_uid = burn_uid
         self.burn_percentage = burn_percentage
+        self.cap_enabled = cap_enabled
 
     def compute_weights(
         self,
@@ -104,7 +106,10 @@ class WeightComputer:
             total_unique_extrapolated = total_unique_checked * extrapolation_factor
 
             # Cap-proportional scoring: reward based on fraction of cap reached
-            capped_unique = min(total_unique_extrapolated, UNIQUE_ROLLOUTS_CAP)
+            if self.cap_enabled:
+                capped_unique = min(total_unique_extrapolated, UNIQUE_ROLLOUTS_CAP)
+            else:
+                capped_unique = total_unique_extrapolated
 
             # Apply superlinear scoring
             base_score = max(0.0, float(capped_unique))
@@ -113,9 +118,16 @@ class WeightComputer:
 
         # Normalize against theoretical max (cap^exponent)
         # This ensures miners are rewarded proportionally to cap achievement
-        max_score = UNIQUE_ROLLOUTS_CAP**self.superlinear_exponent
-        cap_relative = [score / max_score for score in raw_scores]
-        total_cap_relative = math.fsum(cap_relative)
+        if self.cap_enabled:
+            max_score = UNIQUE_ROLLOUTS_CAP**self.superlinear_exponent
+            cap_relative = [score / max_score for score in raw_scores]
+            total_cap_relative = math.fsum(cap_relative)
+        else:
+            total_raw = math.fsum(raw_scores)
+            cap_relative = (
+                [s / total_raw for s in raw_scores] if total_raw > 0 else [0.0] * len(raw_scores)
+            )
+            total_cap_relative = 1.0  # No underproduction concept without cap
 
         if total_cap_relative > 1.0:
             # Multiple strong miners: share proportionally, capped at 1.0 total

@@ -71,7 +71,16 @@ import asyncio
 import logging
 from typing import Any
 
-from ..shared.constants import GRAIL_BURN_UID
+import numpy as np
+
+from ..infrastructure.comms import get_file
+from ..shared.constants import (
+    GRAIL_BURN_UID,
+    TRUST_LIST_KEY_PREFIX,
+    TRUST_LIST_MAX_STALENESS_WINDOWS,
+    TRUST_LIST_VERSION,
+    WINDOW_LENGTH,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -171,3 +180,110 @@ async def _select_top_miners_by_incentive(
         )
 
     return trusted_hotkeys
+
+
+def _find_highest_stake_validator(metagraph: Any) -> int | None:
+    """Find the UID of the highest-stake validator with a permit.
+
+    Uses numpy masking on metagraph.S (stake tensor) filtered by
+    metagraph.validator_permit (boolean tensor).
+
+    Args:
+        metagraph: Bittensor metagraph instance
+
+    Returns:
+        UID of highest-stake validator, or None if no validators have permits
+    """
+    permits = np.array(metagraph.validator_permit)
+    if not permits.any():
+        return None
+
+    stakes = np.where(permits, np.array(metagraph.S), -1.0)
+    uid = int(np.argmax(stakes))
+
+    if stakes[uid] <= 0:
+        return None
+
+    return uid
+
+
+async def get_trust_list_from_validator(
+    metagraph: Any,
+    chain_manager: Any,
+    target_window: int,
+) -> set[str] | None:
+    """Download the validator-published trust list from R2.
+
+    Finds the highest-stake validator, resolves its R2 bucket via
+    chain_manager, and downloads the per-window trust list JSON.
+    Falls back to older windows (up to TRUST_LIST_MAX_STALENESS_WINDOWS)
+    if the exact window key is missing.
+
+    Args:
+        metagraph: Bittensor metagraph instance
+        chain_manager: GrailChainManager for bucket lookups
+        target_window: The window the trainer wants data for
+
+    Returns:
+        Set of eligible hotkeys, or None if unavailable (caller should fallback)
+    """
+    # Find the highest-stake validator
+    validator_uid = _find_highest_stake_validator(metagraph)
+    if validator_uid is None:
+        logger.warning("No validator with permit found for trust list lookup")
+        return None
+
+    # Get the validator's R2 bucket
+    validator_bucket = chain_manager.get_bucket(validator_uid)
+    if validator_bucket is None:
+        logger.warning(
+            "Validator UID %d has no R2 bucket committed on chain",
+            validator_uid,
+        )
+        return None
+
+    # Try the target window, then progressively older windows
+    for offset in range(TRUST_LIST_MAX_STALENESS_WINDOWS + 1):
+        check_window = target_window - offset * WINDOW_LENGTH
+        if check_window < 0:
+            break
+
+        key = f"{TRUST_LIST_KEY_PREFIX}{check_window}.json"
+        trust_data = await get_file(key, credentials=validator_bucket)
+
+        if trust_data is None:
+            continue
+
+        # Validate version
+        if trust_data.get("version") != TRUST_LIST_VERSION:
+            logger.warning(
+                "Trust list version mismatch: got %s, expected %d",
+                trust_data.get("version"),
+                TRUST_LIST_VERSION,
+            )
+            return None
+
+        eligible = trust_data.get("eligible_hotkeys", [])
+        list_window = trust_data.get("window", check_window)
+
+        logger.info(
+            "Loaded trust list from validator UID %d (window %d, %d eligible miners, offset=%d)",
+            validator_uid,
+            list_window,
+            len(eligible),
+            offset,
+        )
+
+        if not eligible:
+            logger.warning("Trust list from validator is empty, falling back")
+            return None
+
+        return set(eligible)
+
+    logger.info(
+        "No trust list found for windows %d..%d from validator UID %d",
+        target_window,
+        target_window - TRUST_LIST_MAX_STALENESS_WINDOWS * WINDOW_LENGTH,
+        validator_uid,
+    )
+    return None
