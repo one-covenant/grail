@@ -65,7 +65,7 @@ Vì vậy, nếu muốn debug đúng chỗ, hãy luôn hỏi: “Mình đang ở
 ### 4.2 Validation có “hard check” và “soft check”
 
 - **Hard check** fail ⇒ rollout không hợp lệ.
-- **Soft check** fail ⇒ vẫn có thể tiếp tục check khác (dùng làm heuristic/chất lượng).
+- **Soft check** fail ⇒ vẫn có thể tiếp tục các check khác (dùng làm heuristic/chất lượng).
 
 Điều này quyết định trực tiếp miner có được tính điểm hay không.
 
