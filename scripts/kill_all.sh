@@ -1,0 +1,6 @@
+pkill -9 "python"
+pkill -9 "python3"
+pkill -9 "grail"
+pkill -9 "VLLM::Worker_TP"
+pkill -9 "VLLM::EngineCor"
+pkill -9 "trl"

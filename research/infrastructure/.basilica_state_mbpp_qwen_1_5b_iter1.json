@@ -1,0 +1,18 @@
+{
+  "instances": {
+    "qwen2.5-1.5b-mbpp-iter1": {
+      "id": "d131e4f8-19c8-456e-9d87-fc5f0773cb0b",
+      "name": "qwen2.5-1.5b-mbpp-iter1",
+      "config": {
+        "gpu_type": "A100",
+        "gpu_count": 8,
+        "compute_type": "secure-cloud"
+      },
+      "ssh": {
+        "host": "62.169.159.124",
+        "port": 22,
+        "user": "ubuntu"
+      }
+    }
+  }
+}

@@ -97,7 +97,7 @@ class EvalConfig:
     window_interval: int = 20
     env_id: str | None = None  # If None, uses CURRENT_ENV_ID from constants
     split: str = "val"  # dataset-backed envs (e.g., GSM8K, MBPP)
-    subset_size: int | None = None  # generative envs or capped dataset eval
+    subset_size: int | None = 50  # generative envs or capped dataset eval
     seed_base: int = 2025
     batch_size: int = 32  # Conservative for vLLM server: 8 tasks × 5 reps = 40 prompts/batch (prevent queue timeout)
     replicates: int = 5  # for pass@k / mean@k curves

@@ -1,0 +1,50 @@
+# Release Notes Format
+
+When writing release notes for GRAIL, follow this format:
+
+```
+# GRAIL vX.X.X Release Notes
+
+**Release Date:** Month DD, YYYY
+
+### Highlights
+
+- **Feature Name**: Brief description of the change and its impact.
+- **Another Feature**: Keep each bullet to 1-2 sentences max.
+```
+
+Rules:
+- Title: `# GRAIL vX.X.X Release Notes`
+- Include release date in bold
+- Use `### Highlights` section with bullet points
+- Each bullet: **Bold title** followed by colon and description
+- Keep descriptions concise (1-2 sentences)
+- Focus on user-facing changes and impact
+- Limit to 5-8 highlight items
+
+---
+
+# Discord Release Message Format
+
+When writing Discord release announcements for GRAIL, follow this format:
+
+```
+@grail・81
+
+🚀 NEW RELEASE IS OUT!
+
+⚠️ <Audience>: <Urgency/action statement about what to do and why.>
+
+<1-2 short paragraphs explaining what changed and the practical impact for miners/validators. Use concrete numbers where possible.>
+
+Enjoy!
+```
+
+Rules:
+- Always tag `@grail・81`
+- Open with the 🚀 NEW RELEASE IS OUT! header
+- Include a ⚠️ callout directed at the affected audience (Miners, Validators, or both)
+- Keep the body to 1-2 short paragraphs, plain language, no markdown headers
+- Focus on what changed and why it matters to the audience
+- Use concrete metrics/numbers when available
+- End with "Enjoy!"

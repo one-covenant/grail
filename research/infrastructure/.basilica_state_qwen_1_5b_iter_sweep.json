@@ -1,0 +1,46 @@
+{
+  "instances": {
+    "qwen2.5-1.5b-iter8": {
+      "id": "ffcd9725-46c5-4a8d-82f2-f187b5a1783b",
+      "name": "qwen2.5-1.5b-iter8",
+      "config": {
+        "gpu_type": "A100",
+        "gpu_count": 8,
+        "compute_type": "secure-cloud"
+      },
+      "ssh": {
+        "host": "185.216.23.148",
+        "port": 22,
+        "user": "ubuntu"
+      }
+    },
+    "qwen2.5-1.5b-iter16": {
+      "id": "37d7aa46-5994-4b38-b732-086275168dc0",
+      "name": "qwen2.5-1.5b-iter16",
+      "config": {
+        "gpu_type": "A100",
+        "gpu_count": 8,
+        "compute_type": "secure-cloud"
+      },
+      "ssh": {
+        "host": "185.216.23.174",
+        "port": 22,
+        "user": "ubuntu"
+      }
+    },
+    "qwen2.5-1.5b-iter32": {
+      "id": "23690a15-8165-4c58-a9a1-a5bce472dd6d",
+      "name": "qwen2.5-1.5b-iter32",
+      "config": {
+        "gpu_type": "A100",
+        "gpu_count": 8,
+        "compute_type": "secure-cloud"
+      },
+      "ssh": {
+        "host": "185.216.23.129",
+        "port": 22,
+        "user": "ubuntu"
+      }
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "instances": {
+    "qwen2.5-7b-iter1": {
+      "id": "8943b587-7891-4cfc-87ca-80f012cfc22a",
+      "name": "qwen2.5-7b-iter1",
+      "config": {
+        "gpu_type": "A100",
+        "gpu_count": 8,
+        "compute_type": "secure-cloud"
+      },
+      "ssh": {
+        "host": "185.216.23.218",
+        "port": 22,
+        "user": "ubuntu"
+      }
+    }
+  }
+}

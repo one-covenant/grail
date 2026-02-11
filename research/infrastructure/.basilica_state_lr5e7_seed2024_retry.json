@@ -1,0 +1,18 @@
+{
+  "instances": {
+    "qwen2.5-1.5b-lr5e-7-seed2024": {
+      "id": "f536aea3-efb4-484b-9bc1-27c0194b2fc5",
+      "name": "qwen2.5-1.5b-lr5e-7-seed2024",
+      "config": {
+        "gpu_type": "A100",
+        "gpu_count": 2,
+        "compute_type": "secure-cloud"
+      },
+      "ssh": {
+        "host": "69.19.137.72",
+        "port": 22,
+        "user": "ubuntu"
+      }
+    }
+  }
+}

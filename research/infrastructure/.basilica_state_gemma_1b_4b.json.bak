@@ -1,0 +1,18 @@
+{
+  "instances": {
+    "gemma3-1b-iter1": {
+      "id": "9eb076e5-f622-4d51-b9c6-df1d3778d32f",
+      "name": "gemma3-1b-iter1",
+      "config": {
+        "gpu_type": "A100",
+        "gpu_count": 8,
+        "compute_type": "secure-cloud"
+      },
+      "ssh": {
+        "host": "185.216.23.212",
+        "port": 22,
+        "user": "ubuntu"
+      }
+    }
+  }
+}

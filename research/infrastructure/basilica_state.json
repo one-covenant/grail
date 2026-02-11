@@ -1,0 +1,18 @@
+{
+  "gemma3-1b-iter1": {
+    "name": "gemma3-1b-iter1",
+    "ssh_host": "185.216.23.212",
+    "ssh_port": 22,
+    "ssh_user": "ubuntu",
+    "gpu_count": 8,
+    "gpu_type": "A100"
+  },
+  "gemma3-4b-iter1": {
+    "name": "gemma3-4b-iter1",
+    "ssh_host": "185.216.23.82",
+    "ssh_port": 22,
+    "ssh_user": "ubuntu",
+    "gpu_count": 8,
+    "gpu_type": "A100"
+  }
+}

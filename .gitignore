@@ -204,3 +204,5 @@ config.local.*
 
 # monitoring files
 wandb/
+grail.tar
+.env_2

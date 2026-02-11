@@ -1,0 +1,32 @@
+{
+  "instances": {
+    "qwen2.5-1.5b-iter8": {
+      "id": "0f660729-b25b-47e3-9820-8b7a89cbb467",
+      "name": "qwen2.5-1.5b-iter8",
+      "config": {
+        "gpu_type": "A100",
+        "gpu_count": 8,
+        "compute_type": "secure-cloud"
+      },
+      "ssh": {
+        "host": "185.216.23.158",
+        "port": 22,
+        "user": "ubuntu"
+      }
+    },
+    "qwen2.5-1.5b-iter16": {
+      "id": "59a0948a-8cf8-4641-a656-9e254b014409",
+      "name": "qwen2.5-1.5b-iter16",
+      "config": {
+        "gpu_type": "A100",
+        "gpu_count": 8,
+        "compute_type": "secure-cloud"
+      },
+      "ssh": {
+        "host": "185.216.23.4",
+        "port": 22,
+        "user": "ubuntu"
+      }
+    }
+  }
+}

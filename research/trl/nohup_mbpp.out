@@ -1,0 +1,11 @@
+usage: train_trl_grpo.py [-h] [--dataset {gsm8k,math,mbpp}]
+                         [--eval-every EVAL_EVERY] [--seed SEED]
+                         [--vllm-port VLLM_PORT] [--group-port GROUP_PORT]
+                         [--run-suffix RUN_SUFFIX]
+                         [--num-iterations NUM_ITERATIONS]
+                         [--wandb-project WANDB_PROJECT]
+                         [--wandb-tags WANDB_TAGS] [--model MODEL]
+                         [--device DEVICE] [--batch-size BATCH_SIZE]
+                         [--grad-accum-steps GRAD_ACCUM_STEPS]
+                         [--no-gradient-checkpointing] [--lr LR]
+train_trl_grpo.py: error: unrecognized arguments: --num_seeds 4 --seeds 42,1337,2024,9999 --run_baseline_eval true --data_path /home/ubuntu/data/mbpp/mbpp_reformatted.json --output_dir /home/ubuntu/grail/research/trl/outputs --delta_checkpoint_dir /home/ubuntu/grail/research/trl --async_delta_save true
