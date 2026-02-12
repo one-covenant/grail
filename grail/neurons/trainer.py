@@ -360,7 +360,12 @@ class TrainerNeuron(BaseNeuron):
 
         # Get heartbeat age from IPC (primary) or filesystem (fallback)
         heartbeat_age = self._get_heartbeat_age()
-        if heartbeat_age > TRAINING_HEARTBEAT_TIMEOUT_SECONDS:
+        if heartbeat_age == float("inf"):
+            # No heartbeat received yet - process still initializing (e.g., loading model)
+            # This is normal during startup, not an error condition
+            logger.debug("Training process initializing (awaiting first heartbeat)")
+        elif heartbeat_age > TRAINING_HEARTBEAT_TIMEOUT_SECONDS:
+            # Had heartbeat but it went stale - this is concerning
             logger.error(
                 "Training heartbeat stale (%.1fs > %ds)",
                 heartbeat_age,
@@ -437,6 +442,15 @@ class TrainerNeuron(BaseNeuron):
         Returns:
             True if training paused successfully, False if timeout/failure
         """
+        # If training is already paused (confirmation still set from prior request),
+        # we can proceed immediately. This prevents a deadlock where the orchestrator
+        # requests pause while training is already paused and waiting for resume.
+        if self._ipc.pause_confirmed.is_set():
+            logger.info(
+                "Training already paused (confirmation from prior request), proceeding immediately"
+            )
+            return True
+
         start_wait = time.time()
         timeout = PAUSE_CONFIRMATION_TIMEOUT_SECONDS
 

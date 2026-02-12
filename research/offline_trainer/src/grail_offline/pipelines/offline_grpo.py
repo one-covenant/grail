@@ -94,6 +94,17 @@ def _save_checkpoint_for_vllm(
     model.save_pretrained(checkpoint_dir, safe_serialization=True)
     tokenizer.save_pretrained(checkpoint_dir)
 
+    # vLLM expects a chat template file when launched with --chat-template.
+    # Persist the tokenizer chat template (if present) alongside the checkpoint.
+    chat_template = getattr(tokenizer, "chat_template", None)
+    if isinstance(chat_template, str) and chat_template.strip():
+        (checkpoint_dir / "chat_template.jinja").write_text(chat_template)
+    else:
+        logger.warning(
+            "Tokenizer has no chat_template; vLLM may not format prompts correctly",
+            extra={"iteration": iteration, "path": str(checkpoint_dir)},
+        )
+
     logger.info(
         "Saved vLLM checkpoint",
         extra={"iteration": iteration, "path": str(checkpoint_dir)},

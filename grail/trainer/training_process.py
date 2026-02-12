@@ -47,7 +47,7 @@ from grail.trainer.config import TrainingConfig
 from grail.trainer.ipc import IPCChannels
 from grail.trainer.replay_buffer import ReplayBuffer, create_replay_buffer
 from grail.trainer.snapshot_manager import SnapshotManager
-from grail.trainer.trust import get_trusted_miner_hotkeys
+from grail.trainer.trust import get_trust_list_from_validator, get_trusted_miner_hotkeys
 
 logger = logging.getLogger(__name__)
 
@@ -530,7 +530,7 @@ class TrainingService:
                     self._current_training_window = target_data_window
 
                     # Get trusted miners only when we need to fetch new data
-                    trusted_hotkeys = await self._get_trusted_miners()
+                    trusted_hotkeys = await self._get_trusted_miners(target_data_window)
                     if not trusted_hotkeys:
                         await asyncio.sleep(NO_MINERS_SLEEP_SECONDS)
                         continue
@@ -817,13 +817,19 @@ class TrainingService:
         except Exception as exc:
             logger.debug("Failed to log epochs_per_window metric: %s", exc)
 
-    async def _get_trusted_miners(self) -> set[str]:
-        """Get trusted miner hotkeys from metagraph with fallback to cache.
+    async def _get_trusted_miners(self, target_window: int) -> set[str]:
+        """Get trusted miner hotkeys, preferring validator R2 trust list.
 
-        In test mode, returns only TRAINER_UID's hotkey for controlled testing.
+        Resolution order:
+        1. Test mode → only TRAINER_UID's hotkey
+        2. Primary → validator-published trust list from R2
+        3. Fallback → on-chain incentive (Yuma Consensus)
+
+        Args:
+            target_window: The data window the trainer is loading
 
         Returns:
-            Set of trusted miner hotkeys (may be cached if blockchain unavailable)
+            Set of trusted miner hotkeys (may be empty if all methods fail)
         """
         try:
             metagraph = await self.subtensor.metagraph(NETUID)  # type: ignore[misc]  # bittensor async stub
@@ -848,7 +854,24 @@ class TrainingService:
                     )
                     return set()
 
-            # Normal mode: compute trusted miners
+            # Primary: try validator-published trust list from R2
+            if self.chain_manager is not None:
+                try:
+                    trust_list = await get_trust_list_from_validator(
+                        metagraph, self.chain_manager, target_window
+                    )
+                    if trust_list:
+                        logger.info(
+                            "Using validator trust list: %d miners for window %d",
+                            len(trust_list),
+                            target_window,
+                        )
+                        return trust_list
+                except Exception as exc:
+                    logger.warning("Trust list lookup failed, falling back to on-chain: %s", exc)
+
+            # Fallback: on-chain incentive (Yuma Consensus)
+            logger.info("Falling back to on-chain incentive for trusted miners")
             trusted_hotkeys = await get_trusted_miner_hotkeys(
                 metagraph,
                 self.config.min_trusted_miners,
@@ -1198,10 +1221,12 @@ class TrainingService:
             return
 
         # Generate repository name based on model and training info
+        # Include timestamp to avoid overwriting prior uploads
         model_name = getattr(self.train_model, "name_or_path", "grail-model")
         # Clean model name for repo (replace / with -)
         clean_name = model_name.replace("/", "-").lower()
-        repo_name = f"grail-trained-{clean_name}"
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        repo_name = f"grail-trained-{clean_name}-{timestamp}"
 
         commit_message = (
             f"GRAIL trained model - {TOTAL_TRAINING_WINDOWS} windows, epoch {self.epoch_counter}"

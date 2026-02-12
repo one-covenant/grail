@@ -88,6 +88,7 @@ class ProcessManager:
         resume_from_checkpoint: str | None = None,
         seed_override: int | None = None,
         lr: float | None = None,
+        fp32_master_weights: bool = False,
     ):
         self.dataset = dataset
         self.eval_every = eval_every
@@ -101,6 +102,7 @@ class ProcessManager:
         self.resume_from_checkpoint = resume_from_checkpoint
         self.seed_override = seed_override
         self.lr = lr
+        self.fp32_master_weights = fp32_master_weights
         # Output base directory for checkpoints, wandb, etc.
         # Use /ephemeral on cloud instances with limited home storage
         self.output_base = output_base or os.getenv("GRAIL_OUTPUT_BASE", ".")
@@ -274,6 +276,9 @@ class ProcessManager:
         # Add learning rate if provided
         if self.lr is not None:
             cmd.extend(["--lr", str(self.lr)])
+        # Add FP32 master weights flag if enabled
+        if self.fp32_master_weights:
+            cmd.append("--fp32-master-weights")
 
         env = os.environ.copy()
         # NCCL weight sync requires both GPUs visible to enable peer access.
@@ -369,6 +374,7 @@ class ProcessManager:
         print(f"Dataset: {self.dataset}")
         print(f"Model: {self.model_id}")
         print(f"Num Iterations: {self.num_iterations}")
+        print(f"FP32 Master Weights: {self.fp32_master_weights}")
         print(f"Instances: {len(self.seeds)} (starting at index {self.start_instance})")
         print(f"Seeds: {self.seeds}")
         print(f"GPU pairs: {self.gpu_pairs}")
@@ -521,6 +527,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override learning rate (default: 3e-6).",
     )
+    parser.add_argument(
+        "--fp32-master-weights",
+        action="store_true",
+        help="Use FP32 master weights with BF16 training (more memory, better precision).",
+    )
     return parser.parse_args()
 
 
@@ -552,6 +563,7 @@ def main() -> None:
         resume_from_checkpoint=args.resume_from_checkpoint,
         seed_override=args.seed,
         lr=args.lr,
+        fp32_master_weights=args.fp32_master_weights,
     )
     manager.run()
 

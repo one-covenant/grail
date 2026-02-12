@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 # Ensure repo root and src on sys.path
 _THIS_FILE = Path(__file__).resolve()
 _REPO_ROOT = _THIS_FILE.parents[3]
@@ -86,6 +88,9 @@ def _make_fake_generator(tokenizer: Any) -> OfflineRolloutGenerator:
         return OfflineRolloutGenerator(tokenizer=tokenizer, config=cfg)
     finally:
         orl.SGLangServerBackend = original_sgl
+
+
+pytestmark = pytest.mark.asyncio
 
 
 async def test_rollout_generation() -> None:

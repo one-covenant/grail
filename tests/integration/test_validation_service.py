@@ -33,6 +33,7 @@ def validation_service(
         superlinear_exponent=1.5,
         burn_uid=0,
         burn_percentage=0.05,
+        cap_enabled=True,
     )
     checkpoint_manager = CheckpointManager(
         cache_root=Path("/tmp/test_checkpoints"),

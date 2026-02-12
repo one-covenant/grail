@@ -206,6 +206,7 @@ GRAIL_BURN_PERCENTAGE = 80.0
 # Miners are rewarded proportionally to how close they are to this cap.
 # This cap covers the full 12-window rolling period (5120 per window × 12 windows).
 UNIQUE_ROLLOUTS_CAP = 61440
+UNIQUE_ROLLOUTS_CAP_ENABLED = os.getenv("GRAIL_UNIQUE_ROLLOUTS_CAP_ENABLED", "0") == "1"
 
 # ────────────────  MINER SAMPLING (VALIDATION COST CONTROL)  ────────────────
 
@@ -235,6 +236,11 @@ MIN_ROLLOUT_FILE_SIZE_BYTES = 200
 # Files above this threshold are rejected before download to prevent
 # resource exhaustion from oversized submissions.
 MAX_ROLLOUT_FILE_SIZE_BYTES = 500 * 1024 * 1024  # 500 MB
+
+# ────────────────  TRUST LIST (VALIDATOR → TRAINER)  ────────────────
+TRUST_LIST_KEY_PREFIX = "grail/trust/trust_list_"
+TRUST_LIST_VERSION = 1
+TRUST_LIST_MAX_STALENESS_WINDOWS = int(os.getenv("GRAIL_TRUST_LIST_MAX_STALENESS_WINDOWS", "5"))
 
 # ────────────────  GRAIL PROOF VERIFICATION  ────────────────
 
@@ -315,7 +321,7 @@ DELTA_THRESHOLD = float(os.getenv("GRAIL_DELTA_THRESHOLD", "0.0"))
 DELTA_CHECKPOINT_ENABLED = os.getenv("GRAIL_DELTA_CHECKPOINT_ENABLED", "1") == "1"
 
 # Delta codec format for trainer uploads ("sparse_codec_v2", "sparse_codec_v3", or "sparse_codec_v3.1")
-DELTA_CODEC_FORMAT = os.getenv("GRAIL_DELTA_FORMAT", "sparse_codec_v2")
+DELTA_CODEC_FORMAT = os.getenv("GRAIL_DELTA_FORMAT", "sparse_codec_v3.1")
 
 # ──────────────── INVARIANT VALIDATION ────────────────────────────────────────
 # Ensure DELTA_CHECKPOINT_RETENTION_LIMIT >= DELTA_BASE_INTERVAL
