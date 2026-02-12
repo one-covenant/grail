@@ -979,7 +979,7 @@ async def file_exists_with_deadline(
                     return False, False, True, None
 
             if max_size_bytes > 0 and size is not None and size > max_size_bytes:
-                logger.warning(
+                logger.debug(
                     f"file_exists_with_deadline: {candidate} too large ({size} > {max_size_bytes})"
                 )
                 return False, False, True, None

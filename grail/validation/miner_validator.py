@@ -328,7 +328,10 @@ class MinerValidator:
         )
 
         if bad_size:
-            logger.warning("File for miner %s skipped: outside size limits", uid_str)
+            logger.warning(
+                "File skipped: outside size limits (max %d MB)",
+                MAX_ROLLOUT_FILE_SIZE_BYTES // (1024 * 1024),
+            )
             return None
 
         if not exists:
