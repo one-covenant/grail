@@ -12,10 +12,7 @@ Part 2 (TestNullGroupRejection): Verifies the fix —
 
 from __future__ import annotations
 
-import hashlib
 import io
-import json
-import random
 from collections import defaultdict
 
 import pyarrow as pa
@@ -29,7 +26,6 @@ from grail.infrastructure.parquet_io import (
 )
 from grail.validation.miner_validator import (
     MAX_SAMPLES_PER_MINER_THRESHOLD,
-    SAMPLE_RATE,
     MinerValidator,
 )
 
@@ -180,10 +176,12 @@ def _table_to_inferences(table: pa.Table) -> list[dict]:
     the counting/sampling logic only)."""
     result = []
     for row in table.to_pylist():
-        result.append({
-            "rollout_group": row.get("rollout_group"),
-            "commit": row.get("commit", {}),
-        })
+        result.append(
+            {
+                "rollout_group": row.get("rollout_group"),
+                "commit": row.get("commit", {}),
+            }
+        )
     return result
 
 
@@ -273,8 +271,7 @@ class TestNullGroupVulnerabilityProof:
             inferences, "5FakeHotkey", "rand", MockWallet(), total_inferences
         )
 
-        null_indices = {i for i, inf in enumerate(inferences)
-                        if inf.get("rollout_group") is None}
+        null_indices = {i for i, inf in enumerate(inferences) if inf.get("rollout_group") is None}
         assert len(null_indices) == 100
         assert len(set(indices_to_check) & null_indices) == 0
 
@@ -340,10 +337,20 @@ class TestNullGroupRejection:
         """
         # Build inferences list manually (as if deserialization somehow passed)
         inferences = [
-            {"rollout_group": 0, "window_start": 100, "block_hash": "abc123",
-             "nonce": 0, "commit": {}},
-            {"rollout_group": None, "window_start": 100, "block_hash": "abc123",
-             "nonce": 1, "commit": {}},  # null group
+            {
+                "rollout_group": 0,
+                "window_start": 100,
+                "block_hash": "abc123",
+                "nonce": 0,
+                "commit": {},
+            },
+            {
+                "rollout_group": None,
+                "window_start": 100,
+                "block_hash": "abc123",
+                "nonce": 1,
+                "commit": {},
+            },  # null group
         ]
         file_data = {
             "wallet": "5FakeHotkey",
