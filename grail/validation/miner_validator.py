@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 # Validation constants (aligned with pre-refactor validate.py)
 MAX_SAMPLES_PER_MINER_THRESHOLD = 20  # If <= this many rollouts, check all
-MAX_SAMPLES_PER_MINER = 32  # If > this many rollouts, sample GRPO groups
+MAX_SAMPLES_PER_MINER = 64  # If > this many rollouts, sample GRPO groups
 SAMPLE_RATE = 0.10  # Fraction of GRPO groups to spot-check
 STOCHASTIC_CHECK_FAILURE_THRESHOLD = 0.51  # Soft-failure fraction to gate wallet
 GRPO_ADV_SUM_TOLERANCE = 0.01  # Sum of advantages should be ~0
@@ -169,11 +169,15 @@ class MinerValidator:
         if file_data is None:
             return self._create_not_found_result(miner_hotkey, uid)
 
-        # Step 2: Validate file structure
-        validation_result = self._validate_file_structure(file_data, miner_hotkey, window, uid)
+        # Step 2: Validate file structure (cheap checks on ALL rollouts)
+        validation_result = self._validate_file_structure(
+            file_data, miner_hotkey, window, window_hash
+        )
 
         if not validation_result["valid"]:
-            return self._create_invalid_file_result(miner_hotkey, uid, validation_result["reason"])
+            return await self._create_invalid_file_result(
+                miner_hotkey, uid, validation_result["reason"], monitor
+            )
 
         inferences = file_data["inferences"]
         total_inferences = len(inferences)
@@ -333,9 +337,24 @@ class MinerValidator:
         return window_data
 
     def _validate_file_structure(
-        self, file_data: dict, miner_hotkey: str, window: int, uid: int | None
+        self,
+        file_data: dict,
+        miner_hotkey: str,
+        window: int,
+        window_hash: str,
     ) -> dict[str, Any]:
-        """Validate basic file structure and consistency.
+        """Validate structural integrity of ALL rollouts before sampling.
+
+        Runs cheap O(1)-per-row checks on every rollout in a single pass.
+        These checks catch malformed or fraudulent submissions without any
+        model inference, so the cost is negligible even for large files.
+
+        Checks performed (all rows):
+          - Null rollout_group (defense-in-depth for parquet_io check)
+          - Window start consistency
+          - Block hash consistency
+          - Nonce uniqueness (global across the file)
+          - GRPO group sizes (each group must have exactly ROLLOUTS_PER_PROBLEM)
 
         Returns:
             Dict with 'valid' bool and optional 'reason' string
@@ -346,15 +365,62 @@ class MinerValidator:
         # Validate wallet matches
         if file_wallet != miner_hotkey:
             logger.warning(
-                f"Wallet mismatch in file: expected {miner_hotkey[:12]}..., "
-                f"got {file_wallet[:12] if file_wallet else 'None'}..."
+                "Wallet mismatch: expected %s..., got %s...",
+                miner_hotkey[:12],
+                file_wallet[:12] if file_wallet else "None",
             )
             return {"valid": False, "reason": "wallet_mismatch"}
 
         # Validate window matches
         if file_window != window:
-            logger.warning(f"Window mismatch in file: expected {window}, got {file_window}")
+            logger.warning("Window mismatch: expected %s, got %s", window, file_window)
             return {"valid": False, "reason": "window_mismatch"}
+
+        inferences = file_data.get("inferences", [])
+        nonces_seen: set[int] = set()
+        group_sizes: dict[str, int] = {}
+
+        for idx, inf in enumerate(inferences):
+            # Null rollout_group — defense-in-depth for parquet_io check
+            rollout_group = inf.get("rollout_group")
+            if rollout_group is None:
+                logger.warning(
+                    "Null rollout_group at row %d; rejecting file (%d total rows)",
+                    idx, len(inferences),
+                )
+                return {"valid": False, "reason": "null_rollout_group"}
+
+            # Window start must match the target window
+            if inf.get("window_start") != window:
+                logger.warning(
+                    "Window start mismatch at row %d: expected %s, got %s",
+                    idx, window, inf.get("window_start"),
+                )
+                return {"valid": False, "reason": "window_start_mismatch"}
+
+            # Block hash must match the target window's block hash
+            if inf.get("block_hash") != window_hash:
+                logger.warning("Block hash mismatch at row %d", idx)
+                return {"valid": False, "reason": "block_hash_mismatch"}
+
+            # Nonces must be globally unique across the entire file
+            nonce = inf.get("nonce")
+            if nonce in nonces_seen:
+                logger.warning("Duplicate nonce %s at row %d", nonce, idx)
+                return {"valid": False, "reason": "duplicate_nonce"}
+            nonces_seen.add(nonce)
+
+            # Accumulate group sizes for GRPO check below
+            group_sizes[str(rollout_group)] = group_sizes.get(str(rollout_group), 0) + 1
+
+        # Every GRPO group must have exactly ROLLOUTS_PER_PROBLEM members
+        for gid, size in group_sizes.items():
+            if size != ROLLOUTS_PER_PROBLEM:
+                logger.warning(
+                    "GRPO group %s has %d rollouts, expected %d",
+                    gid, size, ROLLOUTS_PER_PROBLEM,
+                )
+                return {"valid": False, "reason": "invalid_group_size"}
 
         return {"valid": True}
 
@@ -1015,11 +1081,25 @@ class MinerValidator:
             total_inferences_in_file=0,
         )
 
-    def _create_invalid_file_result(
-        self, miner_hotkey: str, uid: int | None, reason: str
+    async def _create_invalid_file_result(
+        self, miner_hotkey: str, uid: int | None, reason: str, monitor: Any | None
     ) -> MinerResults:
-        """Create result for invalid file structure."""
-        logger.warning(f"Invalid file structure: {reason}")
+        """Create result for invalid file structure.
+
+        Emits per-UID Grafana gauges so structural rejections are visible
+        alongside normal validation failures (had_failure, rejection_reason).
+        """
+        uid_str = str(uid) if uid is not None else "unknown"
+        logger.warning("Rejected file: %s", reason)
+
+        if monitor:
+            try:
+                await monitor.log_gauge(f"{uid_str}/had_failure", 1.0)
+                await monitor.log_gauge(f"{uid_str}/file_rejected", 1.0)
+                await monitor.log_counter(f"validation/file_rejected/{reason}")
+            except Exception:
+                pass
+
         return MinerResults(
             hotkey=miner_hotkey,
             uid=uid,

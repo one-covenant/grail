@@ -493,7 +493,17 @@ class ValidationService:
         if self._subtensor is None:
             raise RuntimeError("Subtensor not initialized")
         target_window_hash = await self._subtensor.get_block_hash(target_window)  # type: ignore[misc]  # bittensor async stub
-        window_rand = await self._compute_window_randomness(target_window_hash, use_drand)
+
+        # Use the CURRENT window's block hash (not the target window's) for
+        # sampling randomness.  The current window starts at target_window +
+        # WINDOW_LENGTH, which is produced AFTER the miner's upload deadline.
+        # This prevents miners from predicting which groups will be sampled,
+        # even without drand.  target_window_hash is still used for env prompt
+        # derivation and consistency checks (miners need it during generation).
+        current_window_hash = await self._subtensor.get_block_hash(  # type: ignore[misc]
+            target_window + WINDOW_LENGTH
+        )
+        window_rand = await self._compute_window_randomness(current_window_hash, use_drand)
 
         # Compute upload deadline timestamp (start of the validator window)
         deadline_ts: float | None = None

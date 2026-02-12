@@ -292,6 +292,31 @@ def serialize_window_to_parquet(window_data: dict[str, Any]) -> bytes:
     return buffer.getvalue()
 
 
+def _validate_table_structure(table: pa.Table) -> None:
+    """Validate Arrow table structural integrity before expensive deserialization.
+
+    Uses O(1) columnar metadata checks (null_count, num_rows) to reject
+    malformed files instantly — before converting millions of rows to Python.
+
+    Raises:
+        ParquetError: If the table is structurally invalid
+    """
+    num_rows = table.num_rows
+
+    if num_rows == 0:
+        return  # Empty files are handled downstream
+
+    # Reject null rollout_group values.  Null rows can never be sampled but
+    # inflate total_inferences, enabling score-inflation exploits.
+    if "rollout_group" in table.column_names:
+        null_count = table.column("rollout_group").null_count
+        if null_count > 0:
+            raise ParquetError(
+                f"File contains {null_count:,} rows with null rollout_group "
+                f"(out of {num_rows:,} total) — rejecting malformed submission"
+            )
+
+
 def deserialize_parquet_to_window(data: bytes) -> dict[str, Any]:
     """Deserialize Parquet bytes back to window data dictionary.
 
@@ -305,7 +330,7 @@ def deserialize_parquet_to_window(data: bytes) -> dict[str, Any]:
         Window dictionary with 'inferences' list and metadata
 
     Raises:
-        ParquetError: If data is empty, too small, or corrupt
+        ParquetError: If data is empty, too small, corrupt, or structurally invalid
     """
     if not data or len(data) < _MIN_PARQUET_SIZE:
         raise ParquetError(f"Invalid Parquet data: {len(data) if data else 0} bytes")
@@ -315,6 +340,11 @@ def deserialize_parquet_to_window(data: bytes) -> dict[str, Any]:
         table = pq.read_table(buffer)
     except pa.ArrowException as e:
         raise ParquetError(f"Corrupt Parquet file: {e}") from e
+
+    # Fast structural validation at the Arrow level — O(1), before any
+    # Python row conversion.  Rejects null-group inflation and other
+    # malformed submissions instantly.
+    _validate_table_structure(table)
 
     # Extract window-level metadata
     metadata = table.schema.metadata or {}
