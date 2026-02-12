@@ -231,6 +231,11 @@ FAILURE_LOOKBACK_WINDOWS = 14
 # Files below this threshold are considered to have 0 rollouts and are filtered.
 MIN_ROLLOUT_FILE_SIZE_BYTES = 200
 
+# Maximum file size for valid rollout window files (bytes).
+# Files above this threshold are rejected before download to prevent
+# resource exhaustion from oversized submissions.
+MAX_ROLLOUT_FILE_SIZE_BYTES = 500 * 1024 * 1024  # 500 MB
+
 # ────────────────  GRAIL PROOF VERIFICATION  ────────────────
 
 # Top-K activation selection (focus on stable, important features)

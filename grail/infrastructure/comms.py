@@ -929,6 +929,7 @@ async def file_exists_with_deadline(
     use_write: bool = False,
     max_upload_time: float | None = None,
     min_size_bytes: int = 0,
+    max_size_bytes: int = 500 * 1024 * 1024,
 ) -> tuple[bool, bool, bool, float | None]:
     """Check existence, size, and whether the object violates an upload deadline.
 
@@ -937,7 +938,7 @@ async def file_exists_with_deadline(
     (exists_and_valid, was_late, too_small, upload_time)
         exists_and_valid: True if object exists, size >= min_size_bytes, and upload_time <= max_upload_time (when provided)
         was_late: True if object exists and is large enough but upload_time exceeded max_upload_time
-        too_small: True if object exists but size < min_size_bytes
+        too_small: True if object exists but size < min_size_bytes (also set for oversized files)
         upload_time: Float unix timestamp of LastModified if available
 
     Args:
@@ -946,6 +947,7 @@ async def file_exists_with_deadline(
         use_write: Whether to use write credentials
         max_upload_time: If provided, reject files uploaded after this timestamp
         min_size_bytes: Minimum file size in bytes (default: 0, no size check)
+        max_size_bytes: Maximum file size in bytes (default: 0, no size check)
     """
     try:
         client = await _get_cached_client(credentials, use_write)
@@ -967,14 +969,20 @@ async def file_exists_with_deadline(
             except Exception:
                 continue
 
-            # Check size requirement
+            # Check size requirements
+            size = response.get("ContentLength")
             if min_size_bytes > 0:
-                size = response.get("ContentLength")
                 if size is None or size < min_size_bytes:
                     logger.debug(
                         f"file_exists_with_deadline: {candidate} too small ({size} < {min_size_bytes})"
                     )
                     return False, False, True, None
+
+            if max_size_bytes > 0 and size is not None and size > max_size_bytes:
+                logger.warning(
+                    f"file_exists_with_deadline: {candidate} too large ({size} > {max_size_bytes})"
+                )
+                return False, False, True, None
 
             last_modified = response.get("LastModified")
             upload_time = float(last_modified.timestamp()) if last_modified else None
@@ -1143,9 +1151,8 @@ async def get_parquet_file(
         if data:
             return deserialize_parquet_to_window(data)
         return None
-    except ParquetError as e:
-        logger.warning(f"Corrupt Parquet file {key}: {e}")
-        return None
+    except ParquetError:
+        raise  # Let callers handle malformed files (e.g. trigger ban)
     except Exception as e:
         logger.debug(f"Failed to get parquet file {key}: {e}")
         return None

@@ -20,7 +20,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..infrastructure.chain import GrailChainManager
 from ..infrastructure.comms import get_parquet_file
-from ..shared.constants import MIN_ROLLOUT_FILE_SIZE_BYTES, ROLLOUTS_PER_PROBLEM
+from ..shared.constants import (
+    FAILURE_LOOKBACK_WINDOWS,
+    MAX_ROLLOUT_FILE_SIZE_BYTES,
+    MIN_ROLLOUT_FILE_SIZE_BYTES,
+    ROLLOUTS_PER_PROBLEM,
+)
 from ..shared.digest import compute_completion_digest
 from .context import ValidationContext
 from .pipeline import ValidationPipeline, get_hard_check_keys, get_soft_check_keys
@@ -159,10 +164,24 @@ class MinerValidator:
         uid = uid_by_hotkey.get(miner_hotkey)
 
         # Step 1: Fetch window file (with timing for aggregation)
+        # ParquetError is raised for structurally malformed files (e.g. null
+        # rollout_group rows).  A string return is a rejection reason (e.g.
+        # file_size_exceeded).  Both trigger a ban via _create_invalid_file_result.
+        from ..infrastructure.parquet_io import ParquetError
+
         t0 = time.monotonic()
-        file_data = await self._fetch_window_file(
-            miner_hotkey, window, credentials, chain_manager, uid, deadline_ts
-        )
+        try:
+            file_data = await self._fetch_window_file(
+                miner_hotkey, window, credentials, chain_manager, uid, deadline_ts
+            )
+        except ParquetError as e:
+            logger.warning("Corrupt Parquet file from miner: %s", e)
+            return await self._create_invalid_file_result(
+                miner_hotkey, uid, "corrupt_parquet", monitor
+            )
+
+        if isinstance(file_data, str):
+            return await self._create_invalid_file_result(miner_hotkey, uid, file_data, monitor)
         if file_data is not None and download_times is not None:
             download_times.append(time.monotonic() - t0)
 
@@ -282,13 +301,14 @@ class MinerValidator:
         chain_manager: GrailChainManager,
         uid: int | None,
         deadline_ts: float | None,
-    ) -> dict | None:
+    ) -> dict | str | None:
         """Fetch and download miner's window file, verifying deadline.
 
         Fetches Parquet-formatted window files for efficient validation.
 
         Returns:
-            Window data dict or None if not found/late/error
+            Window data dict on success, None if not found/late,
+            or a rejection reason string for malicious files (triggers ban).
         """
         from ..infrastructure.comms import file_exists_with_deadline
 
@@ -297,14 +317,19 @@ class MinerValidator:
         bucket_to_use = miner_bucket if miner_bucket else credentials
         uid_str = str(uid) if uid is not None else f"{miner_hotkey[:12]}..."
 
-        # Check existence with deadline validation and min size
-        exists, was_late, _, upload_time = await file_exists_with_deadline(
+        # Check existence with deadline validation and size limits
+        exists, was_late, bad_size, upload_time = await file_exists_with_deadline(
             key=filename,
             credentials=bucket_to_use,
             use_write=False,
             max_upload_time=deadline_ts,
             min_size_bytes=MIN_ROLLOUT_FILE_SIZE_BYTES,
+            max_size_bytes=MAX_ROLLOUT_FILE_SIZE_BYTES,
         )
+
+        if bad_size:
+            logger.warning("File for miner %s skipped: outside size limits", uid_str)
+            return None
 
         if not exists:
             logger.debug(f"No file found at {filename}")
@@ -386,7 +411,8 @@ class MinerValidator:
             if rollout_group is None:
                 logger.warning(
                     "Null rollout_group at row %d; rejecting file (%d total rows)",
-                    idx, len(inferences),
+                    idx,
+                    len(inferences),
                 )
                 return {"valid": False, "reason": "null_rollout_group"}
 
@@ -394,7 +420,9 @@ class MinerValidator:
             if inf.get("window_start") != window:
                 logger.warning(
                     "Window start mismatch at row %d: expected %s, got %s",
-                    idx, window, inf.get("window_start"),
+                    idx,
+                    window,
+                    inf.get("window_start"),
                 )
                 return {"valid": False, "reason": "window_start_mismatch"}
 
@@ -418,7 +446,9 @@ class MinerValidator:
             if size != ROLLOUTS_PER_PROBLEM:
                 logger.warning(
                     "GRPO group %s has %d rollouts, expected %d",
-                    gid, size, ROLLOUTS_PER_PROBLEM,
+                    gid,
+                    size,
+                    ROLLOUTS_PER_PROBLEM,
                 )
                 return {"valid": False, "reason": "invalid_group_size"}
 
@@ -1086,11 +1116,16 @@ class MinerValidator:
     ) -> MinerResults:
         """Create result for invalid file structure.
 
-        Emits per-UID Grafana gauges so structural rejections are visible
-        alongside normal validation failures (had_failure, rejection_reason).
+        Returns metrics with failure_flag=1 so the miner is banned for
+        FAILURE_LOOKBACK_WINDOWS via the existing rolling-failure mechanism
+        in ValidationService.  Also emits per-UID Grafana gauges.
         """
         uid_str = str(uid) if uid is not None else "unknown"
-        logger.warning("Rejected file: %s", reason)
+        logger.warning(
+            "🚫 Rejected file: %s — miner banned for %d windows",
+            reason,
+            FAILURE_LOOKBACK_WINDOWS,
+        )
 
         if monitor:
             try:
@@ -1100,11 +1135,25 @@ class MinerValidator:
             except Exception:
                 pass
 
+        metrics = ValidationMetrics(
+            valid_count=0,
+            checked_count=0,
+            total_inferences=0,
+            estimated_valid=0,
+            successful_rollouts=0,
+            estimated_successful=0,
+            unique_rollouts=0,
+            estimated_unique=0,
+            prompt_valid_count=0,
+            prompt_mismatch_count=0,
+            failure_flag=1,
+        )
+
         return MinerResults(
             hotkey=miner_hotkey,
             uid=uid,
             found_file=True,
-            metrics=None,
+            metrics=metrics.to_dict(),
             rollouts=[],
             processed_counts=(0, 0, 0, 0),
             digest_counter=None,
@@ -1136,9 +1185,13 @@ class MinerValidator:
             failure_flag=1,
         )
 
-        logger.info(
-            f"❌ Rejected uid={uid_str} hard={state['hard_failure']} "
-            f"soft={state['soft_failures']}/{state['checked_count']}"
+        logger.warning(
+            "🚫 Rejected uid=%s hard=%s soft=%s/%s — miner banned for %d windows",
+            uid_str,
+            state["hard_failure"],
+            state["soft_failures"],
+            state["checked_count"],
+            FAILURE_LOOKBACK_WINDOWS,
         )
 
         # Log failure metrics to monitor
