@@ -100,48 +100,48 @@ class TestCopycatTracker:
     def test_window_threshold_violation(self, tracker: CopycatTracker) -> None:
         """Flags miners exceeding window threshold."""
         tracker.reset_interval(0)
-        # miner_a: 10 rollouts, 6 shared with miner_b
-        # miner_b: 10 rollouts, 6 shared with miner_a
-        # Ratio: 6 / min(10, 10) = 0.6 > COPYCAT_WINDOW_THRESHOLD (0.5)
+        # miner_a: 100 rollouts, 6 shared with miner_b
+        # miner_b: 100 rollouts, 6 shared with miner_a
+        # Ratio: 6 / min(100, 100) = 0.06 > COPYCAT_WINDOW_THRESHOLD (0.05)
         miner_rollouts = {
-            "miner_a": (Counter({"shared": 6, "unique_a": 4}), 10),
-            "miner_b": (Counter({"shared": 6, "unique_b": 4}), 10),
+            "miner_a": (Counter({"shared": 6, "unique_a": 94}), 100),
+            "miner_b": (Counter({"shared": 6, "unique_b": 94}), 100),
         }
         w_cheat, w_det, _, _, _, _ = tracker.ingest_window(100, miner_rollouts)
         assert "miner_a" in w_cheat
         assert "miner_b" in w_cheat
         assert len(w_det) == 1
         assert w_det[0].shared == 6
-        assert w_det[0].ratio == 0.6
+        assert w_det[0].ratio == 0.06
 
     def test_window_below_threshold_no_violation(self, tracker: CopycatTracker) -> None:
         """No violation when overlap below window threshold."""
         tracker.reset_interval(0)
-        # Ratio: 4 / min(10, 10) = 0.4 < 0.5
+        # Ratio: 4 / min(100, 100) = 0.04 < 0.05
         miner_rollouts = {
-            "miner_a": (Counter({"shared": 4, "unique_a": 6}), 10),
-            "miner_b": (Counter({"shared": 4, "unique_b": 6}), 10),
+            "miner_a": (Counter({"shared": 4, "unique_a": 96}), 100),
+            "miner_b": (Counter({"shared": 4, "unique_b": 96}), 100),
         }
         w_cheat, w_det, _, _, w_all, _ = tracker.ingest_window(100, miner_rollouts)
         assert len(w_cheat) == 0
         assert len(w_det) == 0
         # But should appear in all_pairs
         assert len(w_all) == 1
-        assert w_all[0].ratio == 0.4
+        assert w_all[0].ratio == 0.04
 
     def test_interval_accumulation(self, tracker: CopycatTracker) -> None:
         """Interval-level detection accumulates across windows."""
         tracker.reset_interval(0)
-        # Accumulate windows with 8 shared each (0.8 per window, high overlap)
-        # Window threshold 0.5 triggers per-window, but we test interval (0.75)
+        # Each window: 4 shared out of 100 = 0.04 per window (below window threshold)
+        # but accumulated over 10 windows: 40 shared / 1000 total = 0.04 > 0.03
         rollouts = {
-            "miner_a": (Counter({"shared": 8, "unique": 2}), 10),
-            "miner_b": (Counter({"shared": 8, "unique": 2}), 10),
+            "miner_a": (Counter({"shared": 4, "unique_a": 96}), 100),
+            "miner_b": (Counter({"shared": 4, "unique_b": 96}), 100),
         }
         # Ingest multiple windows to accumulate interval overlap
         for i in range(10):
             _, _, i_cheat, i_det, _, _ = tracker.ingest_window(100 * i, rollouts)
-        # After 10 windows: 80 shared / 100 total = 0.8 > 0.75
+        # After 10 windows: 40 shared / 1000 total = 0.04 > 0.03
         assert "miner_a" in i_cheat
         assert "miner_b" in i_cheat
         assert i_det[0].ratio >= COPYCAT_INTERVAL_THRESHOLD
@@ -164,11 +164,11 @@ class TestCopycatTracker:
     def test_three_way_overlap(self, tracker: CopycatTracker) -> None:
         """Multiple miners sharing digests creates pairwise violations."""
         tracker.reset_interval(0)
-        # All three share same digest (severe copying)
+        # All three share 8 out of 100 = 0.08 > 0.05 (severe copying)
         miner_rollouts = {
-            "miner_a": (Counter({"shared_all": 8}), 10),
-            "miner_b": (Counter({"shared_all": 8}), 10),
-            "miner_c": (Counter({"shared_all": 8}), 10),
+            "miner_a": (Counter({"shared_all": 8, "unique_a": 92}), 100),
+            "miner_b": (Counter({"shared_all": 8, "unique_b": 92}), 100),
+            "miner_c": (Counter({"shared_all": 8, "unique_c": 92}), 100),
         }
         w_cheat, w_det, _, _, _, _ = tracker.ingest_window(100, miner_rollouts)
         # All three should be flagged (appears in 3 pairs)
@@ -181,18 +181,18 @@ class TestCopycatTracker:
     def test_asymmetric_counts(self, tracker: CopycatTracker) -> None:
         """Uses min(total_a, total_b) as denominator."""
         tracker.reset_interval(0)
-        # miner_a: 20 rollouts, 8 shared
-        # miner_b: 10 rollouts, 8 shared
-        # Ratio: 8 / min(20, 10) = 8 / 10 = 0.8 > 0.5
+        # miner_a: 200 rollouts, 8 shared
+        # miner_b: 100 rollouts, 8 shared
+        # Ratio: 8 / min(200, 100) = 8 / 100 = 0.08 > 0.05
         miner_rollouts = {
-            "miner_a": (Counter({"shared": 8, "unique_a": 12}), 20),
-            "miner_b": (Counter({"shared": 8, "unique_b": 2}), 10),
+            "miner_a": (Counter({"shared": 8, "unique_a": 192}), 200),
+            "miner_b": (Counter({"shared": 8, "unique_b": 92}), 100),
         }
         w_cheat, w_det, _, _, _, _ = tracker.ingest_window(100, miner_rollouts)
         assert "miner_a" in w_cheat
         assert "miner_b" in w_cheat
-        assert w_det[0].denominator == 10
-        assert w_det[0].ratio == 0.8
+        assert w_det[0].denominator == 100
+        assert w_det[0].ratio == 0.08
         # Verify threshold constants are in range
         assert 0.0 < COPYCAT_WINDOW_THRESHOLD < 1.0
         assert 0.0 < COPYCAT_INTERVAL_THRESHOLD < 1.0
@@ -236,19 +236,15 @@ class TestCopycatWithRealisticSAT:
     ) -> None:
         """Detects when miners copy SAT completions from each other."""
         tracker.reset_interval(0)
-        # alice & bob: 8 copied + 2 unique (80% overlap)
+        # alice & bob: 8 copied + 92 unique out of 100 (8% overlap > 5% threshold)
         # charlie: all unique
-        alice_data = make_rollout_data(
-            sat_prompt_tokens,
-            [999] * 8 + [1000, 1001],
-            [False] * 8 + [True, True],
-        )
-        bob_data = make_rollout_data(
-            sat_prompt_tokens,
-            [999] * 8 + [2000, 2001],
-            [False] * 8 + [True, True],
-        )
-        charlie_data = make_rollout_data(sat_prompt_tokens, list(range(3000, 3010)), [True] * 10)
+        alice_seeds = [999] * 8 + list(range(1000, 1092))
+        alice_flags = [False] * 8 + [True] * 92
+        bob_seeds = [999] * 8 + list(range(2000, 2092))
+        bob_flags = [False] * 8 + [True] * 92
+        alice_data = make_rollout_data(sat_prompt_tokens, alice_seeds, alice_flags)
+        bob_data = make_rollout_data(sat_prompt_tokens, bob_seeds, bob_flags)
+        charlie_data = make_rollout_data(sat_prompt_tokens, list(range(3000, 3100)), [True] * 100)
 
         miner_rollouts = {
             "alice": (Counter(alice_data), len(alice_data)),
@@ -258,7 +254,7 @@ class TestCopycatWithRealisticSAT:
 
         w_cheat, w_det, _, _, _, _ = tracker.ingest_window(100, miner_rollouts)
 
-        # alice and bob flagged (8/10 = 0.8 > 0.5), charlie not
+        # alice and bob flagged (8/100 = 0.08 > 0.05), charlie not
         assert "alice" in w_cheat and "bob" in w_cheat
         assert "charlie" not in w_cheat
         assert any({"alice", "bob"} == {v.miner_a, v.miner_b} for v in w_det)
@@ -272,24 +268,24 @@ class TestCopycatWithRealisticSAT:
         tokenizer = AutoTokenizer.from_pretrained(TEST_MODEL_ID)
         tracker.reset_interval(0)
 
-        # miner1 & miner2: 3 copied + 7 unique (30% overlap, below threshold)
+        # miner1 & miner2: 3 copied + 97 unique (3% overlap, below 5% threshold)
         # miner3: all unique
         miner_rollouts = {}
         for i, miner_id in enumerate(["miner1", "miner2", "miner3"]):
             prompt_tokens = tokenizer.encode(sat_prompts[i % len(sat_prompts)])
             if i < 2:
-                # 3 copied, 7 unique
-                seeds = [5555] * 3 + list(range(i * 1000, i * 1000 + 7))
-                flags = [False] * 3 + [True] * 7
+                # 3 copied, 97 unique
+                seeds = [5555] * 3 + list(range(i * 1000, i * 1000 + 97))
+                flags = [False] * 3 + [True] * 97
             else:
-                seeds = list(range(3000, 3010))
-                flags = [True] * 10
+                seeds = list(range(3000, 3100))
+                flags = [True] * 100
             digests = make_rollout_data(prompt_tokens, seeds, flags)
             miner_rollouts[miner_id] = (Counter(digests), len(digests))
 
         _, _, _, _, w_all, _ = tracker.ingest_window(200, miner_rollouts)
 
-        # 30% overlap < 50% threshold (not flagged)
+        # 3% overlap < 5% threshold (not flagged)
         pair = [v for v in w_all if {"miner1", "miner2"} == {v.miner_a, v.miner_b}]
         if pair:
             assert pair[0].ratio < COPYCAT_WINDOW_THRESHOLD

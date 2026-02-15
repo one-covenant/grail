@@ -37,8 +37,18 @@ from .miner_validator import FAILURE_FLAG_KEY
 logger = logging.getLogger(__name__)
 
 # Copycat detection thresholds
-COPYCAT_WINDOW_THRESHOLD = 0.5
-COPYCAT_INTERVAL_THRESHOLD = 0.75
+#
+# Calibrated from first principles for MBPP code-generation at temperature 0.7:
+# - Completion digests are SHA-256 of token IDs → exact token-for-token match required.
+# - At temp 0.7, even short canonical solutions (~15 tokens) have <1% per-pair
+#   match probability; longer solutions (~50+ tokens) are near zero.
+# - With 16 rollouts/problem, ~10% of MBPP problems are short enough for occasional
+#   exact matches → natural overlap baseline is ~1-2% of rollouts.
+# - Window threshold (5%): ~2.5× above natural ceiling; single-window data is noisier.
+# - Interval threshold (3%): accumulated across 12 windows, variance averages out,
+#   so we can be more sensitive to persistent low-level copying.
+COPYCAT_WINDOW_THRESHOLD = 0.05
+COPYCAT_INTERVAL_THRESHOLD = 0.03
 
 
 @dataclass(frozen=True)
