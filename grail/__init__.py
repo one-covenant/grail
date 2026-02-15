@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-__version__ = "0.0.46"
+__version__ = "0.0.49"
 
 from importlib import import_module
 from typing import Any
