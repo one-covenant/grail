@@ -14,6 +14,34 @@ logger = logging.getLogger(__name__)
 # Cache key: (env_id, split) -> TaskSource instance
 _TASK_SOURCE_CACHE: dict[tuple[str, str], Any] = {}
 
+# Minimal test_code for GPU warmup (exercises torch + basic model pattern)
+_WARMUP_TEST_CODE = """
+import torch
+import torch.nn as nn
+
+class Model(nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, x):
+        return torch.relu(x)
+
+def get_inputs():
+    return [torch.randn(4, 4)]
+
+def get_init_inputs():
+    return []
+
+def check_correctness(model_new_class):
+    model = model_new_class()
+    if torch.cuda.is_available():
+        model = model.cuda()
+    inputs = get_inputs()
+    if torch.cuda.is_available():
+        inputs = [x.cuda() for x in inputs]
+    output = model(*inputs)
+    return output.shape == inputs[0].shape
+"""
+
 
 def get_or_create_task_source(
     env_id: str,
@@ -71,6 +99,21 @@ def get_or_create_task_source(
             from .providers import HumanEvalTaskSource
 
             _TASK_SOURCE_CACHE[cache_key] = HumanEvalTaskSource()
+
+        elif env_id == "affine_trace":
+            from .affinetes.task_sources import TraceTaskSource
+
+            _TASK_SOURCE_CACHE[cache_key] = TraceTaskSource()
+
+        elif env_id == "affine_logic":
+            from .affinetes.task_sources import LogicTaskSource
+
+            _TASK_SOURCE_CACHE[cache_key] = LogicTaskSource()
+
+        elif env_id == "triton_kernel":
+            from .gpu_kernel.task_sources import KernelBenchTaskSource
+
+            _TASK_SOURCE_CACHE[cache_key] = KernelBenchTaskSource(split=split)
 
         else:
             raise ValueError(f"Unknown environment ID: {env_id}")
@@ -184,6 +227,86 @@ def create_env(
             task_source if task_source is not None else get_or_create_task_source(env_id, "test")
         )
         return PythonCodeEnv(dataset="humaneval", split="test", task_source=source)
+
+    if env_id == "affine_trace":
+        from .affinetes.trace_env import AffineTraceEnv
+
+        source = (
+            task_source if task_source is not None else get_or_create_task_source(env_id, split)
+        )
+        return AffineTraceEnv(task_source=source)
+
+    if env_id == "affine_logic":
+        from .affinetes.logic_env import AffineLogicEnv
+
+        source = (
+            task_source if task_source is not None else get_or_create_task_source(env_id, split)
+        )
+        return AffineLogicEnv(task_source=source)
+
+    if env_id == "triton_kernel":
+        from .gpu_kernel.env import TritonKernelEnv
+
+        if task_source is not None:
+            source = task_source
+        else:
+            # If dataset_path provided, use UnifiedKernelTaskSource (training);
+            # otherwise use KernelBenchTaskSource from HF (miners/validators).
+            dataset_path = env_params.get("dataset_path", "") if env_params else ""
+            if dataset_path:
+                from .gpu_kernel.task_sources import UnifiedKernelTaskSource
+
+                mode = env_params.get("mode", "rl") if env_params else "rl"
+                exclude_sources = env_params.get("exclude_sources") if env_params else None
+                weighted_sampling = env_params.get("weighted_sampling", False) if env_params else False
+                source = UnifiedKernelTaskSource(
+                    dataset_path=dataset_path,
+                    split=split,
+                    mode=mode,
+                    exclude_sources=exclude_sources,
+                    weighted_sampling=weighted_sampling,
+                )
+            else:
+                source = get_or_create_task_source(env_id, split)
+
+        level = env_params.get("level") if env_params else None
+        # gpu_eval from env_params (checkpoint metadata) or GRAIL_GPU_EVAL env var
+        gpu_eval = env_params.get("gpu_eval", False) if env_params else False
+        if not gpu_eval:
+            import os
+            gpu_eval = os.environ.get("GRAIL_GPU_EVAL", "false").lower() in ("1", "true", "yes")
+        eval_backend = env_params.get("eval_backend") if env_params else None
+
+        # Auto-initialize global eval backend if gpu_eval=True and none exists
+        if gpu_eval and eval_backend is None:
+            from .gpu_kernel.eval_backends import (
+                create_backend,
+                get_global_backend,
+                parse_gpu_ids,
+                set_global_backend,
+            )
+
+            if get_global_backend() is None:
+                gpu_ids = parse_gpu_ids()
+                if gpu_ids:
+                    backend = create_backend(gpu_ids=gpu_ids)
+                    backend.start()
+                    # Warmup JIT cache on eval GPUs to avoid cold compilation latency
+                    try:
+                        warmup_codes = [_WARMUP_TEST_CODE]
+                        backend.warmup(warmup_codes)
+                    except Exception:
+                        logger.warning("Eval backend warmup failed, continuing without warmup")
+                    set_global_backend(backend)
+                    logger.info("Auto-initialized eval backend on GPUs %s", gpu_ids)
+
+        return TritonKernelEnv(
+            split=split,
+            level=level,
+            task_source=source,
+            gpu_eval=gpu_eval,
+            eval_backend=eval_backend,
+        )
 
     raise ValueError(f"Unknown environment ID: {env_id}")
 

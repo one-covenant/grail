@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Protocol, cast, runtime_checkable
 
@@ -308,6 +309,92 @@ class PythonCodeEnvAdapter:
         return result
 
 
+@dataclass(frozen=True)
+class TritonKernelEnvAdapter:
+    """Triton kernel generation adapter backed by TritonKernelEnv.
+
+    Uses KernelBench dataset for GPU kernel optimization tasks.
+    Validates generated Triton kernels for structure and optionally correctness.
+    """
+
+    split: str = "train"
+    level: int | None = None
+
+    @property
+    def gpu_eval(self) -> bool:
+        """Read gpu_eval from GRAIL_GPU_EVAL env var (default False)."""
+        return os.environ.get("GRAIL_GPU_EVAL", "false").lower() in ("1", "true", "yes")
+
+    def build_prompt_ids(
+        self,
+        seed: int,
+        tokenizer: PreTrainedTokenizerBase,
+    ) -> list[int]:
+        from .factory import create_env
+
+        env = create_env(
+            "triton_kernel",
+            split=self.split,
+            env_params={"level": self.level, "gpu_eval": self.gpu_eval},
+        )
+        obs = env.reset(seed=seed)
+        messages = [{"role": m.role, "content": m.content} for m in obs.messages]
+
+        rendered = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        assert isinstance(rendered, str), "Expected apply_chat_template to return string"
+        toks = tokenizer(
+            rendered,
+            return_tensors="pt",
+            return_attention_mask=False,
+        )
+        input_ids_tensor = toks.input_ids[0]
+        ids: list[int] = [int(v) for v in input_ids_tensor.tolist()]
+
+        logger.debug(
+            ("VALIDATOR RENDERED PROMPT (TRITON): length=%d chars, tokens=%d\n%s, seed=%d"),
+            len(rendered),
+            len(ids),
+            rendered,
+            int(seed),
+        )
+
+        return ids
+
+    def evaluate_completion(
+        self,
+        seed: int,
+        completion_text: str,
+        tokenizer: PreTrainedTokenizerBase,
+    ) -> dict:
+        from .core import ChatMessage
+        from .factory import create_env
+
+        env = create_env(
+            "triton_kernel",
+            split=self.split,
+            env_params={"level": self.level, "gpu_eval": self.gpu_eval},
+        )
+        env.reset(seed=int(seed))
+
+        _obs, reward, _terminated, _truncated, info = env.step(
+            ChatMessage(role="assistant", content=completion_text)
+        )
+        success = bool(info.get("success", False))
+        result = {
+            "success": success,
+            "reward": float(reward),
+            "reward_components": info.get("reward_components", {}),
+            "has_code": info.get("has_code", False),
+            "syntax_valid": info.get("syntax_valid", False),
+            "structure_valid": info.get("structure_valid", False),
+        }
+        if info.get("exec_result") is not None:
+            result["exec_result"] = info["exec_result"]
+        return result
+
+
 _REGISTRY: dict[str, EnvAdapter] = {
     "sat": cast(EnvAdapter, SATEnvAdapter()),
     "gsm8k": cast(EnvAdapter, GSM8KEnvAdapter()),
@@ -315,6 +402,7 @@ _REGISTRY: dict[str, EnvAdapter] = {
     "mbpp": cast(EnvAdapter, PythonCodeEnvAdapter(dataset="mbpp", split="train")),
     "python_code": cast(EnvAdapter, PythonCodeEnvAdapter(dataset="mbpp", split="train")),
     "humaneval": cast(EnvAdapter, PythonCodeEnvAdapter(dataset="humaneval", split="test")),
+    "triton_kernel": cast(EnvAdapter, TritonKernelEnvAdapter()),
 }
 
 

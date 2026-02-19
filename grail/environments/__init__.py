@@ -38,6 +38,26 @@ from .providers import (  # noqa: F401
     MBPPTaskSource,
     SATTaskSource,
 )
+from .affinetes import (  # noqa: F401
+    AffineLogicEnv,
+    AffineTraceEnv,
+    LogicTaskSource,
+    TraceTaskSource,
+)
+from .gpu_kernel import (  # noqa: F401
+    EvalResult,
+    KernelBenchTaskSource,
+    KernelEvalBackend,
+    TritonKernelEnv,
+    TritonKernelParser,
+    TritonKernelRubric,
+    UnifiedKernelTaskSource,
+    create_backend,
+    create_triton_kernel_reward_vector,
+    get_global_backend,
+    set_global_backend,
+    validate_gpu_config,
+)
 from .python_code_env import PythonCodeEnv  # noqa: F401
 from .rubric import RewardVectorRubric  # noqa: F401
 from .sat_env import (  # noqa: F401
@@ -88,11 +108,30 @@ __all__ = [
     "MBPPTaskSource",
     "HumanEvalTaskSource",
     "RewardVectorRubric",
+    # Affinetes adapters
+    "AffineTraceEnv",
+    "AffineLogicEnv",
+    "TraceTaskSource",
+    "LogicTaskSource",
     # Environments
     "SATEnv",
     "GSM8KEnv",
     "MATHEnv",
     "PythonCodeEnv",
+    "TritonKernelEnv",
+    # GPU Kernel providers
+    "KernelBenchTaskSource",
+    "UnifiedKernelTaskSource",
+    "TritonKernelParser",
+    "TritonKernelRubric",
+    "create_triton_kernel_reward_vector",
+    # GPU Kernel eval backends
+    "EvalResult",
+    "KernelEvalBackend",
+    "create_backend",
+    "get_global_backend",
+    "set_global_backend",
+    "validate_gpu_config",
     # Factory functions (preferred)
     "create_env",
     "create_env_factory",
