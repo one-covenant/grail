@@ -1056,13 +1056,17 @@ class CodeExecutionPool:
                     os.environ["CUDA_VISIBLE_DEVICES"] = ""
                     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
-                    # max_tasks_per_child requires Python 3.11+; Pyright stubs may not include it
-                    self._executor = concurrent.futures.ProcessPoolExecutor(  # type: ignore[call-overload]
-                        max_workers=self.num_workers,
-                        mp_context=ctx,
-                        max_tasks_per_child=self.max_tasks_per_child,
-                        initializer=_pool_worker_init,  # Apply security sandbox
-                    )
+                    # max_tasks_per_child requires Python 3.11+
+                    executor_kwargs: dict[str, Any] = {
+                        "max_workers": self.num_workers,
+                        "mp_context": ctx,
+                        "initializer": _pool_worker_init,  # Apply security sandbox
+                    }
+                    # Only add max_tasks_per_child on Python 3.11+
+                    if sys.version_info >= (3, 11):
+                        executor_kwargs["max_tasks_per_child"] = self.max_tasks_per_child
+
+                    self._executor = concurrent.futures.ProcessPoolExecutor(**executor_kwargs)
 
                     # Warm up workers - force spawn and apply security now
                     # Timeout increased to 45s to handle high-load scenarios
