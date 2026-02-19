@@ -11,7 +11,11 @@ from typing import Any
 
 import pytest
 
+from grail.shared.thinking import get_thinking_config
+
 pytestmark = [pytest.mark.integration, pytest.mark.gpu_real_data]
+
+_cfg = get_thinking_config()
 
 
 # =============================================================================
@@ -247,8 +251,8 @@ class TestEndToEndEnv:
         assert len(obs.messages) == 1
 
         completion = (
-            "<start_working_out>\nOptimizing ReLU.\n</end_working_out>\n"
-            f"<SOLUTION>\n{_CORRECT_TRITON_CODE}\n</SOLUTION>"
+            f"{_cfg.thinking_open}\nOptimizing ReLU.\n{_cfg.thinking_close}\n"
+            f"{_cfg.solution_open}\n{_CORRECT_TRITON_CODE}\n{_cfg.solution_close}"
         )
         _, reward, terminated, _, info = env.step(
             ChatMessage(role="assistant", content=completion)
@@ -265,8 +269,8 @@ class TestEndToEndEnv:
         env.reset(seed=42)
 
         completion = (
-            "<start_working_out>\nOptimizing ReLU.\n</end_working_out>\n"
-            f"<SOLUTION>\n{_CORRECT_TRITON_CODE}\n</SOLUTION>"
+            f"{_cfg.thinking_open}\nOptimizing ReLU.\n{_cfg.thinking_close}\n"
+            f"{_cfg.solution_open}\n{_CORRECT_TRITON_CODE}\n{_cfg.solution_close}"
         )
         _, reward, _, _, info = env.step(
             ChatMessage(role="assistant", content=completion)
@@ -282,8 +286,8 @@ class TestEndToEndEnv:
         env.reset(seed=42)
 
         completion = (
-            "<start_working_out>\nOptimizing ReLU.\n</end_working_out>\n"
-            f"<SOLUTION>\n{_INCORRECT_TRITON_CODE}\n</SOLUTION>"
+            f"{_cfg.thinking_open}\nOptimizing ReLU.\n{_cfg.thinking_close}\n"
+            f"{_cfg.solution_open}\n{_INCORRECT_TRITON_CODE}\n{_cfg.solution_close}"
         )
         _, reward, _, _, info = env.step(
             ChatMessage(role="assistant", content=completion)
@@ -322,8 +326,8 @@ class TestMinerValidatorAgreement:
 
         backend = _get_subprocess_backend()
         completion = (
-            "<start_working_out>\nOptimizing.\n</end_working_out>\n"
-            f"<SOLUTION>\n{_CORRECT_TRITON_CODE}\n</SOLUTION>"
+            f"{_cfg.thinking_open}\nOptimizing.\n{_cfg.thinking_close}\n"
+            f"{_cfg.solution_open}\n{_CORRECT_TRITON_CODE}\n{_cfg.solution_close}"
         )
 
         rewards = []

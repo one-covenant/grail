@@ -22,8 +22,8 @@ class TritonKernelParser(ThinkingParser):
     - Presence of @triton.jit decorated functions
     - Proper imports (torch, triton)
 
-    Expected completion format:
-        <start_working_out>reasoning about optimization strategy...</end_working_out>
+    Expected completion format (tags depend on thinking mode):
+        <thinking_open>reasoning about optimization strategy...<thinking_close>
         <SOLUTION>
         import torch
         import triton

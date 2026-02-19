@@ -9,6 +9,8 @@ from typing import Protocol, cast, runtime_checkable
 
 from transformers import PreTrainedTokenizerBase
 
+from ..shared.chat_templates import apply_chat_template
+
 logger = logging.getLogger(__name__)
 
 
@@ -54,9 +56,7 @@ class SATEnvAdapter:
         obs = env.reset(seed=seed_int)
         messages = [{"role": m.role, "content": m.content} for m in obs.messages]
 
-        rendered = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+        rendered = apply_chat_template(tokenizer, messages)
         assert isinstance(rendered, str), "Expected apply_chat_template to return string"
         toks = tokenizer(
             rendered,
@@ -117,9 +117,7 @@ class GSM8KEnvAdapter:
         obs = env.reset(seed=seed)
         messages = [{"role": m.role, "content": m.content} for m in obs.messages]
 
-        rendered = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+        rendered = apply_chat_template(tokenizer, messages)
         assert isinstance(rendered, str), "Expected apply_chat_template to return string"
         toks = tokenizer(
             rendered,
@@ -184,9 +182,7 @@ class MATHEnvAdapter:
         obs = env.reset(seed=seed)
         messages = [{"role": m.role, "content": m.content} for m in obs.messages]
 
-        rendered = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+        rendered = apply_chat_template(tokenizer, messages)
         assert isinstance(rendered, str), "Expected apply_chat_template to return string"
         toks = tokenizer(
             rendered,
@@ -255,9 +251,7 @@ class PythonCodeEnvAdapter:
         obs = env.reset(seed=seed)
         messages = [{"role": m.role, "content": m.content} for m in obs.messages]
 
-        rendered = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+        rendered = apply_chat_template(tokenizer, messages)
         assert isinstance(rendered, str), "Expected apply_chat_template to return string"
         toks = tokenizer(
             rendered,
@@ -340,9 +334,7 @@ class TritonKernelEnvAdapter:
         obs = env.reset(seed=seed)
         messages = [{"role": m.role, "content": m.content} for m in obs.messages]
 
-        rendered = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+        rendered = apply_chat_template(tokenizer, messages)
         assert isinstance(rendered, str), "Expected apply_chat_template to return string"
         toks = tokenizer(
             rendered,

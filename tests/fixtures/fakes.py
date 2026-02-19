@@ -28,6 +28,7 @@ class DummyTokenizer:
         *,
         tokenize: bool = False,
         add_generation_prompt: bool = True,
+        **kwargs: Any,
     ) -> str:
         parts: list[str] = []
         for m in messages:

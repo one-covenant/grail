@@ -7,8 +7,8 @@ Strict behavior:
 - No defaults: all required envs must be set; otherwise raise with guidance
 - If a specific window is requested but missing, raise and list available
 
-Trainer uses Qwen chat template for its tokenizer. Validators/miners must not
-inject templates programmatically; they should rely on checkpoint/tokenizer.
+Trainer configures tokenizer template based on thinking mode. Validators/miners
+must not inject templates programmatically; they should rely on checkpoint/tokenizer.
 """
 
 from __future__ import annotations
@@ -19,9 +19,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from grail.model.provider import get_model, get_tokenizer
-from grail.shared.chat_templates import build_qwen_chat_template
+from grail.shared.chat_templates import configure_tokenizer
 from grail.shared.constants import TRAINER_USE_FLASH_ATTENTION
-from grail.shared.prompt_constants import SYSTEM_PROMPT
 
 ModelLoadMode = Literal["latest", "hf", "window"]
 
@@ -155,27 +154,27 @@ async def load_training_artifacts(
 ) -> tuple[Any, Any | None, Any]:
     """Load (train_model, ref_model, tokenizer) per provided specs.
 
-    - Trainer tokenizer installs Qwen chat template.
+    - Trainer tokenizer is configured based on thinking mode.
     - Train model loads with eval_mode=False and Flash Attention enabled; Ref model with eval_mode=True.
     - Flash Attention 2 is enabled for training to optimize performance.
     - Reference model loading can be skipped by setting load_ref_model=False (e.g., when KL is disabled).
     """
-    # Build trainer tokenizer with Qwen chat template
-    chat_template = build_qwen_chat_template(SYSTEM_PROMPT)
-
     # Resolve train source - enable Flash Attention for training if configured
     if train_spec.mode == "hf":
         train_model_id = train_spec.hf_id or ""
         train_model = get_model(
             train_model_id, eval_mode=False, use_flash_attention=TRAINER_USE_FLASH_ATTENTION
         )
-        tokenizer = get_tokenizer(train_model_id, chat_template=chat_template)
+        tokenizer = get_tokenizer(train_model_id)
     else:
         train_ckpt = await _resolve_checkpoint(train_spec, checkpoint_manager)
         train_model = get_model(
             str(train_ckpt), eval_mode=False, use_flash_attention=TRAINER_USE_FLASH_ATTENTION
         )
-        tokenizer = get_tokenizer(str(train_ckpt), chat_template=chat_template)
+        tokenizer = get_tokenizer(str(train_ckpt))
+
+    # Configure tokenizer template based on thinking mode
+    configure_tokenizer(tokenizer)
 
     ref_model: Any | None = None
     if load_ref_model:
@@ -198,10 +197,10 @@ def _guidance_missing_env(*, missing: str, context: str) -> str:
         "# Train latest, Ref HF\n"
         "export GRAIL_TRAIN_MODEL_MODE=latest\n"
         "export GRAIL_REF_MODEL_MODE=hf\n"
-        "export GRAIL_REF_MODEL_ID=Qwen/Qwen2.5-7B\n\n"
+        "export GRAIL_REF_MODEL_ID=Qwen/Qwen3-8B\n\n"
         "# Train HF, Ref window\n"
         "export GRAIL_TRAIN_MODEL_MODE=hf\n"
-        "export GRAIL_TRAIN_MODEL_ID=Qwen/Qwen2.5-7B\n"
+        "export GRAIL_TRAIN_MODEL_ID=Qwen/Qwen3-8B\n"
         "export GRAIL_REF_MODEL_MODE=window\n"
         "export GRAIL_REF_CHECKPOINT_WINDOW=72000\n"
     )

@@ -10,6 +10,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from grail.environments.affinetes.parsers import LogicCompletionParser
+from grail.shared.thinking import get_thinking_config
+
+_cfg = get_thinking_config()
 
 
 @pytest.fixture(scope="module")
@@ -20,7 +23,7 @@ def parser():
 class TestLogicCompletionParser:
     def test_extracts_answer(self, parser):
         completion = (
-            "<start_working_out>reason</end_working_out>\n<SOLUTION>)))(</SOLUTION>"
+            f"{_cfg.thinking_open}reason{_cfg.thinking_close}\n{_cfg.solution_open})))({_cfg.solution_close}"
         )
         parsed = parser.parse(completion, {})
         assert parsed["answer_text"] == ")))("""

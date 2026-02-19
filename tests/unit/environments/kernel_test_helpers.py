@@ -73,9 +73,12 @@ SYNTAX_ERROR_CODE = "def broken(:\n    return"
 
 def build_kernel_completion(thinking: str, code: str, trailing: str = "") -> str:
     """Build properly formatted kernel completion with thinking and solution tags."""
+    from grail.shared.thinking import get_thinking_config
+
+    cfg = get_thinking_config()
     return (
-        f"<start_working_out>\n{thinking}\n</end_working_out>\n"
-        f"<SOLUTION>\n{code}\n</SOLUTION>{trailing}"
+        f"{cfg.thinking_open}\n{thinking}\n{cfg.thinking_close}\n"
+        f"{cfg.solution_open}\n{code}\n{cfg.solution_close}{trailing}"
     )
 
 

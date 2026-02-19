@@ -23,6 +23,7 @@ from typing import Any, Protocol, cast
 import numpy as np
 import torch
 
+from ..shared.chat_templates import apply_chat_template as _apply_chat_template
 from ..shared.constants import GRAIL_PROOF_VERSION, LAYER_INDEX, MAX_NEW_TOKENS
 from ..shared.hf_compat import resolve_hidden_size
 from .core import ChatMessage, MultiTurnEnv
@@ -122,10 +123,10 @@ class GenerationParams:
     """
 
     max_new_tokens: int = MAX_NEW_TOKENS
-    temperature: float = 0.7
+    temperature: float = 0.6
     do_sample: bool = True
     top_p: float = 0.95
-    top_k: int | None = 50
+    top_k: int | None = 20
     repetition_penalty: float | None = 1.1
     trim_right_padding: bool = False
 
@@ -692,11 +693,11 @@ class AgentEnvLoop:
         tokenizer: Any,
         device: str = "cuda",
         max_new_tokens: int = MAX_NEW_TOKENS,
-        temperature: float = 0.7,
+        temperature: float = 0.6,
         *,
         do_sample: bool = True,
         top_p: float = 0.95,
-        top_k: int | None = 50,
+        top_k: int | None = 20,
         repetition_penalty: float | None = 1.1,
         gen_backend: TextGenBackend | None = None,
     ) -> None:
@@ -935,11 +936,7 @@ class AgentEnvLoop:
         self,
         messages: list[dict[str, str]],
     ) -> tuple[str, list[int]]:
-        rendered = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+        rendered = _apply_chat_template(self.tokenizer, messages)
         toks = self.tokenizer(rendered, return_tensors="pt", return_attention_mask=False)
         prompt_ids = toks.input_ids[0].tolist()
 

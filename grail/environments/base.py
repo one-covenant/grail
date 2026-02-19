@@ -30,80 +30,75 @@ class ThinkingParser(Parser):
     """Base parser for environments using thinking + answer tags.
 
     Provides shared logic for detecting thinking and answer blocks using
-    standard GRAIL prompt constants:
-    - Thinking: <start_working_out>...</end_working_out>
-    - Answer: <SOLUTION>...</SOLUTION>
+    mode-dependent thinking tags (configured via ThinkingConfig):
+    - Native mode: <think>...</think>
+    - Instructed mode: <start_working_out>...</end_working_out>
+    - Answer: <SOLUTION>...</SOLUTION> (both modes)
 
     Validates proper ordering: thinking should come before answer.
     Subclasses should override parse() to define complete env-specific parsing.
     """
 
     def __init__(self) -> None:
-        """Initialize with lazy-loaded prompt constants."""
+        """Initialize with lazy-loaded ThinkingConfig."""
         super().__init__()
-        self._constants_loaded = False
-        self._tag_think_open: str = ""
-        self._tag_think_close: str = ""
-        self._tag_solution_open: str = ""
-        self._tag_solution_close: str = ""
+        self._config: Any | None = None
 
-    def _ensure_constants_loaded(self) -> None:
-        """Lazy load prompt constants to avoid circular import."""
-        if self._constants_loaded:
-            return
+    def _ensure_config(self) -> Any:
+        """Lazy load ThinkingConfig to avoid circular import."""
+        if self._config is None:
+            from ..shared.thinking import get_thinking_config
 
-        from ..shared.prompt_constants import (
-            REASONING_END_TOKEN,
-            REASONING_START_TOKEN,
-            SOLUTION_END_TOKEN,
-            SOLUTION_START_TOKEN,
-        )
-
-        self._tag_think_open = REASONING_START_TOKEN
-        self._tag_think_close = REASONING_END_TOKEN
-        self._tag_solution_open = SOLUTION_START_TOKEN
-        self._tag_solution_close = SOLUTION_END_TOKEN
-        self._constants_loaded = True
+            self._config = get_thinking_config()
+        return self._config
 
     def _get_thinking_pattern(self) -> re.Pattern[str]:
-        """Get compiled thinking block pattern."""
-        self._ensure_constants_loaded()
+        """Get compiled thinking block pattern.
+
+        Opening tag is optional for native mode (model may not include
+        <think> in output if the template already added it).
+        """
+        c = self._ensure_config()
         return re.compile(
-            (rf"<{self._tag_think_open}>" r".*?" rf"</{self._tag_think_close}>"),
+            rf"(?:{re.escape(c.thinking_open)})?.*?{re.escape(c.thinking_close)}",
             re.IGNORECASE | re.DOTALL,
         )
 
     def _get_answer_pattern(self) -> re.Pattern[str]:
         """Get compiled answer block pattern."""
-        self._ensure_constants_loaded()
+        c = self._ensure_config()
         return re.compile(
             (
-                rf"<{self._tag_solution_open}>"
+                rf"{re.escape(c.solution_open)}"
                 r"(?P<content>.*?)"
-                rf"</{self._tag_solution_close}>"
+                rf"{re.escape(c.solution_close)}"
             ),
             re.IGNORECASE | re.DOTALL,
         )
 
     def _get_think_then_answer_pattern(self) -> re.Pattern[str]:
-        """Get compiled thinking→answer pattern (strict ordering)."""
-        self._ensure_constants_loaded()
+        """Get compiled thinking->answer pattern (strict ordering).
+
+        Opening thinking tag is optional for native mode.
+        """
+        c = self._ensure_config()
         return re.compile(
             (
-                rf"<{self._tag_think_open}>"
+                rf"(?:{re.escape(c.thinking_open)})?"
                 r".*?"
-                rf"</{self._tag_think_close}>"
+                rf"{re.escape(c.thinking_close)}"
                 r".*?"
-                rf"<{self._tag_solution_open}>"
+                rf"{re.escape(c.solution_open)}"
                 r"(?P<content>.*?)"
-                rf"</{self._tag_solution_close}>"
+                rf"{re.escape(c.solution_close)}"
             ),
             re.IGNORECASE | re.DOTALL,
         )
 
     def _detect_thinking_block(self, text: str) -> bool:
-        """Check if text contains thinking block. Returns True if found."""
-        return bool(self._get_thinking_pattern().search(text or ""))
+        """Check if text contains thinking block (detected by closing tag)."""
+        c = self._ensure_config()
+        return c.thinking_close.lower() in (text or "").lower()
 
     def _detect_answer_block(self, text: str) -> bool:
         """Check if text contains answer block. Returns True if found."""

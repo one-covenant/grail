@@ -31,7 +31,7 @@ class GSM8KCompletionParser(ThinkingParser):
     Provides GSM8K-specific answer parsing for math problems.
 
     Detects:
-    - Thinking blocks: <start_working_out>...</end_working_out> (inherited)
+    - Thinking blocks: mode-dependent tags (inherited from ThinkingParser)
     - Answer blocks: <SOLUTION>...</SOLUTION>
     - Numeric-only validation: ensures answer contains only digits, +/-, decimal point
     - Trailing text: tracks chars after </SOLUTION>

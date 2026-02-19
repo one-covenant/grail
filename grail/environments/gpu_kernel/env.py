@@ -15,10 +15,10 @@ Key features:
 - Anti-reward-hacking detection signals
 - Decomposed reward: compilation, structure, gpu_compilation, correctness, format, thinking
 
-Expected completion format:
-    <start_working_out>
+Expected completion format (tags depend on thinking mode):
+    <thinking_open>
     Analysis of the PyTorch operations and optimization strategy...
-    </end_working_out>
+    <thinking_close>
     <SOLUTION>
     import torch
     import triton

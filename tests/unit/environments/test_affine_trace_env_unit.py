@@ -12,6 +12,9 @@ from grail.environments.affinetes.rewards import (
     _compare_outputs_normalized,
     trace_correctness_reward,
 )
+from grail.shared.thinking import get_thinking_config
+
+_cfg = get_thinking_config()
 
 # Embedded test data (no HF dataset or submodule needed)
 TEST_CASES = [
@@ -29,7 +32,7 @@ def parser():
 class TestTraceCompletionParser:
     def test_extracts_answer_from_solution_tags(self, parser):
         completion = (
-            "<start_working_out>thinking</end_working_out>\n<SOLUTION>5</SOLUTION>"
+            f"{_cfg.thinking_open}thinking{_cfg.thinking_close}\n{_cfg.solution_open}5{_cfg.solution_close}"
         )
         parsed = parser.parse(completion, {})
         assert parsed["answer_text"] == "5"
