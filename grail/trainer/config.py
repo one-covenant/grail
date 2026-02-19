@@ -135,8 +135,8 @@ class EvalConfig:
     vllm_max_model_len: int = (
         4096  # Supports ~1k-token prompts plus 2k-token completions with headroom
     )
-    vllm_max_num_seqs: int = 160  # Optimized for H200 with 141GB mem
-    vllm_max_concurrent_requests: int = 128  # 75% of max_num_seqs for stability
+    vllm_max_num_seqs: int = 48  # Sized for A100 80GB with 0.60 util (~228K KV tokens / 4096 max_len)
+    vllm_max_concurrent_requests: int = 32  # ~67% of max_num_seqs for stability
     # SGLang server memory and concurrency tuning
     sglang_mem_fraction_static: float = 0.75  # Fraction of GPU memory for SGLang
     sglang_context_length: int = 1024  # Maximum sequence length
