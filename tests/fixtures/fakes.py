@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -108,6 +108,48 @@ class FakeBackend(TextGenBackend):
                 seq = seq + [pad_id, pad_id]
             results.append((seq, None))
         return results
+
+
+@dataclass
+class FakeEvalBackend:
+    """Deterministic eval backend for unit tests (no GPU needed).
+
+    Implements KernelEvalBackend protocol. Returns configurable results
+    based on constructor params or input patterns.
+    """
+
+    default_result: Any = field(default=None)
+    results_by_code: dict[str, Any] = field(default_factory=dict)
+    call_log: list[tuple[str, str]] = field(default_factory=list)
+    started: bool = False
+    warmed_up: bool = False
+
+    def __post_init__(self) -> None:
+        if self.default_result is None:
+            from grail.environments.gpu_kernel.eval_backends import EvalResult
+
+            self.default_result = EvalResult(correct=False, compiled=False)
+
+    def evaluate(self, test_code: str, triton_code: str) -> Any:
+        from grail.environments.gpu_kernel.eval_backends import EvalResult
+
+        self.call_log.append((test_code, triton_code))
+        result = self.results_by_code.get(triton_code, self.default_result)
+        if isinstance(result, EvalResult):
+            return result
+        return self.default_result
+
+    def evaluate_batch(self, items: list[tuple[str, str]]) -> list[Any]:
+        return [self.evaluate(tc, tr) for tc, tr in items]
+
+    def warmup(self, sample_test_codes: list[str]) -> None:
+        self.warmed_up = True
+
+    def start(self) -> None:
+        self.started = True
+
+    def shutdown(self) -> None:
+        self.started = False
 
 
 class DummyEnv(MultiTurnEnv):
