@@ -143,9 +143,12 @@ def get_default_env_config() -> tuple[str, dict[str, Any]]:
         )
         split = "train"
 
+    # GPU eval for kernel environments
+    gpu_eval = os.getenv("GRAIL_GPU_EVAL", "false").lower() in ("1", "true", "yes")
+
     env_params = {
         "split": split,
-        # Additional env-specific params can be added here
+        "gpu_eval": gpu_eval,
     }
     return env_id, env_params
 
