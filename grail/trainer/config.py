@@ -128,7 +128,7 @@ class EvalConfig:
     # - Lower gpu_memory_utilization (0.7–0.8) to leave room for graph allocation
     # - Set max_num_seqs low enough to fit in available KV cache (target ~24 for safety)
     # - Client concurrency at 50–70% of server max_num_seqs (avoid burst deadlock)
-    vllm_gpu_memory_utilization: float = 0.75  # Conservative for graph capture safety
+    vllm_gpu_memory_utilization: float = 0.60  # Reduced for Qwen3-8B (larger model needs more headroom)
     # KV cache precision control (vLLM): valid values typically include: 'auto', 'fp16', 'bf16', 'fp8'
     # Note: 'fp32' is generally not supported for KV cache in vLLM V1 and will be rejected.
     vllm_kv_cache_dtype: str = "auto"
