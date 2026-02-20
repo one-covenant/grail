@@ -363,19 +363,22 @@ def _eval_direct(test_code: str, triton_code: str, gpu_id: int | None) -> EvalRe
     """Run kernel eval directly in the current process (no subprocess spawn)."""
     import traceback
 
+    _log = logging.getLogger(__name__)
     triton_file: str | None = None
     test_file: str | None = None
+    t_total = time.monotonic()
     try:
         if gpu_id is not None:
             os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
         import torch  # noqa: F811
 
-        # Write test code to a temp file (test code may also define helper classes
-        # that Triton JIT might introspect, though less common)
+        # Phase 1: Execute test code
+        t0 = time.monotonic()
         test_globals: dict[str, Any] = {}
         _exec_code_from_file(test_code, test_globals)
         test_file = test_globals.get("__file__")
+        t_test = time.monotonic() - t0
 
         model_class = test_globals.get("Model")
         get_inputs = test_globals.get("get_inputs")
@@ -383,45 +386,73 @@ def _eval_direct(test_code: str, triton_code: str, gpu_id: int | None) -> EvalRe
         check_correctness = test_globals.get("check_correctness")
 
         if model_class is None or get_inputs is None:
+            _log.info("[kernel_eval] gpu=%s test_exec=%.2fs FAIL: missing_model_or_inputs", gpu_id, t_test)
             return EvalResult(correct=False, compiled=False, error="missing_model_or_inputs")
 
-        # Write Triton code to a temp file — required for @triton.jit which
-        # calls inspect.getsourcelines() and needs a real .py file
+        # Phase 2: Execute Triton code (JIT compilation happens here)
+        t0 = time.monotonic()
         gen_globals: dict[str, Any] = {}
         _exec_code_from_file(triton_code, gen_globals)
         triton_file = gen_globals.get("__file__")
+        t_triton_exec = time.monotonic() - t0
 
         model_new_class = gen_globals.get("ModelNew")
         if model_new_class is None:
+            _log.info(
+                "[kernel_eval] gpu=%s test_exec=%.2fs triton_exec=%.2fs FAIL: no_model_new_class",
+                gpu_id, t_test, t_triton_exec,
+            )
             return EvalResult(correct=False, compiled=True, error="no_model_new_class")
 
+        # Phase 3: Correctness check
         if check_correctness is not None:
+            t0 = time.monotonic()
             try:
                 result = check_correctness(model_new_class)
+                t_check = time.monotonic() - t0
                 if isinstance(result, dict):
+                    correct = result.get("correct", False)
+                    err = result.get("error")
+                    _log.info(
+                        "[kernel_eval] gpu=%s test=%.2fs triton=%.2fs check=%.2fs correct=%s err=%s total=%.2fs",
+                        gpu_id, t_test, t_triton_exec, t_check, correct, err, time.monotonic() - t_total,
+                    )
                     return EvalResult(
-                        correct=result.get("correct", False),
+                        correct=correct,
                         compiled=True,
-                        error=result.get("error"),
+                        error=err,
                         max_diff=result.get("max_diff"),
                     )
+                t_check = time.monotonic() - t0
+                _log.info(
+                    "[kernel_eval] gpu=%s test=%.2fs triton=%.2fs check=%.2fs correct=%s total=%.2fs",
+                    gpu_id, t_test, t_triton_exec, t_check, bool(result), time.monotonic() - t_total,
+                )
                 return EvalResult(
                     correct=bool(result),
                     compiled=True,
                     error=None if result else "check_correctness_failed",
                 )
             except Exception as e:
+                t_check = time.monotonic() - t0
+                _log.info(
+                    "[kernel_eval] gpu=%s test=%.2fs triton=%.2fs check=%.2fs FAIL: %s total=%.2fs",
+                    gpu_id, t_test, t_triton_exec, t_check, e, time.monotonic() - t_total,
+                )
                 return EvalResult(correct=False, compiled=True, error=f"check_correctness_error: {e}")
 
         # Fallback: manual correctness check
+        t0 = time.monotonic()
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         init_inputs = get_init_inputs() if get_init_inputs else []
         ref_model = model_class(*init_inputs).to(device).eval()
         new_model = model_new_class(*init_inputs).to(device).eval()
+        t_model_init = time.monotonic() - t0
 
         max_diff = 0.0
         tolerance = 1e-2
 
+        t0 = time.monotonic()
         for trial in range(3):
             torch.manual_seed(42 + trial)
             inputs = get_inputs()
@@ -437,6 +468,12 @@ def _eval_direct(test_code: str, triton_code: str, gpu_id: int | None) -> EvalRe
                 new_out = new_out[0]
 
             if ref_out.shape != new_out.shape:
+                t_trials = time.monotonic() - t0
+                _log.info(
+                    "[kernel_eval] gpu=%s test=%.2fs triton=%.2fs init=%.2fs trials=%.2fs FAIL: shape_mismatch %s vs %s total=%.2fs",
+                    gpu_id, t_test, t_triton_exec, t_model_init, t_trials,
+                    ref_out.shape, new_out.shape, time.monotonic() - t_total,
+                )
                 return EvalResult(
                     correct=False, compiled=True,
                     error=f"shape_mismatch: {ref_out.shape} vs {new_out.shape}",
@@ -445,13 +482,23 @@ def _eval_direct(test_code: str, triton_code: str, gpu_id: int | None) -> EvalRe
             diff = torch.max(torch.abs(ref_out.float() - new_out.float())).item()
             max_diff = max(max_diff, diff)
 
+        t_trials = time.monotonic() - t0
+        correct = max_diff <= tolerance
+        _log.info(
+            "[kernel_eval] gpu=%s test=%.2fs triton=%.2fs init=%.2fs trials=%.2fs correct=%s max_diff=%.6f total=%.2fs",
+            gpu_id, t_test, t_triton_exec, t_model_init, t_trials, correct, max_diff, time.monotonic() - t_total,
+        )
         return EvalResult(
-            correct=max_diff <= tolerance,
+            correct=correct,
             compiled=True,
-            error=None if max_diff <= tolerance else f"max_diff={max_diff:.6f}",
+            error=None if correct else f"max_diff={max_diff:.6f}",
             max_diff=max_diff,
         )
     except Exception as e:
+        _log.info(
+            "[kernel_eval] gpu=%s EXCEPTION after %.2fs: %s",
+            gpu_id, time.monotonic() - t_total, traceback.format_exc()[-500:],
+        )
         return EvalResult(correct=False, compiled=False, error=f"eval_error: {traceback.format_exc()}")
     finally:
         _cleanup_temp_file(triton_file)

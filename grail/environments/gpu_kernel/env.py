@@ -43,6 +43,7 @@ RLVR/GRPO Design Principles:
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import asdict
 from typing import Any
 
@@ -56,7 +57,7 @@ from .task_sources import KernelBenchTaskSource
 
 logger = logging.getLogger(__name__)
 
-# Prompt template based on KernelBench/KernelLLM format
+# Prompt template based on KernelBench/KernelLLM format with one-shot example
 _PROMPT_TEMPLATE = """\
 You write custom Triton kernels to replace the PyTorch operators in the given \
 architecture to get speedups.
@@ -67,7 +68,58 @@ operator fusion opportunities (combining multiple operators into a single \
 kernel, for example, combining matmul+relu), or algorithmic changes (such as \
 online softmax). You are only limited by your imagination.
 
-You are given the following architecture:
+Here is an example of how to write a Triton kernel to replace a PyTorch operator:
+
+Input architecture:
+```python
+import torch
+import torch.nn as nn
+
+class Model(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, a, b):
+        return a + b
+
+def get_inputs():
+    return [torch.randn(4, 4), torch.randn(4, 4)]
+
+def get_init_inputs():
+    return []
+```
+
+Output:
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def add_kernel(x_ptr, y_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    x = tl.load(x_ptr + offsets, mask=mask)
+    y = tl.load(y_ptr + offsets, mask=mask)
+    output = x + y
+    tl.store(output_ptr + offsets, output, mask=mask)
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, a, b):
+        output = torch.empty_like(a)
+        n_elements = output.numel()
+        grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']),)
+        add_kernel[grid](a, b, output, n_elements, BLOCK_SIZE=1024)
+        return output
+```
+
+Now, you are given the following architecture:
 
 ```python
 {pytorch_code}
@@ -80,10 +132,12 @@ is fully functional. Just output the new model code, no other text, and \
 NO testing code (no if __name__ == '__main__')!
 
 Your output MUST:
-1. Import torch and triton
+1. Include all necessary imports (torch, torch.nn, triton, triton.language)
 2. Define at least one @triton.jit kernel function
 3. Define a class called ModelNew that inherits from nn.Module
-4. Implement a forward() method that uses your custom Triton kernel(s)"""
+4. Implement a forward() method that uses your custom Triton kernel(s)
+
+IMPORTANT: Wrap your final code in <SOLUTION> and </SOLUTION> tags. Code outside these tags is ignored."""
 
 
 class TritonKernelEnv(SingleTurnEnv):
@@ -220,8 +274,14 @@ class TritonKernelEnv(SingleTurnEnv):
                     "error": "missing_test_code",
                 }
             else:
+                t0 = time.monotonic()
                 result = backend.evaluate(test_code, code)
+                eval_duration = time.monotonic() - t0
                 exec_result = asdict(result)
+                logger.info(
+                    "GPU kernel eval task=%s: compiled=%s correct=%s error=%s duration=%.2fs",
+                    self._task.id, result.compiled, result.correct, result.error, eval_duration,
+                )
 
         # Augment parsed dict with execution results
         parsed_with_exec = {
