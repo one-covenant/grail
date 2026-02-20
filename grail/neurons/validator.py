@@ -117,8 +117,8 @@ class ValidatorNeuron(BaseNeuron):
             monitor=monitor,
         )
 
-        # Start process-level watchdog (10 minutes stall timeout)
-        self.start_watchdog(timeout_seconds=(60 * 10))
+        # Start process-level watchdog (30 minutes stall timeout)
+        self.start_watchdog(timeout_seconds=(60 * 30))
 
         try:
             # Ensure chain manager is stopped during cooperative shutdown

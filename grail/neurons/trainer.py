@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ────────────────────────────────────────────────────────────────────────────────
 
-WATCHDOG_TIMEOUT_SECONDS = 60 * 15  # 15 minutes
+WATCHDOG_TIMEOUT_SECONDS = 60 * 60  # 60 minutes (eval with 8k generation can take 20-40 min)
 WATCHDOG_GRACE_SECONDS = 10
 
 ORCHESTRATION_SLEEP_SECONDS = 60

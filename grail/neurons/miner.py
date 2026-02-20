@@ -365,5 +365,5 @@ class MinerNeuron(BaseNeuron):
                     continue
 
         # Start process-level watchdog (handled by BaseNeuron)
-        self.start_watchdog(timeout_seconds=(60 * 10))
+        self.start_watchdog(timeout_seconds=(60 * 30))
         await _run()
