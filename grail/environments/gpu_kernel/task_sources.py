@@ -173,13 +173,15 @@ class KernelBenchTaskSource(TaskSource):
                 continue
 
             for sample in ds:
-                all_samples.append({
-                    "code": str(sample.get("code", "")),
-                    "level": int(sample.get("level", level_num)),
-                    "name": str(sample.get("name", "")),
-                    "problem_id": int(sample.get("problem_id", 0)),
-                    "original_split": str(sample.get("split", split_name)),
-                })
+                all_samples.append(
+                    {
+                        "code": str(sample.get("code", "")),
+                        "level": int(sample.get("level", level_num)),
+                        "name": str(sample.get("name", "")),
+                        "problem_id": int(sample.get("problem_id", 0)),
+                        "original_split": str(sample.get("split", split_name)),
+                    }
+                )
 
         # Deterministic train/val split per level
         rng = random.Random(_VAL_SEED)
@@ -271,8 +273,16 @@ class KernelBenchTaskSource(TaskSource):
 # Allowed difficulty / category values (must match research/datasets/schema.py)
 _VALID_DIFFICULTIES = ("easy", "medium", "hard", "expert")
 _VALID_CATEGORIES = (
-    "elementwise", "reduction", "matmul", "attention", "normalization",
-    "fused_op", "full_architecture", "memory_op", "scan", "sort",
+    "elementwise",
+    "reduction",
+    "matmul",
+    "attention",
+    "normalization",
+    "fused_op",
+    "full_architecture",
+    "memory_op",
+    "scan",
+    "sort",
 )
 
 
@@ -336,13 +346,9 @@ class UnifiedKernelTaskSource(TaskSource):
         if mode not in ("sft", "rl", "all"):
             raise ValueError(f"mode must be 'sft', 'rl', or 'all', got '{mode}'")
         if difficulty is not None and difficulty not in _VALID_DIFFICULTIES:
-            raise ValueError(
-                f"difficulty must be one of {_VALID_DIFFICULTIES}, got '{difficulty}'"
-            )
+            raise ValueError(f"difficulty must be one of {_VALID_DIFFICULTIES}, got '{difficulty}'")
         if category is not None and category not in _VALID_CATEGORIES:
-            raise ValueError(
-                f"category must be one of {_VALID_CATEGORIES}, got '{category}'"
-            )
+            raise ValueError(f"category must be one of {_VALID_CATEGORIES}, got '{category}'")
 
         self._dataset_path = dataset_path
         self._split = split
@@ -386,9 +392,7 @@ class UnifiedKernelTaskSource(TaskSource):
             if self._split == "val":
                 base_data = [base_data[i] for i in range(len(base_data)) if i in val_indices]
             else:  # train
-                base_data = [
-                    base_data[i] for i in range(len(base_data)) if i not in val_indices
-                ]
+                base_data = [base_data[i] for i in range(len(base_data)) if i not in val_indices]
 
         # Apply filters
         filtered = self._apply_filters(base_data)
@@ -403,8 +407,12 @@ class UnifiedKernelTaskSource(TaskSource):
         logger.info(
             "UnifiedKernelTaskSource: loaded %d rows (split=%s, mode=%s, "
             "source=%s, difficulty=%s, category=%s)",
-            len(self._data), self._split, self._mode,
-            self._source_filter, self._difficulty, self._category,
+            len(self._data),
+            self._split,
+            self._mode,
+            self._source_filter,
+            self._difficulty,
+            self._category,
         )
 
     def _load_base_data(self) -> list[dict[str, Any]]:
@@ -461,7 +469,8 @@ class UnifiedKernelTaskSource(TaskSource):
         # Mode filter
         if self._mode == "sft":
             filtered = [
-                r for r in filtered
+                r
+                for r in filtered
                 if r.get("reference_solution")
                 and (
                     r.get("solution_quality") is None
@@ -470,8 +479,7 @@ class UnifiedKernelTaskSource(TaskSource):
             ]
         elif self._mode == "rl":
             filtered = [
-                r for r in filtered
-                if r.get("test_code") and str(r.get("test_code", "")).strip()
+                r for r in filtered if r.get("test_code") and str(r.get("test_code", "")).strip()
             ]
 
         return filtered

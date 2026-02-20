@@ -11,6 +11,12 @@ Exports:
 - Legacy: Parser, RewardVector
 """
 
+from .affinetes import (  # noqa: F401
+    AffineLogicEnv,
+    AffineTraceEnv,
+    LogicTaskSource,
+    TraceTaskSource,
+)
 from .base import Parser, RewardVector  # noqa: F401
 from .core import (  # noqa: F401
     ChatMessage,
@@ -28,22 +34,6 @@ from .factory import (  # noqa: F401
     create_env_factory,
     get_or_create_task_source,
 )
-from .gsm8k_env import GSM8KEnv  # noqa: F401
-from .loop import AgentEnvLoop, GRPORollout  # noqa: F401
-from .math_hendrycks_env import MATHEnv  # noqa: F401
-from .providers import (  # noqa: F401
-    GSM8KTaskSource,
-    HumanEvalTaskSource,
-    MATHTaskSource,
-    MBPPTaskSource,
-    SATTaskSource,
-)
-from .affinetes import (  # noqa: F401
-    AffineLogicEnv,
-    AffineTraceEnv,
-    LogicTaskSource,
-    TraceTaskSource,
-)
 from .gpu_kernel import (  # noqa: F401
     EvalResult,
     KernelBenchTaskSource,
@@ -57,6 +47,16 @@ from .gpu_kernel import (  # noqa: F401
     get_global_backend,
     set_global_backend,
     validate_gpu_config,
+)
+from .gsm8k_env import GSM8KEnv  # noqa: F401
+from .loop import AgentEnvLoop, GRPORollout  # noqa: F401
+from .math_hendrycks_env import MATHEnv  # noqa: F401
+from .providers import (  # noqa: F401
+    GSM8KTaskSource,
+    HumanEvalTaskSource,
+    MATHTaskSource,
+    MBPPTaskSource,
+    SATTaskSource,
 )
 from .python_code_env import PythonCodeEnv  # noqa: F401
 from .rubric import RewardVectorRubric  # noqa: F401

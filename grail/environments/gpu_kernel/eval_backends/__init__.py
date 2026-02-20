@@ -130,14 +130,14 @@ def validate_gpu_config(gpu_ids: list[int], gpu_eval: bool) -> None:
 
     try:
         import torch
-    except ImportError:
+    except ImportError as e:
         raise RuntimeError(
             "gpu_eval=True but PyTorch is not installed.\n"
             "Options:\n"
             "  - Install PyTorch: pip install torch\n"
             "  - Set gpu_eval=False (max reward = 0.35)\n"
             "  - Use KERNEL_EVAL_BACKEND=modal (no local GPU needed)"
-        )
+        ) from e
 
     if not torch.cuda.is_available():
         raise RuntimeError(
@@ -231,6 +231,5 @@ def create_backend(
         return ModalBackend(timeout=timeout, **kwargs)
 
     raise ValueError(
-        f"Unknown kernel eval backend: {name!r}. "
-        f"Must be one of: subprocess, affinetes, modal"
+        f"Unknown kernel eval backend: {name!r}. Must be one of: subprocess, affinetes, modal"
     )

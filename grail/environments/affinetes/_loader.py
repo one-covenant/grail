@@ -98,7 +98,7 @@ def load_logic_task():
 def load_logic_verifiers():
     """Lazy-load verifier classes from affinetes lgc-v2 environment."""
     _ensure_env_path("primeintellect/lgc-v2")
-    from games.verifiers import verifier_classes  # type: ignore[import-not-found]
     from base.data import Data  # type: ignore[import-not-found]
+    from games.verifiers import verifier_classes  # type: ignore[import-not-found]
 
     return verifier_classes, Data

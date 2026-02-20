@@ -258,7 +258,9 @@ def create_env(
 
                 mode = env_params.get("mode", "rl") if env_params else "rl"
                 exclude_sources = env_params.get("exclude_sources") if env_params else None
-                weighted_sampling = env_params.get("weighted_sampling", False) if env_params else False
+                weighted_sampling = (
+                    env_params.get("weighted_sampling", False) if env_params else False
+                )
                 source = UnifiedKernelTaskSource(
                     dataset_path=dataset_path,
                     split=split,
@@ -274,6 +276,7 @@ def create_env(
         gpu_eval = env_params.get("gpu_eval", False) if env_params else False
         if not gpu_eval:
             import os
+
             gpu_eval = os.environ.get("GRAIL_GPU_EVAL", "false").lower() in ("1", "true", "yes")
         eval_backend = env_params.get("eval_backend") if env_params else None
 

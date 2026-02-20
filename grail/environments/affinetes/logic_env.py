@@ -54,7 +54,9 @@ class AffineLogicEnv(SingleTurnEnv):
 
         # Compute decomposed reward via rubric (context = ground_truth dict)
         reward, components = self._rubric.step_reward(
-            parsed=completion, context=ground_truth, turn_index=1,
+            parsed=completion,
+            context=ground_truth,
+            turn_index=1,
         )
 
         # Correctness for info dict (uses cached verifiers, inline)
@@ -71,9 +73,7 @@ class AffineLogicEnv(SingleTurnEnv):
                     from ._loader import load_logic_verifiers
 
                     _, Data = load_logic_verifiers()
-                    data = (
-                        Data.from_json(game_data) if isinstance(game_data, dict) else game_data
-                    )
+                    data = Data.from_json(game_data) if isinstance(game_data, dict) else game_data
                     success = verifier.verify(data, answer)
                 except Exception:
                     pass
@@ -87,9 +87,14 @@ class AffineLogicEnv(SingleTurnEnv):
             turn_index=1,
             task_meta={"task_id": self._task.id, **self._task.metadata},
         )
-        return obs, float(reward), False, {
-            "reward_components": components,
-            "success": success,
-            "termination_cause": "final",
-            "task_type": self._task.metadata.get("task_type", "unknown"),
-        }
+        return (
+            obs,
+            float(reward),
+            False,
+            {
+                "reward_components": components,
+                "success": success,
+                "termination_cause": "final",
+                "task_type": self._task.metadata.get("task_type", "unknown"),
+            },
+        )

@@ -54,7 +54,9 @@ class AffineTraceEnv(SingleTurnEnv):
 
         # Compute decomposed reward via rubric (context = expected_output string)
         reward, components = self._rubric.step_reward(
-            parsed=completion, context=expected, turn_index=1,
+            parsed=completion,
+            context=expected,
+            turn_index=1,
         )
 
         # Correctness for info dict (inline, no affinetes call)
@@ -70,8 +72,13 @@ class AffineTraceEnv(SingleTurnEnv):
             turn_index=1,
             task_meta={"task_id": self._task.id, **self._task.metadata},
         )
-        return obs, float(reward), False, {
-            "reward_components": components,
-            "success": success,
-            "termination_cause": "final",
-        }
+        return (
+            obs,
+            float(reward),
+            False,
+            {
+                "reward_components": components,
+                "success": success,
+                "termination_cause": "final",
+            },
+        )

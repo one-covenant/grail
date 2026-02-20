@@ -210,10 +210,7 @@ class TritonKernelRubric(Rubric):
             for fn in self._reward_vector.reward_functions:
                 rewards.append(fn(parsed, context))
 
-            total = sum(
-                r * w
-                for r, w in zip(rewards, self._reward_vector.weights, strict=False)
-            )
+            total = sum(r * w for r, w in zip(rewards, self._reward_vector.weights, strict=False))
 
             components = {
                 "compilation": rewards[0],

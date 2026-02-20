@@ -232,9 +232,7 @@ class TritonKernelEnv(SingleTurnEnv):
         )
         return obs
 
-    def _do_step(
-        self, action: ChatMessage
-    ) -> tuple[Observation, float, bool, dict[str, Any]]:
+    def _do_step(self, action: ChatMessage) -> tuple[Observation, float, bool, dict[str, Any]]:
         """Execute single turn: parse Triton code, validate, optionally run on GPU.
 
         Steps:
@@ -280,7 +278,11 @@ class TritonKernelEnv(SingleTurnEnv):
                 exec_result = asdict(result)
                 logger.info(
                     "GPU kernel eval task=%s: compiled=%s correct=%s error=%s duration=%.2fs",
-                    self._task.id, result.compiled, result.correct, result.error, eval_duration,
+                    self._task.id,
+                    result.compiled,
+                    result.correct,
+                    result.error,
+                    eval_duration,
                 )
 
         # Augment parsed dict with execution results

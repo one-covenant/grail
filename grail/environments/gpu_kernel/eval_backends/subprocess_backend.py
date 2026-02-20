@@ -23,6 +23,8 @@ import time
 from concurrent.futures import (
     BrokenExecutor,
     ProcessPoolExecutor,
+)
+from concurrent.futures import (
     TimeoutError as FuturesTimeoutError,
 )
 from typing import Any
@@ -110,7 +112,8 @@ class SubprocessBackend:
                 self._consecutive_failures = 0
                 logger.info(
                     "Pool restarted successfully (%d workers on GPUs %s)",
-                    self._max_workers, self._gpu_ids,
+                    self._max_workers,
+                    self._gpu_ids,
                 )
             except Exception as e:
                 logger.error("Failed to restart pool: %s", e)
@@ -167,9 +170,7 @@ class SubprocessBackend:
             for i, (test_code, triton_code) in enumerate(items):
                 gpu_id = self._gpu_ids[i % len(self._gpu_ids)]
                 try:
-                    future = self._pool.submit(
-                        _eval_worker, test_code, triton_code, gpu_id
-                    )
+                    future = self._pool.submit(_eval_worker, test_code, triton_code, gpu_id)
                     futures.append((future, i))
                 except BrokenExecutor:
                     self._record_failure("broken_pool_batch")
@@ -188,14 +189,10 @@ class SubprocessBackend:
                     results.append(result)
                 except FuturesTimeoutError:
                     self._record_failure("timeout_batch")
-                    results.append(
-                        EvalResult(correct=False, compiled=False, error="timeout")
-                    )
+                    results.append(EvalResult(correct=False, compiled=False, error="timeout"))
                 except Exception as e:
                     self._record_failure(str(e))
-                    results.append(
-                        EvalResult(correct=False, compiled=False, error=str(e))
-                    )
+                    results.append(EvalResult(correct=False, compiled=False, error=str(e)))
         else:
             # Sequential fallback (no pool)
             for test_code, triton_code in items:
@@ -238,7 +235,11 @@ class SubprocessBackend:
                 elapsed = time.monotonic() - start
                 logger.info(
                     "Warmup: %d/%d on GPU %d [%.1fs] compiled=%s",
-                    i + 1, n, gpu_id, elapsed, result.compiled,
+                    i + 1,
+                    n,
+                    gpu_id,
+                    elapsed,
+                    result.compiled,
                 )
             except Exception as e:
                 logger.warning("Warmup: %d/%d failed on GPU %d: %s", i + 1, n, gpu_id, e)
@@ -259,7 +260,8 @@ class SubprocessBackend:
             )
             logger.info(
                 "SubprocessBackend started: %d workers on GPUs %s",
-                self._max_workers, self._gpu_ids,
+                self._max_workers,
+                self._gpu_ids,
             )
         else:
             logger.info("SubprocessBackend started: no GPUs, eval will return compiled=False")
@@ -386,7 +388,9 @@ def _eval_direct(test_code: str, triton_code: str, gpu_id: int | None) -> EvalRe
         check_correctness = test_globals.get("check_correctness")
 
         if model_class is None or get_inputs is None:
-            _log.info("[kernel_eval] gpu=%s test_exec=%.2fs FAIL: missing_model_or_inputs", gpu_id, t_test)
+            _log.info(
+                "[kernel_eval] gpu=%s test_exec=%.2fs FAIL: missing_model_or_inputs", gpu_id, t_test
+            )
             return EvalResult(correct=False, compiled=False, error="missing_model_or_inputs")
 
         # Phase 2: Execute Triton code (JIT compilation happens here)
@@ -400,7 +404,9 @@ def _eval_direct(test_code: str, triton_code: str, gpu_id: int | None) -> EvalRe
         if model_new_class is None:
             _log.info(
                 "[kernel_eval] gpu=%s test_exec=%.2fs triton_exec=%.2fs FAIL: no_model_new_class",
-                gpu_id, t_test, t_triton_exec,
+                gpu_id,
+                t_test,
+                t_triton_exec,
             )
             return EvalResult(correct=False, compiled=True, error="no_model_new_class")
 
@@ -415,7 +421,13 @@ def _eval_direct(test_code: str, triton_code: str, gpu_id: int | None) -> EvalRe
                     err = result.get("error")
                     _log.info(
                         "[kernel_eval] gpu=%s test=%.2fs triton=%.2fs check=%.2fs correct=%s err=%s total=%.2fs",
-                        gpu_id, t_test, t_triton_exec, t_check, correct, err, time.monotonic() - t_total,
+                        gpu_id,
+                        t_test,
+                        t_triton_exec,
+                        t_check,
+                        correct,
+                        err,
+                        time.monotonic() - t_total,
                     )
                     return EvalResult(
                         correct=correct,
@@ -426,7 +438,12 @@ def _eval_direct(test_code: str, triton_code: str, gpu_id: int | None) -> EvalRe
                 t_check = time.monotonic() - t0
                 _log.info(
                     "[kernel_eval] gpu=%s test=%.2fs triton=%.2fs check=%.2fs correct=%s total=%.2fs",
-                    gpu_id, t_test, t_triton_exec, t_check, bool(result), time.monotonic() - t_total,
+                    gpu_id,
+                    t_test,
+                    t_triton_exec,
+                    t_check,
+                    bool(result),
+                    time.monotonic() - t_total,
                 )
                 return EvalResult(
                     correct=bool(result),
@@ -437,9 +454,16 @@ def _eval_direct(test_code: str, triton_code: str, gpu_id: int | None) -> EvalRe
                 t_check = time.monotonic() - t0
                 _log.info(
                     "[kernel_eval] gpu=%s test=%.2fs triton=%.2fs check=%.2fs FAIL: %s total=%.2fs",
-                    gpu_id, t_test, t_triton_exec, t_check, e, time.monotonic() - t_total,
+                    gpu_id,
+                    t_test,
+                    t_triton_exec,
+                    t_check,
+                    e,
+                    time.monotonic() - t_total,
                 )
-                return EvalResult(correct=False, compiled=True, error=f"check_correctness_error: {e}")
+                return EvalResult(
+                    correct=False, compiled=True, error=f"check_correctness_error: {e}"
+                )
 
         # Fallback: manual correctness check
         t0 = time.monotonic()
@@ -471,11 +495,18 @@ def _eval_direct(test_code: str, triton_code: str, gpu_id: int | None) -> EvalRe
                 t_trials = time.monotonic() - t0
                 _log.info(
                     "[kernel_eval] gpu=%s test=%.2fs triton=%.2fs init=%.2fs trials=%.2fs FAIL: shape_mismatch %s vs %s total=%.2fs",
-                    gpu_id, t_test, t_triton_exec, t_model_init, t_trials,
-                    ref_out.shape, new_out.shape, time.monotonic() - t_total,
+                    gpu_id,
+                    t_test,
+                    t_triton_exec,
+                    t_model_init,
+                    t_trials,
+                    ref_out.shape,
+                    new_out.shape,
+                    time.monotonic() - t_total,
                 )
                 return EvalResult(
-                    correct=False, compiled=True,
+                    correct=False,
+                    compiled=True,
                     error=f"shape_mismatch: {ref_out.shape} vs {new_out.shape}",
                 )
 
@@ -486,7 +517,14 @@ def _eval_direct(test_code: str, triton_code: str, gpu_id: int | None) -> EvalRe
         correct = max_diff <= tolerance
         _log.info(
             "[kernel_eval] gpu=%s test=%.2fs triton=%.2fs init=%.2fs trials=%.2fs correct=%s max_diff=%.6f total=%.2fs",
-            gpu_id, t_test, t_triton_exec, t_model_init, t_trials, correct, max_diff, time.monotonic() - t_total,
+            gpu_id,
+            t_test,
+            t_triton_exec,
+            t_model_init,
+            t_trials,
+            correct,
+            max_diff,
+            time.monotonic() - t_total,
         )
         return EvalResult(
             correct=correct,
@@ -494,12 +532,16 @@ def _eval_direct(test_code: str, triton_code: str, gpu_id: int | None) -> EvalRe
             error=None if correct else f"max_diff={max_diff:.6f}",
             max_diff=max_diff,
         )
-    except Exception as e:
+    except Exception:
         _log.info(
             "[kernel_eval] gpu=%s EXCEPTION after %.2fs: %s",
-            gpu_id, time.monotonic() - t_total, traceback.format_exc()[-500:],
+            gpu_id,
+            time.monotonic() - t_total,
+            traceback.format_exc()[-500:],
         )
-        return EvalResult(correct=False, compiled=False, error=f"eval_error: {traceback.format_exc()}")
+        return EvalResult(
+            correct=False, compiled=False, error=f"eval_error: {traceback.format_exc()}"
+        )
     finally:
         _cleanup_temp_file(triton_file)
         _cleanup_temp_file(test_file)
@@ -539,11 +581,13 @@ def _eval_worker_process(
         check_correctness = test_globals.get("check_correctness")
 
         if model_class is None or get_inputs is None:
-            conn.send({
-                "correct": False,
-                "compiled": False,
-                "error": "missing_model_or_inputs",
-            })
+            conn.send(
+                {
+                    "correct": False,
+                    "compiled": False,
+                    "error": "missing_model_or_inputs",
+                }
+            )
             return
 
         # Execute Triton code via temp file (required for @triton.jit)
@@ -553,11 +597,13 @@ def _eval_worker_process(
 
         model_new_class = gen_globals.get("ModelNew")
         if model_new_class is None:
-            conn.send({
-                "correct": False,
-                "compiled": True,
-                "error": "no_model_new_class",
-            })
+            conn.send(
+                {
+                    "correct": False,
+                    "compiled": True,
+                    "error": "no_model_new_class",
+                }
+            )
             return
 
         # Use check_correctness if available (preferred path)
@@ -567,23 +613,29 @@ def _eval_worker_process(
                 if isinstance(result, dict):
                     conn.send(result)
                 elif isinstance(result, bool):
-                    conn.send({
-                        "correct": result,
-                        "compiled": True,
-                        "error": None if result else "check_correctness_failed",
-                    })
+                    conn.send(
+                        {
+                            "correct": result,
+                            "compiled": True,
+                            "error": None if result else "check_correctness_failed",
+                        }
+                    )
                 else:
-                    conn.send({
-                        "correct": bool(result),
-                        "compiled": True,
-                        "error": None,
-                    })
+                    conn.send(
+                        {
+                            "correct": bool(result),
+                            "compiled": True,
+                            "error": None,
+                        }
+                    )
             except Exception as e:
-                conn.send({
-                    "correct": False,
-                    "compiled": True,
-                    "error": f"check_correctness_error: {e}",
-                })
+                conn.send(
+                    {
+                        "correct": False,
+                        "compiled": True,
+                        "error": f"check_correctness_error: {e}",
+                    }
+                )
             return
 
         # Fallback: manual correctness check (same as old _gpu_eval_worker)
@@ -600,10 +652,7 @@ def _eval_worker_process(
         for trial in range(n_trials):
             torch.manual_seed(42 + trial)
             inputs = get_inputs()
-            inputs = [
-                x.to(device) if isinstance(x, torch.Tensor) else x
-                for x in inputs
-            ]
+            inputs = [x.to(device) if isinstance(x, torch.Tensor) else x for x in inputs]
 
             with torch.no_grad():
                 ref_out = ref_model(*inputs)
@@ -615,40 +664,46 @@ def _eval_worker_process(
                 new_out = new_out[0]
 
             if ref_out.shape != new_out.shape:
-                conn.send({
-                    "correct": False,
-                    "compiled": True,
-                    "error": f"shape_mismatch: {ref_out.shape} vs {new_out.shape}",
-                    "max_diff": None,
-                })
+                conn.send(
+                    {
+                        "correct": False,
+                        "compiled": True,
+                        "error": f"shape_mismatch: {ref_out.shape} vs {new_out.shape}",
+                        "max_diff": None,
+                    }
+                )
                 return
 
             diff = torch.max(torch.abs(ref_out.float() - new_out.float())).item()
             max_diff = max(max_diff, diff)
 
         correct = max_diff <= tolerance
-        conn.send({
-            "correct": correct,
-            "compiled": True,
-            "error": None if correct else f"max_diff={max_diff:.6f}",
-            "max_diff": max_diff,
-        })
+        conn.send(
+            {
+                "correct": correct,
+                "compiled": True,
+                "error": None if correct else f"max_diff={max_diff:.6f}",
+                "max_diff": max_diff,
+            }
+        )
 
     except Exception as e:
         tb = traceback.format_exc()
-        conn.send({
-            "correct": False,
-            "compiled": False,
-            "error": f"{type(e).__name__}: {e}\n{tb}",
-            "max_diff": None,
-        })
+        conn.send(
+            {
+                "correct": False,
+                "compiled": False,
+                "error": f"{type(e).__name__}: {e}\n{tb}",
+                "max_diff": None,
+            }
+        )
     finally:
         _cleanup_temp_file(triton_file)
         _cleanup_temp_file(test_file)
 
 
 # Minimal Triton kernel for warmup (exercises JIT compilation)
-_WARMUP_TRITON_CODE = '''
+_WARMUP_TRITON_CODE = """
 import torch
 import triton
 import triton.language as tl
@@ -669,4 +724,4 @@ class ModelNew(torch.nn.Module):
         n = x.numel()
         _warmup_kernel[(n,)](x, out, n)
         return out
-'''
+"""

@@ -125,24 +125,16 @@ class TritonKernelParser(ThinkingParser):
 # =============================================================================
 
 # Pattern for class ModelNew definition
-_MODEL_NEW_PATTERN = re.compile(
-    r"class\s+ModelNew\s*\(", re.MULTILINE
-)
+_MODEL_NEW_PATTERN = re.compile(r"class\s+ModelNew\s*\(", re.MULTILINE)
 
 # Pattern for @triton.jit decorator
-_TRITON_JIT_PATTERN = re.compile(
-    r"@triton\.jit", re.MULTILINE
-)
+_TRITON_JIT_PATTERN = re.compile(r"@triton\.jit", re.MULTILINE)
 
 # Pattern for triton imports
-_TRITON_IMPORT_PATTERN = re.compile(
-    r"(?:import\s+triton|from\s+triton)", re.MULTILINE
-)
+_TRITON_IMPORT_PATTERN = re.compile(r"(?:import\s+triton|from\s+triton)", re.MULTILINE)
 
 # Pattern for torch imports
-_TORCH_IMPORT_PATTERN = re.compile(
-    r"(?:import\s+torch|from\s+torch)", re.MULTILINE
-)
+_TORCH_IMPORT_PATTERN = re.compile(r"(?:import\s+torch|from\s+torch)", re.MULTILINE)
 
 
 def _check_has_model_new(code: str) -> bool:
@@ -185,9 +177,7 @@ def extract_anti_hacking_signals(code: str) -> dict[str, bool]:
     )
 
     # Check: try-except wrapping (potential PyTorch fallback)
-    checks["has_try_except"] = bool(
-        re.search(r"try\s*:.*?except", code, re.DOTALL)
-    )
+    checks["has_try_except"] = bool(re.search(r"try\s*:.*?except", code, re.DOTALL))
 
     # Check: class body is just 'pass'
     checks["model_is_pass_only"] = bool(
