@@ -47,7 +47,7 @@ READY_MARKER_UPLOAD_BLOCKS = 1  # ~12 seconds at 12s/block
 TRAINER_LR = float(os.getenv("GRAIL_TRAINER_LR", "1e-6"))
 TRAINER_EPOCHS = int(os.getenv("GRAIL_TRAINER_EPOCHS", "1"))
 TRAINER_BATCH_SIZE = int(os.getenv("GRAIL_TRAINER_BATCH_SIZE", "16"))
-TRAINER_MAX_LENGTH = int(os.getenv("GRAIL_TRAINER_MAX_LENGTH", "3072"))
+TRAINER_MAX_LENGTH = int(os.getenv("GRAIL_TRAINER_MAX_LENGTH", "12288"))
 TRAINER_GRAD_CLIP = float(os.getenv("GRAIL_TRAINER_GRAD_CLIP", "0.5"))
 TRAINER_WARMUP_STEPS = int(os.getenv("GRAIL_TRAINER_WARMUP_STEPS", "10"))
 TRAINER_KL_COEF = float(os.getenv("GRAIL_TRAINER_KL_COEF", "0.02"))
@@ -91,7 +91,7 @@ TRAINER_MIN_TRUSTED_MINERS = int(os.getenv("GRAIL_TRAINER_MIN_TRUSTED_MINERS", "
 # Stage 1 (fast structural/cheap filters) happens before Stage 2.
 # Defaults are conservative so behavior is unchanged unless configured.
 GRPO_MAX_GROUPS = int(os.getenv("GRAIL_GRPO_MAX_GROUPS", "32"))
-GRPO_MAX_COMPLETION_TOKENS = int(os.getenv("GRAIL_GRPO_MAX_COMPLETION_TOKENS", "2048"))
+GRPO_MAX_COMPLETION_TOKENS = int(os.getenv("GRAIL_GRPO_MAX_COMPLETION_TOKENS", "8192"))
 
 # GRPO loss aggregation variant
 # Options: 'grpo' (per-sequence), 'bnpo' (global token avg),
@@ -133,7 +133,7 @@ DELTA_CHECKPOINT_RETENTION_LIMIT = int(os.getenv("GRAIL_DELTA_CHECKPOINT_RETENTI
 CLEANUP_INTERVAL_UPLOADS = int(os.getenv("GRAIL_CLEANUP_INTERVAL_UPLOADS", "10"))
 
 # Trainer identity used for checkpoint publication
-TRAINER_UID = 0
+TRAINER_UID = 80
 
 # ────────────────  LOGGING  ────────────────
 
@@ -148,7 +148,7 @@ LAYER_INDEX = -1
 
 # ────────────────  TERMINATION VALIDATION HPs  ────────────────
 
-MAX_NEW_TOKENS = 2048
+MAX_NEW_TOKENS = 8192
 
 # Must match rollout generator default
 MIN_EOS_PROBABILITY = 0.02  # Minimum probability for valid EOS termination
@@ -193,7 +193,7 @@ ROLLOUTS_PER_PROBLEM = 16
 # ────────────────  ENVIRONMENT CONFIGURATION  ────────────────
 
 # Current environment ID (validators use this constant, never trust miner data)
-CURRENT_ENV_ID = "mbpp"
+CURRENT_ENV_ID = "triton_kernel"
 
 # ────────────────  EMISSION BURN MECHANISM  ────────────────
 
@@ -339,8 +339,8 @@ assert DELTA_CHECKPOINT_RETENTION_LIMIT >= DELTA_BASE_INTERVAL, (
 # Upload worker poll interval (seconds between snapshot checks)
 SNAPSHOT_POLL_INTERVAL_SECONDS = int(os.getenv("GRAIL_SNAPSHOT_POLL_INTERVAL", "30"))
 
-# Training heartbeat timeout for liveness monitoring (15 minutes)
-TRAINING_HEARTBEAT_TIMEOUT_SECONDS = int(os.getenv("GRAIL_TRAINING_HEARTBEAT_TIMEOUT", "900"))
+# Training heartbeat timeout for liveness monitoring (60 minutes)
+TRAINING_HEARTBEAT_TIMEOUT_SECONDS = int(os.getenv("GRAIL_TRAINING_HEARTBEAT_TIMEOUT", "3600"))
 
 # Upload retry configuration
 UPLOAD_RETRY_MAX_ATTEMPTS = int(os.getenv("GRAIL_UPLOAD_RETRY_MAX_ATTEMPTS", "3"))

@@ -219,7 +219,7 @@ def get_default_generation_params() -> dict[str, Any]:
         Dictionary of validated generation parameters
     """
     return {
-        "max_tokens": _parse_int_param("GRAIL_GEN_MAX_TOKENS", "512", min_val=1, max_val=4096),
+        "max_tokens": _parse_int_param("GRAIL_GEN_MAX_TOKENS", "8192", min_val=1, max_val=16384),
         "temperature": _parse_float_param(
             "GRAIL_GEN_TEMPERATURE", "0.7", min_val=0.01, max_val=2.0
         ),

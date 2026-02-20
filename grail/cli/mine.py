@@ -600,7 +600,7 @@ async def generate_rollouts_for_window(
         """Clamp value to [min_val, max_val] range."""
         return max(min_val, min(value, max_val))
 
-    max_tokens = clamp(generation_params.get("max_tokens", 512), 1, 4096)
+    max_tokens = clamp(generation_params.get("max_tokens", 8192), 1, 16384)
     temperature = clamp(generation_params.get("temperature", 0.7), 0.01, 2.0)
     top_p = clamp(generation_params.get("top_p", 0.95), 0.0, 1.0)
     top_k = clamp(generation_params.get("top_k", 50), 0, 1000)
