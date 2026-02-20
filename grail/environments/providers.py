@@ -584,9 +584,10 @@ class MBPPTaskSource(TaskSource):
         from datasets import load_dataset
 
         # Load all three original splits
-        ds_train = load_dataset("mbpp", "full", split="train")
-        ds_validation = load_dataset("mbpp", "full", split="validation")
-        ds_test = load_dataset("mbpp", "full", split="test")
+        # Note: Dataset moved from "mbpp" to "google-research-datasets/mbpp"
+        ds_train = load_dataset("google-research-datasets/mbpp", "full", split="train")
+        ds_validation = load_dataset("google-research-datasets/mbpp", "full", split="validation")
+        ds_test = load_dataset("google-research-datasets/mbpp", "full", split="test")
 
         # Parse into standard format
         train_samples = self._parse_hf_samples(ds_train)
