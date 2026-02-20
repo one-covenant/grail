@@ -62,10 +62,11 @@ INSTRUCTED_CONFIG = ThinkingConfig(
     solution_open_token="SOLUTION",
     solution_close_token="SOLUTION",
     system_prompt=(
-        "You are given a problem.\n"
-        "Think about the problem and provide your working out.\n"
-        "Place it between <start_working_out> and </end_working_out>.\n"
-        "Then, provide your solution between <SOLUTION> and </SOLUTION>."
+        "You are given a problem. Think step by step.\n"
+        "Place your reasoning between <start_working_out> and </end_working_out>.\n"
+        "You may write and reason about code during your thinking.\n"
+        "After thinking, you MUST provide your final solution wrapped in <SOLUTION> and </SOLUTION> tags.\n"
+        "Any code outside <SOLUTION> tags will be ignored. Your answer will score 0 without these tags."
     ),
     use_custom_template=True,
     enable_thinking=False,
@@ -78,8 +79,10 @@ NATIVE_CONFIG = ThinkingConfig(
     solution_open_token="SOLUTION",
     solution_close_token="SOLUTION",
     system_prompt=(
-        "You are given a problem.\n"
-        "Provide your solution between <SOLUTION> and </SOLUTION>."
+        "You are given a problem. Think step by step.\n"
+        "You may write and reason about code during your thinking.\n"
+        "After thinking, you MUST provide your final solution wrapped in <SOLUTION> and </SOLUTION> tags.\n"
+        "Any code outside <SOLUTION> tags will be ignored. Your answer will score 0 without these tags."
     ),
     use_custom_template=False,
     enable_thinking=True,
