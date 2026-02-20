@@ -64,8 +64,9 @@ class EnvironmentPromptValidator(Validator):
                 ctx.checks[self.check_name] = False
                 return False
 
-            # Pass integer seed through; adapter handles type as needed
-            canonical_ids = adapter.build_prompt_ids(canonical_seed, ctx.tokenizer)
+            canonical_ids = adapter.build_prompt_ids(
+                canonical_seed, ctx.tokenizer, env_params=ctx.env_params or None
+            )
 
             tokens = ctx.commit.get("tokens", [])
             rollout = ctx.commit.get("rollout", {})
@@ -162,8 +163,9 @@ class EnvironmentEvaluationValidator(Validator):
                 logger.error(f"Invalid environment ID '{env_id}': {e}")
                 ctx.checks[self.check_name] = False
                 return False
-            # Pass integer seed through; adapter handles type as needed
-            result = adapter.evaluate_completion(canonical_seed, completion_text, ctx.tokenizer)
+            result = adapter.evaluate_completion(
+                canonical_seed, completion_text, ctx.tokenizer, env_params=ctx.env_params or None
+            )
             ctx.metadata["env_eval_result"] = result
             ctx.checks[self.check_name] = True
             return True

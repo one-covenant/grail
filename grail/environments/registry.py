@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Protocol, cast, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 from transformers import PreTrainedTokenizerBase
 
@@ -16,12 +16,18 @@ logger = logging.getLogger(__name__)
 
 @runtime_checkable
 class EnvAdapter(Protocol):
-    """Adapter interface for environment-specific logic used by validation."""
+    """Adapter interface for environment-specific logic used by validation.
+
+    ``env_params`` carries checkpoint-metadata overrides so that the validator
+    reproduces the exact same environment configuration the miner used.
+    When *None*, each adapter falls back to its own defaults.
+    """
 
     def build_prompt_ids(
         self,
         seed: int,
         tokenizer: PreTrainedTokenizerBase,
+        env_params: dict[str, Any] | None = None,
     ) -> list[int]: ...
 
     def evaluate_completion(
@@ -29,6 +35,7 @@ class EnvAdapter(Protocol):
         seed: int,
         completion_text: str,
         tokenizer: PreTrainedTokenizerBase,
+        env_params: dict[str, Any] | None = None,
     ) -> dict:
         """Return at least {"success": bool, "reward": float}.
 
@@ -48,12 +55,12 @@ class SATEnvAdapter:
         self,
         seed: int,
         tokenizer: PreTrainedTokenizerBase,
+        env_params: dict[str, Any] | None = None,
     ) -> list[int]:
         from .factory import create_env
 
-        env = create_env("sat")
-        seed_int = seed
-        obs = env.reset(seed=seed_int)
+        env = create_env("sat", env_params=env_params)
+        obs = env.reset(seed=seed)
         messages = [{"role": m.role, "content": m.content} for m in obs.messages]
 
         rendered = apply_chat_template(tokenizer, messages)
@@ -66,13 +73,12 @@ class SATEnvAdapter:
         input_ids_tensor = toks.input_ids[0]
         ids: list[int] = [int(v) for v in input_ids_tensor.tolist()]
 
-        # Debug: log rendered prompt text for comparison with miner
         logger.debug(
-            ("VALIDATOR RENDERED PROMPT: length=%d chars, tokens=%d\n%s, seed=%d"),
+            "VALIDATOR RENDERED PROMPT: length=%d chars, tokens=%d\n%s, seed=%d",
             len(rendered),
             len(ids),
             rendered,
-            seed_int,
+            seed,
         )
 
         return ids
@@ -82,18 +88,19 @@ class SATEnvAdapter:
         seed: int,
         completion_text: str,
         tokenizer: PreTrainedTokenizerBase,
+        env_params: dict[str, Any] | None = None,
     ) -> dict:
         from .core import ChatMessage
         from .factory import create_env
 
-        env = create_env("sat")
+        env = create_env("sat", env_params=env_params)
         env.reset(seed=int(seed))
 
         _, reward, _terminated, _truncated, info = env.step(
             ChatMessage(role="assistant", content=completion_text)
         )
         success = bool(info.get("success", False))
-        result = {"success": success, "reward": float(reward)}
+        result: dict[str, Any] = {"success": success, "reward": float(reward)}
         if "assignment" in info:
             result["assignment"] = info["assignment"]
         return result
@@ -110,10 +117,11 @@ class GSM8KEnvAdapter:
         self,
         seed: int,
         tokenizer: PreTrainedTokenizerBase,
+        env_params: dict[str, Any] | None = None,
     ) -> list[int]:
         from .factory import create_env
 
-        env = create_env("gsm8k")
+        env = create_env("gsm8k", env_params=env_params)
         obs = env.reset(seed=seed)
         messages = [{"role": m.role, "content": m.content} for m in obs.messages]
 
@@ -127,13 +135,12 @@ class GSM8KEnvAdapter:
         input_ids_tensor = toks.input_ids[0]
         ids: list[int] = [int(v) for v in input_ids_tensor.tolist()]
 
-        # Debug: log rendered prompt text for comparison with miner
         logger.debug(
-            ("VALIDATOR RENDERED PROMPT (GSM8K): length=%d chars, tokens=%d\n%s, seed=%d"),
+            "VALIDATOR RENDERED PROMPT (GSM8K): length=%d chars, tokens=%d\n%s, seed=%d",
             len(rendered),
             len(ids),
             rendered,
-            int(seed),
+            seed,
         )
 
         return ids
@@ -143,19 +150,19 @@ class GSM8KEnvAdapter:
         seed: int,
         completion_text: str,
         tokenizer: PreTrainedTokenizerBase,
+        env_params: dict[str, Any] | None = None,
     ) -> dict:
         from .core import ChatMessage
         from .factory import create_env
 
-        env = create_env("gsm8k")
+        env = create_env("gsm8k", env_params=env_params)
         env.reset(seed=int(seed))
 
         _obs, reward, _terminated, _truncated, info = env.step(
             ChatMessage(role="assistant", content=completion_text)
         )
         success = bool(info.get("success", False))
-        result = {"success": success, "reward": float(reward)}
-        # Include normalized answers for diagnostics if present
+        result: dict[str, Any] = {"success": success, "reward": float(reward)}
         if "gold_answer" in info:
             result["gold_answer"] = info["gold_answer"]
         if "pred_answer" in info:
@@ -175,10 +182,11 @@ class MATHEnvAdapter:
         self,
         seed: int,
         tokenizer: PreTrainedTokenizerBase,
+        env_params: dict[str, Any] | None = None,
     ) -> list[int]:
         from .factory import create_env
 
-        env = create_env("math")
+        env = create_env("math", env_params=env_params)
         obs = env.reset(seed=seed)
         messages = [{"role": m.role, "content": m.content} for m in obs.messages]
 
@@ -192,13 +200,12 @@ class MATHEnvAdapter:
         input_ids_tensor = toks.input_ids[0]
         ids: list[int] = [int(v) for v in input_ids_tensor.tolist()]
 
-        # Debug: log rendered prompt text for comparison with miner
         logger.debug(
-            ("VALIDATOR RENDERED PROMPT (MATH): length=%d chars, tokens=%d\n%s, seed=%d"),
+            "VALIDATOR RENDERED PROMPT (MATH): length=%d chars, tokens=%d\n%s, seed=%d",
             len(rendered),
             len(ids),
             rendered,
-            int(seed),
+            seed,
         )
 
         return ids
@@ -208,19 +215,19 @@ class MATHEnvAdapter:
         seed: int,
         completion_text: str,
         tokenizer: PreTrainedTokenizerBase,
+        env_params: dict[str, Any] | None = None,
     ) -> dict:
         from .core import ChatMessage
         from .factory import create_env
 
-        env = create_env("math")
+        env = create_env("math", env_params=env_params)
         env.reset(seed=int(seed))
 
         _obs, reward, _terminated, _truncated, info = env.step(
             ChatMessage(role="assistant", content=completion_text)
         )
         success = bool(info.get("success", False))
-        result = {"success": success, "reward": float(reward)}
-        # Include metadata for diagnostics
+        result: dict[str, Any] = {"success": success, "reward": float(reward)}
         if "gold_answer" in info:
             result["gold_answer"] = info["gold_answer"]
         if "pred_answer" in info:
@@ -239,15 +246,21 @@ class PythonCodeEnvAdapter:
     dataset: str = "mbpp"  # "mbpp" or "humaneval"
     split: str = "train"  # "train", "validation", "test"
 
+    def _effective_split(self, env_params: dict[str, Any] | None) -> str:
+        if env_params and "split" in env_params:
+            return str(env_params["split"])
+        return self.split
+
     def build_prompt_ids(
         self,
         seed: int,
         tokenizer: PreTrainedTokenizerBase,
+        env_params: dict[str, Any] | None = None,
     ) -> list[int]:
         from .factory import create_env
 
         env_id = "humaneval" if self.dataset == "humaneval" else "mbpp"
-        env = create_env(env_id, split=self.split)
+        env = create_env(env_id, split=self._effective_split(env_params), env_params=env_params)
         obs = env.reset(seed=seed)
         messages = [{"role": m.role, "content": m.content} for m in obs.messages]
 
@@ -261,13 +274,12 @@ class PythonCodeEnvAdapter:
         input_ids_tensor = toks.input_ids[0]
         ids: list[int] = [int(v) for v in input_ids_tensor.tolist()]
 
-        # Debug: log rendered prompt text for comparison with miner
         logger.debug(
-            ("VALIDATOR RENDERED PROMPT (PYTHON): length=%d chars, tokens=%d\n%s, seed=%d"),
+            "VALIDATOR RENDERED PROMPT (PYTHON): length=%d chars, tokens=%d\n%s, seed=%d",
             len(rendered),
             len(ids),
             rendered,
-            int(seed),
+            seed,
         )
 
         return ids
@@ -277,25 +289,25 @@ class PythonCodeEnvAdapter:
         seed: int,
         completion_text: str,
         tokenizer: PreTrainedTokenizerBase,
+        env_params: dict[str, Any] | None = None,
     ) -> dict:
         from .core import ChatMessage
         from .factory import create_env
 
         env_id = "humaneval" if self.dataset == "humaneval" else "mbpp"
-        env = create_env(env_id, split=self.split)
+        env = create_env(env_id, split=self._effective_split(env_params), env_params=env_params)
         env.reset(seed=int(seed))
 
         _obs, reward, _terminated, _truncated, info = env.step(
             ChatMessage(role="assistant", content=completion_text)
         )
         success = bool(info.get("success", False))
-        result = {
+        result: dict[str, Any] = {
             "success": success,
             "reward": float(reward),
             "tests_passed": info.get("tests_passed", 0),
             "tests_total": info.get("tests_total", 0),
         }
-        # Include diagnostics
         if "syntax_valid" in info:
             result["syntax_valid"] = info["syntax_valid"]
         if "has_code" in info:
@@ -309,27 +321,51 @@ class TritonKernelEnvAdapter:
 
     Uses KernelBench dataset for GPU kernel optimization tasks.
     Validates generated Triton kernels for structure and optionally correctness.
+
+    When ``env_params`` is supplied (from checkpoint metadata), those values
+    take precedence over the adapter's own defaults and ``GRAIL_GPU_EVAL``.
+    This ensures the validator evaluates under the same configuration the
+    miner used.
     """
 
     split: str = "train"
     level: int | None = None
 
-    @property
-    def gpu_eval(self) -> bool:
-        """Read gpu_eval from GRAIL_GPU_EVAL env var (default False)."""
-        return os.environ.get("GRAIL_GPU_EVAL", "false").lower() in ("1", "true", "yes")
+    def _build_env_params(self, env_params: dict[str, Any] | None) -> dict[str, Any]:
+        """Merge checkpoint env_params over adapter defaults.
+
+        Precedence (highest wins): env_params > adapter fields > env var.
+        """
+        gpu_eval_default = os.environ.get("GRAIL_GPU_EVAL", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        merged: dict[str, Any] = {
+            "level": self.level,
+            "gpu_eval": gpu_eval_default,
+        }
+        if env_params:
+            merged.update(env_params)
+        return merged
+
+    def _effective_split(self, env_params: dict[str, Any] | None) -> str:
+        if env_params and "split" in env_params:
+            return str(env_params["split"])
+        return self.split
 
     def build_prompt_ids(
         self,
         seed: int,
         tokenizer: PreTrainedTokenizerBase,
+        env_params: dict[str, Any] | None = None,
     ) -> list[int]:
         from .factory import create_env
 
         env = create_env(
             "triton_kernel",
-            split=self.split,
-            env_params={"level": self.level, "gpu_eval": self.gpu_eval},
+            split=self._effective_split(env_params),
+            env_params=self._build_env_params(env_params),
         )
         obs = env.reset(seed=seed)
         messages = [{"role": m.role, "content": m.content} for m in obs.messages]
@@ -345,11 +381,11 @@ class TritonKernelEnvAdapter:
         ids: list[int] = [int(v) for v in input_ids_tensor.tolist()]
 
         logger.debug(
-            ("VALIDATOR RENDERED PROMPT (TRITON): length=%d chars, tokens=%d\n%s, seed=%d"),
+            "VALIDATOR RENDERED PROMPT (TRITON): length=%d chars, tokens=%d\n%s, seed=%d",
             len(rendered),
             len(ids),
             rendered,
-            int(seed),
+            seed,
         )
 
         return ids
@@ -359,14 +395,15 @@ class TritonKernelEnvAdapter:
         seed: int,
         completion_text: str,
         tokenizer: PreTrainedTokenizerBase,
+        env_params: dict[str, Any] | None = None,
     ) -> dict:
         from .core import ChatMessage
         from .factory import create_env
 
         env = create_env(
             "triton_kernel",
-            split=self.split,
-            env_params={"level": self.level, "gpu_eval": self.gpu_eval},
+            split=self._effective_split(env_params),
+            env_params=self._build_env_params(env_params),
         )
         env.reset(seed=int(seed))
 
@@ -374,7 +411,7 @@ class TritonKernelEnvAdapter:
             ChatMessage(role="assistant", content=completion_text)
         )
         success = bool(info.get("success", False))
-        result = {
+        result: dict[str, Any] = {
             "success": success,
             "reward": float(reward),
             "reward_components": info.get("reward_components", {}),
