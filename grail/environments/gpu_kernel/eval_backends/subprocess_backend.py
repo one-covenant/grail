@@ -37,6 +37,26 @@ logger = logging.getLogger(__name__)
 _CONSECUTIVE_FAILURE_THRESHOLD = 3  # Restart pool after N consecutive failures
 _MAX_RESTARTS = 5  # Give up restarting after N attempts
 
+# CUDA sticky error patterns — these corrupt the CUDA context permanently.
+# The only recovery is killing the worker process and starting fresh.
+_CUDA_STICKY_PATTERNS = (
+    "illegal memory access",
+    "device-side assert",
+    "an illegal instruction",
+    "unspecified launch failure",
+    "cudaErrorIllegalAddress",
+    "cudaErrorAssert",
+    "cudaErrorLaunchFailure",
+)
+
+
+def _is_cuda_sticky_error(error: str | None) -> bool:
+    """Check if an error indicates a CUDA sticky error that corrupts the context."""
+    if error is None:
+        return False
+    error_lower = error.lower()
+    return any(p.lower() in error_lower for p in _CUDA_STICKY_PATTERNS)
+
 
 class SubprocessBackend:
     """GPU kernel evaluation backend with resilient process pool.
@@ -144,6 +164,12 @@ class SubprocessBackend:
             try:
                 future = self._pool.submit(_eval_worker, test_code, triton_code, gpu_id)
                 result = future.result(timeout=self._timeout)
+                # CUDA sticky errors (illegal memory access, device-side assert)
+                # poison the worker's CUDA context. Treat these as pool failures
+                # so the pool restarts with fresh workers.
+                if _is_cuda_sticky_error(result.error):
+                    self._record_failure(f"cuda_sticky: {result.error}")
+                    return result
                 self._record_success()
                 return result
             except FuturesTimeoutError:
@@ -185,7 +211,10 @@ class SubprocessBackend:
             for future, _idx in futures:
                 try:
                     result = future.result(timeout=self._timeout)
-                    self._record_success()
+                    if _is_cuda_sticky_error(result.error):
+                        self._record_failure(f"cuda_sticky: {result.error}")
+                    else:
+                        self._record_success()
                     results.append(result)
                 except FuturesTimeoutError:
                     self._record_failure("timeout_batch")
@@ -452,6 +481,7 @@ def _eval_direct(test_code: str, triton_code: str, gpu_id: int | None) -> EvalRe
                 )
             except Exception as e:
                 t_check = time.monotonic() - t0
+                error_str = str(e)
                 _log.info(
                     "[kernel_eval] gpu=%s test=%.2fs triton=%.2fs check=%.2fs FAIL: %s total=%.2fs",
                     gpu_id,
@@ -461,6 +491,15 @@ def _eval_direct(test_code: str, triton_code: str, gpu_id: int | None) -> EvalRe
                     e,
                     time.monotonic() - t_total,
                 )
+                # CUDA sticky errors corrupt the CUDA context permanently.
+                # Kill this worker so the pool replaces it with a fresh process.
+                if _is_cuda_sticky_error(error_str):
+                    _log.error(
+                        "[kernel_eval] gpu=%s CUDA sticky error detected, terminating worker: %s",
+                        gpu_id,
+                        error_str[:200],
+                    )
+                    os._exit(1)
                 return EvalResult(
                     correct=False, compiled=True, error=f"check_correctness_error: {e}"
                 )
@@ -533,15 +572,21 @@ def _eval_direct(test_code: str, triton_code: str, gpu_id: int | None) -> EvalRe
             max_diff=max_diff,
         )
     except Exception:
+        tb = traceback.format_exc()
         _log.info(
             "[kernel_eval] gpu=%s EXCEPTION after %.2fs: %s",
             gpu_id,
             time.monotonic() - t_total,
-            traceback.format_exc()[-500:],
+            tb[-500:],
         )
-        return EvalResult(
-            correct=False, compiled=False, error=f"eval_error: {traceback.format_exc()}"
-        )
+        # CUDA sticky errors in any phase → kill the worker
+        if _is_cuda_sticky_error(tb):
+            _log.error(
+                "[kernel_eval] gpu=%s CUDA sticky error in eval, terminating worker",
+                gpu_id,
+            )
+            os._exit(1)
+        return EvalResult(correct=False, compiled=False, error=f"eval_error: {tb}")
     finally:
         _cleanup_temp_file(triton_file)
         _cleanup_temp_file(test_file)
