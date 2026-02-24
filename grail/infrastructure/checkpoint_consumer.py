@@ -164,6 +164,8 @@ class CheckpointManager:
         self._metadata_cache: dict[tuple[int, str], CheckpointMetadata] = {}
         self._download_locks: dict[int, asyncio.Lock] = {}
         self._fallback_attempted: set[int] = set()
+        self._last_cache_task: asyncio.Task[None] | None = None
+        self._last_cache_window: int | None = None
 
     # ----------------------------- High-level API --------------------------- #
 
@@ -424,11 +426,12 @@ class CheckpointManager:
                 target_window,
             )
 
-            # Optionally cache the updated checkpoint to disk for future cold starts
-            # (async, non-blocking - don't wait for it)
-            asyncio.create_task(
+            # Cache the updated checkpoint to disk for future cold starts.
+            # Store the task so callers (e.g. pipeline weight sync) can await it.
+            self._last_cache_task = asyncio.create_task(
                 self._cache_model_state_async(reconstructed, metadata, target_window)
             )
+            self._last_cache_window = target_window
 
             return True
 
@@ -439,6 +442,28 @@ class CheckpointManager:
                 exc,
             )
             return False
+
+    async def await_cache_complete(self) -> Path | None:
+        """Wait for the last cache task to finish and return the cached path.
+
+        Used by the pipeline weight sync to get the disk path for reloading
+        the generation server after a fast-path delta update.
+
+        Returns:
+            Path to the cached checkpoint directory, or None if no cache
+            was written or the path does not exist.
+        """
+        if self._last_cache_task is not None:
+            try:
+                await self._last_cache_task
+            except Exception as exc:
+                logger.debug("Cache task failed: %s", exc)
+            self._last_cache_task = None
+
+        if self._last_cache_window is not None:
+            path = self.cache_root / f"checkpoint-{self._last_cache_window}"
+            return path if path.exists() else None
+        return None
 
     async def load_or_update_model(
         self,
@@ -1419,10 +1444,23 @@ class CheckpointManager:
         """
         try:
             # List all checkpoint directories
+            bucket_id = comms.get_bucket_id(self.credentials, use_write=False)
+            cred_type = type(self.credentials).__name__
+            logger.debug(
+                "get_latest_ready_checkpoint: listing bucket=%s cred_type=%s before_window=%s",
+                bucket_id,
+                cred_type,
+                before_window,
+            )
             keys = await comms.list_bucket_files(
                 CHECKPOINT_PREFIX,
                 credentials=self.credentials,
                 use_write=False,
+            )
+            logger.debug(
+                "get_latest_ready_checkpoint: found %d keys, READY markers: %s",
+                len(keys),
+                [k for k in keys if "/READY-" in k],
             )
 
             # Parse all READY-{ready_window} markers
