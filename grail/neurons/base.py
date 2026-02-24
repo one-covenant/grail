@@ -26,6 +26,7 @@ import bittensor as bt
 from ..infrastructure.network import create_subtensor
 from ..logging_utils import dump_asyncio_stacks
 from ..shared.constants import WINDOW_LENGTH
+from ..shared.subnet import get_own_uid_on_subnet
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,40 @@ class BaseNeuron:
     async def run(self) -> None:
         """Entry point for subclasses to implement their main loop."""
         raise NotImplementedError
+
+    async def ensure_registered(
+        self,
+        wallet: bt.wallet,
+        netuid: int,
+        role: str = "neuron",
+    ) -> int:
+        """Verify hotkey is registered on-chain and return its UID.
+
+        Raises SystemExit if not registered — the process cannot function
+        without a valid on-chain identity.
+        """
+        subtensor = await self.get_subtensor()
+        uid = await get_own_uid_on_subnet(subtensor, netuid, wallet.hotkey.ss58_address)
+        if uid is None:
+            logger.error(
+                "Hotkey %s is NOT registered on subnet %d. "
+                "Register with: btcli subnet register --netuid %d --wallet.name %s --wallet.hotkey %s",
+                wallet.hotkey.ss58_address,
+                netuid,
+                netuid,
+                wallet.name,
+                wallet.hotkey.ss58_address,
+            )
+            raise SystemExit(1)
+
+        logger.info(
+            "%s registered on subnet %d as UID %d (hotkey: %s)",
+            role.capitalize(),
+            netuid,
+            uid,
+            wallet.hotkey.ss58_address,
+        )
+        return uid
 
     async def get_subtensor(self) -> bt.subtensor:
         """Get or create the shared subtensor instance.

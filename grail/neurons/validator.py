@@ -70,6 +70,9 @@ class ValidatorNeuron(BaseNeuron):
         subtensor = await self.get_subtensor()
         logger.info("✅ Connected to Bittensor network")
 
+        # Fail fast if hotkey is not registered on the subnet
+        await self.ensure_registered(wallet, NETUID, role="validator")
+
         # Load credentials
         credentials = load_r2_credentials()
 

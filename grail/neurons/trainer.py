@@ -1088,31 +1088,26 @@ class TrainerNeuron(BaseNeuron):
 
     async def _initialize_chain_manager(self) -> None:
         """Initialize chain manager for miner data fetching."""
-        try:
-            subtensor = await self.get_subtensor()
-            metagraph = await subtensor.metagraph(NETUID)
+        # Fail fast if hotkey is not registered on the subnet
+        await self.ensure_registered(self._context.wallet, NETUID, role="trainer")
 
-            config = SimpleNamespace(netuid=NETUID)
-            chain_manager = GrailChainManager(
-                config,
-                self._context.wallet,
-                metagraph,
-                subtensor,
-                self._context.credentials,
-            )
+        subtensor = await self.get_subtensor()
+        metagraph = await subtensor.metagraph(NETUID)
 
-            await chain_manager.initialize()
-            self._context.chain_manager = chain_manager
-            logger.info("Initialized chain manager for trainer lifetime")
+        config = SimpleNamespace(netuid=NETUID)
+        chain_manager = GrailChainManager(
+            config,
+            self._context.wallet,
+            metagraph,
+            subtensor,
+            self._context.credentials,
+        )
 
-            self.register_shutdown_callback(self._cleanup_chain_manager)
+        await chain_manager.initialize()
+        self._context.chain_manager = chain_manager
+        logger.info("Initialized chain manager for trainer lifetime")
 
-        except Exception as exc:
-            logger.warning(
-                "Failed to initialize chain manager: %s; will continue with default credentials",
-                exc,
-            )
-            self._context.chain_manager = None
+        self.register_shutdown_callback(self._cleanup_chain_manager)
 
     def _cleanup_chain_manager(self) -> None:
         """Clean up chain manager on shutdown."""
