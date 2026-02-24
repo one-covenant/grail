@@ -28,25 +28,71 @@ KERNELBENCH_LEVELS = (1, 2, 3, 4)
 _VAL_FRACTION = 0.2
 _VAL_SEED = 42
 
+# ---------------------------------------------------------------------------
+# Kernel evaluation constants
+# ---------------------------------------------------------------------------
+# Used by _STANDARD_CHECK_CORRECTNESS (embedded as literals in the exec'd
+# string) and by the subprocess_backend.py fallback path (imported directly).
+# Keep both locations in sync when changing these values.
+
+KERNEL_EVAL_SEED = 42
+"""RNG seed for deterministic model weight init and input generation.
+
+Matches KernelBench's default ``seed_num=42``.  Called via
+``torch.manual_seed`` / ``torch.cuda.manual_seed`` before constructing
+each model so that ``nn.Linear``, ``nn.Conv2d``, etc. produce identical
+random weights in both ``Model`` and ``ModelNew``."""
+
+KERNEL_EVAL_TOLERANCE = 1e-2
+"""Absolute tolerance for output comparison (max element-wise diff).
+
+Looser than KernelBench's fp32 default (1e-4) to absorb cross-GPU
+numerical differences in the decentralized miner/validator setting.
+Triton autotuning, CUDNN algorithm selection, and floating-point
+accumulation order vary across GPU instances."""
+
+KERNEL_EVAL_NUM_TRIALS = 3
+"""Number of correctness trials with different random inputs.
+
+KernelBench uses 5; we use 3 to reduce per-eval subprocess overhead
+(~2s per trial) while still catching non-deterministic failures."""
+
 # Standard check_correctness() function appended to KernelBench code as test_code.
 # KernelBench `code` already contains Model, get_inputs(), get_init_inputs().
 # This adds the check_correctness() function needed by the eval backend.
+#
+# IMPORTANT: literal values below must match KERNEL_EVAL_* constants above.
 _STANDARD_CHECK_CORRECTNESS = '''
 def check_correctness(model_new_cls):
-    """Check if ModelNew produces correct outputs vs Model reference."""
+    """Check if ModelNew produces correct outputs vs Model reference.
+
+    Seeds RNG before each model construction so nn.Linear, nn.Conv2d, etc.
+    produce identical random weights (matches KernelBench methodology).
+    """
     import torch
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    _SEED = 42       # KERNEL_EVAL_SEED
+    _TOLERANCE = 1e-2 # KERNEL_EVAL_TOLERANCE
+    _N_TRIALS = 3     # KERNEL_EVAL_NUM_TRIALS
+
     init_inputs = get_init_inputs() if get_init_inputs else []
+
+    # Seed before constructing EACH model so parameterized layers
+    # (nn.Linear, nn.Conv2d, nn.Parameter(torch.randn(...)), etc.)
+    # produce identical random weights.
+    torch.manual_seed(_SEED)
+    torch.cuda.manual_seed(_SEED)
     ref_model = Model(*init_inputs).to(device).eval()
+
+    torch.manual_seed(_SEED)
+    torch.cuda.manual_seed(_SEED)
     new_model = model_new_cls(*init_inputs).to(device).eval()
 
-    n_trials = 3
     max_diff = 0.0
-    tolerance = 1e-2
 
-    for trial in range(n_trials):
-        torch.manual_seed(42 + trial)
+    for trial in range(_N_TRIALS):
+        torch.manual_seed(_SEED + trial)
         inputs = get_inputs()
         inputs = [x.to(device) if isinstance(x, torch.Tensor) else x for x in inputs]
 
@@ -70,7 +116,7 @@ def check_correctness(model_new_cls):
         diff = torch.max(torch.abs(ref_out.float() - new_out.float())).item()
         max_diff = max(max_diff, diff)
 
-    correct = max_diff <= tolerance
+    correct = max_diff <= _TOLERANCE
     return {
         "correct": correct,
         "compiled": True,

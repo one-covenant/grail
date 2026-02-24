@@ -1,15 +1,21 @@
-"""Subprocess-based GPU evaluation backend.
+"""Subprocess-isolated GPU evaluation backend.
 
-Uses a ProcessPoolExecutor with spawn context for persistent GPU workers.
-Workers run kernel evaluations directly (no nested subprocess), reusing the
-CUDA context across calls for speed. The pool is monitored for health — if
-consecutive failures exceed a threshold, the pool is torn down and recreated.
+Every kernel evaluation runs in a **fresh spawned subprocess** with its own
+CUDA context.  This guarantees that a CUDA sticky error (illegal memory
+access, device-side assert, …) in one kernel can never poison subsequent
+evaluations — each subprocess is born clean and dies after one job.
 
-Fallback: when the pool is unavailable (during restart or if no GPUs configured),
-evaluations run in isolated one-shot subprocesses.
+Batch evaluation runs subprocesses in parallel via a ThreadPoolExecutor
+(threads just wait on their child process; the real GPU work is in the
+subprocess).  Concurrency is bounded by the number of configured GPUs.
 
-Note: Triton's @jit decorator requires source code from a real .py file
-(it calls inspect.getsourcelines). We write code to temp files before exec.
+Transient CUDA errors are automatically retried (up to 3 attempts) using
+``tenacity``.  Non-CUDA errors (NameError, shape mismatch, …) are
+legitimate failures and are **not** retried.
+
+Note: Triton's ``@jit`` decorator requires source code from a real ``.py``
+file (it calls ``inspect.getsourcelines``).  We write code to temp files
+before ``exec()``.
 """
 
 from __future__ import annotations
@@ -18,27 +24,25 @@ import logging
 import multiprocessing as mp
 import os
 import tempfile
-import threading
 import time
-from concurrent.futures import (
-    BrokenExecutor,
-    ProcessPoolExecutor,
-)
-from concurrent.futures import (
-    TimeoutError as FuturesTimeoutError,
-)
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
+
+from tenacity import (
+    retry,
+    retry_if_result,
+    stop_after_attempt,
+    wait_none,
+)
 
 from . import EvalResult
 
 logger = logging.getLogger(__name__)
 
-# Pool health thresholds
-_CONSECUTIVE_FAILURE_THRESHOLD = 3  # Restart pool after N consecutive failures
-_MAX_RESTARTS = 5  # Give up restarting after N attempts
+# ---------------------------------------------------------------------------
+# CUDA sticky-error detection
+# ---------------------------------------------------------------------------
 
-# CUDA sticky error patterns — these corrupt the CUDA context permanently.
-# The only recovery is killing the worker process and starting fresh.
 _CUDA_STICKY_PATTERNS = (
     "illegal memory access",
     "device-side assert",
@@ -51,26 +55,34 @@ _CUDA_STICKY_PATTERNS = (
 
 
 def _is_cuda_sticky_error(error: str | None) -> bool:
-    """Check if an error indicates a CUDA sticky error that corrupts the context."""
+    """Return True if *error* indicates a CUDA sticky error."""
     if error is None:
         return False
     error_lower = error.lower()
     return any(p.lower() in error_lower for p in _CUDA_STICKY_PATTERNS)
 
 
-class SubprocessBackend:
-    """GPU kernel evaluation backend with resilient process pool.
+# ---------------------------------------------------------------------------
+# Backend class
+# ---------------------------------------------------------------------------
 
-    Architecture:
-    - A ProcessPoolExecutor with spawn context keeps persistent workers.
-    - Workers pin to GPU via CUDA_VISIBLE_DEVICES and keep CUDA context warm.
-    - Pool health is tracked: consecutive failures trigger automatic restart.
-    - If pool is broken/restarting, falls back to one-shot subprocess isolation.
+
+class SubprocessBackend:
+    """GPU kernel evaluation backend with per-eval subprocess isolation.
+
+    Every ``evaluate()`` call spawns a fresh subprocess that pins to the
+    target GPU, runs the kernel, and exits.  This eliminates CUDA context
+    corruption at the cost of ~5-10 s per eval for CUDA/Triton init (amortised
+    by Triton's on-disk JIT cache after the first compilation).
+
+    For batch evaluation, subprocesses run in parallel via a thread pool so
+    the wall-clock overhead stays roughly constant regardless of batch size.
 
     Args:
-        gpu_ids: List of GPU device indices to use for evaluation.
+        gpu_ids: GPU device indices for kernel evaluation.
         timeout: Per-kernel evaluation timeout in seconds.
-        max_workers: Maximum concurrent workers. Defaults to len(gpu_ids) or 1.
+        max_workers: Max parallel subprocesses.  Defaults to ``len(gpu_ids)``
+            (one subprocess per GPU) or 1.
     """
 
     def __init__(
@@ -78,163 +90,67 @@ class SubprocessBackend:
         gpu_ids: list[int] | None = None,
         timeout: float = 60.0,
         max_workers: int | None = None,
-        **kwargs: object,
+        **_kwargs: object,
     ) -> None:
         self._gpu_ids = gpu_ids or []
         self._timeout = timeout
         self._max_workers = max_workers or max(len(self._gpu_ids), 1)
-        self._pool: ProcessPoolExecutor | None = None
         self._started = False
-        # Health tracking
-        self._consecutive_failures = 0
-        self._restart_count = 0
-        self._lock = threading.Lock()
 
-    def _try_restart_pool(self) -> None:
-        """Restart the pool if consecutive failures exceed threshold.
-
-        Thread-safe. Only one restart can happen at a time.
-        """
-        with self._lock:
-            if self._consecutive_failures < _CONSECUTIVE_FAILURE_THRESHOLD:
-                return
-            if self._restart_count >= _MAX_RESTARTS:
-                logger.error(
-                    "Pool exceeded max restarts (%d). "
-                    "Falling back to one-shot subprocess for all evals.",
-                    _MAX_RESTARTS,
-                )
-                self._pool = None
-                return
-
-            logger.warning(
-                "Pool health check: %d consecutive failures, restarting pool (attempt %d/%d)",
-                self._consecutive_failures,
-                self._restart_count + 1,
-                _MAX_RESTARTS,
-            )
-            # Tear down old pool
-            if self._pool is not None:
-                try:
-                    self._pool.shutdown(wait=False, cancel_futures=True)
-                except Exception:
-                    pass
-                self._pool = None
-
-            # Create new pool
-            try:
-                ctx = mp.get_context("spawn")
-                self._pool = ProcessPoolExecutor(
-                    max_workers=self._max_workers,
-                    mp_context=ctx,
-                )
-                self._restart_count += 1
-                self._consecutive_failures = 0
-                logger.info(
-                    "Pool restarted successfully (%d workers on GPUs %s)",
-                    self._max_workers,
-                    self._gpu_ids,
-                )
-            except Exception as e:
-                logger.error("Failed to restart pool: %s", e)
-                self._pool = None
-
-    def _record_success(self) -> None:
-        """Reset consecutive failure count on success."""
-        self._consecutive_failures = 0
-
-    def _record_failure(self, error: str) -> None:
-        """Track a failure and trigger restart if needed."""
-        self._consecutive_failures += 1
-        if self._consecutive_failures >= _CONSECUTIVE_FAILURE_THRESHOLD:
-            logger.warning(
-                "Pool failure %d/%d: %s",
-                self._consecutive_failures,
-                _CONSECUTIVE_FAILURE_THRESHOLD,
-                error,
-            )
-            self._try_restart_pool()
+    # -- public API ---------------------------------------------------------
 
     def evaluate(self, test_code: str, triton_code: str) -> EvalResult:
-        """Evaluate a single kernel. Uses pool if healthy, else one-shot subprocess."""
+        """Evaluate a single kernel in an isolated subprocess.
+
+        Automatically retries (up to 3×) when a CUDA sticky error is detected,
+        since each retry runs in a brand-new process with a clean context.
+        """
         gpu_id = self._gpu_ids[0] if self._gpu_ids else None
-
-        # Try pool first
-        if self._pool is not None:
-            try:
-                future = self._pool.submit(_eval_worker, test_code, triton_code, gpu_id)
-                result = future.result(timeout=self._timeout)
-                # CUDA sticky errors (illegal memory access, device-side assert)
-                # poison the worker's CUDA context. Treat these as pool failures
-                # so the pool restarts with fresh workers.
-                if _is_cuda_sticky_error(result.error):
-                    self._record_failure(f"cuda_sticky: {result.error}")
-                    return result
-                self._record_success()
-                return result
-            except FuturesTimeoutError:
-                self._record_failure("timeout")
-                return EvalResult(correct=False, compiled=False, error="timeout")
-            except BrokenExecutor as e:
-                self._record_failure(f"broken_pool: {e}")
-                # Fall through to one-shot subprocess
-            except Exception as e:
-                self._record_failure(str(e))
-                return EvalResult(correct=False, compiled=False, error=str(e))
-
-        # Fallback: one-shot isolated subprocess (always safe)
-        return _run_eval_in_subprocess(test_code, triton_code, gpu_id, self._timeout)
+        return _eval_subprocess_with_retry(
+            test_code,
+            triton_code,
+            gpu_id,
+            self._timeout,
+        )
 
     def evaluate_batch(self, items: list[tuple[str, str]]) -> list[EvalResult]:
-        """Evaluate multiple kernels, distributing across GPU workers."""
+        """Evaluate multiple kernels in parallel subprocesses.
+
+        Each item is dispatched to a thread that spawns an isolated subprocess.
+        GPU IDs are assigned round-robin across the batch.
+        """
         if not items:
             return []
 
-        results: list[EvalResult] = []
-        if self._pool is not None and self._gpu_ids:
+        results: list[EvalResult | None] = [None] * len(items)
+
+        def _run(idx: int, test_code: str, triton_code: str) -> None:
+            gpu_id = self._gpu_ids[idx % len(self._gpu_ids)] if self._gpu_ids else None
+            results[idx] = _eval_subprocess_with_retry(
+                test_code,
+                triton_code,
+                gpu_id,
+                self._timeout,
+            )
+
+        with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
             futures = []
             for i, (test_code, triton_code) in enumerate(items):
-                gpu_id = self._gpu_ids[i % len(self._gpu_ids)]
-                try:
-                    future = self._pool.submit(_eval_worker, test_code, triton_code, gpu_id)
-                    futures.append((future, i))
-                except BrokenExecutor:
-                    self._record_failure("broken_pool_batch")
-                    # Fall back to one-shot for remaining items
-                    for test_c, triton_c in items[i:]:
-                        gid = self._gpu_ids[0] if self._gpu_ids else None
-                        results.append(
-                            _run_eval_in_subprocess(test_c, triton_c, gid, self._timeout)
-                        )
-                    break
+                futures.append(pool.submit(_run, i, test_code, triton_code))
+            # Wait for all to finish; propagate first exception if any
+            for f in futures:
+                f.result()
 
-            for future, _idx in futures:
-                try:
-                    result = future.result(timeout=self._timeout)
-                    if _is_cuda_sticky_error(result.error):
-                        self._record_failure(f"cuda_sticky: {result.error}")
-                    else:
-                        self._record_success()
-                    results.append(result)
-                except FuturesTimeoutError:
-                    self._record_failure("timeout_batch")
-                    results.append(EvalResult(correct=False, compiled=False, error="timeout"))
-                except Exception as e:
-                    self._record_failure(str(e))
-                    results.append(EvalResult(correct=False, compiled=False, error=str(e)))
-        else:
-            # Sequential fallback (no pool)
-            for test_code, triton_code in items:
-                results.append(self.evaluate(test_code, triton_code))
-
-        return results
+        # Every slot should be filled; guard against programming errors.
+        return [
+            r
+            if r is not None
+            else EvalResult(correct=False, compiled=False, error="internal_error")
+            for r in results
+        ]
 
     def warmup(self, sample_test_codes: list[str]) -> None:
-        """Warm up JIT cache and CUDA context on each eval GPU.
-
-        Uses the pool if available (warms the persistent workers). Falls back
-        to one-shot subprocesses (warms JIT cache on disk, not workers).
-        """
+        """Warm up Triton JIT cache on each eval GPU via isolated subprocesses."""
         if not self._gpu_ids:
             logger.info("Warmup: no GPU IDs configured, skipping")
             return
@@ -247,20 +163,15 @@ class SubprocessBackend:
         logger.info("Warmup: compiling %d kernels across GPUs %s", n, self._gpu_ids)
         start = time.monotonic()
 
-        warmup_triton_code = _WARMUP_TRITON_CODE
-
         for i in range(n):
             gpu_id = self._gpu_ids[i % len(self._gpu_ids)]
             try:
-                if self._pool is not None:
-                    future = self._pool.submit(
-                        _eval_worker, sample_test_codes[i], warmup_triton_code, gpu_id
-                    )
-                    result = future.result(timeout=self._timeout)
-                else:
-                    result = _run_eval_in_subprocess(
-                        sample_test_codes[i], warmup_triton_code, gpu_id, self._timeout
-                    )
+                result = _run_eval_in_subprocess(
+                    sample_test_codes[i],
+                    _WARMUP_TRITON_CODE,
+                    gpu_id,
+                    self._timeout,
+                )
                 elapsed = time.monotonic() - start
                 logger.info(
                     "Warmup: %d/%d on GPU %d [%.1fs] compiled=%s",
@@ -277,40 +188,60 @@ class SubprocessBackend:
         logger.info("Warmup: completed %d kernels in %.1fs", n, elapsed)
 
     def start(self) -> None:
-        """Start the process pool."""
+        """Mark the backend as started (no persistent resources to create)."""
         if self._started:
             return
-
         if self._gpu_ids:
-            ctx = mp.get_context("spawn")
-            self._pool = ProcessPoolExecutor(
-                max_workers=self._max_workers,
-                mp_context=ctx,
-            )
             logger.info(
-                "SubprocessBackend started: %d workers on GPUs %s",
-                self._max_workers,
+                "SubprocessBackend started: subprocess isolation on GPUs %s (max %d parallel)",
                 self._gpu_ids,
+                self._max_workers,
             )
         else:
             logger.info("SubprocessBackend started: no GPUs, eval will return compiled=False")
-
         self._started = True
-        self._consecutive_failures = 0
-        self._restart_count = 0
 
     def shutdown(self) -> None:
-        """Shut down the process pool."""
-        if self._pool is not None:
-            self._pool.shutdown(wait=False)
-            self._pool = None
+        """Mark the backend as stopped (no persistent resources to release)."""
         self._started = False
         logger.info("SubprocessBackend shut down")
 
 
 # ---------------------------------------------------------------------------
-# Subprocess worker functions (module-level for pickling)
+# Subprocess helpers (module-level for pickling / multiprocessing)
 # ---------------------------------------------------------------------------
+
+
+def _should_retry(result: EvalResult) -> bool:
+    """Tenacity retry predicate: retry only on CUDA sticky errors."""
+    return _is_cuda_sticky_error(result.error)
+
+
+@retry(
+    retry=retry_if_result(_should_retry),
+    stop=stop_after_attempt(3),
+    wait=wait_none(),
+    reraise=True,
+)
+def _eval_subprocess_with_retry(
+    test_code: str,
+    triton_code: str,
+    gpu_id: int | None,
+    timeout: float,
+) -> EvalResult:
+    """Run evaluation in a subprocess, retrying on CUDA sticky errors.
+
+    Each attempt spawns a brand-new process (clean CUDA context), so a
+    transient CUDA error in attempt N cannot affect attempt N+1.
+    """
+    result = _run_eval_in_subprocess(test_code, triton_code, gpu_id, timeout)
+    if _is_cuda_sticky_error(result.error):
+        logger.warning(
+            "CUDA sticky error on GPU %s, retrying in fresh subprocess: %s",
+            gpu_id,
+            (result.error or "")[:200],
+        )
+    return result
 
 
 def _run_eval_in_subprocess(
@@ -319,7 +250,7 @@ def _run_eval_in_subprocess(
     gpu_id: int | None,
     timeout: float,
 ) -> EvalResult:
-    """Run evaluation in a fresh spawned subprocess for CUDA isolation."""
+    """Spawn a fresh subprocess, run the eval, collect the result via Pipe."""
     ctx = mp.get_context("spawn")
     parent_conn, child_conn = ctx.Pipe()
 
@@ -328,15 +259,24 @@ def _run_eval_in_subprocess(
         args=(child_conn, test_code, triton_code, gpu_id),
     )
     proc.start()
+    # Close the child end in the parent so recv() raises on child death.
+    child_conn.close()
+
     proc.join(timeout=timeout)
 
     if proc.is_alive():
         proc.kill()
         proc.join()
+        parent_conn.close()
         return EvalResult(correct=False, compiled=False, error="timeout")
 
     if parent_conn.poll():
-        result_dict = parent_conn.recv()
+        try:
+            result_dict = parent_conn.recv()
+        except (EOFError, OSError):
+            parent_conn.close()
+            return EvalResult(correct=False, compiled=False, error="pipe_error")
+        parent_conn.close()
         return EvalResult(
             correct=result_dict.get("correct", False),
             compiled=result_dict.get("compiled", False),
@@ -344,19 +284,22 @@ def _run_eval_in_subprocess(
             max_diff=result_dict.get("max_diff"),
         )
 
+    parent_conn.close()
     return EvalResult(correct=False, compiled=False, error="no_result")
 
 
+# ---------------------------------------------------------------------------
+# Code-execution helpers (shared by subprocess entry point)
+# ---------------------------------------------------------------------------
+
+
 def _exec_code_from_file(code: str, globals_dict: dict[str, Any]) -> None:
-    """Execute Python code via a temp file so inspect.getsourcelines() works.
+    """Execute Python code via a temp file so ``inspect.getsourcelines()`` works.
 
-    Triton's @jit decorator calls inspect.getsourcelines(fn), which requires
-    the decorated function to exist in a real .py file. Plain exec() creates
-    code in '<string>' which makes getsourcelines() raise OSError.
-
-    This writes the code to a temporary .py file, compiles it with the file
-    path set, and then execs the compiled code. The temp file is kept alive
-    long enough for Triton's JIT to read it.
+    Triton's ``@jit`` decorator calls ``inspect.getsourcelines(fn)``, which
+    requires the decorated function to exist in a real ``.py`` file.  Plain
+    ``exec()`` creates code in ``'<string>'`` which makes ``getsourcelines()``
+    raise ``OSError``.
     """
     fd, path = tempfile.mkstemp(suffix=".py", prefix="grail_kernel_")
     try:
@@ -367,7 +310,7 @@ def _exec_code_from_file(code: str, globals_dict: dict[str, Any]) -> None:
         exec(compiled, globals_dict)  # noqa: S102
     finally:
         # Don't delete yet — Triton JIT may read the file lazily during forward().
-        # We rely on OS temp cleanup or delete after eval completes.
+        # Cleanup happens in the finally block of _eval_worker_process.
         pass
 
 
@@ -381,215 +324,9 @@ def _cleanup_temp_file(path: str | None) -> None:
         pass
 
 
-def _eval_worker(test_code: str, triton_code: str, gpu_id: int | None) -> EvalResult:
-    """Worker function for ProcessPoolExecutor — runs eval directly in pool worker.
-
-    This avoids spawning another subprocess (faster), accepting that a CUDA
-    sticky error could corrupt this worker. The pool will replace dead workers.
-    """
-    return _eval_direct(test_code, triton_code, gpu_id)
-
-
-def _eval_direct(test_code: str, triton_code: str, gpu_id: int | None) -> EvalResult:
-    """Run kernel eval directly in the current process (no subprocess spawn)."""
-    import traceback
-
-    _log = logging.getLogger(__name__)
-    triton_file: str | None = None
-    test_file: str | None = None
-    t_total = time.monotonic()
-    try:
-        if gpu_id is not None:
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-
-        import torch  # noqa: F811
-
-        # Phase 1: Execute test code
-        t0 = time.monotonic()
-        test_globals: dict[str, Any] = {}
-        _exec_code_from_file(test_code, test_globals)
-        test_file = test_globals.get("__file__")
-        t_test = time.monotonic() - t0
-
-        model_class = test_globals.get("Model")
-        get_inputs = test_globals.get("get_inputs")
-        get_init_inputs = test_globals.get("get_init_inputs")
-        check_correctness = test_globals.get("check_correctness")
-
-        if model_class is None or get_inputs is None:
-            _log.info(
-                "[kernel_eval] gpu=%s test_exec=%.2fs FAIL: missing_model_or_inputs", gpu_id, t_test
-            )
-            return EvalResult(correct=False, compiled=False, error="missing_model_or_inputs")
-
-        # Phase 2: Execute Triton code (JIT compilation happens here)
-        t0 = time.monotonic()
-        gen_globals: dict[str, Any] = {}
-        _exec_code_from_file(triton_code, gen_globals)
-        triton_file = gen_globals.get("__file__")
-        t_triton_exec = time.monotonic() - t0
-
-        model_new_class = gen_globals.get("ModelNew")
-        if model_new_class is None:
-            _log.info(
-                "[kernel_eval] gpu=%s test_exec=%.2fs triton_exec=%.2fs FAIL: no_model_new_class",
-                gpu_id,
-                t_test,
-                t_triton_exec,
-            )
-            return EvalResult(correct=False, compiled=True, error="no_model_new_class")
-
-        # Phase 3: Correctness check
-        if check_correctness is not None:
-            t0 = time.monotonic()
-            try:
-                result = check_correctness(model_new_class)
-                t_check = time.monotonic() - t0
-                if isinstance(result, dict):
-                    correct = result.get("correct", False)
-                    err = result.get("error")
-                    _log.info(
-                        "[kernel_eval] gpu=%s test=%.2fs triton=%.2fs check=%.2fs correct=%s err=%s total=%.2fs",
-                        gpu_id,
-                        t_test,
-                        t_triton_exec,
-                        t_check,
-                        correct,
-                        err,
-                        time.monotonic() - t_total,
-                    )
-                    return EvalResult(
-                        correct=correct,
-                        compiled=True,
-                        error=err,
-                        max_diff=result.get("max_diff"),
-                    )
-                t_check = time.monotonic() - t0
-                _log.info(
-                    "[kernel_eval] gpu=%s test=%.2fs triton=%.2fs check=%.2fs correct=%s total=%.2fs",
-                    gpu_id,
-                    t_test,
-                    t_triton_exec,
-                    t_check,
-                    bool(result),
-                    time.monotonic() - t_total,
-                )
-                return EvalResult(
-                    correct=bool(result),
-                    compiled=True,
-                    error=None if result else "check_correctness_failed",
-                )
-            except Exception as e:
-                t_check = time.monotonic() - t0
-                error_str = str(e)
-                _log.info(
-                    "[kernel_eval] gpu=%s test=%.2fs triton=%.2fs check=%.2fs FAIL: %s total=%.2fs",
-                    gpu_id,
-                    t_test,
-                    t_triton_exec,
-                    t_check,
-                    e,
-                    time.monotonic() - t_total,
-                )
-                # CUDA sticky errors corrupt the CUDA context permanently.
-                # Kill this worker so the pool replaces it with a fresh process.
-                if _is_cuda_sticky_error(error_str):
-                    _log.error(
-                        "[kernel_eval] gpu=%s CUDA sticky error detected, terminating worker: %s",
-                        gpu_id,
-                        error_str[:200],
-                    )
-                    os._exit(1)
-                return EvalResult(
-                    correct=False, compiled=True, error=f"check_correctness_error: {e}"
-                )
-
-        # Fallback: manual correctness check
-        t0 = time.monotonic()
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        init_inputs = get_init_inputs() if get_init_inputs else []
-        ref_model = model_class(*init_inputs).to(device).eval()
-        new_model = model_new_class(*init_inputs).to(device).eval()
-        t_model_init = time.monotonic() - t0
-
-        max_diff = 0.0
-        tolerance = 1e-2
-
-        t0 = time.monotonic()
-        for trial in range(3):
-            torch.manual_seed(42 + trial)
-            inputs = get_inputs()
-            inputs = [x.to(device) if isinstance(x, torch.Tensor) else x for x in inputs]
-
-            with torch.no_grad():
-                ref_out = ref_model(*inputs)
-                new_out = new_model(*inputs)
-
-            if isinstance(ref_out, tuple):
-                ref_out = ref_out[0]
-            if isinstance(new_out, tuple):
-                new_out = new_out[0]
-
-            if ref_out.shape != new_out.shape:
-                t_trials = time.monotonic() - t0
-                _log.info(
-                    "[kernel_eval] gpu=%s test=%.2fs triton=%.2fs init=%.2fs trials=%.2fs FAIL: shape_mismatch %s vs %s total=%.2fs",
-                    gpu_id,
-                    t_test,
-                    t_triton_exec,
-                    t_model_init,
-                    t_trials,
-                    ref_out.shape,
-                    new_out.shape,
-                    time.monotonic() - t_total,
-                )
-                return EvalResult(
-                    correct=False,
-                    compiled=True,
-                    error=f"shape_mismatch: {ref_out.shape} vs {new_out.shape}",
-                )
-
-            diff = torch.max(torch.abs(ref_out.float() - new_out.float())).item()
-            max_diff = max(max_diff, diff)
-
-        t_trials = time.monotonic() - t0
-        correct = max_diff <= tolerance
-        _log.info(
-            "[kernel_eval] gpu=%s test=%.2fs triton=%.2fs init=%.2fs trials=%.2fs correct=%s max_diff=%.6f total=%.2fs",
-            gpu_id,
-            t_test,
-            t_triton_exec,
-            t_model_init,
-            t_trials,
-            correct,
-            max_diff,
-            time.monotonic() - t_total,
-        )
-        return EvalResult(
-            correct=correct,
-            compiled=True,
-            error=None if correct else f"max_diff={max_diff:.6f}",
-            max_diff=max_diff,
-        )
-    except Exception:
-        tb = traceback.format_exc()
-        _log.info(
-            "[kernel_eval] gpu=%s EXCEPTION after %.2fs: %s",
-            gpu_id,
-            time.monotonic() - t_total,
-            tb[-500:],
-        )
-        # CUDA sticky errors in any phase → kill the worker
-        if _is_cuda_sticky_error(tb):
-            _log.error(
-                "[kernel_eval] gpu=%s CUDA sticky error in eval, terminating worker",
-                gpu_id,
-            )
-            os._exit(1)
-        return EvalResult(correct=False, compiled=False, error=f"eval_error: {tb}")
-    finally:
-        _cleanup_temp_file(triton_file)
-        _cleanup_temp_file(test_file)
+# ---------------------------------------------------------------------------
+# Subprocess entry point
+# ---------------------------------------------------------------------------
 
 
 def _eval_worker_process(
@@ -598,24 +335,24 @@ def _eval_worker_process(
     triton_code: str,
     gpu_id: int | None,
 ) -> None:
-    """Subprocess entry point for kernel evaluation.
+    """Entry point for the spawned subprocess.
 
-    Executes test_code to get Model, get_inputs(), get_init_inputs(), and
-    check_correctness(). Then executes triton_code to get ModelNew.
-    Calls check_correctness(ModelNew) to verify correctness.
+    Executes test_code to obtain ``Model``, ``get_inputs()``,
+    ``get_init_inputs()``, and ``check_correctness()``.  Then executes
+    triton_code to obtain ``ModelNew``.  Results are sent back via *conn*.
     """
     import traceback
 
     triton_file: str | None = None
     test_file: str | None = None
     try:
-        # Pin to specific GPU
+        # Pin to specific GPU before any CUDA initialisation
         if gpu_id is not None:
             os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
-        import torch  # noqa: F811
+        import torch  # noqa: F811  (deferred so CUDA_VISIBLE_DEVICES takes effect)
 
-        # Execute test code via temp file
+        # Phase 1 — execute test harness
         test_globals: dict[str, Any] = {}
         _exec_code_from_file(test_code, test_globals)
         test_file = test_globals.get("__file__")
@@ -626,32 +363,20 @@ def _eval_worker_process(
         check_correctness = test_globals.get("check_correctness")
 
         if model_class is None or get_inputs is None:
-            conn.send(
-                {
-                    "correct": False,
-                    "compiled": False,
-                    "error": "missing_model_or_inputs",
-                }
-            )
+            conn.send({"correct": False, "compiled": False, "error": "missing_model_or_inputs"})
             return
 
-        # Execute Triton code via temp file (required for @triton.jit)
+        # Phase 2 — execute generated Triton code
         gen_globals: dict[str, Any] = {}
         _exec_code_from_file(triton_code, gen_globals)
         triton_file = gen_globals.get("__file__")
 
         model_new_class = gen_globals.get("ModelNew")
         if model_new_class is None:
-            conn.send(
-                {
-                    "correct": False,
-                    "compiled": True,
-                    "error": "no_model_new_class",
-                }
-            )
+            conn.send({"correct": False, "compiled": True, "error": "no_model_new_class"})
             return
 
-        # Use check_correctness if available (preferred path)
+        # Phase 3a — preferred: use check_correctness() from the test harness
         if check_correctness is not None:
             try:
                 result = check_correctness(model_new_class)
@@ -666,13 +391,7 @@ def _eval_worker_process(
                         }
                     )
                 else:
-                    conn.send(
-                        {
-                            "correct": bool(result),
-                            "compiled": True,
-                            "error": None,
-                        }
-                    )
+                    conn.send({"correct": bool(result), "compiled": True, "error": None})
             except Exception as e:
                 conn.send(
                     {
@@ -683,19 +402,31 @@ def _eval_worker_process(
                 )
             return
 
-        # Fallback: manual correctness check (same as old _gpu_eval_worker)
+        # Phase 3b — fallback: manual correctness check
+        from ..task_sources import (
+            KERNEL_EVAL_NUM_TRIALS,
+            KERNEL_EVAL_SEED,
+            KERNEL_EVAL_TOLERANCE,
+        )
+
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         init_inputs = get_init_inputs() if get_init_inputs else []
+
+        # Seed before constructing EACH model so parameterised layers
+        # produce identical random weights (matches KernelBench convention).
+        torch.manual_seed(KERNEL_EVAL_SEED)
+        torch.cuda.manual_seed(KERNEL_EVAL_SEED)
         ref_model = model_class(*init_inputs).to(device).eval()
+
+        torch.manual_seed(KERNEL_EVAL_SEED)
+        torch.cuda.manual_seed(KERNEL_EVAL_SEED)
         new_model = model_new_class(*init_inputs).to(device).eval()
 
-        n_trials = 3
         max_diff = 0.0
-        tolerance = 1e-2
 
-        for trial in range(n_trials):
-            torch.manual_seed(42 + trial)
+        for trial in range(KERNEL_EVAL_NUM_TRIALS):
+            torch.manual_seed(KERNEL_EVAL_SEED + trial)
             inputs = get_inputs()
             inputs = [x.to(device) if isinstance(x, torch.Tensor) else x for x in inputs]
 
@@ -722,7 +453,7 @@ def _eval_worker_process(
             diff = torch.max(torch.abs(ref_out.float() - new_out.float())).item()
             max_diff = max(max_diff, diff)
 
-        correct = max_diff <= tolerance
+        correct = max_diff <= KERNEL_EVAL_TOLERANCE
         conn.send(
             {
                 "correct": correct,
@@ -747,7 +478,10 @@ def _eval_worker_process(
         _cleanup_temp_file(test_file)
 
 
-# Minimal Triton kernel for warmup (exercises JIT compilation)
+# ---------------------------------------------------------------------------
+# Warmup kernel
+# ---------------------------------------------------------------------------
+
 _WARMUP_TRITON_CODE = """
 import torch
 import triton

@@ -1,7 +1,7 @@
 """Pluggable GPU evaluation backends for Triton kernel correctness checking.
 
 Provides a protocol-based abstraction for kernel evaluation with three backends:
-- SubprocessBackend: ProcessPool-based, GPU-pinned workers (default)
+- SubprocessBackend: Per-eval subprocess isolation, GPU-pinned (default)
 - AffinetesBackend: Docker container pool via vendored Affinetes
 - ModalBackend: Serverless GPU via Modal
 
