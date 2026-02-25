@@ -11,6 +11,7 @@ import torch
 
 from grail.cli.mine import (
     MiningTimers,
+    _pipelined_generation_loop,
     generate_rollouts_for_window,
     get_conf,
     get_window_randomness,
@@ -27,11 +28,11 @@ from grail.infrastructure.checkpoint_consumer import (
     default_checkpoint_cache_root,
 )
 from grail.infrastructure.credentials import load_r2_credentials
+from grail.mining.config import PipelineConfig
 from grail.model.provider import clear_model_and_tokenizer, get_model, get_tokenizer
 from grail.monitoring import get_monitoring_manager
 from grail.monitoring.config import MonitoringConfig
 from grail.shared.constants import TRAINER_UID, WINDOW_LENGTH
-from grail.shared.subnet import get_own_uid_on_subnet
 from grail.shared.window_utils import (
     WindowWaitTracker,
     calculate_next_window,
@@ -88,6 +89,11 @@ class MinerNeuron(BaseNeuron):
             subtensor = await self.get_subtensor()
             self.heartbeat()
             netuid = int(get_conf("BT_NETUID", get_conf("NETUID", 200)))
+
+            # Fail fast if hotkey is not registered on the subnet
+            miner_uid = await self.ensure_registered(wallet, netuid, role="miner")
+            self.heartbeat()
+
             metagraph = await subtensor.metagraph(netuid)
             self.heartbeat()
 
@@ -147,22 +153,25 @@ class MinerNeuron(BaseNeuron):
                 keep_limit=2,  # Keep only current + previous window
             )
 
+            # Pipeline state (initialized on first checkpoint load if enabled)
+            pipeline_config = PipelineConfig.from_env()
+            pipeline_engine = None
+            weight_sync = None
+            proof_worker = None
+
+            if pipeline_config.enabled:
+                logger.info(
+                    "Pipeline mode ENABLED: backend=%s, gen_gpu=%d, proof_gpu=%d",
+                    pipeline_config.backend,
+                    pipeline_config.vllm_gpu,
+                    pipeline_config.proof_gpu,
+                )
+
             # Initialize monitoring for mining operations
             monitor = get_monitoring_manager()
             if monitor:
                 mining_config = MonitoringConfig.for_mining(wallet.name)
-                try:
-                    subtensor_for_uid = await self.get_subtensor()
-                    self.heartbeat()
-                except Exception:
-                    subtensor_for_uid = None
-                uid = None
-                if subtensor_for_uid is not None:
-                    uid = await get_own_uid_on_subnet(
-                        subtensor_for_uid, netuid, wallet.hotkey.ss58_address
-                    )
-                    self.heartbeat()
-                run_name = f"miner-{uid}" if uid is not None else f"mining_{wallet.name}"
+                run_name = f"miner-{miner_uid}"
                 run_id = await monitor.start_run(run_name, mining_config.get("hyperparameters", {}))
                 self.heartbeat()
                 logger.info(f"Started monitoring run: {run_id} (name={run_name})")
@@ -219,6 +228,29 @@ class MinerNeuron(BaseNeuron):
                             # Fast path: model already updated in-place
                             current_checkpoint_window = result.window
                             logger.info("⚡ Model updated in-place to window %s", result.window)
+
+                            # Pipeline: sync proof worker (model is shared object,
+                            # weights already updated in-place, but keep reference fresh)
+                            if proof_worker is not None:
+                                proof_worker.update_model_in_place(model)
+
+                            # Pipeline: sync generation server weights
+                            if pipeline_engine is not None and weight_sync is not None:
+                                try:
+                                    cache_path = await checkpoint_manager.await_cache_complete()
+                                    if cache_path:
+                                        await weight_sync.sync_weights(str(cache_path))
+                                    else:
+                                        logger.warning(
+                                            "Pipeline: cache path not available after fast path"
+                                        )
+                                except Exception as sync_exc:
+                                    logger.warning(
+                                        "Pipeline: weight sync failed (mining continues "
+                                        "with correct HF proofs): %s",
+                                        sync_exc,
+                                    )
+
                         elif checkpoint_path is not None:
                             # Slow path: load from disk
                             logger.info(
@@ -227,9 +259,27 @@ class MinerNeuron(BaseNeuron):
                                 checkpoint_path,
                             )
                             try:
-                                model, tokenizer = clear_model_and_tokenizer(model, tokenizer)
-                                model = get_model(str(checkpoint_path), device=None, eval_mode=True)
-                                tokenizer = get_tokenizer(str(checkpoint_path))
+                                if proof_worker is not None:
+                                    # Pipeline slow-path: reload via proof_worker
+                                    # (single model owner avoids duplicate on proof GPU)
+                                    model = None
+                                    tokenizer = None
+                                    proof_worker.load_model(str(checkpoint_path))
+                                    model = proof_worker._model
+                                    tokenizer = proof_worker.tokenizer
+                                else:
+                                    model, tokenizer = clear_model_and_tokenizer(model, tokenizer)
+                                    # Pipeline: load model to proof GPU to keep gen GPU free
+                                    model_device = (
+                                        f"cuda:{pipeline_config.proof_gpu}"
+                                        if pipeline_config.enabled
+                                        else None
+                                    )
+                                    model = get_model(
+                                        str(checkpoint_path), device=model_device, eval_mode=True
+                                    )
+                                    tokenizer = get_tokenizer(str(checkpoint_path))
+
                                 current_checkpoint_window = result.window
 
                                 if torch.cuda.is_available():
@@ -238,6 +288,16 @@ class MinerNeuron(BaseNeuron):
                                         f"reserved={torch.cuda.memory_reserved() / 1024**3:.2f}GB"
                                     )
                                     torch.cuda.empty_cache()
+
+                                if weight_sync is not None:
+                                    try:
+                                        await weight_sync.sync_weights(str(checkpoint_path))
+                                    except Exception as sync_exc:
+                                        logger.warning(
+                                            "Pipeline: weight sync failed after full load: %s",
+                                            sync_exc,
+                                        )
+
                             except Exception:
                                 logger.exception(
                                     "Failed to load checkpoint for window %s", result.window
@@ -257,6 +317,62 @@ class MinerNeuron(BaseNeuron):
                         last_window_start = window_start  # Prevent infinite loop
                         continue
 
+                    # Initialize pipeline on first successful checkpoint load
+                    if (
+                        pipeline_config.enabled
+                        and pipeline_engine is None
+                        and checkpoint_path is not None
+                    ):
+                        try:
+                            from grail.mining.engine import PipelinedMiningEngine
+                            from grail.mining.proof_worker import ProofWorker
+                            from grail.mining.weight_sync import (
+                                SGLangWeightSync,
+                                VLLMWeightSync,
+                            )
+
+                            proof_worker = ProofWorker(pipeline_config)
+                            proof_worker.set_model(model, tokenizer)
+
+                            if pipeline_config.backend == "sglang":
+                                weight_sync = SGLangWeightSync(
+                                    pipeline_config, proof_worker.tokenizer
+                                )
+                            else:
+                                weight_sync = VLLMWeightSync(
+                                    pipeline_config, proof_worker.tokenizer
+                                )
+
+                            await weight_sync.start(str(checkpoint_path))
+                            pipeline_engine = PipelinedMiningEngine(
+                                pipeline_config, weight_sync, proof_worker
+                            )
+                            logger.info("Pipeline engine initialized successfully")
+
+                            # Register cleanup callbacks
+                            async def _shutdown_pipeline(
+                                _ws=weight_sync,
+                                _pe=pipeline_engine,
+                            ) -> None:
+                                if _ws is not None:
+                                    await _ws.shutdown()
+                                if _pe is not None:
+                                    _pe.shutdown()
+
+                            self.register_shutdown_callback(
+                                lambda: asyncio.ensure_future(_shutdown_pipeline())
+                            )
+                        except Exception as pipe_exc:
+                            logger.error(
+                                "Failed to initialize pipeline, falling back to "
+                                "single-GPU mode: %s",
+                                pipe_exc,
+                                exc_info=True,
+                            )
+                            pipeline_engine = None
+                            weight_sync = None
+                            proof_worker = None
+
                     # Fetch checkpoint metadata for environment and generation configuration
                     env_id = None
                     env_params = {}
@@ -268,6 +384,17 @@ class MinerNeuron(BaseNeuron):
                                 current_checkpoint_window
                             )
                             if checkpoint_metadata:
+                                missing = checkpoint_metadata.validate_metadata()
+                                if missing:
+                                    logger.error(
+                                        "Checkpoint %s missing required metadata: %s. "
+                                        "Skipping window — trainer may be misconfigured.",
+                                        current_checkpoint_window,
+                                        ", ".join(missing),
+                                    )
+                                    last_window_start = window_start
+                                    continue
+
                                 env_id = checkpoint_metadata.env_id
                                 env_params = checkpoint_metadata.env_params or {}
                                 generation_params = checkpoint_metadata.generation_params or {}
@@ -307,22 +434,40 @@ class MinerNeuron(BaseNeuron):
                         self.use_drand,
                     )
 
-                    inferences = await generate_rollouts_for_window(
-                        wallet,
-                        model,
-                        tokenizer,
-                        subtensor,
-                        window_start,
-                        window_block_hash,
-                        combined_randomness,
-                        timers,
-                        monitor,
-                        self.use_drand,
-                        current_checkpoint_window,
-                        env_id=env_id,
-                        env_params=env_params,
-                        generation_params=generation_params,
-                    )
+                    if pipeline_engine is not None:
+                        inferences = await _pipelined_generation_loop(
+                            pipeline_engine,
+                            wallet,
+                            model,
+                            tokenizer,
+                            subtensor,
+                            window_start,
+                            window_block_hash,
+                            combined_randomness,
+                            timers,
+                            monitor,
+                            self.use_drand,
+                            current_checkpoint_window,
+                            env_id=env_id,
+                            env_params=env_params,
+                        )
+                    else:
+                        inferences = await generate_rollouts_for_window(
+                            wallet,
+                            model,
+                            tokenizer,
+                            subtensor,
+                            window_start,
+                            window_block_hash,
+                            combined_randomness,
+                            timers,
+                            monitor,
+                            self.use_drand,
+                            current_checkpoint_window,
+                            env_id=env_id,
+                            env_params=env_params,
+                            generation_params=generation_params,
+                        )
 
                     if inferences:
                         logger.info(
