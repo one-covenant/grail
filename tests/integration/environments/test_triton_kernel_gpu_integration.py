@@ -33,7 +33,7 @@ def _get_subprocess_backend(gpu_id: int = 0, timeout: float = 60.0):
 
 
 # Simple correct Triton kernel for ReLU
-_CORRECT_TRITON_CODE = '''
+_CORRECT_TRITON_CODE = """
 import torch
 import triton
 import triton.language as tl
@@ -54,10 +54,10 @@ class ModelNew(torch.nn.Module):
         n = x.numel()
         relu_kernel[(n,)](x, out, n)
         return out
-'''
+"""
 
 # Incorrect kernel (adds 100 instead of relu)
-_INCORRECT_TRITON_CODE = '''
+_INCORRECT_TRITON_CODE = """
 import torch
 import triton
 import triton.language as tl
@@ -78,10 +78,10 @@ class ModelNew(torch.nn.Module):
         n = x.numel()
         wrong_kernel[(n,)](x, out, n)
         return out
-'''
+"""
 
 # Test code with check_correctness
-_TEST_CODE = '''
+_TEST_CODE = """
 import torch
 import torch.nn as nn
 
@@ -99,13 +99,19 @@ def get_init_inputs():
     return []
 
 def check_correctness(model_new_cls):
+    from grail.environments.gpu_kernel.task_sources import (
+        KERNEL_EVAL_NUM_TRIALS,
+        KERNEL_EVAL_SEED,
+        KERNEL_EVAL_TOLERANCE,
+    )
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ref_model = Model().to(device).eval()
     new_model = model_new_cls().to(device).eval()
 
     max_diff = 0.0
-    for trial in range(3):
-        torch.manual_seed(42 + trial)
+    for trial in range(KERNEL_EVAL_NUM_TRIALS):
+        torch.manual_seed(KERNEL_EVAL_SEED + trial)
         inputs = [torch.randn(64).to(device)]
         with torch.no_grad():
             ref_out = ref_model(*inputs)
@@ -113,14 +119,14 @@ def check_correctness(model_new_cls):
         diff = torch.max(torch.abs(ref_out.float() - new_out.float())).item()
         max_diff = max(max_diff, diff)
 
-    correct = max_diff <= 1e-2
+    correct = max_diff <= KERNEL_EVAL_TOLERANCE
     return {
         "correct": correct,
         "compiled": True,
         "error": None if correct else f"max_diff={max_diff:.6f}",
         "max_diff": max_diff,
     }
-'''
+"""
 
 _SYNTAX_ERROR_CODE = "def broken(:\n    return"
 
@@ -156,7 +162,7 @@ class TestSubprocessBackend:
 
     def test_timeout_enforcement(self) -> None:
         """Infinite loop -> timeout error within timeout period."""
-        infinite_code = '''
+        infinite_code = """
 import torch
 class ModelNew(torch.nn.Module):
     def __init__(self):
@@ -165,7 +171,7 @@ class ModelNew(torch.nn.Module):
         while True:
             pass
         return x
-'''
+"""
         backend = _get_subprocess_backend(timeout=5.0)
         start = time.monotonic()
         result = backend.evaluate(_TEST_CODE, infinite_code)
@@ -180,10 +186,12 @@ class ModelNew(torch.nn.Module):
         backend = _get_subprocess_backend()
         backend.start()
         try:
-            results = backend.evaluate_batch([
-                (_TEST_CODE, _CORRECT_TRITON_CODE),
-                (_TEST_CODE, _INCORRECT_TRITON_CODE),
-            ])
+            results = backend.evaluate_batch(
+                [
+                    (_TEST_CODE, _CORRECT_TRITON_CODE),
+                    (_TEST_CODE, _INCORRECT_TRITON_CODE),
+                ]
+            )
             assert len(results) == 2
             assert results[0].correct is True
             assert results[1].correct is False
@@ -254,9 +262,7 @@ class TestEndToEndEnv:
             f"{_cfg.thinking_open}\nOptimizing ReLU.\n{_cfg.thinking_close}\n"
             f"{_cfg.solution_open}\n{_CORRECT_TRITON_CODE}\n{_cfg.solution_close}"
         )
-        _, reward, terminated, _, info = env.step(
-            ChatMessage(role="assistant", content=completion)
-        )
+        _, reward, terminated, _, info = env.step(ChatMessage(role="assistant", content=completion))
         assert terminated is True
         assert reward > 0.5
         assert info["success"] is True
@@ -272,9 +278,7 @@ class TestEndToEndEnv:
             f"{_cfg.thinking_open}\nOptimizing ReLU.\n{_cfg.thinking_close}\n"
             f"{_cfg.solution_open}\n{_CORRECT_TRITON_CODE}\n{_cfg.solution_close}"
         )
-        _, reward, _, _, info = env.step(
-            ChatMessage(role="assistant", content=completion)
-        )
+        _, reward, _, _, info = env.step(ChatMessage(role="assistant", content=completion))
         assert reward == pytest.approx(1.0)
         assert info["exec_result"]["correct"] is True
 
@@ -289,9 +293,7 @@ class TestEndToEndEnv:
             f"{_cfg.thinking_open}\nOptimizing ReLU.\n{_cfg.thinking_close}\n"
             f"{_cfg.solution_open}\n{_INCORRECT_TRITON_CODE}\n{_cfg.solution_close}"
         )
-        _, reward, _, _, info = env.step(
-            ChatMessage(role="assistant", content=completion)
-        )
+        _, reward, _, _, info = env.step(ChatMessage(role="assistant", content=completion))
         # Should get: compilation(0.05) + structure(0.10) + gpu_comp(0.15) + format(0.10) + thinking(0.10) = 0.50
         # But NOT correctness (0.50)
         assert 0.3 < reward < 0.7
@@ -338,9 +340,7 @@ class TestMinerValidatorAgreement:
                 eval_backend=backend,
             )
             env.reset(seed=42)
-            _, reward, _, _, _ = env.step(
-                ChatMessage(role="assistant", content=completion)
-            )
+            _, reward, _, _, _ = env.step(ChatMessage(role="assistant", content=completion))
             rewards.append(reward)
 
         assert rewards[0] == pytest.approx(rewards[1])

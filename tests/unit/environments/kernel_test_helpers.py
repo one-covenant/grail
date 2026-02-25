@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 # Sample PyTorch code (simple enough for tests, matches KernelBench format)
-SAMPLE_PYTORCH_CODE = '''
+SAMPLE_PYTORCH_CODE = """
 import torch
 import torch.nn as nn
 
@@ -19,10 +19,10 @@ def get_inputs():
 
 def get_init_inputs():
     return []
-'''
+"""
 
 # Valid Triton completion
-VALID_TRITON_CODE = '''
+VALID_TRITON_CODE = """
 import torch
 import triton
 import triton.language as tl
@@ -41,10 +41,10 @@ class ModelNew(torch.nn.Module):
         out = torch.empty_like(x)
         relu_kernel[(x.numel(),)](x, out, x.numel())
         return out
-'''
+"""
 
 # Structurally invalid (missing ModelNew)
-MISSING_MODEL_NEW_CODE = '''
+MISSING_MODEL_NEW_CODE = """
 import torch
 import triton
 import triton.language as tl
@@ -54,10 +54,10 @@ def relu_kernel(x_ptr, out_ptr, n: tl.constexpr):
     idx = tl.program_id(0)
     x = tl.load(x_ptr + idx)
     tl.store(out_ptr + idx, tl.maximum(x, 0.0))
-'''
+"""
 
 # Missing triton imports but has ModelNew
-NO_TRITON_IMPORT_CODE = '''
+NO_TRITON_IMPORT_CODE = """
 import torch
 
 class ModelNew(torch.nn.Module):
@@ -66,7 +66,7 @@ class ModelNew(torch.nn.Module):
 
     def forward(self, x):
         return torch.relu(x)
-'''
+"""
 
 SYNTAX_ERROR_CODE = "def broken(:\n    return"
 
