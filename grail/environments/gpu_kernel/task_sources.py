@@ -31,9 +31,9 @@ _VAL_SEED = 42
 # ---------------------------------------------------------------------------
 # Kernel evaluation constants
 # ---------------------------------------------------------------------------
-# Used by _STANDARD_CHECK_CORRECTNESS (embedded as literals in the exec'd
-# string) and by the subprocess_backend.py fallback path (imported directly).
-# Keep both locations in sync when changing these values.
+# Single source of truth for kernel eval parameters.  All consumers import
+# these constants: _STANDARD_CHECK_CORRECTNESS template (below), the
+# subprocess_backend.py fallback path, and research dataset converters.
 
 KERNEL_EVAL_SEED = 42
 """RNG seed for deterministic model weight init and input generation.
@@ -54,15 +54,17 @@ accumulation order vary across GPU instances."""
 KERNEL_EVAL_NUM_TRIALS = 3
 """Number of correctness trials with different random inputs.
 
-KernelBench uses 5; we use 3 to reduce per-eval subprocess overhead
-(~2s per trial) while still catching non-deterministic failures."""
+KernelBench uses 5; we use 3 for robust correctness checking while
+keeping per-eval overhead low with the persistent worker pool.
+Multiple trials with different random inputs catch kernels that only
+work for specific input shapes or values."""
 
 # Standard check_correctness() function appended to KernelBench code as test_code.
 # KernelBench `code` already contains Model, get_inputs(), get_init_inputs().
 # This adds the check_correctness() function needed by the eval backend.
 #
-# IMPORTANT: literal values below must match KERNEL_EVAL_* constants above.
-_STANDARD_CHECK_CORRECTNESS = '''
+# Uses a template so the constants above are the single source of truth.
+_STANDARD_CHECK_CORRECTNESS_TEMPLATE = '''\
 def check_correctness(model_new_cls):
     """Check if ModelNew produces correct outputs vs Model reference.
 
@@ -72,9 +74,9 @@ def check_correctness(model_new_cls):
     import torch
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    _SEED = 42       # KERNEL_EVAL_SEED
-    _TOLERANCE = 1e-2 # KERNEL_EVAL_TOLERANCE
-    _N_TRIALS = 3     # KERNEL_EVAL_NUM_TRIALS
+    _SEED = {seed}
+    _TOLERANCE = {tolerance}
+    _N_TRIALS = {num_trials}
 
     init_inputs = get_init_inputs() if get_init_inputs else []
 
@@ -106,24 +108,30 @@ def check_correctness(model_new_cls):
             new_out = new_out[0]
 
         if ref_out.shape != new_out.shape:
-            return {
+            return {{
                 "correct": False,
                 "compiled": True,
-                "error": f"shape_mismatch: {ref_out.shape} vs {new_out.shape}",
+                "error": f"shape_mismatch: {{ref_out.shape}} vs {{new_out.shape}}",
                 "max_diff": None,
-            }
+            }}
 
         diff = torch.max(torch.abs(ref_out.float() - new_out.float())).item()
         max_diff = max(max_diff, diff)
 
     correct = max_diff <= _TOLERANCE
-    return {
+    return {{
         "correct": correct,
         "compiled": True,
-        "error": None if correct else f"max_diff={max_diff:.6f}",
+        "error": None if correct else f"max_diff={{max_diff:.6f}}",
         "max_diff": max_diff,
-    }
+    }}
 '''
+
+_STANDARD_CHECK_CORRECTNESS = _STANDARD_CHECK_CORRECTNESS_TEMPLATE.format(
+    seed=KERNEL_EVAL_SEED,
+    tolerance=KERNEL_EVAL_TOLERANCE,
+    num_trials=KERNEL_EVAL_NUM_TRIALS,
+)
 
 
 class KernelBenchTaskSource(TaskSource):

@@ -15,7 +15,6 @@ from grail.environments.gpu_kernel.eval_backends import (
 )
 from tests.fixtures.fakes import FakeEvalBackend
 
-
 # =============================================================================
 # TestEvalResult
 # =============================================================================
@@ -62,14 +61,14 @@ class TestBackendFactory:
         with pytest.raises(ValueError, match="Unknown kernel eval backend"):
             create_backend("nonexistent")
 
-    def test_default_backend_is_subprocess(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from grail.environments.gpu_kernel.eval_backends.subprocess_backend import (
-            SubprocessBackend,
+    def test_default_backend_is_persistent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from grail.environments.gpu_kernel.eval_backends.persistent_backend import (
+            PersistentWorkerPool,
         )
 
         monkeypatch.delenv("KERNEL_EVAL_BACKEND", raising=False)
         backend = create_backend(gpu_ids=[])
-        assert isinstance(backend, SubprocessBackend)
+        assert isinstance(backend, PersistentWorkerPool)
 
 
 # =============================================================================

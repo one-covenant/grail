@@ -168,7 +168,7 @@ class SubprocessBackend:
             try:
                 result = _run_eval_in_subprocess(
                     sample_test_codes[i],
-                    _WARMUP_TRITON_CODE,
+                    WARMUP_TRITON_CODE,
                     gpu_id,
                     self._timeout,
                 )
@@ -329,29 +329,33 @@ def _cleanup_temp_file(path: str | None) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _eval_worker_process(
-    conn: Any,
-    test_code: str,
-    triton_code: str,
-    gpu_id: int | None,
-) -> None:
-    """Entry point for the spawned subprocess.
+def run_kernel_eval(test_code: str, triton_code: str, device: Any = None) -> dict:
+    """Execute test harness + generated kernel and return result dict.
 
-    Executes test_code to obtain ``Model``, ``get_inputs()``,
-    ``get_init_inputs()``, and ``check_correctness()``.  Then executes
-    triton_code to obtain ``ModelNew``.  Results are sent back via *conn*.
+    This is the core eval logic shared by :class:`SubprocessBackend` (per-eval
+    process) and :class:`~.persistent_backend.PersistentWorkerPool` (long-lived
+    process).  Both call this function identically, ensuring miner/validator
+    agreement regardless of backend choice.
+
+    Args:
+        test_code: Test harness containing ``Model``, ``get_inputs()``,
+            ``get_init_inputs()``, and optionally ``check_correctness()``.
+        triton_code: Generated code defining ``ModelNew``.
+        device: ``torch.device`` to use.  Defaults to ``"cuda"`` if available.
+
+    Returns:
+        Dict with keys ``correct``, ``compiled``, ``error``, ``max_diff``.
     """
     import traceback
+
+    import torch
+
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     triton_file: str | None = None
     test_file: str | None = None
     try:
-        # Pin to specific GPU before any CUDA initialisation
-        if gpu_id is not None:
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-
-        import torch  # noqa: F811  (deferred so CUDA_VISIBLE_DEVICES takes effect)
-
         # Phase 1 — execute test harness
         test_globals: dict[str, Any] = {}
         _exec_code_from_file(test_code, test_globals)
@@ -363,8 +367,7 @@ def _eval_worker_process(
         check_correctness = test_globals.get("check_correctness")
 
         if model_class is None or get_inputs is None:
-            conn.send({"correct": False, "compiled": False, "error": "missing_model_or_inputs"})
-            return
+            return {"correct": False, "compiled": False, "error": "missing_model_or_inputs"}
 
         # Phase 2 — execute generated Triton code
         gen_globals: dict[str, Any] = {}
@@ -373,34 +376,27 @@ def _eval_worker_process(
 
         model_new_class = gen_globals.get("ModelNew")
         if model_new_class is None:
-            conn.send({"correct": False, "compiled": True, "error": "no_model_new_class"})
-            return
+            return {"correct": False, "compiled": True, "error": "no_model_new_class"}
 
         # Phase 3a — preferred: use check_correctness() from the test harness
         if check_correctness is not None:
             try:
                 result = check_correctness(model_new_class)
                 if isinstance(result, dict):
-                    conn.send(result)
-                elif isinstance(result, bool):
-                    conn.send(
-                        {
-                            "correct": result,
-                            "compiled": True,
-                            "error": None if result else "check_correctness_failed",
-                        }
-                    )
-                else:
-                    conn.send({"correct": bool(result), "compiled": True, "error": None})
-            except Exception as e:
-                conn.send(
-                    {
-                        "correct": False,
+                    return result
+                if isinstance(result, bool):
+                    return {
+                        "correct": result,
                         "compiled": True,
-                        "error": f"check_correctness_error: {e}",
+                        "error": None if result else "check_correctness_failed",
                     }
-                )
-            return
+                return {"correct": bool(result), "compiled": True, "error": None}
+            except Exception as e:
+                return {
+                    "correct": False,
+                    "compiled": True,
+                    "error": f"check_correctness_error: {e}",
+                }
 
         # Phase 3b — fallback: manual correctness check
         from ..task_sources import (
@@ -408,8 +404,6 @@ def _eval_worker_process(
             KERNEL_EVAL_SEED,
             KERNEL_EVAL_TOLERANCE,
         )
-
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         init_inputs = get_init_inputs() if get_init_inputs else []
 
@@ -440,30 +434,60 @@ def _eval_worker_process(
                 new_out = new_out[0]
 
             if ref_out.shape != new_out.shape:
-                conn.send(
-                    {
-                        "correct": False,
-                        "compiled": True,
-                        "error": f"shape_mismatch: {ref_out.shape} vs {new_out.shape}",
-                        "max_diff": None,
-                    }
-                )
-                return
+                return {
+                    "correct": False,
+                    "compiled": True,
+                    "error": f"shape_mismatch: {ref_out.shape} vs {new_out.shape}",
+                    "max_diff": None,
+                }
 
             diff = torch.max(torch.abs(ref_out.float() - new_out.float())).item()
             max_diff = max(max_diff, diff)
 
         correct = max_diff <= KERNEL_EVAL_TOLERANCE
-        conn.send(
-            {
-                "correct": correct,
-                "compiled": True,
-                "error": None if correct else f"max_diff={max_diff:.6f}",
-                "max_diff": max_diff,
-            }
-        )
+        return {
+            "correct": correct,
+            "compiled": True,
+            "error": None if correct else f"max_diff={max_diff:.6f}",
+            "max_diff": max_diff,
+        }
 
     except Exception as e:
+        tb = traceback.format_exc()
+        return {
+            "correct": False,
+            "compiled": False,
+            "error": f"{type(e).__name__}: {e}\n{tb}",
+            "max_diff": None,
+        }
+    finally:
+        _cleanup_temp_file(triton_file)
+        _cleanup_temp_file(test_file)
+
+
+def _eval_worker_process(
+    conn: Any,
+    test_code: str,
+    triton_code: str,
+    gpu_id: int | None,
+) -> None:
+    """Entry point for the spawned subprocess.
+
+    Pins to *gpu_id*, imports torch (initialising CUDA), then delegates to
+    :func:`run_kernel_eval` and sends the result dict back via *conn*.
+    """
+    try:
+        if gpu_id is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+        import torch  # noqa: F811  (deferred so CUDA_VISIBLE_DEVICES takes effect)
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        result = run_kernel_eval(test_code, triton_code, device)
+        conn.send(result)
+    except Exception as e:
+        import traceback
+
         tb = traceback.format_exc()
         conn.send(
             {
@@ -473,16 +497,13 @@ def _eval_worker_process(
                 "max_diff": None,
             }
         )
-    finally:
-        _cleanup_temp_file(triton_file)
-        _cleanup_temp_file(test_file)
 
 
 # ---------------------------------------------------------------------------
 # Warmup kernel
 # ---------------------------------------------------------------------------
 
-_WARMUP_TRITON_CODE = """
+WARMUP_TRITON_CODE = """
 import torch
 import triton
 import triton.language as tl

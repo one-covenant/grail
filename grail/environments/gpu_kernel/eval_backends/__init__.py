@@ -1,13 +1,14 @@
 """Pluggable GPU evaluation backends for Triton kernel correctness checking.
 
-Provides a protocol-based abstraction for kernel evaluation with three backends:
+Provides a protocol-based abstraction for kernel evaluation with four backends:
 - SubprocessBackend: Per-eval subprocess isolation, GPU-pinned (default)
+- PersistentWorkerPool: Long-lived workers with CUDA context reuse
 - AffinetesBackend: Docker container pool via vendored Affinetes
 - ModalBackend: Serverless GPU via Modal
 
 Configuration via environment variables:
-    KERNEL_EVAL_BACKEND=subprocess|affinetes|modal
-    KERNEL_EVAL_GPU_IDS=0,1,2   (comma-separated GPU indices)
+    KERNEL_EVAL_BACKEND=subprocess|persistent|affinetes|modal
+    KERNEL_EVAL_GPU_IDS=0,1,2   (comma-separated PHYSICAL GPU indices, not relative to CUDA_VISIBLE_DEVICES)
     KERNEL_EVAL_TIMEOUT=60      (per-kernel timeout in seconds)
 """
 
@@ -16,7 +17,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +193,7 @@ def create_backend(
     *,
     gpu_ids: list[int] | None = None,
     timeout: float | None = None,
-    **kwargs: object,
+    **kwargs: Any,
 ) -> KernelEvalBackend:
     """Create a kernel evaluation backend by name.
 
@@ -209,7 +210,7 @@ def create_backend(
     Raises:
         ValueError: If backend name is unknown.
     """
-    name = name or os.environ.get("KERNEL_EVAL_BACKEND", "subprocess")
+    name = name or os.environ.get("KERNEL_EVAL_BACKEND", "persistent")
     if gpu_ids is None:
         gpu_ids = parse_gpu_ids()
     if timeout is None:
@@ -219,6 +220,11 @@ def create_backend(
         from .subprocess_backend import SubprocessBackend
 
         return SubprocessBackend(gpu_ids=gpu_ids, timeout=timeout, **kwargs)
+
+    if name == "persistent":
+        from .persistent_backend import PersistentWorkerPool
+
+        return PersistentWorkerPool(gpu_ids=gpu_ids, timeout=timeout, **kwargs)
 
     if name == "affinetes":
         from .affinetes_backend import AffinetesBackend
@@ -231,5 +237,6 @@ def create_backend(
         return ModalBackend(timeout=timeout, **kwargs)
 
     raise ValueError(
-        f"Unknown kernel eval backend: {name!r}. Must be one of: subprocess, affinetes, modal"
+        f"Unknown kernel eval backend: {name!r}. "
+        f"Must be one of: subprocess, persistent, affinetes, modal"
     )
