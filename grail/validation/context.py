@@ -47,8 +47,9 @@ class ValidationContext:
         default_factory=dict
     )  # Generation params (e.g., max_tokens) from checkpoint
 
-    # Cached intermediate results (populated by validators)
-    cached_logits: torch.Tensor | None = None
+    # Cached intermediate results (populated by validators or batched pre-computation)
+    cached_hidden_states: torch.Tensor | None = None  # [seq_len, hidden_dim] at LAYER_INDEX
+    cached_logits: torch.Tensor | None = None  # [seq_len, vocab_size] on CPU
     verified_problem: Any | None = None  # SATProblem, CodeProblem, etc.
 
     # Results accumulators (updated by validators)
