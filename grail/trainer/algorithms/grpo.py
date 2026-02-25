@@ -907,13 +907,23 @@ def compute_logprobs(
     prompt_lengths: list[int],
     completion_lengths: list[int],
     return_per_token: bool = False,
-) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """Compute log-probabilities over completion tokens for GRPO.
+    return_entropy: bool = False,
+) -> (
+    torch.Tensor
+    | tuple[torch.Tensor, torch.Tensor]
+    | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+):
+    """Compute log-probabilities (and optionally entropy) over completion tokens.
+
+    Single forward pass serves both logprob and entropy computation, avoiding
+    a redundant forward that would double peak GPU memory from vocab-sized tensors
+    (~6 GB each at seq_len=10K, vocab=152K).
 
     This function:
     1. Runs model forward pass on padded input_ids (right-padded to batch max length)
     2. Shifts logits left by 1 to align with next-token prediction (standard LM indexing)
     3. For each sequence, extracts logprobs for completion tokens only
+    4. Optionally computes mean entropy over completion tokens from the same log_softmax
 
     Key indexing detail: logits[i,j] predicts token[i,j+1], so to get logprob of
     token[i, prompt_len + k] (k-th completion token), we extract logprobs[i, prompt_len-1+k]
@@ -924,11 +934,13 @@ def compute_logprobs(
         attention_mask: [batch_size, seq_len] mask (1=real, 0=pad)
         prompt_lengths: [batch_size] original prompt length per sample (before padding)
         completion_lengths: [batch_size] number of completion tokens per sample
-        return_per_token: If True, return (sum_logprobs, per_token_logprobs_padded)
+        return_per_token: If True, return per-token logprobs alongside sums
+        return_entropy: If True, also return mean entropy per sequence (requires return_per_token=True)
 
     Returns:
         If return_per_token=False: [batch_size] tensor of sum log-probabilities
-        If return_per_token=True: ([batch_size], [batch_size, max_comp_len]) tuple
+        If return_per_token=True, return_entropy=False: ([batch_size], [batch_size, max_comp_len])
+        If return_per_token=True, return_entropy=True: ([batch_size], [batch_size, max_comp_len], [batch_size])
     """
     # Precision controlled by caller via accelerator.autocast
     outputs = model(
@@ -946,6 +958,16 @@ def compute_logprobs(
         2,
         shift_labels.unsqueeze(-1),
     ).squeeze(-1)
+
+    # Derive entropy from the same log_probs — no extra vocab-sized allocation.
+    # entropy = -sum(p * log(p)) = -sum(exp(log_p) * log_p)
+    entropy_per_token: torch.Tensor | None = None
+    if return_entropy:
+        entropy_per_token = -(log_probs.exp() * log_probs).sum(dim=-1)
+
+    # Free the large log_probs tensor now that we've extracted what we need.
+    # token_log_probs and entropy_per_token are [batch, seq_len-1] (no vocab dim).
+    del log_probs
 
     if not return_per_token:
         # Original behavior: return sequence sums
@@ -969,6 +991,11 @@ def compute_logprobs(
         per_token_padded: torch.Tensor = torch.zeros(batch_size, max_comp_len, device=device)
         seq_log_probs_tensor: torch.Tensor = torch.zeros(batch_size, device=device)
 
+        # Entropy: mean over completion tokens per sequence
+        mean_entropies: torch.Tensor | None = None
+        if return_entropy and entropy_per_token is not None:
+            entropies_list: list[torch.Tensor] = []
+
         seq_len_minus_1 = token_log_probs.shape[1]
         for idx, prompt_len in enumerate(prompt_lengths):
             completion_len = completion_lengths[idx]
@@ -978,57 +1005,17 @@ def compute_logprobs(
                 comp_logps = token_log_probs[idx, start_idx:end_idx]
                 per_token_padded[idx, : len(comp_logps)] = comp_logps
                 seq_log_probs_tensor[idx] = comp_logps.sum()
+                if return_entropy and entropy_per_token is not None:
+                    entropies_list.append(entropy_per_token[idx, start_idx:end_idx].mean())
+            else:
+                if return_entropy and entropy_per_token is not None:
+                    entropies_list.append(torch.tensor(0.0, device=device))
+
+        if return_entropy and entropy_per_token is not None:
+            mean_entropies = torch.stack(entropies_list)
+            return seq_log_probs_tensor, per_token_padded, mean_entropies
 
         return seq_log_probs_tensor, per_token_padded
-
-
-def compute_entropy(
-    model: Any,
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
-    prompt_lengths: list[int],
-    completion_lengths: list[int],
-) -> torch.Tensor:
-    """Compute mean entropy over completion tokens for entropy regularization.
-
-    Mirrors the indexing used in compute_logprobs to ensure entropy is computed
-    only over the completion portion of each sequence.
-
-    Args:
-        model: Language model
-        input_ids: [batch_size, seq_len] right-padded token ids
-        attention_mask: [batch_size, seq_len] mask (1=real, 0=pad)
-        prompt_lengths: [batch_size] original prompt length per sample (before padding)
-        completion_lengths: [batch_size] number of completion tokens per sample
-
-    Returns:
-        [batch_size] tensor of mean entropy over completion tokens
-    """
-    # Precision is controlled by the caller via accelerator.autocast
-    outputs = model(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-    )
-    logits = outputs.logits[:, :-1, :].contiguous()
-
-    # Cast to float32 for precise softmax/log_softmax (even if model is bfloat16)
-    logits_f32 = logits.float()
-    probs = F.softmax(logits_f32, dim=-1)
-    log_probs = F.log_softmax(logits_f32, dim=-1)
-    entropy_per_token = -(probs * log_probs).sum(dim=-1)
-
-    entropies: list[torch.Tensor] = []
-    seq_len_minus_1 = entropy_per_token.shape[1]
-    for idx, prompt_len in enumerate(prompt_lengths):
-        completion_len = completion_lengths[idx]
-        start_idx = max(0, prompt_len - 1)
-        end_idx = min(seq_len_minus_1, start_idx + completion_len)
-        if end_idx > start_idx:
-            entropies.append(entropy_per_token[idx, start_idx:end_idx].mean())
-        else:
-            entropies.append(torch.tensor(0.0, device=entropy_per_token.device))
-
-    return torch.stack(entropies)
 
 
 class GRPOAlgorithm(TrainingAlgorithm):
@@ -1798,15 +1785,35 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 device=accelerator.device,
             )
 
-            # Step 2: Compute current policy logprobs (with per-token for proper KL)
+            # Step 2: Compute current policy logprobs and entropy in a single forward pass.
+            # Fusing entropy here avoids a redundant forward that would double peak
+            # GPU memory from vocab-sized tensors (~6 GB each at seq_len=10K).
+            _want_entropy = self.config.entropy_coef > 0.0
             with accelerator.autocast():
-                logprobs_current_sum, logprobs_current_per_token = compute_logprobs(
+                _logprob_result = compute_logprobs(
                     model,
                     input_ids_tensor,
                     attention_mask_tensor,
                     batch_prompt_lens,
                     batch_comp_lens,
                     return_per_token=True,
+                    return_entropy=_want_entropy,
+                )
+            if _want_entropy:
+                assert isinstance(_logprob_result, tuple) and len(_logprob_result) == 3
+                logprobs_current_sum, logprobs_current_per_token, entropies = _logprob_result
+            else:
+                assert isinstance(_logprob_result, tuple) and len(_logprob_result) == 2
+                logprobs_current_sum, logprobs_current_per_token = _logprob_result
+                entropies = None
+
+            if torch.cuda.is_available():
+                logger.debug(
+                    "MEMORY after_logprobs alloc_gb=%.2f reserved_gb=%.2f seq_len=%d batch=%d",
+                    torch.cuda.memory_allocated() / (1024**3),
+                    torch.cuda.memory_reserved() / (1024**3),
+                    input_ids_tensor.shape[1],
+                    input_ids_tensor.shape[0],
                 )
 
             if not _is_finite_tensor(logprobs_current_sum):
@@ -1854,7 +1861,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
             if kl_enabled:
                 if ref_model is not None:
                     with torch.no_grad(), accelerator.autocast():
-                        logprobs_ref_sum, logprobs_ref_per_token = compute_logprobs(
+                        _ref_result = compute_logprobs(
                             ref_model,
                             input_ids_tensor,
                             attention_mask_tensor,
@@ -1862,6 +1869,8 @@ class GRPOAlgorithm(TrainingAlgorithm):
                             batch_comp_lens,
                             return_per_token=True,
                         )
+                        assert isinstance(_ref_result, tuple) and len(_ref_result) == 2
+                        logprobs_ref_sum, logprobs_ref_per_token = _ref_result
                     if not _is_finite_tensor(logprobs_ref_sum):
                         ref_min = torch.nan_to_num(logprobs_ref_sum).min().item()
                         ref_max = torch.nan_to_num(logprobs_ref_sum).max().item()
@@ -1918,22 +1927,13 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 loss_kl = torch.tensor(0.0, device=logprobs_current_sum.device)
                 kl_value = 0.0
 
-            # Step 9: Compute entropy regularization
-            # Only compute entropy if coefficient is non-zero (saves memory)
-            if self.config.entropy_coef > 0.0:
-                entropies = compute_entropy(
-                    model,
-                    input_ids_tensor,
-                    attention_mask_tensor,
-                    batch_prompt_lens,
-                    batch_comp_lens,
-                )
+            # Step 9: Entropy regularization (already computed in Step 2's forward pass)
+            if entropies is not None:
                 if not _is_finite_tensor(entropies):
                     logger.warning("Non-finite entropies; skipping batch")
                     continue
                 loss_entropy = -self.config.entropy_coef * entropies.mean()
             else:
-                # Skip entropy computation entirely when coefficient is zero
                 entropies = torch.zeros(len(batch_rollouts), device=accelerator.device)
                 loss_entropy = torch.tensor(0.0, device=accelerator.device)
 
@@ -1990,6 +1990,13 @@ class GRPOAlgorithm(TrainingAlgorithm):
             scaled_loss = loss_total / float(grad_accum_steps)
             accelerator.backward(scaled_loss)
             grad_accum_counter += 1
+
+            if torch.cuda.is_available():
+                logger.debug(
+                    "MEMORY after_backward alloc_gb=%.2f reserved_gb=%.2f",
+                    torch.cuda.memory_allocated() / (1024**3),
+                    torch.cuda.memory_reserved() / (1024**3),
+                )
 
             grad_norm_scalar = None
             # Only step optimizer and clip gradients every N accumulation steps

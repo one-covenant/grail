@@ -23,7 +23,6 @@ import torch
 from grail.trainer.algorithms.grpo import (
     GRPOGroup,
     GRPORollout,
-    compute_entropy,
     compute_logprobs,
 )
 
@@ -141,7 +140,20 @@ class TestComputeLogprobs:
 
 
 class TestComputeEntropy:
-    """Test entropy computation over completion tokens."""
+    """Test entropy computation fused into compute_logprobs via return_entropy=True."""
+
+    def _get_entropy(self, model: Any, inputs: dict[str, Any]) -> torch.Tensor:
+        """Helper: call compute_logprobs with return_entropy=True, return entropies."""
+        _, _, entropies = compute_logprobs(
+            model,
+            inputs["input_ids"],
+            inputs["attention_mask"],
+            inputs["prompt_lengths"],
+            inputs["completion_lengths"],
+            return_per_token=True,
+            return_entropy=True,
+        )
+        return entropies
 
     def test_entropy_correct_shape(
         self,
@@ -149,18 +161,11 @@ class TestComputeEntropy:
         tiny_qwen_model_and_tokenizer: tuple[Any, Any],
         sample_batch_inputs: dict[str, Any],
     ) -> None:
-        """Test compute_entropy returns correct shape [batch_size]."""
+        """Test fused entropy returns correct shape [batch_size]."""
         model, _ = tiny_qwen_model_and_tokenizer
         model.eval()
 
-        entropies = compute_entropy(
-            model,
-            sample_batch_inputs["input_ids"],
-            sample_batch_inputs["attention_mask"],
-            sample_batch_inputs["prompt_lengths"],
-            sample_batch_inputs["completion_lengths"],
-        )
-
+        entropies = self._get_entropy(model, sample_batch_inputs)
         assert entropies.shape == (sample_batch_inputs["batch_size"],)
 
     def test_entropy_are_nonnegative(
@@ -173,14 +178,7 @@ class TestComputeEntropy:
         model, _ = tiny_qwen_model_and_tokenizer
         model.eval()
 
-        entropies = compute_entropy(
-            model,
-            sample_batch_inputs["input_ids"],
-            sample_batch_inputs["attention_mask"],
-            sample_batch_inputs["prompt_lengths"],
-            sample_batch_inputs["completion_lengths"],
-        )
-
+        entropies = self._get_entropy(model, sample_batch_inputs)
         assert (entropies >= 0.0).all()
 
     def test_entropy_are_finite(
@@ -193,14 +191,7 @@ class TestComputeEntropy:
         model, _ = tiny_qwen_model_and_tokenizer
         model.eval()
 
-        entropies = compute_entropy(
-            model,
-            sample_batch_inputs["input_ids"],
-            sample_batch_inputs["attention_mask"],
-            sample_batch_inputs["prompt_lengths"],
-            sample_batch_inputs["completion_lengths"],
-        )
-
+        entropies = self._get_entropy(model, sample_batch_inputs)
         assert torch.isfinite(entropies).all()
 
     def test_entropy_bounded_by_vocab(
@@ -213,17 +204,31 @@ class TestComputeEntropy:
         model, _ = tiny_qwen_model_and_tokenizer
         model.eval()
 
-        entropies = compute_entropy(
+        entropies = self._get_entropy(model, sample_batch_inputs)
+        max_entropy = math.log(sample_batch_inputs["vocab_size"])
+        # Allow larger numerical slack for bfloat16 precision and distribution variance
+        assert (entropies <= max_entropy + 1.5).all()
+
+    def test_entropy_not_returned_when_disabled(
+        self,
+        seeded_torch_env: None,
+        tiny_qwen_model_and_tokenizer: tuple[Any, Any],
+        sample_batch_inputs: dict[str, Any],
+    ) -> None:
+        """Test that return_entropy=False returns 2-tuple (no entropy)."""
+        model, _ = tiny_qwen_model_and_tokenizer
+        model.eval()
+
+        result = compute_logprobs(
             model,
             sample_batch_inputs["input_ids"],
             sample_batch_inputs["attention_mask"],
             sample_batch_inputs["prompt_lengths"],
             sample_batch_inputs["completion_lengths"],
+            return_per_token=True,
+            return_entropy=False,
         )
-
-        max_entropy = math.log(sample_batch_inputs["vocab_size"])
-        # Allow larger numerical slack for bfloat16 precision and distribution variance
-        assert (entropies <= max_entropy + 1.5).all()
+        assert len(result) == 2
 
 
 class TestAdvantageClipping:
