@@ -25,7 +25,9 @@ class _FakeAdapter:
         self._prompt_ids = prompt_ids
         self._reward = float(env_reward)
 
-    def build_prompt_ids(self, seed: str, tokenizer: Any) -> list[int]:
+    def build_prompt_ids(
+        self, seed: str, tokenizer: Any, env_params: dict | None = None
+    ) -> list[int]:
         return list(self._prompt_ids)
 
     def evaluate_completion(
@@ -33,8 +35,8 @@ class _FakeAdapter:
         seed: str,
         completion_text: str,
         tokenizer: Any,
+        env_params: dict | None = None,
     ) -> dict:
-        # Return success and a deterministic reward
         return {"success": True, "reward": self._reward}
 
 
