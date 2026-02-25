@@ -59,14 +59,11 @@ def create_proof(
     verifier = GRAILVerifier(hidden_dim=hidden_dim, topk=topk)
     r_vec = verifier.generate_r_vec(randomness_hex)
 
-    commitments = []
     with torch.inference_mode():
         outputs = model(inputs["input_ids"], output_hidden_states=True)
         layer_idx = min(LAYER_INDEX, len(outputs.hidden_states) - 1)
         h_layer = outputs.hidden_states[layer_idx][0]
-        for pos in range(len(tokens)):
-            commitment = verifier.create_commitment(h_layer[pos], r_vec, pos)
-            commitments.append(commitment)
+        commitments = verifier.create_commitments_batch(h_layer, r_vec)
 
     return {
         "tokens": tokens,

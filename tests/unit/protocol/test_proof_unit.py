@@ -10,6 +10,7 @@ from grail.protocol.grail_verifier import (
     GRAILVerifier,
     adaptive_sketch_tolerance,
     log_magnitude_bucket,
+    log_magnitude_bucket_vectorized,
 )
 from grail.shared.constants import (
     PROOF_NUM_BUCKETS,
@@ -180,3 +181,112 @@ class TestGRAILVerifier:
         )
 
         assert not is_valid, "Different hidden state should be rejected"
+
+
+class TestVectorizedBucketing:
+    """Verify log_magnitude_bucket_vectorized matches scalar version exactly."""
+
+    def test_basic_values(self) -> None:
+        test_values = [0.0, 1e-7, -1e-7, 1.0, -1.0, 0.1, -0.1, 5.0, -5.0, 100.0, -100.0]
+        vectorized = log_magnitude_bucket_vectorized(torch.tensor(test_values)).tolist()
+        scalar = [log_magnitude_bucket(v) for v in test_values]
+        assert vectorized == scalar
+
+    def test_edge_cases(self) -> None:
+        test_values = [
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            1e-6,
+            -1e-6,
+            1e-7,
+            5e-7,
+        ]
+        vectorized = log_magnitude_bucket_vectorized(torch.tensor(test_values)).tolist()
+        scalar = [log_magnitude_bucket(v) for v in test_values]
+        assert vectorized == scalar
+
+    def test_random_1000(self) -> None:
+        torch.manual_seed(42)
+        values = torch.randn(1000) * 3.0
+        values[0] = float("nan")
+        values[1] = float("inf")
+        values[2] = float("-inf")
+        values[3] = 0.0
+        values[4] = 1e-8
+        vectorized = log_magnitude_bucket_vectorized(values).tolist()
+        scalar = [log_magnitude_bucket(v.item()) for v in values]
+        assert vectorized == scalar
+
+    def test_2d_matches_per_row(self) -> None:
+        torch.manual_seed(123)
+        values_2d = torch.randn(100, 32) * 5.0
+        vectorized = log_magnitude_bucket_vectorized(values_2d)
+        for row in range(100):
+            for col in range(32):
+                s = log_magnitude_bucket(values_2d[row, col].item())
+                assert vectorized[row, col].item() == s, (
+                    f"Mismatch at [{row},{col}]: vec={vectorized[row, col].item()}, "
+                    f"scalar={s}, input={values_2d[row, col].item()}"
+                )
+
+
+class TestCreateCommitmentsBatch:
+    """Verify create_commitments_batch matches per-position scalar loop."""
+
+    @pytest.fixture
+    def verifier(self) -> GRAILVerifier:
+        return GRAILVerifier(hidden_dim=3584, topk=32)
+
+    @pytest.fixture
+    def randomness(self) -> str:
+        return "feedbeefcafebabe1234567890abcdef"
+
+    def test_batch_matches_scalar(self, verifier: GRAILVerifier, randomness: str) -> None:
+        r_vec = verifier.generate_r_vec(randomness)
+        torch.manual_seed(99)
+        h_layer = torch.randn(500, 3584)
+
+        scalar_commitments = [
+            verifier.create_commitment(h_layer[pos], r_vec, pos) for pos in range(500)
+        ]
+        batch_commitments = verifier.create_commitments_batch(h_layer, r_vec)
+
+        assert len(batch_commitments) == len(scalar_commitments)
+        for pos in range(500):
+            assert batch_commitments[pos]["position"] == pos
+            assert batch_commitments[pos]["sketch"] == scalar_commitments[pos]["sketch"], (
+                f"Sketch mismatch at pos {pos}: "
+                f"batch={batch_commitments[pos]['sketch']}, scalar={scalar_commitments[pos]['sketch']}"
+            )
+            assert batch_commitments[pos]["indices"] == scalar_commitments[pos]["indices"]
+
+    def test_edge_case_hidden_states(self, verifier: GRAILVerifier, randomness: str) -> None:
+        r_vec = verifier.generate_r_vec(randomness)
+        h_layer = torch.randn(10, 3584)
+        h_layer[0, :] = 0.0
+        h_layer[1, :] = float("inf")
+        h_layer[2, :] = float("-inf")
+        h_layer[3, :100] = float("nan")
+
+        scalar_commitments = [
+            verifier.create_commitment(h_layer[pos], r_vec, pos) for pos in range(10)
+        ]
+        batch_commitments = verifier.create_commitments_batch(h_layer, r_vec)
+
+        for pos in range(10):
+            assert batch_commitments[pos] == scalar_commitments[pos], f"Mismatch at pos {pos}"
+
+    def test_batch_self_verification(self, verifier: GRAILVerifier, randomness: str) -> None:
+        r_vec = verifier.generate_r_vec(randomness)
+        torch.manual_seed(42)
+        h_layer = torch.randn(100, 3584)
+
+        batch_commitments = verifier.create_commitments_batch(h_layer, r_vec)
+
+        for pos in [0, 10, 25, 50, 75, 99]:
+            is_valid, diagnostics = verifier.verify_commitment(
+                h_layer[pos], batch_commitments[pos], r_vec, sequence_length=100
+            )
+            assert is_valid, f"Self-verification failed at pos {pos}: {diagnostics}"
+            assert diagnostics["sketch_diff"] == 0
