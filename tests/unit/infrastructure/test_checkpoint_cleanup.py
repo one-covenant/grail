@@ -12,11 +12,57 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from grail.infrastructure.checkpoint_consumer import CheckpointMetadata
 from grail.shared.retention_utils import compute_retention_windows
 
 # ============================================================================
 # Tests for _compute_keep_windows
 # ============================================================================
+
+
+class TestValidateMetadata:
+    """Tests for CheckpointMetadata.validate_metadata()."""
+
+    def _make_metadata(self, **overrides: object) -> CheckpointMetadata:
+        defaults: dict[str, object] = {
+            "window": 100,
+            "file_manifest": {},
+            "env_id": "triton_kernel",
+            "generation_params": {"max_tokens": 8192, "temperature": 0.7},
+        }
+        defaults.update(overrides)
+        return CheckpointMetadata(**defaults)  # type: ignore[arg-type]
+
+    def test_valid_metadata_returns_empty(self) -> None:
+        meta = self._make_metadata()
+        assert meta.validate_metadata() == []
+
+    def test_missing_env_id(self) -> None:
+        meta = self._make_metadata(env_id=None)
+        missing = meta.validate_metadata()
+        assert "env_id" in missing
+
+    def test_empty_env_id(self) -> None:
+        meta = self._make_metadata(env_id="")
+        missing = meta.validate_metadata()
+        assert "env_id" in missing
+
+    def test_missing_generation_params(self) -> None:
+        meta = self._make_metadata(generation_params={})
+        missing = meta.validate_metadata()
+        assert "generation_params" in missing
+
+    def test_missing_max_tokens(self) -> None:
+        meta = self._make_metadata(generation_params={"temperature": 0.7})
+        missing = meta.validate_metadata()
+        assert "generation_params.max_tokens" in missing
+
+    def test_multiple_missing_fields(self) -> None:
+        meta = self._make_metadata(env_id=None, generation_params={})
+        missing = meta.validate_metadata()
+        assert "env_id" in missing
+        assert "generation_params" in missing
+        assert len(missing) == 2
 
 
 class TestComputeKeepWindows:

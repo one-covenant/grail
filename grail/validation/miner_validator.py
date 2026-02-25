@@ -219,6 +219,16 @@ class MinerValidator:
                     validator_checkpoint_window
                 )
                 if checkpoint_metadata is not None:
+                    missing = checkpoint_metadata.validate_metadata()
+                    if missing:
+                        logger.error(
+                            "Checkpoint %s missing required metadata: %s. "
+                            "Skipping validation — trainer may be misconfigured.",
+                            validator_checkpoint_window,
+                            ", ".join(missing),
+                        )
+                        return self._create_not_found_result(miner_hotkey, uid)
+
                     env_id = checkpoint_metadata.env_id
                     env_params = checkpoint_metadata.env_params or {}
                     generation_params = checkpoint_metadata.generation_params or {}

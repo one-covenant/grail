@@ -100,6 +100,20 @@ class CheckpointMetadata:
         default_factory=dict
     )  # Generation parameters (max_tokens, temperature, etc.)
 
+    def validate_metadata(self) -> list[str]:
+        """Validate that required fields for mining/validation are present.
+
+        Returns a list of missing field names. Empty list = valid.
+        """
+        missing = []
+        if not self.env_id:
+            missing.append("env_id")
+        if not self.generation_params:
+            missing.append("generation_params")
+        elif "max_tokens" not in self.generation_params:
+            missing.append("generation_params.max_tokens")
+        return missing
+
     def remote_prefix(self) -> str:
         """Get the remote R2 prefix for this checkpoint.
 
