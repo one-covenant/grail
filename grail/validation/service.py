@@ -450,6 +450,18 @@ class ValidationService:
                 self._model, self._tokenizer = clear_model_and_tokenizer(
                     self._model, self._tokenizer
                 )
+                # gc.collect() inside clear_model_and_tokenizer runs while
+                # self._model still held the old ref (parameter vs attribute).
+                # Now self._model is None, so the old model is truly unreachable.
+                # Force collection of HF model circular refs BEFORE loading the
+                # new model — otherwise two copies coexist on GPU.
+                import gc
+
+                import torch
+
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 self._model = get_model(str(checkpoint_path), device=None, eval_mode=True)
                 self._tokenizer = get_tokenizer(str(checkpoint_path))
                 self._current_checkpoint_id = str(checkpoint_path)

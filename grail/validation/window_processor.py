@@ -6,11 +6,13 @@ single window.
 
 from __future__ import annotations
 
+import gc
 import logging
 import time
 from collections import Counter
 from typing import Any
 
+import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..infrastructure.chain import GrailChainManager
@@ -197,6 +199,13 @@ class WindowProcessor:
                 with miner_log_context(uid, window):
                     logger.warning(f"Error processing miner: {e}")
                 continue
+            finally:
+                # Free GPU tensors (cached hidden states) between miners.
+                # Without this, tensors from miner N linger until gc runs,
+                # reducing available memory for miner N+1's batched forward.
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
         # Compute total valid rollouts
         total_valid_rollouts = sum(
