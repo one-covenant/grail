@@ -11,11 +11,14 @@ Provides AgentEnvLoop class that:
 from __future__ import annotations
 
 import asyncio
+import gc
 import hashlib
 import json
 import logging
+import os
 import random
 import time
+import traceback as _tb
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, cast
@@ -714,6 +717,105 @@ def compute_advantages(rewards: list[float]) -> list[float]:
     return [a / denom for a in centered]
 
 
+def _batched_forward_pass(
+    model: Any,
+    device: str,
+    all_token_ids_batch: list[list[int]],
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    """Run sub-batched forward passes with right-padding.
+
+    Right-padding is correct for causal models: PAD tokens are to the right of
+    real tokens and are blocked by the causal attention mask, so hidden states
+    at real positions are mathematically identical to unbatched computation.
+
+    Args:
+        model: HuggingFace causal LM
+        device: Device string
+        all_token_ids_batch: Variable-length token sequences
+
+    Returns:
+        (per_seq_hidden, per_seq_logits) — lists of tensors, one per sequence.
+        hidden: [seq_len, hidden_dim] on device.  logits: [seq_len, vocab] on CPU.
+    """
+    proof_batch_size = int(os.getenv("GRAIL_PROOF_BATCH_SIZE", "4"))
+    batch_size = len(all_token_ids_batch)
+    seq_lens = [len(seq) for seq in all_token_ids_batch]
+    pad_id = getattr(model.config, "pad_token_id", None)
+    if pad_id is None:
+        pad_id = getattr(model.config, "eos_token_id", 0)
+
+    per_seq_hidden: list[torch.Tensor] = []
+    per_seq_logits: list[torch.Tensor] = []
+
+    sub_batch_size = proof_batch_size
+    pos = 0  # tracks how many sequences we've processed
+
+    while pos < batch_size:
+        sub_end = min(pos + sub_batch_size, batch_size)
+        sub_seqs = all_token_ids_batch[pos:sub_end]
+        sub_lens = seq_lens[pos:sub_end]
+        sub_max = max(sub_lens)
+        sub_bs = len(sub_seqs)
+
+        try:
+            input_ids = torch.full((sub_bs, sub_max), pad_id, dtype=torch.long, device=device)
+            attn_mask = torch.zeros(sub_bs, sub_max, dtype=torch.long, device=device)
+            for i, (seq, slen) in enumerate(zip(sub_seqs, sub_lens, strict=True)):
+                input_ids[i, :slen] = torch.tensor(seq, dtype=torch.long, device=device)
+                attn_mask[i, :slen] = 1
+
+            with torch.inference_mode():
+                outs = model(input_ids, attention_mask=attn_mask, output_hidden_states=True)
+
+            for i, slen in enumerate(sub_lens):
+                # .clone() to decouple from the full outs tensor so del outs frees GPU memory
+                per_seq_hidden.append(outs.hidden_states[LAYER_INDEX][i, :slen, :].clone())
+                per_seq_logits.append(outs.logits[i, :slen, :].detach().to("cpu"))
+
+            del outs, input_ids, attn_mask
+            torch.cuda.empty_cache()
+            pos = sub_end  # advance past this successful sub-batch
+
+        except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+            if (
+                not isinstance(e, torch.cuda.OutOfMemoryError)
+                and "out of memory" not in str(e).lower()
+            ):
+                raise
+            if sub_batch_size <= 1:
+                # Already at batch_size=1, cannot halve further — propagate
+                raise
+
+            new_size = max(1, sub_batch_size // 2)
+            logger.warning(
+                "OOM at sub-batch %d, halving sub-batch size: %d -> %d",
+                sub_batch_size,
+                sub_batch_size,
+                new_size,
+            )
+            sub_batch_size = new_size
+            # Clear traceback frame locals — they hold references to intermediate
+            # GPU tensors (attention matrices, layer outputs) from the failed
+            # forward pass.  Without this, sys.exc_info() keeps those tensors
+            # alive until the except block exits, starving subsequent retries.
+            if e.__traceback__ is not None:
+                _tb.clear_frames(e.__traceback__)
+            del e
+            gc.collect()
+            torch.cuda.empty_cache()
+            # Do NOT advance pos — retry the same chunk with smaller sub-batch
+
+    logger.info(
+        "Batched forward pass: %d seqs, sub-batch %d->%d (max_len=%d, min_len=%d)",
+        batch_size,
+        proof_batch_size,
+        sub_batch_size,
+        max(seq_lens),
+        min(seq_lens),
+    )
+    return per_seq_hidden, per_seq_logits
+
+
 def compute_proofs(
     model: Any,
     device: str,
@@ -725,8 +827,9 @@ def compute_proofs(
 ) -> list[tuple[list[dict], list[float], bytes, dict, str]]:
     """Compute GRAIL commitments and logprobs. Used by AgentEnvLoop and ProofWorker.
 
-    CRITICAL: Uses individual forward passes (no batching, no padding) to ensure
-    hidden states match the validator's computation exactly.
+    Uses sub-batched forward passes (controlled by GRAIL_PROOF_BATCH_SIZE env var,
+    default 4) with right-padding and attention masks for efficiency.  Falls back
+    to sequential single-sequence passes on OOM.
 
     Args:
         model: The loaded PyTorch model
@@ -750,64 +853,127 @@ def compute_proofs(
     verifier = GRAILVerifier(hidden_dim=hidden_dim)
     r_vec = verifier.generate_r_vec(randomness_hex)
 
+    # --- Phase 1: Forward passes (batched with OOM fallback) ---
+    use_batched = True
+    per_seq_hidden: list[torch.Tensor | None] = [None] * batch_size
+    per_seq_logits: list[torch.Tensor | None] = [None] * batch_size
+
+    try:
+        hidden_list, logits_list = _batched_forward_pass(model, device, all_token_ids_batch)
+        for i in range(batch_size):
+            per_seq_hidden[i] = hidden_list[i]
+            per_seq_logits[i] = logits_list[i]
+        del hidden_list, logits_list
+    except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+        if not isinstance(e, torch.cuda.OutOfMemoryError) and "out of memory" not in str(e).lower():
+            raise
+        logger.warning(
+            "Batched proof OOM even at sub-batch=1 (total=%d), falling back to sequential",
+            batch_size,
+        )
+        # Free any partial results from earlier sub-batches before fallback
+        per_seq_hidden = [None] * batch_size
+        per_seq_logits = [None] * batch_size
+        if e.__traceback__ is not None:
+            _tb.clear_frames(e.__traceback__)
+        del e
+        gc.collect()
+        torch.cuda.empty_cache()
+        use_batched = False
+
+    # --- Phase 2: Per-sequence commitment and logprob computation ---
     results: list[tuple[list[dict], list[float], bytes, dict, str]] = []
 
     for idx, all_token_ids in enumerate(all_token_ids_batch):
         prompt_len = prompt_lens[idx]
 
+        if use_batched:
+            h_layer = per_seq_hidden[idx]
+            logits = per_seq_logits[idx]
+            assert h_layer is not None and logits is not None
+        else:
+            # Sequential fallback: individual forward pass
+            if idx == 0:
+                logger.debug(
+                    "SEQUENTIAL FALLBACK: seq_len=%d prompt_len=%d",
+                    len(all_token_ids),
+                    prompt_len,
+                )
+            token_tensor = torch.tensor(all_token_ids, dtype=torch.long, device=device).unsqueeze(0)
+            with torch.inference_mode():
+                model_outputs = model(token_tensor, output_hidden_states=True)
+                h_layer = model_outputs.hidden_states[LAYER_INDEX][0]
+                logits = model_outputs.logits[0].detach().to("cpu")
+
         if idx == 0:
             logger.debug(
-                "MINER UNBATCHED COMPUTATION: seq_len=%d prompt_len=%d "
+                "PROOF COMPUTATION: seq_len=%d prompt_len=%d batched=%s "
                 "tokens_first_4=%s tokens_last_4=%s",
                 len(all_token_ids),
                 prompt_len,
+                use_batched,
                 all_token_ids[:4],
                 all_token_ids[-4:] if len(all_token_ids) >= 4 else all_token_ids,
             )
 
-        token_tensor = torch.tensor(all_token_ids, dtype=torch.long, device=device).unsqueeze(0)
+        # --- Vectorized commitment computation (all positions at once) ---
+        commitments = verifier.create_commitments_batch(h_layer, r_vec)
 
-        with torch.inference_mode():
-            model_outputs = model(
-                token_tensor,
-                output_hidden_states=True,
-            )
-            h_layer = model_outputs.hidden_states[LAYER_INDEX][0]
-            logits = model_outputs.logits[0].detach().to("cpu")
+        if idx == 0:
+            for pos in [0, prompt_len - 1, prompt_len, len(all_token_ids) - 1]:
+                if 0 <= pos < len(commitments):
+                    commitment = commitments[pos]
+                    logger.debug(
+                        "MINER COMMITMENT pos=%d token_id=%d "
+                        "sketch_hash=%s rank_hash=%s hidden_norm=%.6f",
+                        pos,
+                        all_token_ids[pos],
+                        commitment.get("sketch_hash", "")[:16],
+                        commitment.get("rank_hash", "")[:16],
+                        float(h_layer[pos].norm().item()),
+                    )
 
-        commitments: list[dict] = []
+        # --- Vectorized logprob computation ---
+        completion_ids = all_token_ids[prompt_len:]
+        num_completion = len(completion_ids)
         logprobs: list[float] = []
 
-        for pos in range(len(all_token_ids)):
-            commitment = verifier.create_commitment(h_layer[pos], r_vec, pos)
-            commitments.append(commitment)
+        if num_completion > 0:
+            start_logit = prompt_len - 1
+            end_logit = start_logit + num_completion
+            valid_start = max(0, start_logit)
+            valid_end = min(logits.size(0), end_logit)
 
-            if idx == 0 and pos in [0, prompt_len - 1, prompt_len, len(all_token_ids) - 1]:
-                logger.debug(
-                    "MINER COMMITMENT pos=%d token_id=%d "
-                    "sketch_hash=%s rank_hash=%s hidden_norm=%.6f",
-                    pos,
-                    all_token_ids[pos],
-                    commitment.get("sketch_hash", "")[:16],
-                    commitment.get("rank_hash", "")[:16],
-                    float(h_layer[pos].norm().item()),
+            if valid_start < valid_end:
+                skip_front = valid_start - start_logit
+                n_valid = valid_end - valid_start
+                valid_token_ids = completion_ids[skip_front : skip_front + n_valid]
+                token_tensor = torch.tensor(valid_token_ids, dtype=torch.long)
+
+                # Chunked log_softmax to cap CPU memory (~600MB per chunk)
+                LOGPROB_CHUNK = 512
+                chunk_logprobs: list[float] = []
+                for c_start in range(0, n_valid, LOGPROB_CHUNK):
+                    c_end = min(c_start + LOGPROB_CHUNK, n_valid)
+                    logit_slice = logits[valid_start + c_start : valid_start + c_end]
+                    log_probs_chunk = torch.log_softmax(logit_slice, dim=-1)
+                    tok_slice = token_tensor[c_start:c_end]
+                    selected = log_probs_chunk[torch.arange(c_end - c_start), tok_slice]
+                    chunk_logprobs.extend(selected.tolist())
+
+                logprobs = (
+                    [float("-inf")] * skip_front
+                    + chunk_logprobs
+                    + [float("-inf")] * (num_completion - skip_front - n_valid)
                 )
-
-        completion_ids = all_token_ids[prompt_len:]
-        for i, token_id in enumerate(completion_ids):
-            logit_pos = prompt_len + i - 1
-            if logit_pos >= 0 and logit_pos < logits.size(0):
-                log_probs_dist = torch.log_softmax(logits[logit_pos], dim=-1)
-                logprobs.append(log_probs_dist[token_id].item())
             else:
+                logprobs = [float("-inf")] * num_completion
                 logger.warning(
-                    "Missing logits for completion token %d/%d at logit_pos=%d; "
-                    "setting logprob to -inf",
-                    i,
-                    len(completion_ids),
-                    logit_pos,
+                    "All completion logit positions out of range: start=%d end=%d logits_size=%d",
+                    start_logit,
+                    end_logit,
+                    logits.size(0),
                 )
-                logprobs.append(float("-inf"))
 
         commitment_data = json.dumps(commitments, sort_keys=True)
         commitment_hash = hashlib.sha256(commitment_data.encode()).digest()
@@ -823,7 +989,9 @@ def compute_proofs(
         results.append((commitments, logprobs, signature, beacon, proof_version))
 
     logger.debug(
-        "Completed unbatched proof computation for %d rollout(s)", len(all_token_ids_batch)
+        "Completed proof computation for %d rollout(s) (batched=%s)",
+        len(all_token_ids_batch),
+        use_batched,
     )
     return results
 
