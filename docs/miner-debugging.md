@@ -76,13 +76,14 @@ Run trainer + validator + miner locally for end-to-end testing.
 
 **Setup:**
 
-1. **Update constants** (grail/shared/constants.py:132):
+1. **Update constants** (grail/shared/constants.py):
    ```python
-   TRAINER_UID = <your-trainer-uid>  # Change from 80
+   TRAINER_UID = <your-trainer-uid>  # Set to your UID on the subnet
    ```
 
-2. **Run all components** (requires 3 GPUs):
+2. **Run all components** (requires 4+ GPUs for triton_kernel, 3 for text-only envs):
 
+   For **text-only environments** (SAT, GSM8K, etc.):
    ```bash
    # Terminal 1: Trainer (with --test-mode)
    CUDA_VISIBLE_DEVICES=0 grail -vv train --test-mode > train.log 2>&1 &
@@ -93,6 +94,21 @@ Run trainer + validator + miner locally for end-to-end testing.
    # Terminal 3: Validator (with --test-mode)
    CUDA_VISIBLE_DEVICES=2 grail -vv validate --test-mode > validate.log 2>&1 &
    ```
+
+   For **Triton Kernel environment** (miner needs 2+ GPUs for pipeline mode):
+   ```bash
+   # Miner: GPU 0 decoding, GPU 1 proofs (pipeline), GPU 2 kernel eval (physical index)
+   CUDA_VISIBLE_DEVICES=0,1 GRAIL_GPU_EVAL=true KERNEL_EVAL_GPU_IDS=2 \
+     GRAIL_PIPELINE_ENABLED=true GRAIL_PIPELINE_BACKEND=vllm \
+     GRAIL_PIPELINE_VLLM_GPU=0 GRAIL_PIPELINE_PROOF_GPU=1 \
+     grail -vv mine > mine.log 2>&1 &
+
+   # Validator on a separate GPU, with its own kernel eval GPU
+   CUDA_VISIBLE_DEVICES=3 KERNEL_EVAL_GPU_IDS=4 \
+     grail -vv validate --test-mode > validate.log 2>&1 &
+   ```
+   > **Note:** `KERNEL_EVAL_GPU_IDS` uses **physical** GPU indices (as shown by `nvidia-smi`).
+   > `GRAIL_PIPELINE_VLLM_GPU` and `GRAIL_PIPELINE_PROOF_GPU` are **relative** to `CUDA_VISIBLE_DEVICES`.
 
 **Why this is harder:**
 - Requires multiple GPUs
@@ -128,7 +144,8 @@ grep "Rejected" validate.log | grep "uid=42"
 | `Sketch tolerance exceeded` | Model weights don't match checkpoint | Load correct checkpoint window |
 | `Signature verification failed` | Hotkey mismatch or signing error | Verify wallet config |
 | `Sampling distribution check failed` | Token sampling distribution wrong | Check generation params (temperature, top_p) |
-| `Reward mismatch` | SAT solution evaluation differs | Verify reward calculation logic |
+| `Reward mismatch` | Environment reward evaluation differs | Verify reward calculation; for `triton_kernel`, check kernel eval GPU health |
+| `reward_valid` hard check failed | Miner reward ≠ validator reward (e.g. miner 0.5 vs validator 1.0) | CUDA context corruption on eval GPU — check for CUDA sticky errors in logs; ensure subprocess isolation is active |
 
 ### Log Verbosity
 
@@ -208,8 +225,8 @@ tail -f validate.log | grep "uid=<your-uid>"
 ### For Advanced Testing (Method 2)
 
 ```bash
-# 1. Update TRAINER_UID in grail/shared/constants.py:132
-# 2. Reduce FAILURE_LOOKBACK_WINDOWS in grail/shared/constants.py:223
+# 1. Update TRAINER_UID in grail/shared/constants.py to your UID
+# 2. Reduce FAILURE_LOOKBACK_WINDOWS in grail/shared/constants.py
 
 # 3. Run trainer with --test-mode
 CUDA_VISIBLE_DEVICES=0 grail -vv train --test-mode > train.log 2>&1 &
