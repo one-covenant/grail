@@ -124,10 +124,23 @@ class VLLMWeightSync(WeightSyncStrategy):
         self._manager: Any | None = None
         self._backend: Any | None = None
 
+    @staticmethod
+    def _is_hf_model_id(name: str) -> bool:
+        """Check if *name* looks like a HuggingFace model ID (``org/model``).
+
+        Checkpoint metadata stores internal names like ``"async_trainer_snapshot"``
+        which are not valid HF repo IDs and must not be passed as ``--tokenizer``
+        to vLLM — doing so triggers a 404 RepositoryNotFoundError.
+        """
+        return "/" in name
+
     def _resolve_tokenizer_name(self, checkpoint_path: str) -> str | None:
         """Derive tokenizer HF model ID from checkpoint metadata.
 
-        Falls back to GRAIL_TRAIN_MODEL_ID env var, then None.
+        Only returns the metadata ``model_name`` when it is a valid HuggingFace
+        repo ID (e.g. ``Qwen/Qwen3-8B``).  Internal names like
+        ``"async_trainer_snapshot"`` are ignored so we fall through to the
+        ``GRAIL_TRAIN_MODEL_ID`` env-var fallback.
         """
         metadata_path = os.path.join(checkpoint_path, "metadata.json")
         if os.path.isfile(metadata_path):
@@ -135,7 +148,7 @@ class VLLMWeightSync(WeightSyncStrategy):
                 with open(metadata_path) as f:
                     meta = json.load(f)
                 name = meta.get("model_name")
-                if name and name != "no_name":
+                if name and self._is_hf_model_id(name):
                     return name
             except Exception:
                 pass
