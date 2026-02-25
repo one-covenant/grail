@@ -17,7 +17,6 @@ from grail.environments.gpu_kernel.task_sources import (
     UnifiedKernelTaskSource,
 )
 
-
 # =============================================================================
 # Helpers
 # =============================================================================
@@ -39,17 +38,19 @@ def _sample_unified_rows(n: int = 10) -> list[dict[str, Any]]:
     difficulties = ["easy", "medium", "hard", "expert"]
 
     for i in range(n):
-        rows.append({
-            "id": f"test_{i}",
-            "source": sources[i % len(sources)],
-            "prompt": f"Optimize kernel {i}",
-            "pytorch_reference": f"class Model:\n  pass  # {i}",
-            "test_code": f"def check_correctness(m): return True  # {i}",
-            "difficulty": difficulties[i % len(difficulties)],
-            "category": "elementwise",
-            "reference_solution": f"class ModelNew:\n  pass  # {i}" if i % 3 == 0 else None,
-            "solution_quality": 0.8 if i % 3 == 0 else None,
-        })
+        rows.append(
+            {
+                "id": f"test_{i}",
+                "source": sources[i % len(sources)],
+                "prompt": f"Optimize kernel {i}",
+                "pytorch_reference": f"class Model:\n  pass  # {i}",
+                "test_code": f"def check_correctness(m): return True  # {i}",
+                "difficulty": difficulties[i % len(difficulties)],
+                "category": "elementwise",
+                "reference_solution": f"class ModelNew:\n  pass  # {i}" if i % 3 == 0 else None,
+                "solution_quality": 0.8 if i % 3 == 0 else None,
+            }
+        )
     return rows
 
 
@@ -94,7 +95,7 @@ class TestUnifiedKernelTaskSource:
             assert excluded.size() < full.size()
             # Verify no kernelbook rows
             for tid in excluded.iter_ids():
-                task = excluded.next(task_id=tid)
+                excluded.next(task_id=tid)
                 # Source check via metadata in taskspec
         finally:
             os.unlink(path)
@@ -126,7 +127,7 @@ class TestUnifiedKernelTaskSource:
             t2 = source.next(seed=42)
             assert t1.id == t2.id
 
-            t3 = source.next(seed=99)
+            source.next(seed=99)
             # Different seeds may give different tasks (depends on dataset size)
         finally:
             os.unlink(path)
@@ -179,22 +180,26 @@ class TestWeightedSampling:
     """Sampling weight computation."""
 
     def test_source_weights(self) -> None:
-        weights = UnifiedKernelTaskSource._compute_sample_weights([
-            {"source": "production_repos", "difficulty": "medium"},
-            {"source": "ai_cuda_engineer", "difficulty": "medium"},
-            {"source": "kernelbook", "difficulty": "medium"},
-        ])
+        weights = UnifiedKernelTaskSource._compute_sample_weights(
+            [
+                {"source": "production_repos", "difficulty": "medium"},
+                {"source": "ai_cuda_engineer", "difficulty": "medium"},
+                {"source": "kernelbook", "difficulty": "medium"},
+            ]
+        )
         assert weights[0] == 3.0  # production_repos x medium
         assert weights[1] == 2.0  # ai_cuda_engineer x medium
         assert weights[2] == 1.0  # kernelbook x medium
 
     def test_difficulty_weights(self) -> None:
-        weights = UnifiedKernelTaskSource._compute_sample_weights([
-            {"source": "kernelbook", "difficulty": "easy"},
-            {"source": "kernelbook", "difficulty": "medium"},
-            {"source": "kernelbook", "difficulty": "hard"},
-            {"source": "kernelbook", "difficulty": "expert"},
-        ])
+        weights = UnifiedKernelTaskSource._compute_sample_weights(
+            [
+                {"source": "kernelbook", "difficulty": "easy"},
+                {"source": "kernelbook", "difficulty": "medium"},
+                {"source": "kernelbook", "difficulty": "hard"},
+                {"source": "kernelbook", "difficulty": "expert"},
+            ]
+        )
         assert weights[0] == pytest.approx(0.5)
         assert weights[1] == pytest.approx(1.0)
         assert weights[2] == pytest.approx(1.5)
@@ -202,9 +207,11 @@ class TestWeightedSampling:
 
     def test_combined_weights(self) -> None:
         """source_weight x difficulty_weight."""
-        weights = UnifiedKernelTaskSource._compute_sample_weights([
-            {"source": "production_repos", "difficulty": "expert"},
-        ])
+        weights = UnifiedKernelTaskSource._compute_sample_weights(
+            [
+                {"source": "production_repos", "difficulty": "expert"},
+            ]
+        )
         assert weights[0] == pytest.approx(6.0)  # 3.0 x 2.0
 
 

@@ -247,9 +247,7 @@ def generate_realistic_sat_prompt(
     try:
         original_template = getattr(tokenizer, "chat_template", None)
         configure_tokenizer(tokenizer)
-        templated = str(
-            apply_chat_template(tokenizer, [{"role": "user", "content": base_prompt}])
-        )
+        templated = str(apply_chat_template(tokenizer, [{"role": "user", "content": base_prompt}]))
         # Restore original template
         if original_template is not None:
             tokenizer.chat_template = original_template

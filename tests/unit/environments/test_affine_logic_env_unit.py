@@ -22,11 +22,9 @@ def parser():
 
 class TestLogicCompletionParser:
     def test_extracts_answer(self, parser):
-        completion = (
-            f"{_cfg.thinking_open}reason{_cfg.thinking_close}\n{_cfg.solution_open})))({_cfg.solution_close}"
-        )
+        completion = f"{_cfg.thinking_open}reason{_cfg.thinking_close}\n{_cfg.solution_open})))({_cfg.solution_close}"
         parsed = parser.parse(completion, {})
-        assert parsed["answer_text"] == ")))("""
+        assert parsed["answer_text"] == ")))("
         assert parsed["has_thinking"] is True
         assert parsed["has_answer"] is True
 

@@ -35,9 +35,7 @@ def _build_solution(code: str, thinking: str = "") -> str:
 
     cfg = get_thinking_config()
     if thinking:
-        return (
-            f"{cfg.thinking_open}\n{thinking}\n{cfg.thinking_close}\n{cfg.solution_open}\n{code}\n{cfg.solution_close}"
-        )
+        return f"{cfg.thinking_open}\n{thinking}\n{cfg.thinking_close}\n{cfg.solution_open}\n{code}\n{cfg.solution_close}"
     return f"{cfg.solution_open}\n{code}\n{cfg.solution_close}"
 
 

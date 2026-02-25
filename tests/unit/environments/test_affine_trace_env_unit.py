@@ -31,9 +31,7 @@ def parser():
 
 class TestTraceCompletionParser:
     def test_extracts_answer_from_solution_tags(self, parser):
-        completion = (
-            f"{_cfg.thinking_open}thinking{_cfg.thinking_close}\n{_cfg.solution_open}5{_cfg.solution_close}"
-        )
+        completion = f"{_cfg.thinking_open}thinking{_cfg.thinking_close}\n{_cfg.solution_open}5{_cfg.solution_close}"
         parsed = parser.parse(completion, {})
         assert parsed["answer_text"] == "5"
         assert parsed["has_thinking"] is True

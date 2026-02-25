@@ -11,8 +11,8 @@ from unittest.mock import patch
 import pytest
 
 from grail.environments.core import ChatMessage
-from grail.environments.gpu_kernel.eval_backends import EvalResult
 from grail.environments.gpu_kernel.env import TritonKernelEnv
+from grail.environments.gpu_kernel.eval_backends import EvalResult
 from grail.environments.gpu_kernel.parser import TritonKernelParser
 from grail.environments.gpu_kernel.rewards import (
     TritonKernelRubric,
@@ -33,7 +33,6 @@ from tests.unit.environments.kernel_test_helpers import (
     build_kernel_completion,
     make_task_payload,
 )
-
 
 # =============================================================================
 # Fixtures
@@ -311,9 +310,7 @@ class TestTritonKernelEnv:
         env.reset(seed=42)
 
         completion = build_kernel_completion("thinking", VALID_TRITON_CODE)
-        _, reward, terminated, _, info = env.step(
-            ChatMessage(role="assistant", content=completion)
-        )
+        _, reward, terminated, _, info = env.step(ChatMessage(role="assistant", content=completion))
 
         assert terminated is True
         assert reward == pytest.approx(0.35)
@@ -322,9 +319,7 @@ class TestTritonKernelEnv:
 
     def test_step_with_fake_backend(self) -> None:
         """gpu_eval=True + FakeEvalBackend -> uses backend."""
-        backend = FakeEvalBackend(
-            default_result=EvalResult(correct=True, compiled=True)
-        )
+        backend = FakeEvalBackend(default_result=EvalResult(correct=True, compiled=True))
         env = TritonKernelEnv(
             task_source=_FakeTaskSource(),
             gpu_eval=True,
@@ -333,9 +328,7 @@ class TestTritonKernelEnv:
         env.reset(seed=42)
 
         completion = build_kernel_completion("thinking", VALID_TRITON_CODE)
-        _, reward, _, _, info = env.step(
-            ChatMessage(role="assistant", content=completion)
-        )
+        _, reward, _, _, info = env.step(ChatMessage(role="assistant", content=completion))
 
         assert reward == pytest.approx(1.0)
         assert info["exec_result"]["correct"] is True
@@ -353,9 +346,7 @@ class TestTritonKernelEnv:
         completion = build_kernel_completion("thinking", VALID_TRITON_CODE)
 
         # Mock out the global backend to be None
-        with patch(
-            "grail.environments.gpu_kernel.env.get_global_backend", return_value=None
-        ):
+        with patch("grail.environments.gpu_kernel.env.get_global_backend", return_value=None):
             with pytest.raises(RuntimeError, match="no eval backend configured"):
                 env.step(ChatMessage(role="assistant", content=completion))
 
@@ -371,9 +362,7 @@ class TestTritonKernelEnv:
 
         # Missing ModelNew -> structure_valid=False -> no GPU eval
         completion = build_kernel_completion("thinking", MISSING_MODEL_NEW_CODE)
-        _, _, _, _, info = env.step(
-            ChatMessage(role="assistant", content=completion)
-        )
+        _, _, _, _, info = env.step(ChatMessage(role="assistant", content=completion))
 
         assert info["exec_result"] is None
         assert len(backend.call_log) == 0
@@ -387,9 +376,7 @@ class TestTritonKernelEnv:
         for _ in range(3):
             env = TritonKernelEnv(task_source=source, gpu_eval=False)
             env.reset(seed=42)
-            _, reward, _, _, _ = env.step(
-                ChatMessage(role="assistant", content=completion)
-            )
+            _, reward, _, _, _ = env.step(ChatMessage(role="assistant", content=completion))
             rewards.append(reward)
 
         assert all(r == rewards[0] for r in rewards)
@@ -400,9 +387,7 @@ class TestTritonKernelEnv:
         env.reset(seed=42)
 
         completion = build_kernel_completion("thinking", VALID_TRITON_CODE)
-        _, _, _, _, info = env.step(
-            ChatMessage(role="assistant", content=completion)
-        )
+        _, _, _, _, info = env.step(ChatMessage(role="assistant", content=completion))
 
         expected_keys = {
             "reward_components",

@@ -25,8 +25,7 @@ def _ensure_affinetes():
     vendor = Path(__file__).resolve().parents[3] / "vendor" / "affinetes"
     if not (vendor / "environments").exists():
         pytest.skip(
-            "affinetes submodule not initialized "
-            "(git submodule update --init vendor/affinetes)"
+            "affinetes submodule not initialized (git submodule update --init vendor/affinetes)"
         )
 
 
@@ -71,9 +70,7 @@ def test_trace_env_format_rewards_without_tags():
     """No tags -> no format bonuses, only base reward."""
     env = create_env("affine_trace")
     env.reset(seed=42)
-    _, reward, _, _, info = env.step(
-        ChatMessage(role="assistant", content="plain text no tags")
-    )
+    _, reward, _, _, info = env.step(ChatMessage(role="assistant", content="plain text no tags"))
     assert reward < 0.3  # No format bonuses, no correctness
 
 
