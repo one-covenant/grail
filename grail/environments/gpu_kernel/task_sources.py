@@ -226,7 +226,10 @@ class KernelBenchTaskSource(TaskSource):
                 # Level might not exist (e.g., level_4 was added later)
                 continue
 
-            for sample in ds:
+            for raw_sample in ds:
+                # load_dataset with split= returns a Dataset whose rows are
+                # dict-like; cast to dict to satisfy pyright's union type.
+                sample: dict[str, Any] = dict(raw_sample)  # type: ignore[arg-type]
                 all_samples.append(
                     {
                         "code": str(sample.get("code", "")),

@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 def forward_single_layer(
     model: Any,
     input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
+    attention_mask: torch.Tensor | None,
     layer_index: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run a forward pass returning hidden states at *one* layer plus logits.

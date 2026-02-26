@@ -26,8 +26,9 @@ class TraceTaskSource(TaskSource):
 
     def next(self, *, seed: int | None = None, task_id: str | None = None) -> TaskSpec:
         self._ensure_task()
+        assert TraceTaskSource._instance is not None, "TraceTask failed to load"
         effective_id = int(task_id) if task_id else (seed if seed is not None else 0)
-        challenge = asyncio.run(self._instance.generate(task_id=effective_id))
+        challenge = asyncio.run(TraceTaskSource._instance.generate(task_id=effective_id))
         return TaskSpec(
             id=str(effective_id),
             payload={
@@ -55,8 +56,9 @@ class LogicTaskSource(TaskSource):
 
     def next(self, *, seed: int | None = None, task_id: str | None = None) -> TaskSpec:
         self._ensure_task()
+        assert LogicTaskSource._instance is not None, "LogicTaskV2 failed to load"
         effective_id = int(task_id) if task_id else (seed if seed is not None else 0)
-        challenge = asyncio.run(self._instance.generate(task_id=effective_id))
+        challenge = asyncio.run(LogicTaskSource._instance.generate(task_id=effective_id))
         return TaskSpec(
             id=str(effective_id),
             payload={

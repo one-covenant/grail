@@ -57,6 +57,7 @@ class ProofWorker:
         logger.info("ProofWorker: loading model from %s to %s", checkpoint_path, self._device)
         self._model = get_model(str(checkpoint_path), device=self._device, eval_mode=True)
         self._tokenizer = get_tokenizer(str(checkpoint_path))
+        assert self._model is not None, "get_model() returned None"
         self._hidden_dim = resolve_hidden_size(self._model)
         logger.info(
             "ProofWorker: model loaded (hidden_dim=%d, device=%s)",

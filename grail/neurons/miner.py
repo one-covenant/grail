@@ -359,9 +359,10 @@ class MinerNeuron(BaseNeuron):
                                 if _pe is not None:
                                     _pe.shutdown()
 
-                            self.register_shutdown_callback(
-                                lambda: asyncio.ensure_future(_shutdown_pipeline())
-                            )
+                            def _schedule_pipeline_shutdown() -> None:
+                                asyncio.ensure_future(_shutdown_pipeline())
+
+                            self.register_shutdown_callback(_schedule_pipeline_shutdown)
                         except Exception as pipe_exc:
                             logger.error(
                                 "Failed to initialize pipeline, falling back to "
