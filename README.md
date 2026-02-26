@@ -15,6 +15,7 @@
   Documentation:
   <a href="docs/miner.md">Miner</a> •
   <a href="docs/validator.md">Validator</a> •
+  <a href="docs/codebase-orientation-vi.md">Codebase cho người mới (VI)</a>
 </p>
 
 <p align="center">
