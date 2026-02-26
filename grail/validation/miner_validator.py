@@ -556,7 +556,6 @@ class MinerValidator:
             logits_cpu: [seq_len, vocab_size] on CPU.
             Empty dict on any error (caller falls back to per-rollout forward).
         """
-        import os
 
         import torch
 
