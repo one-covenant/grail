@@ -30,6 +30,9 @@ class PipelineConfig:
     max_concurrent_requests: int = 48
     server_timeout: float = 300.0
 
+    # Symlink directory for vLLM weight reload (empty = use checkpoint parent dir)
+    symlink_dir: str = ""  # GRAIL_PIPELINE_SYMLINK_DIR
+
     @classmethod
     def from_env(cls) -> PipelineConfig:
         """Construct from environment variables with sensible defaults."""
@@ -66,4 +69,5 @@ class PipelineConfig:
                 "GRAIL_PIPELINE_MAX_CONCURRENT", cls.max_concurrent_requests
             ),
             server_timeout=_float("GRAIL_PIPELINE_SERVER_TIMEOUT", cls.server_timeout),
+            symlink_dir=_str("GRAIL_PIPELINE_SYMLINK_DIR", cls.symlink_dir),
         )

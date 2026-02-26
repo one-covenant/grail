@@ -171,6 +171,10 @@ The current default environment is **Triton Kernel**. Pipeline mode is the **rec
 
 Proof computation (GPU 1) and kernel evaluation (GPU 2) run **in parallel** after decoding completes, since proofs only need token IDs and do not depend on evaluation results.
 
+**Weight sync between windows:** When a new checkpoint is available, the pipeline reloads vLLM weights using the sleep/wake/reload API (~3-30 seconds) instead of a full server restart (~5 minutes). This is automatic and requires no configuration. If the fast path fails, it falls back to a full restart.
+
+If checkpoints live on a different volume (e.g. ephemeral/tmpfs), set `GRAIL_PIPELINE_SYMLINK_DIR` to a writable directory on the same filesystem or any accessible path — the symlink used for weight reload will be placed there instead of next to the checkpoint.
+
 ### Triton Kernel GPU Setup Example
 
 ```bash
