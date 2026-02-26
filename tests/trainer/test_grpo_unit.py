@@ -23,6 +23,7 @@ import torch
 from grail.trainer.algorithms.grpo import (
     GRPOGroup,
     GRPORollout,
+    _unwrap_for_chunked_logits,
     compute_logprobs,
 )
 
@@ -465,6 +466,153 @@ class TestGradAccumulationAndClipping:
 
         # Should have reset after each grad_accum_steps
         assert grad_accum_counter == 1  # Last step is 5 % 2 = 1
+
+
+class TestChunkedLogprobs:
+    """Test chunked logit computation matches non-chunked path exactly."""
+
+    def test_chunked_matches_non_chunked_sum(
+        self,
+        seeded_torch_env: None,
+        tiny_qwen_model_and_tokenizer: tuple[Any, Any],
+        sample_batch_inputs: dict[str, Any],
+    ) -> None:
+        """Test chunked and non-chunked return identical sum logprobs."""
+        model, _ = tiny_qwen_model_and_tokenizer
+        model.eval()
+
+        inputs = sample_batch_inputs
+        args = (
+            model,
+            inputs["input_ids"],
+            inputs["attention_mask"],
+            inputs["prompt_lengths"],
+            inputs["completion_lengths"],
+        )
+
+        non_chunked = compute_logprobs(*args)
+        # Use small chunk_size=4 to exercise chunk boundary logic
+        chunked = compute_logprobs(*args, chunked=True, chunk_size=4)
+
+        torch.testing.assert_close(chunked, non_chunked, rtol=1e-5, atol=1e-6)
+
+    def test_chunked_matches_non_chunked_per_token(
+        self,
+        seeded_torch_env: None,
+        tiny_qwen_model_and_tokenizer: tuple[Any, Any],
+        sample_batch_inputs: dict[str, Any],
+    ) -> None:
+        """Test chunked per-token logprobs and entropy match non-chunked."""
+        model, _ = tiny_qwen_model_and_tokenizer
+        model.eval()
+
+        inputs = sample_batch_inputs
+        args = (
+            model,
+            inputs["input_ids"],
+            inputs["attention_mask"],
+            inputs["prompt_lengths"],
+            inputs["completion_lengths"],
+        )
+        kwargs = {"return_per_token": True, "return_entropy": True}
+
+        result_nc = compute_logprobs(*args, **kwargs)
+        assert isinstance(result_nc, tuple) and len(result_nc) == 3
+        sums_nc, per_tok_nc, entropy_nc = result_nc
+        result_c = compute_logprobs(*args, **kwargs, chunked=True, chunk_size=4)
+        assert isinstance(result_c, tuple) and len(result_c) == 3
+        sums_c, per_tok_c, entropy_c = result_c
+
+        torch.testing.assert_close(sums_c, sums_nc, rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(per_tok_c, per_tok_nc, rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(entropy_c, entropy_nc, rtol=1e-4, atol=1e-5)
+
+    def test_chunked_preserves_gradients(
+        self,
+        seeded_torch_env: None,
+        tiny_qwen_model_and_tokenizer: tuple[Any, Any],
+        sample_batch_inputs: dict[str, Any],
+    ) -> None:
+        """Test that backward through chunked path produces non-zero gradients."""
+        model, _ = tiny_qwen_model_and_tokenizer
+        model.train()
+
+        inputs = sample_batch_inputs
+        logprobs_result = compute_logprobs(
+            model,
+            inputs["input_ids"],
+            inputs["attention_mask"],
+            inputs["prompt_lengths"],
+            inputs["completion_lengths"],
+            chunked=True,
+            chunk_size=4,
+        )
+        assert isinstance(logprobs_result, torch.Tensor)
+
+        loss = -logprobs_result.mean()
+        loss.backward()
+
+        has_nonzero_grad = any(
+            p.grad is not None and p.grad.abs().sum() > 0 for p in model.parameters()
+        )
+        assert has_nonzero_grad, "Chunked path should produce non-zero gradients"
+
+    def test_chunked_fallback_on_incompatible_model(
+        self,
+        seeded_torch_env: None,
+        sample_batch_inputs: dict[str, Any],
+    ) -> None:
+        """Test that chunked=True falls back gracefully for models without .model/.lm_head."""
+
+        # A plain nn.Module won't have base_model_prefix / lm_head
+        class DummyModel(torch.nn.Module):
+            def __init__(self, vocab_size: int) -> None:
+                super().__init__()
+                self.embed = torch.nn.Embedding(vocab_size, 32)
+                self.head = torch.nn.Linear(32, vocab_size)
+
+            def forward(
+                self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None
+            ) -> Any:
+                h = self.embed(input_ids)
+                logits = self.head(h)
+                return type("Out", (), {"logits": logits})()
+
+        inputs = sample_batch_inputs
+        dummy = DummyModel(inputs["vocab_size"])
+        dummy.eval()
+
+        # Should fall back to non-chunked without error
+        result = compute_logprobs(
+            dummy,
+            inputs["input_ids"],
+            inputs["attention_mask"],
+            inputs["prompt_lengths"],
+            inputs["completion_lengths"],
+            chunked=True,
+            chunk_size=4,
+        )
+        assert isinstance(result, torch.Tensor)
+        assert result.shape == (inputs["batch_size"],)
+        assert torch.isfinite(result).all()
+
+    def test_unwrap_helper_qwen(
+        self,
+        tiny_qwen_model_and_tokenizer: tuple[Any, Any],
+    ) -> None:
+        """Test _unwrap_for_chunked_logits extracts base model and lm_head from Qwen."""
+        model, _ = tiny_qwen_model_and_tokenizer
+        parts = _unwrap_for_chunked_logits(model)
+
+        assert parts is not None, "Qwen model should be compatible with chunked logits"
+        base, lm_head = parts
+        assert hasattr(base, "forward")
+        assert isinstance(lm_head, torch.nn.Linear)
+
+    def test_unwrap_helper_incompatible(self) -> None:
+        """Test _unwrap_for_chunked_logits returns None for plain nn.Module."""
+        plain = torch.nn.Linear(10, 10)
+        assert _unwrap_for_chunked_logits(plain) is None
 
 
 if __name__ == "__main__":
