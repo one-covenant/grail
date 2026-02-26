@@ -288,7 +288,7 @@ async def maybe_log_debug_sample(
         prompt_len = int(getattr(sample, "prompt_length", 0) or 0)
         completion_len = int(getattr(sample, "completion_length", 0) or 0)
         sample_text = tokenizer.decode(sample.tokens, skip_special_tokens=False)  # type: ignore[attr-defined]
-        sample_nonce = base_nonce * 10
+        sample_nonce = base_nonce * ROLLOUTS_PER_PROBLEM
         logger.debug(
             (
                 "TEXT[mine] window=%s group=%s nonce=%s reward=%.3f "
@@ -434,7 +434,7 @@ def package_rollout_data(
     Returns:
         Signed dictionary ready to upload for validation
     """
-    rollout_nonce = base_nonce * 10 + rollout_idx
+    rollout_nonce = base_nonce * ROLLOUTS_PER_PROBLEM + rollout_idx
 
     # Sign commit binding (tokens, randomness, model, layer, commitments)
     from ..protocol.signatures import sign_commit_binding
