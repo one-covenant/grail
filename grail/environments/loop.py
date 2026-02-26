@@ -26,6 +26,7 @@ from typing import Any, Protocol, cast
 import numpy as np
 import torch
 
+from ..model.forward import forward_single_layer
 from ..shared.chat_templates import apply_chat_template as _apply_chat_template
 from ..shared.constants import GRAIL_PROOF_VERSION, LAYER_INDEX, MAX_NEW_TOKENS
 from ..shared.hf_compat import resolve_hidden_size
@@ -724,18 +725,22 @@ def _batched_forward_pass(
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     """Run sub-batched forward passes with right-padding.
 
-    Right-padding is correct for causal models: PAD tokens are to the right of
-    real tokens and are blocked by the causal attention mask, so hidden states
-    at real positions are mathematically identical to unbatched computation.
+    Uses ``forward_single_layer`` — the same function the validator uses —
+    so miner and validator produce identical hidden states and logits for
+    GRAIL proof generation and verification.
+
+    On OOM the sub-batch size is halved automatically (down to 1) before
+    propagating the error.
 
     Args:
         model: HuggingFace causal LM
-        device: Device string
+        device: Device string (e.g. ``"cuda:1"``)
         all_token_ids_batch: Variable-length token sequences
 
     Returns:
-        (per_seq_hidden, per_seq_logits) — lists of tensors, one per sequence.
-        hidden: [seq_len, hidden_dim] on device.  logits: [seq_len, vocab] on CPU.
+        ``(per_seq_hidden, per_seq_logits)`` — lists of tensors, one per
+        sequence.  hidden: ``[seq_len, hidden_dim]`` on *device*.
+        logits: ``[seq_len, vocab]`` on CPU.
     """
     proof_batch_size = int(os.getenv("GRAIL_PROOF_BATCH_SIZE", "4"))
     batch_size = len(all_token_ids_batch)
@@ -748,7 +753,7 @@ def _batched_forward_pass(
     per_seq_logits: list[torch.Tensor] = []
 
     sub_batch_size = proof_batch_size
-    pos = 0  # tracks how many sequences we've processed
+    pos = 0
 
     while pos < batch_size:
         sub_end = min(pos + sub_batch_size, batch_size)
@@ -758,23 +763,26 @@ def _batched_forward_pass(
         sub_bs = len(sub_seqs)
 
         try:
+            # Right-pad variable-length sequences to sub-batch max length
             input_ids = torch.full((sub_bs, sub_max), pad_id, dtype=torch.long, device=device)
             attn_mask = torch.zeros(sub_bs, sub_max, dtype=torch.long, device=device)
             for i, (seq, slen) in enumerate(zip(sub_seqs, sub_lens, strict=True)):
                 input_ids[i, :slen] = torch.tensor(seq, dtype=torch.long, device=device)
                 attn_mask[i, :slen] = 1
 
+            # Shared forward path with validator (use_cache=False, single-layer)
             with torch.inference_mode():
-                outs = model(input_ids, attention_mask=attn_mask, output_hidden_states=True)
+                h_layer, logits = forward_single_layer(model, input_ids, attn_mask, LAYER_INDEX)
 
+            # Extract per-sequence results, trimming padding.
+            # .clone() decouples from the batched tensor so del frees GPU memory.
             for i, slen in enumerate(sub_lens):
-                # .clone() to decouple from the full outs tensor so del outs frees GPU memory
-                per_seq_hidden.append(outs.hidden_states[LAYER_INDEX][i, :slen, :].clone())
-                per_seq_logits.append(outs.logits[i, :slen, :].detach().to("cpu"))
+                per_seq_hidden.append(h_layer[i, :slen, :].clone())
+                per_seq_logits.append(logits[i, :slen, :].detach().to("cpu"))
 
-            del outs, input_ids, attn_mask
+            del h_layer, logits, input_ids, attn_mask
             torch.cuda.empty_cache()
-            pos = sub_end  # advance past this successful sub-batch
+            pos = sub_end
 
         except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
             if (
@@ -783,7 +791,6 @@ def _batched_forward_pass(
             ):
                 raise
             if sub_batch_size <= 1:
-                # Already at batch_size=1, cannot halve further — propagate
                 raise
 
             new_size = max(1, sub_batch_size // 2)
@@ -794,10 +801,8 @@ def _batched_forward_pass(
                 new_size,
             )
             sub_batch_size = new_size
-            # Clear traceback frame locals — they hold references to intermediate
-            # GPU tensors (attention matrices, layer outputs) from the failed
-            # forward pass.  Without this, sys.exc_info() keeps those tensors
-            # alive until the except block exits, starving subsequent retries.
+            # Clear traceback frame locals — they hold references to
+            # intermediate GPU tensors from the failed forward pass.
             if e.__traceback__ is not None:
                 _tb.clear_frames(e.__traceback__)
             del e
@@ -825,11 +830,15 @@ def compute_proofs(
     randomness_hex: str,
     wallet: Any,
 ) -> list[tuple[list[dict], list[float], bytes, dict, str]]:
-    """Compute GRAIL commitments and logprobs. Used by AgentEnvLoop and ProofWorker.
+    """Compute GRAIL commitments and logprobs.  Used by AgentEnvLoop and ProofWorker.
 
-    Uses sub-batched forward passes (controlled by GRAIL_PROOF_BATCH_SIZE env var,
-    default 4) with right-padding and attention masks for efficiency.  Falls back
-    to sequential single-sequence passes on OOM.
+    Two-phase design:
+      Phase 1 — Forward passes via ``_batched_forward_pass`` (which internally
+        calls ``forward_single_layer``, the same function the validator uses).
+        Sub-batch size is controlled by GRAIL_PROOF_BATCH_SIZE (default 4).
+        Falls back to sequential single-sequence passes on OOM.
+      Phase 2 — Per-sequence commitment + logprob extraction from cached
+        hidden states and logits.
 
     Args:
         model: The loaded PyTorch model
@@ -892,7 +901,8 @@ def compute_proofs(
             logits = per_seq_logits[idx]
             assert h_layer is not None and logits is not None
         else:
-            # Sequential fallback: individual forward pass
+            # Sequential fallback: one sequence at a time using the same
+            # forward_single_layer path for numerical consistency.
             if idx == 0:
                 logger.debug(
                     "SEQUENTIAL FALLBACK: seq_len=%d prompt_len=%d",
@@ -900,10 +910,14 @@ def compute_proofs(
                     prompt_len,
                 )
             token_tensor = torch.tensor(all_token_ids, dtype=torch.long, device=device).unsqueeze(0)
+            attn_mask = torch.ones_like(token_tensor)
             with torch.inference_mode():
-                model_outputs = model(token_tensor, output_hidden_states=True)
-                h_layer = model_outputs.hidden_states[LAYER_INDEX][0]
-                logits = model_outputs.logits[0].detach().to("cpu")
+                h_batch, logits_batch = forward_single_layer(
+                    model, token_tensor, attn_mask, LAYER_INDEX
+                )
+                h_layer = h_batch[0]
+                logits = logits_batch[0].detach().to("cpu")
+            del token_tensor, attn_mask, h_batch, logits_batch
 
         if idx == 0:
             logger.debug(
@@ -956,7 +970,7 @@ def compute_proofs(
                 for c_start in range(0, n_valid, LOGPROB_CHUNK):
                     c_end = min(c_start + LOGPROB_CHUNK, n_valid)
                     logit_slice = logits[valid_start + c_start : valid_start + c_end]
-                    log_probs_chunk = torch.log_softmax(logit_slice, dim=-1)
+                    log_probs_chunk = torch.log_softmax(logit_slice.float(), dim=-1)
                     tok_slice = token_tensor[c_start:c_end]
                     selected = log_probs_chunk[torch.arange(c_end - c_start), tok_slice]
                     chunk_logprobs.extend(selected.tolist())
