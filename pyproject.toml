@@ -170,18 +170,20 @@ addopts = [
     "--strict-markers",
     "--strict-config",
     "--verbose",
-    "-m not gpu_real_data and not long and not integration",  # Exclude GPU, long-running, and integration tests by default
+    "-m not gpu_real_data and not long and not integration and not benchmark",  # Exclude GPU, long-running, integration, and benchmark tests by default
 ]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "gpu_real_data: marks tests as GPU real-data tests (long-running, requires GPU) - include with: pytest -m gpu_real_data",
     "long: marks tests as long-running (typically 10-15min, opt-in) - include with: pytest -m long",
+    "benchmark: marks tests as performance benchmarks (requires GPU) - include with: pytest -m benchmark",
 ]
 # Test suite selection:
-# - pytest                                    = Run all tests EXCEPT GPU and long-running (default, ~2 min)
+# - pytest                                    = Run all tests EXCEPT GPU, long, and benchmark (default, ~2 min)
 # - pytest -m long                            = Run ONLY long-running tests
 # - pytest -m gpu_real_data                  = Run ONLY GPU real-data tests
+# - pytest -m benchmark                      = Run ONLY benchmark tests
 # - pytest -m "gpu_real_data or long"        = Run both GPU and long-running tests
 # - pytest --override-ini="addopts=" tests/  = Run ALL tests including GPU and long-running
 # - pytest -m "not gpu_real_data and not long" tests/ = Explicitly exclude both
@@ -225,7 +227,7 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-extend-exclude = ["scripts", "research"]
+extend-exclude = ["scripts", "research", "results", "vendor", "examples", "benchmark_results", "data"]
 
 [tool.ruff.lint]
 select = [
