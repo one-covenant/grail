@@ -3,8 +3,8 @@
 <div align="center">
   <pre>
    ✦  ✦  ✦  ✦  ✦  ✦  ✦
-  ┌─┐┬─┐┌─┐┬┬  
-  │ ┬├┬┘├─┤││  
+  ┌─┐┬─┐┌─┐┬┬
+  │ ┬├┬┘├─┤││
   └─┘┴└─┴ ┴┴┴─┘
   ✦  ✦  ✦  ✦  ✦  ✦  ✦
   </pre>
@@ -15,6 +15,7 @@
   Documentation:
   <a href="docs/miner.md">Miner</a> •
   <a href="docs/validator.md">Validator</a> •
+  <a href="docs/FAQ.md">FAQ</a>
 </p>
 
 <p align="center">
@@ -68,8 +69,14 @@ GRPO-style rollout system with:
 - SAT-specific `SATRolloutGenerator` with modular reward vector composition
 
 #### 3. Environment System (`grail/environments/`)
-Modular environments, currently:
+Modular environments:
 - **SAT Problems** (`sat.py`): Deterministic 3-SAT generation, parsing, reward shaping
+- **GSM8K** (`gsm8k_env.py`): Math word problems with step-by-step reasoning verification
+- **MATH** (`math_hendrycks_env.py`): Competition-level math problems from the Hendrycks MATH dataset
+- **MBPP** (`python_code_env.py`): Python code generation from the MBPP benchmark
+- **HumanEval** (`python_code_env.py`): Function-level code generation from OpenAI HumanEval
+- **Affine Trace/Logic** (`affinetes/`): Affine type system trace and logic environments
+- **Triton Kernel** (`gpu_kernel/`): GPU kernel generation and correctness evaluation using Triton; requires dedicated GPU for kernel execution
 
 #### 4. Communication & Storage (`grail/infrastructure/comms.py`)
 Object-storage utilities for miner/validator coordination:
@@ -113,11 +120,16 @@ The GRAIL protocol ensures:
 ### Supported Environments
 - **3-SAT**: Variables 3–10, Clauses 5–20, Clause length 3; deterministic from seed
 - **GSM8K**: Math word problems from the GSM8K dataset with step-by-step reasoning verification
+- **MATH**: Competition-level mathematics from the Hendrycks MATH dataset
+- **MBPP**: Python code generation from the Mostly Basic Python Problems benchmark
+- **HumanEval**: Function-level code generation from the OpenAI HumanEval benchmark
+- **Affine Trace/Logic**: Affine type system environments for trace and logic reasoning
+- **Triton Kernel** (current default): GPU kernel generation — the model writes Triton kernels evaluated for correctness on a dedicated GPU
 
 ### Model Requirements
 - Hugging Face Transformers compatible, exposes token ids/logprobs
-- **OS and hardware-agnostic**: Runs on any platform with floating point precision within tolerance
-- Accelerators (GPU/TPU) recommended for throughput
+- **Text-only environments** (SAT, GSM8K, MATH, MBPP, HumanEval): 1 GPU minimum; any CUDA-capable accelerator
+- **Triton Kernel environment**: 3 GPUs recommended — one for model inference (decoding), one for proof/logprob computation, and one for kernel evaluation. The kernel evaluation GPU should be A100 or H100 class to support Triton JIT compilation
 
 For detailed hardware specifications, see [`compute.min.yaml`](compute.min.yaml).
 

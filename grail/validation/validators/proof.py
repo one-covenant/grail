@@ -13,6 +13,7 @@ import logging
 
 import torch
 
+from ...model.forward import forward_single_layer
 from ...protocol.crypto import indices_from_root_in_range
 from ...protocol.grail_verifier import GRAILVerifier
 from ...protocol.signatures import verify_commit_signature
@@ -213,37 +214,48 @@ class GRAILProofValidator(Validator):
             CHALLENGE_K,
         )
 
-        # Run model inference with hidden states
-        full_ids = torch.tensor(tokens, dtype=torch.long, device=ctx.device).unsqueeze(0)
-        try:
-            with torch.inference_mode():
-                outs = ctx.model(full_ids, output_hidden_states=True)
-        except RuntimeError as e:
-            vocab_size = resolve_vocab_size(ctx.model.config)
-            logger.error(
-                f"[proof_valid] Model inference failed | "
-                f"error={str(e)} | "
-                f"vocab_size={vocab_size} | "
-                f"token_range=[{min(tokens)}, {max(tokens)}] | "
-                f"seq_len={seq_len} | "
-                f"device={ctx.device}"
+        # Use pre-computed results from batched forward pass if available,
+        # otherwise run a single-sequence forward pass (backward compatible).
+        if ctx.cached_hidden_states is not None and ctx.cached_logits is not None:
+            h_layer = ctx.cached_hidden_states
+            logger.debug(
+                "VALIDATOR HIDDEN STATE: using pre-computed cache | seq_len=%d",
+                seq_len,
             )
-            ctx.checks[self.check_name] = False
-            return False
+        else:
+            full_ids = torch.tensor(tokens, dtype=torch.long, device=ctx.device).unsqueeze(0)
+            try:
+                with torch.inference_mode():
+                    h_batch, logits_batch = forward_single_layer(
+                        ctx.model,
+                        full_ids,
+                        None,
+                        LAYER_INDEX,
+                    )
+            except RuntimeError as e:
+                vocab_size = resolve_vocab_size(ctx.model.config)
+                logger.error(
+                    f"[proof_valid] Model inference failed | "
+                    f"error={str(e)} | "
+                    f"vocab_size={vocab_size} | "
+                    f"token_range=[{min(tokens)}, {max(tokens)}] | "
+                    f"seq_len={seq_len} | "
+                    f"device={ctx.device}"
+                )
+                ctx.checks[self.check_name] = False
+                return False
 
-        h_layer = outs.hidden_states[LAYER_INDEX][0]
+            h_layer = h_batch[0]
 
-        # Log validator's hidden state computation for debugging
-        logger.debug(
-            "VALIDATOR HIDDEN STATE COMPUTATION: seq_len=%d "
-            "tokens_first_4=%s tokens_last_4=%s attention_mask=None position_ids=None",
-            seq_len,
-            tokens[:4],
-            tokens[-4:] if len(tokens) >= 4 else tokens,
-        )
+            logger.debug(
+                "VALIDATOR HIDDEN STATE: single forward pass | seq_len=%d "
+                "tokens_first_4=%s tokens_last_4=%s",
+                seq_len,
+                tokens[:4],
+                tokens[-4:] if len(tokens) >= 4 else tokens,
+            )
 
-        # Cache full logits for downstream validators (termination + distribution)
-        ctx.cached_logits = outs.logits[0].detach().to("cpu")
+            ctx.cached_logits = logits_batch[0].detach().to("cpu")
 
         # Verify proof commitments at challenged indices
         failed_checks = []

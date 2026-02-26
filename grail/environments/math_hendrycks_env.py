@@ -153,7 +153,7 @@ class MATHCompletionParser(ThinkingParser):
     Uses same format as GSM8K for training consistency.
 
     Expected format:
-    - Thinking blocks: <start_working_out>...</end_working_out> (inherited)
+    - Thinking blocks: mode-dependent tags (inherited from ThinkingParser)
     - Answer blocks: <SOLUTION>...</SOLUTION> (inherited)
     - Trailing text: tracks chars after answer
 
@@ -286,7 +286,7 @@ class MATHEnv(MathDatasetEnv):
     - Text/Special: \\text{June 20}, matrices (1% of dataset)
 
     Model completion format:
-        <start_working_out>Step-by-step reasoning</end_working_out>
+        <thinking_open>Step-by-step reasoning<thinking_close>
         <SOLUTION>\\frac{3}{4}</SOLUTION>
 
     Usage:

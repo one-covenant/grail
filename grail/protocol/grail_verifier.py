@@ -81,6 +81,51 @@ def log_magnitude_bucket(value: float, num_buckets: int = PROOF_NUM_BUCKETS) -> 
     return bucket if value >= 0 else -bucket
 
 
+def log_magnitude_bucket_vectorized(
+    values: torch.Tensor,
+    num_buckets: int = PROOF_NUM_BUCKETS,
+) -> torch.Tensor:
+    """Vectorized log-magnitude bucketing, bit-identical to the scalar version.
+
+    Uses float64 arithmetic to match the scalar path (which converts via
+    .item() to Python float64 then calls math.log2).
+
+    Args:
+        values: Activation values, any shape (e.g. [seq_len, topk]).
+        num_buckets: Buckets per sign (default 16).
+
+    Returns:
+        Signed bucket indices (int64), same shape. Range [-(num_buckets-1), num_buckets-1].
+    """
+    abs_vals = values.abs().to(torch.float64)
+    scale_factor = num_buckets / 10.0
+
+    log_vals = torch.log2(abs_vals + 1.0)
+    raw_buckets = (log_vals * scale_factor).to(torch.int64)
+    raw_buckets = torch.clamp(raw_buckets, min=0, max=num_buckets - 1)
+
+    # Sign: bucket if value >= 0, else -bucket
+    sign_positive = values >= 0  # NaN → False, which is fine (overridden below)
+    buckets = torch.where(sign_positive, raw_buckets, -raw_buckets)
+
+    # Edge cases (applied in priority order)
+    zero = torch.zeros_like(buckets)
+    deadzone_mask = abs_vals < 1e-6
+    buckets = torch.where(deadzone_mask, zero, buckets)
+
+    nan_mask = torch.isnan(values)
+    buckets = torch.where(nan_mask, zero, buckets)
+
+    inf_mask = torch.isinf(values)
+    if inf_mask.any():
+        pos_inf = torch.tensor(num_buckets - 1, dtype=torch.int64, device=values.device)
+        neg_inf = torch.tensor(-(num_buckets - 1), dtype=torch.int64, device=values.device)
+        inf_buckets = torch.where(values > 0, pos_inf, neg_inf)
+        buckets = torch.where(inf_mask, inf_buckets, buckets)
+
+    return buckets
+
+
 def adaptive_sketch_tolerance(
     position: int,
     sequence_length: int,
@@ -207,6 +252,51 @@ class GRAILVerifier:
             "indices": indices.tolist(),
             "position": position,
         }
+
+    def create_commitments_batch(self, h_layer: torch.Tensor, r_vec: torch.Tensor) -> list[dict]:
+        """Create commitments for all positions at once (vectorized).
+
+        Produces bit-identical results to calling create_commitment() in a loop.
+
+        Args:
+            h_layer: Hidden states [seq_len, hidden_dim] on any device.
+            r_vec: Coefficient vector [topk] (int8, typically on CPU).
+
+        Returns:
+            List of commitment dicts, one per position.
+        """
+        seq_len = h_layer.size(0)
+
+        # Step 1: Batched top-k selection
+        abs_h = h_layer.abs()  # [seq_len, hidden_dim]
+        _, topk_indices = torch.topk(abs_h, k=self.topk, dim=1)  # [seq_len, topk]
+        signed_values = torch.gather(h_layer, dim=1, index=topk_indices)  # [seq_len, topk]
+        del abs_h
+
+        # Step 2: Vectorized log-magnitude bucketing (float64 for precision match)
+        buckets = log_magnitude_bucket_vectorized(signed_values, self.num_buckets)
+        # [seq_len, topk] int64
+        del signed_values
+
+        # Step 3: Batched sketch via matrix-vector product
+        # Max |dot| = topk * 15 * 127 = 60,960 — fits in int32, but CUDA
+        # doesn't support int matmul ("addmv_impl_cuda" not implemented for 'Int').
+        # Use float32 — exact for integers up to 2^24 (our max is 60,960).
+        buckets_f = buckets.to(torch.float32)
+        r_vec_f = r_vec.to(torch.float32).to(buckets_f.device)
+        sketches = (buckets_f @ r_vec_f).to(torch.int64)  # [seq_len]
+        del buckets, buckets_f
+
+        # Use Python % for exact match with scalar: int(sketch.item()) % PRIME_Q
+        sketches_list = sketches.tolist()
+        sketch_vals = [s % PRIME_Q for s in sketches_list]
+
+        # Step 4: Package as list of dicts
+        indices_list = topk_indices.tolist()
+        return [
+            {"sketch": sketch_vals[pos], "indices": indices_list[pos], "position": pos}
+            for pos in range(seq_len)
+        ]
 
     def verify_commitment(
         self,

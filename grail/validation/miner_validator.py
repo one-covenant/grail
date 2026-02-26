@@ -5,6 +5,7 @@ Handles fetching, validating, and scoring a single miner's window submission.
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import logging
@@ -20,6 +21,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..infrastructure.chain import GrailChainManager
 from ..infrastructure.comms import get_parquet_file
+from ..model.forward import forward_single_layer
 from ..shared.constants import (
     FAILURE_LOOKBACK_WINDOWS,
     MAX_ROLLOUT_FILE_SIZE_BYTES,
@@ -32,6 +34,7 @@ from .pipeline import ValidationPipeline, get_hard_check_keys, get_soft_check_ke
 from .types import MinerResults
 
 logger = logging.getLogger(__name__)
+
 
 # Validation constants (aligned with pre-refactor validate.py)
 MAX_SAMPLES_PER_MINER_THRESHOLD = 20  # If <= this many rollouts, check all
@@ -219,6 +222,16 @@ class MinerValidator:
                     validator_checkpoint_window
                 )
                 if checkpoint_metadata is not None:
+                    missing = checkpoint_metadata.validate_metadata()
+                    if missing:
+                        logger.error(
+                            "Checkpoint %s missing required metadata: %s. "
+                            "Skipping validation — trainer may be misconfigured.",
+                            validator_checkpoint_window,
+                            ", ".join(missing),
+                        )
+                        return self._create_not_found_result(miner_hotkey, uid)
+
                     env_id = checkpoint_metadata.env_id
                     env_params = checkpoint_metadata.env_params or {}
                     generation_params = checkpoint_metadata.generation_params or {}
@@ -525,6 +538,225 @@ class MinerValidator:
 
         return indices_to_check, groups_map, group_index_by_id
 
+    def _precompute_batched_forward(
+        self,
+        inferences: list[dict],
+        indices_to_check: list[int],
+        model: Any,
+    ) -> dict[int, tuple[Any, Any]]:
+        """Pre-compute model forward passes in sub-batches for all rollouts.
+
+        Uses right-padding with attention masks.  Hidden states at real positions
+        are mathematically identical to unbatched computation because PAD tokens
+        sit to the right and are blocked by the causal attention mask.
+
+        Returns:
+            Dict mapping inference_idx → (hidden_states, logits_cpu).
+            hidden_states: [seq_len, hidden_dim] on model device.
+            logits_cpu: [seq_len, vocab_size] on CPU.
+            Empty dict on any error (caller falls back to per-rollout forward).
+        """
+        import os
+
+        import torch
+
+        from ..shared.constants import LAYER_INDEX
+
+        proof_batch_size = int(os.getenv("GRAIL_PROOF_BATCH_SIZE", "4"))
+
+        # Collect valid token sequences
+        token_seqs: list[list[int]] = []
+        valid_indices: list[int] = []
+        for idx in indices_to_check:
+            tokens = inferences[idx].get("commit", {}).get("tokens")
+            if tokens and isinstance(tokens, list) and len(tokens) > 0:
+                token_seqs.append(tokens)
+                valid_indices.append(idx)
+
+        if not token_seqs:
+            return {}
+
+        device = model.device
+        seq_lens = [len(seq) for seq in token_seqs]
+        pad_id = getattr(model.config, "pad_token_id", None)
+        if pad_id is None:
+            pad_id = getattr(model.config, "eos_token_id", 0)
+
+        result: dict[int, tuple[Any, Any]] = {}
+        total = len(token_seqs)
+        sub_batch_size = proof_batch_size
+        pos = 0  # tracks how many sequences we've processed
+
+        def _run_sub_batch_attempt(
+            sub_seqs: list[list[int]],
+            sub_indices: list[int],
+            sub_lens: list[int],
+            sub_max: int,
+        ) -> tuple[bool, dict[int, tuple[Any, Any]]]:
+            """Run one forward attempt in its own scope for deterministic cleanup."""
+            sub_result: dict[int, tuple[Any, Any]] = {}
+            input_ids: torch.Tensor | None = None
+            attn_mask: torch.Tensor | None = None
+            h_layer: Any = None
+            logits: Any = None
+            had_oom = False
+
+            try:
+                sub_bs = len(sub_seqs)
+                input_ids = torch.full((sub_bs, sub_max), pad_id, dtype=torch.long, device=device)
+                attn_mask = torch.zeros(sub_bs, sub_max, dtype=torch.long, device=device)
+                for i, (seq, slen) in enumerate(zip(sub_seqs, sub_lens, strict=True)):
+                    input_ids[i, :slen] = torch.tensor(seq, dtype=torch.long, device=device)
+                    attn_mask[i, :slen] = 1
+
+                with torch.inference_mode():
+                    h_layer, logits = forward_single_layer(
+                        model,
+                        input_ids,
+                        attn_mask,
+                        LAYER_INDEX,
+                    )
+
+                for i, (idx, slen) in enumerate(zip(sub_indices, sub_lens, strict=True)):
+                    sub_result[idx] = (
+                        h_layer[i, :slen, :].clone(),
+                        logits[i, :slen, :].detach().to("cpu"),
+                    )
+
+                return True, sub_result
+            except (torch.cuda.OutOfMemoryError, RuntimeError) as exc:
+                if (
+                    not isinstance(exc, torch.cuda.OutOfMemoryError)
+                    and "out of memory" not in str(exc).lower()
+                ):
+                    raise
+                had_oom = True
+                return False, {}
+            finally:
+                del input_ids, attn_mask, h_layer, logits
+                if had_oom:
+                    gc.collect()
+                    if torch.cuda.is_available() and getattr(device, "type", "") == "cuda":
+                        torch.cuda.synchronize(device=device)
+                        torch.cuda.empty_cache()
+
+        while pos < total:
+            sub_end = min(pos + sub_batch_size, total)
+            sub_seqs = token_seqs[pos:sub_end]
+            sub_indices = valid_indices[pos:sub_end]
+            sub_lens = seq_lens[pos:sub_end]
+            sub_max = max(sub_lens)
+            success, sub_result = _run_sub_batch_attempt(
+                sub_seqs=sub_seqs,
+                sub_indices=sub_indices,
+                sub_lens=sub_lens,
+                sub_max=sub_max,
+            )
+            if success:
+                result.update(sub_result)
+                pos = sub_end  # advance past this successful sub-batch
+                continue
+
+            if sub_batch_size <= 1:
+                logger.warning(
+                    "OOM at sub-batch=1, cannot reduce further — returning partial results"
+                )
+                break
+
+            new_size = max(1, sub_batch_size // 2)
+            logger.warning(
+                "OOM at sub-batch %d, halving: %d -> %d",
+                sub_batch_size,
+                sub_batch_size,
+                new_size,
+            )
+            sub_batch_size = new_size
+
+        logger.info(
+            "Pre-computed batched forward: %d rollouts, sub-batch %d->%d",
+            len(result),
+            proof_batch_size,
+            sub_batch_size,
+        )
+        return result
+
+    def _precompute_challenged_logprobs(
+        self,
+        inferences: list[dict],
+        indices_to_check: list[int],
+        batched_cache: dict[int, tuple[Any, Any]],
+        window_rand: str,
+    ) -> dict[int, dict[int, float]]:
+        """Pre-compute log-probabilities at all challenged positions in one batch.
+
+        Derives challenge positions for every rollout, gathers the logit rows,
+        runs a single vectorized ``log_softmax``, and returns a map of
+        ``inference_idx → {abs_token_pos: logprob}``.
+
+        This replaces 16 × 16 = 256 individual ``log_softmax`` calls in the
+        serial validation loop with one batched operation.
+        """
+        import torch
+
+        from ..protocol.crypto import indices_from_root_in_range
+        from ..shared.constants import CHALLENGE_K
+
+        result: dict[int, dict[int, float]] = {}
+
+        # Collect all (logit_row, target_token) pairs across all rollouts
+        logit_rows: list[torch.Tensor] = []
+        target_tokens: list[int] = []
+        # Track which rollout and abs_idx each entry belongs to
+        entry_map: list[tuple[int, int]] = []  # (inference_idx, abs_idx)
+
+        for inference_idx in indices_to_check:
+            cached = batched_cache.get(inference_idx)
+            if cached is None:
+                continue
+            _, cached_logits = cached  # [seq_len, vocab] on CPU
+
+            commit = inferences[inference_idx].get("commit", {})
+            tokens = commit.get("tokens", [])
+            rollout = commit.get("rollout", {})
+            prompt_len = int(rollout.get("prompt_length", 0))
+            completion_len = int(rollout.get("completion_length", 0))
+
+            if completion_len < CHALLENGE_K or not tokens:
+                continue
+
+            challenged_idxs = indices_from_root_in_range(
+                tokens,
+                window_rand,
+                prompt_len,
+                prompt_len + completion_len,
+                CHALLENGE_K,
+            )
+
+            for abs_idx in challenged_idxs:
+                pos = abs_idx - 1  # next-token prediction offset
+                if pos < 0 or pos >= cached_logits.size(0):
+                    continue
+                logit_rows.append(cached_logits[pos])
+                target_tokens.append(tokens[abs_idx])
+                entry_map.append((inference_idx, abs_idx))
+
+        if not logit_rows:
+            return result
+
+        # Single batched log_softmax across all challenged positions
+        stacked = torch.stack(logit_rows)  # [N, vocab_size]
+        log_probs = torch.log_softmax(stacked.float(), dim=-1)  # fp32 precision
+        target_tensor = torch.tensor(target_tokens, dtype=torch.long)
+        gathered = log_probs.gather(1, target_tensor.unsqueeze(-1)).squeeze(-1)
+
+        for i, (inference_idx, abs_idx) in enumerate(entry_map):
+            if inference_idx not in result:
+                result[inference_idx] = {}
+            result[inference_idx][abs_idx] = float(gathered[i].item())
+
+        del stacked, log_probs, target_tensor, gathered
+        return result
+
     async def _validate_rollouts(
         self,
         inferences: list[dict],
@@ -580,6 +812,47 @@ class MinerValidator:
         )
 
         uid_str = str(uid) if uid is not None else f"{miner_hotkey[:12]}..."
+
+        # Pre-compute batched forward passes for all rollouts to validate.
+        # On any failure, batched_cache is empty and the proof validator
+        # falls back to per-rollout forward passes automatically.
+        batched_cache: dict[int, tuple[Any, Any]] = {}
+        t_forward_start = time.monotonic()
+        try:
+            batched_cache = self._precompute_batched_forward(inferences, indices_to_check, model)
+        except Exception as e:
+            logger.warning(
+                "Batched forward pre-computation failed, falling back to per-rollout: %s",
+                e,
+            )
+        t_forward_elapsed = time.monotonic() - t_forward_start
+
+        # Pre-compute log_softmax at all challenged positions across all
+        # rollouts in one vectorized pass.  This avoids 16 × 16 = 256
+        # individual log_softmax calls inside the serial validation loop.
+        precomputed_logprobs_by_idx: dict[int, dict[int, float]] = {}
+        t_logprob_start = time.monotonic()
+        try:
+            precomputed_logprobs_by_idx = self._precompute_challenged_logprobs(
+                inferences,
+                indices_to_check,
+                batched_cache,
+                window_rand,
+            )
+        except Exception as e:
+            logger.warning("Batched logprob pre-computation failed: %s", e)
+        t_logprob_elapsed = time.monotonic() - t_logprob_start
+
+        logger.info(
+            "Pre-computation complete: forward=%.2fs, logprobs=%.2fs, "
+            "rollouts=%d, logprob_positions=%d",
+            t_forward_elapsed,
+            t_logprob_elapsed,
+            len(indices_to_check),
+            sum(len(v) for v in precomputed_logprobs_by_idx.values()),
+        )
+
+        t_validation_start = time.monotonic()
 
         for inference_idx in indices_to_check:
             # Update watchdog
@@ -668,6 +941,8 @@ class MinerValidator:
                     seed_int,
                 )
                 # Run validation pipeline with trusted validator-derived values
+                # Inject pre-computed forward pass results if available
+                cached_hs, cached_lg = batched_cache.get(inference_idx, (None, None))
                 ctx = ValidationContext(
                     commit=commit_data,
                     prover_address=miner_hotkey,
@@ -681,6 +956,9 @@ class MinerValidator:
                     env_id=env_id,
                     env_params=env_params or {},
                     generation_params=generation_params or {},
+                    cached_hidden_states=cached_hs,
+                    cached_logits=cached_lg,
+                    precomputed_logprobs=precomputed_logprobs_by_idx.get(inference_idx),
                 )
 
                 if monitor:
@@ -742,6 +1020,23 @@ class MinerValidator:
                 logger.debug(f"Error processing inference: {e}")
                 state["pr_processing_err"] += 1
                 continue
+
+        t_validation_elapsed = time.monotonic() - t_validation_start
+
+        logger.info(
+            "Validation loop complete: forward=%.2fs, logprob_precompute=%.2fs, "
+            "serial_validation=%.2fs, total=%.2fs, valid=%d/%d",
+            t_forward_elapsed,
+            t_logprob_elapsed,
+            t_validation_elapsed,
+            t_forward_elapsed + t_logprob_elapsed + t_validation_elapsed,
+            state["valid_count"],
+            state["checked_count"],
+        )
+
+        # Explicitly free GPU tensors from batched pre-computation.
+        # hidden_states sit on GPU; without this they linger until gc runs.
+        batched_cache.clear()
 
         return state
 

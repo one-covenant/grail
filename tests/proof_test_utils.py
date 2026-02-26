@@ -59,14 +59,11 @@ def create_proof(
     verifier = GRAILVerifier(hidden_dim=hidden_dim, topk=topk)
     r_vec = verifier.generate_r_vec(randomness_hex)
 
-    commitments = []
     with torch.inference_mode():
         outputs = model(inputs["input_ids"], output_hidden_states=True)
         layer_idx = min(LAYER_INDEX, len(outputs.hidden_states) - 1)
         h_layer = outputs.hidden_states[layer_idx][0]
-        for pos in range(len(tokens)):
-            commitment = verifier.create_commitment(h_layer[pos], r_vec, pos)
-            commitments.append(commitment)
+        commitments = verifier.create_commitments_batch(h_layer, r_vec)
 
     return {
         "tokens": tokens,
@@ -242,19 +239,12 @@ def generate_realistic_sat_prompt(
         return base_prompt
 
     # Apply production chat template and system prompt
-    from grail.shared.chat_templates import build_qwen_chat_template
-    from grail.shared.prompt_constants import (
-        SYSTEM_PROMPT,
-    )
+    from grail.shared.chat_templates import apply_chat_template, configure_tokenizer
 
-    # Apply Qwen chat template (same as mining)
     try:
         original_template = getattr(tokenizer, "chat_template", None)
-        tokenizer.chat_template = build_qwen_chat_template(SYSTEM_PROMPT)
-        messages = [{"role": "user", "content": base_prompt}]
-        templated = str(
-            tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        )
+        configure_tokenizer(tokenizer)
+        templated = str(apply_chat_template(tokenizer, [{"role": "user", "content": base_prompt}]))
         # Restore original template
         if original_template is not None:
             tokenizer.chat_template = original_template

@@ -70,6 +70,9 @@ class ValidatorNeuron(BaseNeuron):
         subtensor = await self.get_subtensor()
         logger.info("✅ Connected to Bittensor network")
 
+        # Fail fast if hotkey is not registered on the subnet
+        await self.ensure_registered(wallet, NETUID, role="validator")
+
         # Load credentials
         credentials = load_r2_credentials()
 
@@ -117,8 +120,8 @@ class ValidatorNeuron(BaseNeuron):
             monitor=monitor,
         )
 
-        # Start process-level watchdog (10 minutes stall timeout)
-        self.start_watchdog(timeout_seconds=(60 * 10))
+        # Start process-level watchdog (30 minutes stall timeout)
+        self.start_watchdog(timeout_seconds=(60 * 30))
 
         try:
             # Ensure chain manager is stopped during cooperative shutdown

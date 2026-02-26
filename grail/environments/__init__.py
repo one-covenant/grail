@@ -11,6 +11,12 @@ Exports:
 - Legacy: Parser, RewardVector
 """
 
+from .affinetes import (  # noqa: F401
+    AffineLogicEnv,
+    AffineTraceEnv,
+    LogicTaskSource,
+    TraceTaskSource,
+)
 from .base import Parser, RewardVector  # noqa: F401
 from .core import (  # noqa: F401
     ChatMessage,
@@ -27,6 +33,20 @@ from .factory import (  # noqa: F401
     create_env,
     create_env_factory,
     get_or_create_task_source,
+)
+from .gpu_kernel import (  # noqa: F401
+    EvalResult,
+    KernelBenchTaskSource,
+    KernelEvalBackend,
+    TritonKernelEnv,
+    TritonKernelParser,
+    TritonKernelRubric,
+    UnifiedKernelTaskSource,
+    create_backend,
+    create_triton_kernel_reward_vector,
+    get_global_backend,
+    set_global_backend,
+    validate_gpu_config,
 )
 from .gsm8k_env import GSM8KEnv  # noqa: F401
 from .loop import AgentEnvLoop, GRPORollout  # noqa: F401
@@ -88,11 +108,30 @@ __all__ = [
     "MBPPTaskSource",
     "HumanEvalTaskSource",
     "RewardVectorRubric",
+    # Affinetes adapters
+    "AffineTraceEnv",
+    "AffineLogicEnv",
+    "TraceTaskSource",
+    "LogicTaskSource",
     # Environments
     "SATEnv",
     "GSM8KEnv",
     "MATHEnv",
     "PythonCodeEnv",
+    "TritonKernelEnv",
+    # GPU Kernel providers
+    "KernelBenchTaskSource",
+    "UnifiedKernelTaskSource",
+    "TritonKernelParser",
+    "TritonKernelRubric",
+    "create_triton_kernel_reward_vector",
+    # GPU Kernel eval backends
+    "EvalResult",
+    "KernelEvalBackend",
+    "create_backend",
+    "get_global_backend",
+    "set_global_backend",
+    "validate_gpu_config",
     # Factory functions (preferred)
     "create_env",
     "create_env_factory",

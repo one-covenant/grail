@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 import torch
 
-from grail.shared.constants import CURRENT_ENV_ID
+from grail.shared.constants import CHALLENGE_K, CURRENT_ENV_ID
 from grail.validation import create_env_validation_pipeline
 from grail.validation.context import ValidationContext
 
@@ -25,7 +25,9 @@ class _FakeAdapter:
         self._prompt_ids = prompt_ids
         self._reward = float(env_reward)
 
-    def build_prompt_ids(self, seed: str, tokenizer: Any) -> list[int]:
+    def build_prompt_ids(
+        self, seed: str, tokenizer: Any, env_params: dict | None = None
+    ) -> list[int]:
         return list(self._prompt_ids)
 
     def evaluate_completion(
@@ -33,8 +35,8 @@ class _FakeAdapter:
         seed: str,
         completion_text: str,
         tokenizer: Any,
+        env_params: dict | None = None,
     ) -> dict:
-        # Return success and a deterministic reward
         return {"success": True, "reward": self._reward}
 
 
@@ -73,9 +75,10 @@ def _stub_registry(monkeypatch: pytest.MonkeyPatch, adapter: Any) -> None:
 def test_pipeline_golden_valid_rollout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Canonical prompt/completion (min 10 tokens for schema)
+    # Completion must have at least CHALLENGE_K tokens for LogprobValidator
+    # and GRAILProofValidator minimum-length guards.
     prompt_ids = [10, 11, 12, 13, 14, 15, 16]
-    completion_ids = [17, 18, 19]
+    completion_ids = list(range(100, 100 + CHALLENGE_K))
     tokens = prompt_ids + completion_ids
     prompt_len = len(prompt_ids)
     completion_len = len(completion_ids)
@@ -84,12 +87,13 @@ def test_pipeline_golden_valid_rollout(
     adapter = _FakeAdapter(prompt_ids, env_reward=0.8)
     _stub_registry(monkeypatch, adapter)
 
-    # Stub proof validator to set cached logits matching claimed logprobs
-    vocab = 64
+    # Stub proof validator to set cached logits matching claimed logprobs.
+    # Each completion token gets logit=0 at its position while all others
+    # are -20, so log_softmax yields ~0.0 matching the claimed logprobs.
+    vocab = 256
     logits = torch.full((len(tokens), vocab), -20.0, dtype=torch.float32)
-    # Make chosen token likely at each step (logit 0 vs -20 elsewhere)
     for i, tok in enumerate(completion_ids):
-        row = (prompt_len + i - 1) if (prompt_len + i - 1) >= 0 else 0
+        row = prompt_len + i - 1
         logits[row, tok] = 0.0
     # Ensure EOS probability high on second-to-last step for termination check
     eos_id = completion_ids[-1]

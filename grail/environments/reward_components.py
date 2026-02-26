@@ -16,7 +16,7 @@ from .base import Parser, RewardVector
 def thinking_format_reward(parsed: Any, context: Any) -> float:
     """Reward for having thinking tags.
 
-    Checks for <start_working_out> blocks in completion.
+    Checks for thinking tag blocks in completion (mode-dependent tags).
     Returns 0.5 if thinking block detected, 0.0 otherwise.
     """
     if not isinstance(parsed, dict):

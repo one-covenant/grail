@@ -37,9 +37,11 @@ Grail validators:
 
 ## Prerequisites
 
-- Any operating system (Linux, macOS, Windows, etc.)
+- Linux with NVIDIA GPU drivers installed
 - Docker and Docker Compose installed
-- **Any hardware platform** with floating point precision within tolerance
+- **2x NVIDIA GPUs** (A100 or H100 recommended) for Triton kernel evaluation
+  - GPU 0: Model inference / proof verification
+  - GPU 1: Triton kernel compilation + correctness evaluation
 - At least 40GB RAM recommended for optimal performance
 - Bittensor wallet (cold/hot) registered on the target subnet
 - Cloudflare R2 (or S3-compatible) bucket and credentials
@@ -49,8 +51,9 @@ Grail validators:
 For detailed hardware specifications, see [`compute.min.yaml`](../compute.min.yaml).
 
 Hardware requirements:
-- **OS and hardware-agnostic**: Runs on any platform (Linux, macOS, Windows; any CPU/GPU)
-- Key constraint: Floating point precision must be within tolerance thresholds
+- **Linux with 2x NVIDIA GPUs** (A100/H100 recommended for Triton JIT compatibility)
+  - GPU 0: Model inference and proof verification
+  - GPU 1: Triton kernel evaluation (compilation + correctness checks)
 - At least 40GB RAM recommended for optimal performance
 
 ---
@@ -100,6 +103,11 @@ Set these in `.env` (see `.env.example`). This file will be used with Docker Com
 - Monitoring
   - `GRAIL_MONITORING_BACKEND` (wandb|null)
   - `WANDB_API_KEY`, `WANDB_PROJECT`, `WANDB_ENTITY`, `WANDB_MODE`
+- Kernel evaluation (triton_kernel environment)
+  - `GRAIL_GPU_EVAL` (true|false, default: true) — enable GPU-based kernel correctness evaluation
+  - `KERNEL_EVAL_GPU_IDS` (default: 1) — physical GPU index for kernel eval (GPU 0 runs the model)
+  - `KERNEL_EVAL_BACKEND` (subprocess|modal, default: subprocess) — evaluation backend
+  - `KERNEL_EVAL_TIMEOUT` (default: 60) — per-kernel evaluation timeout in seconds
 - Optional
   - `HF_TOKEN`, `HF_USERNAME` (for Hugging Face dataset publishing)
 

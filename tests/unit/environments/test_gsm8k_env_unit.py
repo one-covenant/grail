@@ -123,15 +123,13 @@ def _normalize_answer(s: str) -> str:
 
 
 def _build_completion(thinking: str, answer: str, trailing: str = "") -> str:
-    """Build properly formatted completion with thinking and solution tags.
+    """Build properly formatted completion with thinking and solution tags."""
+    from grail.shared.thinking import get_thinking_config
 
-    Uses the canonical format from prompt_constants:
-    - Thinking: <start_working_out>...</end_working_out>
-    - Solution: <SOLUTION>...</SOLUTION>
-    """
+    cfg = get_thinking_config()
     return (
-        f"<start_working_out>\n{thinking}\n</end_working_out>\n"
-        f"<SOLUTION>{answer}</SOLUTION>{trailing}"
+        f"{cfg.thinking_open}\n{thinking}\n{cfg.thinking_close}\n"
+        f"{cfg.solution_open}{answer}{cfg.solution_close}{trailing}"
     )
 
 
@@ -143,7 +141,7 @@ def test_gsm8k_perfect_format_with_thinking(
     """Test perfect format: thinking + correct numeric answer, no trailing.
 
     For each of 5 real GSM8K problems, generate a completion with:
-    - Proper thinking tags (<start_working_out>...</end_working_out>)
+    - Proper thinking tags (mode-dependent)
     - Correct numeric answer inside <SOLUTION>...</SOLUTION>
     - No trailing text after solution tag
 

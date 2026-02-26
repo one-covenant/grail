@@ -1007,6 +1007,17 @@ class TrainingService:
                 return {}
 
             epoch_start = time.time()
+            if torch.cuda.is_available():
+                _alloc = torch.cuda.memory_allocated() / (1024**3)
+                _reserved = torch.cuda.memory_reserved() / (1024**3)
+                _total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                logger.info(
+                    "MEMORY epoch_start alloc_gb=%.2f reserved_gb=%.2f free_gb=%.2f total_gb=%.2f",
+                    _alloc,
+                    _reserved,
+                    _total - _alloc,
+                    _total,
+                )
             assert self.optimizer is not None, "Optimizer must be initialized before training"
             assert self.algorithm is not None, "Algorithm must be initialized before training"
 
@@ -1027,6 +1038,17 @@ class TrainingService:
                 self.scheduler.step()
 
             epoch_duration = time.time() - epoch_start
+            if torch.cuda.is_available():
+                _alloc = torch.cuda.memory_allocated() / (1024**3)
+                _reserved = torch.cuda.memory_reserved() / (1024**3)
+                _total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                logger.info(
+                    "MEMORY epoch_end alloc_gb=%.2f reserved_gb=%.2f free_gb=%.2f total_gb=%.2f",
+                    _alloc,
+                    _reserved,
+                    _total - _alloc,
+                    _total,
+                )
             logger.info(
                 "Epoch %d complete in %.1fs: loss=%.4f reward_mean=%.4f",
                 self.epoch_counter + 1,

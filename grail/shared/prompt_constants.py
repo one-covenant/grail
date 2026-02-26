@@ -1,30 +1,27 @@
-"""Single source of truth for reasoning/solution tags and system prompt.
+"""Backward-compatible exports. All values derived from active ThinkingConfig.
 
-Centralizes the tags used across parsing, prompting, and validation, and
-provides a canonical SYSTEM_PROMPT string that references these tags.
+New code should import from grail.shared.thinking directly.
 """
 
 from __future__ import annotations
 
-# Unbracketed tag tokens (used by parsers and regex)
-REASONING_START_TOKEN = "start_working_out"
-REASONING_END_TOKEN = "end_working_out"
-SOLUTION_START_TOKEN = "SOLUTION"
-SOLUTION_END_TOKEN = "SOLUTION"
+from .thinking import get_thinking_config
 
-# Bracketed forms (used in prompts/templates)
-REASONING_START = f"<{REASONING_START_TOKEN}>"
-REASONING_END = f"</{REASONING_END_TOKEN}>"
-SOLUTION_START = f"<{SOLUTION_START_TOKEN}>"
-SOLUTION_END = f"</{SOLUTION_END_TOKEN}>"
+_cfg = get_thinking_config()
 
-# Canonical system prompt referencing the tags above
-SYSTEM_PROMPT = (
-    "You are given a problem.\n"
-    "Think about the problem and provide your working out.\n"
-    f"Place it between {REASONING_START} and {REASONING_END}.\n"
-    f"Then, provide your code between {SOLUTION_START} and {SOLUTION_END}."
-)
+# Unbracketed tokens (used by parsers/regex)
+REASONING_START_TOKEN = _cfg.thinking_open_token  # "think" or "start_working_out"
+REASONING_END_TOKEN = _cfg.thinking_close_token  # "think" or "end_working_out"
+SOLUTION_START_TOKEN = _cfg.solution_open_token  # "SOLUTION"
+SOLUTION_END_TOKEN = _cfg.solution_close_token  # "SOLUTION"
+
+# Bracketed forms (derived from tokens above)
+REASONING_START = _cfg.thinking_open  # "<think>" or "<start_working_out>"
+REASONING_END = _cfg.thinking_close  # "</think>" or "</end_working_out>"
+SOLUTION_START = _cfg.solution_open  # "<SOLUTION>"
+SOLUTION_END = _cfg.solution_close  # "</SOLUTION>"
+
+SYSTEM_PROMPT = _cfg.system_prompt
 
 __all__ = [
     # tokens

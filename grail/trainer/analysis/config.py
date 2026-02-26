@@ -72,6 +72,13 @@ class AnalysisConfig:
     # Momentum analysis (future)
     momentum_enabled: bool = False
 
+    # Adam sign descent analysis
+    adam_sign_enabled: bool = False
+    adam_sign_track_per_component: bool = True
+    adam_sign_track_per_layer: bool = False
+    adam_sign_histogram_samples: int = 1_000_000
+    adam_sign_near_lr_tolerance: float = 0.1
+
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
         if self.interval <= 0:
@@ -131,6 +138,9 @@ class AnalysisConfig:
             sparse_quality_enabled=True,
             sparse_quality_include_random=True,
             gradient_enabled=False,  # Will enable when implemented
+            adam_sign_enabled=True,
+            adam_sign_track_per_component=True,
+            adam_sign_track_per_layer=False,
         )
 
     @classmethod
@@ -165,4 +175,9 @@ class AnalysisConfig:
             "gradient_enabled": self.gradient_enabled,
             "gradient_track_per_layer": self.gradient_track_per_layer,
             "momentum_enabled": self.momentum_enabled,
+            "adam_sign_enabled": self.adam_sign_enabled,
+            "adam_sign_track_per_component": self.adam_sign_track_per_component,
+            "adam_sign_track_per_layer": self.adam_sign_track_per_layer,
+            "adam_sign_histogram_samples": self.adam_sign_histogram_samples,
+            "adam_sign_near_lr_tolerance": self.adam_sign_near_lr_tolerance,
         }

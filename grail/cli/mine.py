@@ -177,7 +177,10 @@ class MiningTimers:
         )
         safety_s = float(MINER_SAFETY_BLOCKS) * self.block_time_ema_s
         total_s = est_gen_s + est_upload_s + safety_s
-        return max(1, math.ceil(total_s / max(0.001, self.block_time_ema_s)))
+        needed = max(1, math.ceil(total_s / max(0.001, self.block_time_ema_s)))
+        # Never claim we need the entire window — always attempt at least one
+        # generation at the start of a new window so the EMA can recover.
+        return min(needed, WINDOW_LENGTH - 1)
 
     def update_gen_time_ema(self, duration_s: float) -> None:
         self.gen_time_ema_s = (
@@ -285,7 +288,7 @@ async def maybe_log_debug_sample(
         prompt_len = int(getattr(sample, "prompt_length", 0) or 0)
         completion_len = int(getattr(sample, "completion_length", 0) or 0)
         sample_text = tokenizer.decode(sample.tokens, skip_special_tokens=False)  # type: ignore[attr-defined]
-        sample_nonce = base_nonce * 10
+        sample_nonce = base_nonce * ROLLOUTS_PER_PROBLEM
         logger.debug(
             (
                 "TEXT[mine] window=%s group=%s nonce=%s reward=%.3f "
@@ -431,7 +434,7 @@ def package_rollout_data(
     Returns:
         Signed dictionary ready to upload for validation
     """
-    rollout_nonce = base_nonce * 10 + rollout_idx
+    rollout_nonce = base_nonce * ROLLOUTS_PER_PROBLEM + rollout_idx
 
     # Sign commit binding (tokens, randomness, model, layer, commitments)
     from ..protocol.signatures import sign_commit_binding
@@ -527,6 +530,147 @@ async def upload_inferences_with_metrics(
     return time.time() - upload_start
 
 
+async def _pipelined_generation_loop(
+    pipeline_engine: Any,
+    wallet: bt.wallet,
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    subtensor: bt.subtensor,
+    window_start: int,
+    window_block_hash: str,
+    combined_randomness: str,
+    timers: MiningTimers,
+    monitor: Any | None,
+    use_drand: bool,
+    checkpoint_window: int | None,
+    env_id: str | None = None,
+    env_params: dict[str, Any] | None = None,
+) -> list[dict]:
+    """Generate rollouts using the 3-GPU pipeline engine.
+
+    Uses PipelinedMiningEngine for overlapped generation (GPU 0),
+    proof computation (GPU 1), and kernel eval (GPU 2).
+
+    Mirrors the time-budgeting and packaging logic of
+    ``generate_rollouts_for_window`` but delegates generation to the pipeline.
+    """
+    from ..environments.factory import create_env
+    from ..grail import derive_env_seed
+    from ..shared.constants import CHALLENGE_K, ROLLOUTS_PER_PROBLEM
+
+    inferences: list[dict] = []
+    start_time = time.time()
+    problem_count = 0
+    text_logs_emitted = 0
+
+    while True:
+        current_block = await subtensor.get_current_block()  # type: ignore[await-not-coroutine]
+        timers.update_block_time_ema(current_block)
+        current_window = calculate_window_start(current_block)
+        if current_window > window_start:
+            break
+
+        blocks_remaining = (window_start + WINDOW_LENGTH) - current_block
+        needed_blocks = timers.blocks_needed_for_next_gen()
+        if blocks_remaining <= needed_blocks:
+            logger.info(
+                "Pipeline: stopping — %s blocks remain, need %s",
+                blocks_remaining,
+                needed_blocks,
+            )
+            break
+
+        try:
+            gen_start = time.time()
+            problem_count += 1
+
+            problem_index = max(0, problem_count - 1)
+            seed_int = derive_env_seed(wallet.hotkey.ss58_address, window_block_hash, problem_index)
+            base_nonce = problem_index
+
+            def _env_factory() -> Any:
+                return create_env(env_id=env_id, env_params=env_params)
+
+            grpo_rollouts = await pipeline_engine.generate_grpo_group(
+                _env_factory,
+                ROLLOUTS_PER_PROBLEM,
+                combined_randomness,
+                wallet,
+                seed=seed_int,
+            )
+
+            if grpo_rollouts:
+                text_logs_emitted = await maybe_log_debug_sample(
+                    tokenizer,
+                    grpo_rollouts[0],
+                    window_start,
+                    base_nonce,
+                    monitor,
+                    text_logs_emitted,
+                    DEBUG_TEXT_LOG_LIMIT_PER_WINDOW,
+                )
+
+            # Completion length gate
+            short_rollouts = [
+                (i, r.completion_length)
+                for i, r in enumerate(grpo_rollouts)
+                if r.completion_length < CHALLENGE_K
+            ]
+            if short_rollouts:
+                logger.warning(
+                    "Pipeline: dropping group %d — %d/%d rollouts too short",
+                    base_nonce,
+                    len(short_rollouts),
+                    len(grpo_rollouts),
+                )
+                timers.update_gen_time_ema(time.time() - gen_start)
+                continue
+
+            for rollout_idx, rollout in enumerate(grpo_rollouts):
+                rollout_data = package_rollout_data(
+                    model,
+                    wallet,
+                    rollout,
+                    base_nonce,
+                    rollout_idx,
+                    len(grpo_rollouts),
+                    window_start,
+                    current_block,
+                    window_block_hash,
+                    combined_randomness,
+                    use_drand,
+                    checkpoint_window,
+                )
+                inferences.append(rollout_data)
+
+            gen_duration = time.time() - gen_start
+            # Cap outliers: don't let a single slow group poison the EMA
+            # beyond the window length (WINDOW_LENGTH * BLOCK_TIME_SECONDS)
+            max_gen_s = float(WINDOW_LENGTH * BLOCK_TIME_SECONDS)
+            timers.update_gen_time_ema(min(gen_duration, max_gen_s))
+            await asyncio.sleep(0.01)
+
+        except RuntimeError as e:
+            if "CUDA" in str(e):
+                logger.error("Pipeline CUDA error: %s", e)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                continue
+            raise
+        except Exception as e:
+            logger.warning("Pipeline generation failed: %s", e)
+            continue
+
+    elapsed_time = time.time() - start_time
+    logger.info(
+        "Pipeline: generated %s rollouts in %.1fs for window %s",
+        len(inferences),
+        elapsed_time,
+        window_start,
+    )
+    return inferences
+
+
 async def generate_rollouts_for_window(
     wallet: bt.wallet,
     model: AutoModelForCausalLM,
@@ -600,7 +744,7 @@ async def generate_rollouts_for_window(
         """Clamp value to [min_val, max_val] range."""
         return max(min_val, min(value, max_val))
 
-    max_tokens = clamp(generation_params.get("max_tokens", 512), 1, 4096)
+    max_tokens = clamp(generation_params["max_tokens"], 1, 16384)
     temperature = clamp(generation_params.get("temperature", 0.7), 0.01, 2.0)
     top_p = clamp(generation_params.get("top_p", 0.95), 0.0, 1.0)
     top_k = clamp(generation_params.get("top_k", 50), 0, 1000)

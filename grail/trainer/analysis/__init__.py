@@ -39,6 +39,7 @@ Custom Metrics:
 from grail.trainer.analysis.config import AnalysisConfig
 from grail.trainer.analysis.manager import ModelAnalysisManager
 from grail.trainer.analysis.metrics import (
+    AdamSignDescentMetrics,
     AnalysisContext,
     GradientSparsityMetrics,
     MetricComputer,
@@ -60,6 +61,7 @@ __all__ = [
     "ParameterChangeMetrics",
     "SparseQualityMetrics",
     "GradientSparsityMetrics",
+    "AdamSignDescentMetrics",
 ]
 
 __version__ = "1.0.0"

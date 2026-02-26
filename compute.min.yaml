@@ -26,8 +26,13 @@ compute_spec:
       min_compute_capability: 9.0          # Minimum CUDA compute capability
       recommended_compute_capability: 12.4 # Recommended CUDA compute capability
       recommended_gpu: "NVIDIA A100 40GB (or 80GB)"  # Recommended GPU to purchase/rent
-      min_amount: 1                        # Minimum amount of GPUs required for the miner to run
-      recommended_amount: 1                # Recommended amount of GPUs
+      min_amount: 1                        # Minimum GPUs (1 for text-only envs like SAT, GSM8K)
+      recommended_amount: 3                # 3 GPUs for triton_kernel env: decoding + proof + kernel eval
+      # GPU roles for triton_kernel environment:
+      #   GPU 0: Model inference / decoding (vLLM/SGLang)
+      #   GPU 1: Proof computation / logprob verification (HuggingFace model)
+      #   GPU 2: Kernel evaluation (requires A100/H100 class for Triton JIT)
+      # Text-only environments (sat, gsm8k, math, mbpp, humaneval) need only 1 GPU.
 
     memory:
       min_ram: 64             # Minimum RAM (GB)
@@ -62,8 +67,8 @@ compute_spec:
       min_compute_capability: 9.0          # Minimum CUDA compute capability
       recommended_compute_capability: 12.4 # Recommended CUDA compute capability
       recommended_gpu: "NVIDIA A100 40GB (or 80GB)"  # Recommended GPU to purchase/rent
-      min_amount: 1                        # Minimum amount of GPUs required for the validator to run
-      recommended_amount: 1                # Recommended amount of GPUs
+      min_amount: 2                        # 2 GPUs: GPU 0 = model inference / proof verification, GPU 1 = Triton kernel eval (A100/H100 for Triton JIT)
+      recommended_amount: 2                # Recommended amount of GPUs
 
     memory:
       min_ram: 64             # Minimum RAM (GB)

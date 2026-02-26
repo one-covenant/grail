@@ -34,7 +34,9 @@ class ServerConfig:
     model_name_override: str | None = None
     model_path: str = ""
     chat_template_path: str | None = None  # Path to chat_template.jinja file
+    tokenizer_name: str | None = None  # Explicit tokenizer name/path (e.g. "Qwen/Qwen3-8B")
     env: dict[str, str] | None = None  # Environment variables for subprocess
+    enable_sleep_mode: bool = False  # Enable vLLM sleep mode for on-the-fly weight sync
 
 
 class InferenceServerManager(ABC):
@@ -610,8 +612,18 @@ class VLLMServerManager(InferenceServerManager):
             str(self._eval_config.vllm_max_num_seqs),
         ]
 
+        # Explicit tokenizer avoids huggingface_hub repo_id validation issues
+        # when using local checkpoint paths (regression in huggingface_hub >= 0.36)
+        if self._config.tokenizer_name:
+            cmd.extend(["--tokenizer", self._config.tokenizer_name])
+
         if self._config.trust_remote_code:
             cmd.append("--trust-remote-code")
+
+        # Enable sleep mode for on-the-fly weight sync (vLLM 0.15+)
+        if self._config.enable_sleep_mode:
+            cmd.append("--enable-sleep-mode")
+            logger.info("vLLM server will launch with sleep mode enabled")
 
         # Explicitly provide chat template to ensure vLLM uses the correct formatting
         # with system prompt and reasoning tags during generation

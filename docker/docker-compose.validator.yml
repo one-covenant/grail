@@ -64,6 +64,12 @@ services:
       # Environment label for observability
       - GRAIL_ENV=${GRAIL_ENV:-prod}
 
+      # Triton kernel evaluation (requires 2 GPUs: GPU 0 = model, GPU 1 = kernel eval)
+      - GRAIL_GPU_EVAL=${GRAIL_GPU_EVAL:-true}
+      - KERNEL_EVAL_GPU_IDS=${KERNEL_EVAL_GPU_IDS:-1}
+      - KERNEL_EVAL_BACKEND=${KERNEL_EVAL_BACKEND:-subprocess}
+      - KERNEL_EVAL_TIMEOUT=${KERNEL_EVAL_TIMEOUT:-60}
+
       # Performance tuning
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
       - TRANSFORMERS_NO_ADVISORY_WARNINGS=1
@@ -95,7 +101,9 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              # 2 GPUs required: GPU 0 = model inference / proof verification,
+              #                  GPU 1 = Triton kernel evaluation
+              count: 2
               capabilities: [gpu]
 
     networks:

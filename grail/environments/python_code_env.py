@@ -11,10 +11,10 @@ Key features:
 - Flexible dataset backends (MBPP train/val/test, HumanEval test)
 - Single test execution per step (reward functions use cached results)
 
-Expected completion format:
-    <start_working_out>
+Expected completion format (tags depend on thinking mode):
+    <thinking_open>
     Step-by-step reasoning about the problem...
-    </end_working_out>
+    <thinking_close>
     <SOLUTION>
     def function_name(args):
         # Implementation here
@@ -45,8 +45,8 @@ class PythonCodeParser(ThinkingParser):
     Inherits thinking tag detection from ThinkingParser base class.
     Extracts Python code from <SOLUTION>...</SOLUTION> tags.
 
-    Expected format:
-        <start_working_out>reasoning...</end_working_out>
+    Expected format (tags depend on thinking mode):
+        <thinking_open>reasoning...<thinking_close>
         <SOLUTION>code...</SOLUTION>
 
     Detects:
@@ -373,8 +373,8 @@ class PythonCodeEnv(SingleTurnEnv):
           Requesting split='test' raises AssertionError.
         - HumanEval: test only (164)
 
-    Completion format:
-        <start_working_out>reasoning...</end_working_out>
+    Completion format (tags depend on thinking mode):
+        <thinking_open>reasoning...<thinking_close>
         <SOLUTION>
         def function_name(args):
             return result

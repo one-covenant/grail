@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""TRL GRPO training script with factory pattern for GSM8K, MATH, and MBPP datasets.
+"""TRL GRPO training script with factory pattern for multiple datasets.
 
-Supports three datasets with exact parity to GRAIL environment implementations:
+Supports four datasets with exact parity to GRAIL environment implementations:
 - GSM8K: Grade school math (7,473 train / 1,319 test)
 - MATH: Hendrycks MATH benchmark (7,000 train / 500 val / 5,000 test)
 - MBPP: Python code generation (374 train / 90 validation / 500 test)
+- Triton Kernel: GPU kernel optimization (10K+ unified dataset)
 
 Usage:
     python train_trl_grpo.py --dataset gsm8k
     python train_trl_grpo.py --dataset math
     python train_trl_grpo.py --dataset mbpp
+    python train_trl_grpo.py --dataset triton_kernel --kernel-dataset-path /path/to/data.jsonl
 """
 
 from __future__ import annotations
@@ -70,8 +72,16 @@ from grail.environments.providers import (  # noqa: E402
     MATHTaskSource,
     MBPPTaskSource,
 )
-from grail.shared.chat_templates import build_qwen_chat_template  # noqa: E402
+from grail.shared.chat_templates import apply_chat_template, configure_tokenizer  # noqa: E402
+from grail.shared.prompt_constants import (  # noqa: E402
+    REASONING_END_TOKEN,
+    REASONING_START_TOKEN,
+    SOLUTION_END_TOKEN,
+    SOLUTION_START_TOKEN,
+    SYSTEM_PROMPT,
+)
 from grail.trainer.analysis import (  # noqa: E402
+    AdamSignDescentMetrics,
     AnalysisConfig,
     GradientSparsityMetrics,
     ModelAnalysisManager,
@@ -114,7 +124,9 @@ class Config:
     # ────────────────────────────────────────────────────────────────────────
     # Model Configuration (from GRAIL_TRAIN_MODEL_ID)
     # ────────────────────────────────────────────────────────────────────────
-    model_id: str = "Qwen/Qwen2.5-1.5B-Instruct"
+    model_id: str = "Qwen/Qwen3-8B"
+    # Training precision: "bfloat16" (default mixed-precision) or "float32" (full precision)
+    dtype: str = "bfloat16"
 
     # ────────────────────────────────────────────────────────────────────────
     # Training Hyperparameters (from grail/shared/constants.py + env vars)
@@ -149,7 +161,7 @@ class Config:
     # Total training windows (GRAIL_TRAINER_TOTAL_WINDOWS) - controls iteration count
     # Each optimizer step = 32 groups × 16 rollouts = 512 samples
     # total_optimizer_steps calculated below based on total_windows
-    total_steps: int = 400
+    total_steps: int = 100
 
     # ────────────────────────────────────────────────────────────────────────
     # GRPO Loss Configuration (from grail/trainer/algorithms/grpo.py)
@@ -159,6 +171,8 @@ class Config:
     # Entropy coefficient for exploration (GRAIL_TRAINER_ENTROPY_COEF, constants.py default: 0.001)
     # Note: TRL may not support entropy regularization directly
     entropy_coef: float = 0.0
+    # Adam beta2 (second moment decay rate, default: 0.999)
+    adam_beta2: float = 0.999
     # PPO clip epsilon lower bound (TRAINER_PPO_CLIP_EPS, constants.py default: 0.2)
     epsilon: float = 0.2
     # PPO clip epsilon upper bound - DAPO-style asymmetric clipping
@@ -194,9 +208,9 @@ class Config:
     # ────────────────────────────────────────────────────────────────────────
     # Generation Parameters
     # ────────────────────────────────────────────────────────────────────────
-    temperature: float = 0.7
+    temperature: float = 0.6
     top_p: float = 0.95
-    top_k: int = 50
+    top_k: int = 20
 
     # ────────────────────────────────────────────────────────────────────────
     # Evaluation Configuration
@@ -217,27 +231,8 @@ class Config:
 
 cfg = Config()
 
-# ════════════════════════════════════════════════════════════════════════════
-# SYSTEM PROMPT & TAGS (shared across datasets)
-# ════════════════════════════════════════════════════════════════════════════
-REASONING_START_TOKEN = "start_working_out"
-REASONING_END_TOKEN = "end_working_out"
-SOLUTION_START_TOKEN = "SOLUTION"
-SOLUTION_END_TOKEN = "SOLUTION"
-
-REASONING_START = f"<{REASONING_START_TOKEN}>"
-REASONING_END = f"</{REASONING_END_TOKEN}>"
-SOLUTION_START = f"<{SOLUTION_START_TOKEN}>"
-SOLUTION_END = f"</{SOLUTION_END_TOKEN}>"
-
-SYSTEM_PROMPT = (
-    "You are given a problem.\n"
-    "Think about the problem and provide your working out.\n"
-    f"Place it between {REASONING_START} and {REASONING_END}.\n"
-    f"Then, provide your solution between {SOLUTION_START}{SOLUTION_END}."
-)
-
-QWEN_CHAT_TEMPLATE = build_qwen_chat_template(system_prompt=SYSTEM_PROMPT)
+# Tags, system prompt, and chat template are imported from grail.shared modules.
+# See grail/shared/thinking.py for the single source of truth.
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -816,14 +811,229 @@ class MBPPAdapter(DatasetAdapter):
         return correctness + syntax + solution_format + thinking
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# Triton Kernel Adapter
+# ────────────────────────────────────────────────────────────────────────────
+class TritonKernelAdapter(DatasetAdapter):
+    """Triton kernel dataset adapter for GPU kernel optimization training.
+
+    Uses UnifiedKernelTaskSource for training (JSONL-backed, 10K+ rows)
+    and KernelBenchTaskSource for evaluation (HF-backed, 250 problems).
+
+    GPU eval is managed via the pluggable eval backend system.
+    """
+
+    def __init__(
+        self,
+        *,
+        dataset_path: str = "",
+        gpu_eval: bool = False,
+        eval_backend_name: str = "subprocess",
+        eval_gpu_ids: list[int] | None = None,
+        warmup_count: int = 20,
+    ) -> None:
+        self._dataset_path = dataset_path
+        self._gpu_eval = gpu_eval
+        self._eval_backend_name = eval_backend_name
+        self._eval_gpu_ids = eval_gpu_ids or []
+        self._warmup_count = warmup_count
+        self._backend = None
+
+    @property
+    def name(self) -> str:
+        return "triton_kernel"
+
+    @property
+    def question_field(self) -> str:
+        return "pytorch_code"
+
+    @property
+    def answer_field(self) -> str:
+        return "test_code"
+
+    @property
+    def correctness_weight(self) -> float:
+        return 0.50
+
+    @property
+    def success_threshold(self) -> float:
+        return 0.50
+
+    def _ensure_backend(self) -> None:
+        """Set up eval backend if gpu_eval is enabled."""
+        if self._backend is not None or not self._gpu_eval:
+            return
+
+        from grail.environments.gpu_kernel.eval_backends import (
+            create_backend,
+            set_global_backend,
+            validate_gpu_config,
+        )
+
+        validate_gpu_config(self._eval_gpu_ids, self._gpu_eval)
+
+        self._backend = create_backend(
+            self._eval_backend_name,
+            gpu_ids=self._eval_gpu_ids,
+        )
+        self._backend.start()
+        set_global_backend(self._backend)
+        logger.info(
+            "Triton kernel eval backend started: %s on GPUs %s",
+            self._eval_backend_name,
+            self._eval_gpu_ids,
+        )
+
+    def load_train_data(self) -> list[dict[str, Any]]:
+        """Load training data from unified kernel dataset."""
+        from grail.environments.gpu_kernel.task_sources import UnifiedKernelTaskSource
+
+        if not self._dataset_path:
+            raise ValueError(
+                "TritonKernelAdapter requires --kernel-dataset-path for training. "
+                "Run 'python -m research.datasets.build' to generate the dataset."
+            )
+
+        source = UnifiedKernelTaskSource(
+            dataset_path=self._dataset_path,
+            split="train",
+            mode="rl",
+            exclude_sources=["kernelbench"],
+            weighted_sampling=True,
+        )
+
+        data = []
+        for task_id in source.iter_ids():
+            task = source.next(task_id=task_id)
+            data.append({
+                "question": task.payload.get("pytorch_code", ""),
+                "test_code": task.payload.get("test_code", ""),
+                "problem_name": task.payload.get("problem_name", ""),
+            })
+
+        logger.info("Loaded %d triton kernel training samples", len(data))
+        return data
+
+    def load_eval_data(self) -> list[dict[str, Any]]:
+        """Load eval data from KernelBench (val split)."""
+        from grail.environments.gpu_kernel.task_sources import KernelBenchTaskSource
+
+        source = KernelBenchTaskSource(split="val")
+
+        data = []
+        for task_id in source.iter_ids():
+            task = source.next(task_id=task_id)
+            data.append({
+                "question": task.payload.get("pytorch_code", ""),
+                "test_code": task.payload.get("test_code", ""),
+                "problem_name": task.payload.get("problem_name", ""),
+            })
+
+        logger.info("Loaded %d triton kernel eval samples", len(data))
+        return data
+
+    def parse_gold_answer(self, raw_answer: Any) -> Any:
+        """For triton kernels, gold data is the test_code."""
+        return raw_answer
+
+    def validate_answer(self, predicted: str, gold: Any) -> bool:
+        """Validate by running GPU eval if available."""
+        if not self._gpu_eval or self._backend is None:
+            # Structural validation only
+            return self._check_structure(predicted)
+
+        test_code = gold if isinstance(gold, str) else ""
+        if not test_code:
+            return False
+
+        result = self._backend.evaluate(test_code, predicted)
+        return result.correct
+
+    def _check_structure(self, code: str) -> bool:
+        """Check if code has valid Triton structure."""
+        from grail.environments.gpu_kernel.parser import TritonKernelParser
+
+        parser = TritonKernelParser()
+        parsed = parser.parse(f"<SOLUTION>\n{code}\n</SOLUTION>", {})
+        return parsed.get("structure_valid", False)
+
+    def _parse_completion(self, text: str) -> dict[str, Any]:
+        """Parse completion using TritonKernelParser."""
+        from grail.environments.gpu_kernel.parser import TritonKernelParser
+
+        parser = TritonKernelParser()
+        return parser.parse(text, {})
+
+    def compute_reward(self, completion: str, gold_answer: Any) -> float:
+        """Compute triton kernel reward (matching TritonKernelRubric weights).
+
+        Components:
+        - Compilation (0.05): Valid Python syntax
+        - Structure (0.10): ModelNew + @triton.jit + imports
+        - GPU Compilation (0.15): Code runs on GPU
+        - Correctness (0.50): Outputs match reference
+        - Format (0.10): <SOLUTION> tags
+        - Thinking (0.10): Reasoning block
+        """
+        parsed = self._parse_completion(completion)
+        code = parsed.get("code", "") or ""
+
+        # Structural rewards (always available)
+        compilation = 0.05 if parsed.get("syntax_valid", False) else 0.0
+
+        structure_score = 0.0
+        for key in ("has_model_new", "has_triton_jit", "has_triton_import", "has_torch_import"):
+            if parsed.get(key, False):
+                structure_score += 0.25
+        structure = 0.10 * structure_score
+
+        solution_format = (
+            0.10
+            if (parsed.get("has_solution", False) and parsed.get("trailing_after_solution", 100) < 50)
+            else 0.0
+        )
+        thinking = 0.10 if parsed.get("has_thinking", False) else 0.0
+
+        # GPU rewards (only if backend available and structure valid)
+        gpu_compilation = 0.0
+        correctness = 0.0
+
+        if (
+            self._gpu_eval
+            and self._backend is not None
+            and code
+            and parsed.get("structure_valid", False)
+        ):
+            test_code = gold_answer if isinstance(gold_answer, str) else ""
+            if test_code:
+                result = self._backend.evaluate(test_code, code)
+                if result.compiled:
+                    gpu_compilation = 0.15
+                if result.correct:
+                    correctness = 0.50
+
+        return compilation + structure + gpu_compilation + correctness + solution_format + thinking
+
+    def get_gold_data(self, sample: dict[str, Any]) -> Any:
+        """Get test_code from sample for evaluation."""
+        return sample.get("test_code", "")
+
+    def shutdown(self) -> None:
+        """Clean up eval backend."""
+        if self._backend is not None:
+            self._backend.shutdown()
+            self._backend = None
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # FACTORY FUNCTION
 # ════════════════════════════════════════════════════════════════════════════
-def get_dataset_adapter(dataset_name: str) -> DatasetAdapter:
+def get_dataset_adapter(dataset_name: str, **kwargs: Any) -> DatasetAdapter:
     """Factory function to get dataset adapter by name.
 
     Args:
-        dataset_name: 'gsm8k', 'math', or 'mbpp'
+        dataset_name: 'gsm8k', 'math', 'mbpp', or 'triton_kernel'
+        **kwargs: Additional arguments passed to adapter constructor.
 
     Returns:
         DatasetAdapter instance
@@ -835,12 +1045,13 @@ def get_dataset_adapter(dataset_name: str) -> DatasetAdapter:
         "gsm8k": GSM8KAdapter,
         "math": MATHAdapter,
         "mbpp": MBPPAdapter,
+        "triton_kernel": TritonKernelAdapter,
     }
 
     if dataset_name.lower() not in adapters:
         raise ValueError(f"Unknown dataset: {dataset_name}. Supported: {list(adapters.keys())}")
 
-    return adapters[dataset_name.lower()]()
+    return adapters[dataset_name.lower()](**kwargs)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1010,13 +1221,8 @@ def prepare_train_dataset(adapter: DatasetAdapter, tokenizer: PreTrainedTokenize
     formatted = []
     for sample in raw_data:
         question = sample[adapter.question_field]
-        prompt = tokenizer.apply_chat_template(
-            [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": question},
-            ],
-            tokenize=False,
-            add_generation_prompt=True,
+        prompt = apply_chat_template(
+            tokenizer, [{"role": "user", "content": question}]
         )
 
         # For MBPP, store full test data dict; for others, store answer string
@@ -1477,13 +1683,13 @@ def get_gradient_checkpointing_kwargs(model_id: str) -> dict[str, Any]:
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="TRL GRPO training with GSM8K, MATH, or MBPP dataset"
+        description="TRL GRPO training with GSM8K, MATH, MBPP, or Triton Kernel dataset"
     )
     parser.add_argument(
         "--dataset",
         type=str,
         default="gsm8k",
-        choices=["gsm8k", "math", "mbpp"],
+        choices=["gsm8k", "math", "mbpp", "triton_kernel"],
         help="Dataset to use for training (default: gsm8k)",
     )
     parser.add_argument(
@@ -1580,6 +1786,52 @@ def parse_args() -> argparse.Namespace:
         "states are kept in FP32 for numerical stability, while forward/backward "
         "passes use BF16 via autocast. Increases memory by ~2x for model+optimizer.",
     )
+    parser.add_argument(
+        "--adam-beta2",
+        type=float,
+        default=None,
+        help="Override Adam beta2 (second moment decay rate, default: 0.999).",
+    )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        default=None,
+        choices=["bfloat16", "float32"],
+        help="Training precision dtype (default: bfloat16). Use float32 for full-precision training.",
+    )
+
+    # Triton kernel-specific arguments
+    parser.add_argument(
+        "--kernel-dataset-path",
+        type=str,
+        default="",
+        help="Path to unified kernel JSONL dataset (required for --dataset triton_kernel).",
+    )
+    parser.add_argument(
+        "--kernel-eval-backend",
+        type=str,
+        default="subprocess",
+        choices=["subprocess", "affinetes", "modal"],
+        help="Eval backend for Triton kernel GPU evaluation (default: subprocess).",
+    )
+    parser.add_argument(
+        "--kernel-eval-gpu-ids",
+        type=str,
+        default="",
+        help="Comma-separated GPU IDs for kernel eval (e.g., '2,3'). "
+             "Uses KERNEL_EVAL_GPU_IDS env var if not specified.",
+    )
+    parser.add_argument(
+        "--kernel-gpu-eval",
+        action="store_true",
+        help="Enable GPU-based kernel evaluation (default: structural rewards only).",
+    )
+    parser.add_argument(
+        "--kernel-warmup-count",
+        type=int,
+        default=20,
+        help="Number of kernels to compile during JIT warmup (default: 20).",
+    )
     return parser.parse_args()
 
 
@@ -1597,6 +1849,13 @@ def main() -> None:
         cfg.gradient_checkpointing = False
     if args.lr is not None:
         cfg.lr = args.lr
+    if args.adam_beta2 is not None:
+        cfg.adam_beta2 = args.adam_beta2
+    if args.dtype is not None:
+        cfg.dtype = args.dtype
+    # Auto-set delta checkpoint dtype to match training dtype
+    if cfg.dtype == "float32":
+        cfg.delta_checkpoint_dtype = "float32"
 
     # Set random seeds for reproducibility
     import random
@@ -1638,6 +1897,7 @@ def main() -> None:
     logger.info(f"  {'Parameter':<40} {'Value':<15} {'GRAIL Env Var'}")
     logger.info("─" * 80)
     logger.info(f"  {'Model ID':<40} {cfg.model_id:<15} GRAIL_TRAIN_MODEL_ID")
+    logger.info(f"  {'Training Dtype':<40} {cfg.dtype:<15} GRAIL_DTYPE")
     logger.info(f"  {'Learning Rate':<40} {cfg.lr:<15} GRAIL_TRAINER_LR")
     logger.info(f"  {'Epochs (per window)':<40} {cfg.epochs:<15} GRAIL_TRAINER_EPOCHS")
     logger.info(f"  {'Batch Size':<40} {cfg.batch_size:<15} GRAIL_TRAINER_BATCH_SIZE")
@@ -1658,6 +1918,7 @@ def main() -> None:
     logger.info(f"  {'IS Ratio Max':<40} {cfg.is_ratio_max:<15} GRAIL_TRAINER_IS_RATIO_MAX")
     logger.info(f"  {'GRPO Variant':<40} {cfg.grpo_variant:<15} GRAIL_GRPO_VARIANT")
     logger.info(f"  {'IS Level':<40} {cfg.importance_sampling_level:<15} GRAIL_IMPORTANCE_SAMPLING_LEVEL")
+    logger.info(f"  {'Adam Beta2':<40} {cfg.adam_beta2:<15} GRAIL_ADAM_BETA2")
     logger.info(f"  {'Max Groups':<40} {cfg.max_groups:<15} GRPO_MAX_GROUPS")
     logger.info(f"  {'Rollouts per Problem':<40} {cfg.rollouts_per_problem:<15} ROLLOUTS_PER_PROBLEM")
     logger.info(f"  {'Gradient Checkpointing':<40} {cfg.gradient_checkpointing!s:<15} Memory optimization")
@@ -1668,7 +1929,19 @@ def main() -> None:
     print_memory_estimate(cfg.model_id, fp32_master_weights=args.fp32_master_weights)
 
     # Get dataset adapter
-    adapter = get_dataset_adapter(args.dataset)
+    adapter_kwargs: dict[str, Any] = {}
+    if args.dataset == "triton_kernel":
+        # Parse GPU IDs from CLI or env var
+        gpu_ids_str = args.kernel_eval_gpu_ids or os.environ.get("KERNEL_EVAL_GPU_IDS", "")
+        eval_gpu_ids = [int(x) for x in gpu_ids_str.split(",") if x.strip()] if gpu_ids_str else []
+        adapter_kwargs = {
+            "dataset_path": args.kernel_dataset_path,
+            "gpu_eval": args.kernel_gpu_eval,
+            "eval_backend_name": args.kernel_eval_backend,
+            "eval_gpu_ids": eval_gpu_ids,
+            "warmup_count": args.kernel_warmup_count,
+        }
+    adapter = get_dataset_adapter(args.dataset, **adapter_kwargs)
     logger.info("\n📚 Dataset Configuration:")
     logger.info(f"  Dataset: {adapter.name}")
     logger.info(f"  Correctness weight: {adapter.correctness_weight}")
@@ -1689,36 +1962,40 @@ def main() -> None:
     else:
         train_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Determine model dtype: FP32 for master weights, BF16 otherwise
-    # When using FP32 master weights:
-    #   - Model weights stored in FP32 for numerical stability
-    #   - Optimizer states (momentum, variance) also in FP32
-    #   - Forward/backward use BF16 via autocast (bf16=True in GRPOConfig)
-    #   - vLLM receives FP32 weights, converts to BF16 internally
-    model_dtype = torch.float32 if args.fp32_master_weights else torch.bfloat16
-    logger.info(f"  Model dtype: {model_dtype}")
+    torch_dtype = torch.float32 if cfg.dtype == "float32" else torch.bfloat16
+    logger.info(f"  Model dtype: {torch_dtype}")
 
     with profiler.track("model_loading"):
-        try:
+        if cfg.dtype == "float32":
+            # Flash Attention 2 doesn't support fp32; use SDPA directly
+            logger.info(f"  Full FP32 mode: using SDPA attention (Flash Attention 2 requires bf16/fp16)")
             model = AutoModelForCausalLM.from_pretrained(
                 cfg.model_id,
-                torch_dtype=model_dtype,
-                attn_implementation="flash_attention_2",
-                device_map=train_device,
-            )
-        except (ImportError, RuntimeError) as e:
-            logger.warning(f"⚠️  Flash Attention 2 unavailable ({type(e).__name__}), using SDPA")
-            model = AutoModelForCausalLM.from_pretrained(
-                cfg.model_id,
-                torch_dtype=model_dtype,
+                torch_dtype=torch.float32,
                 attn_implementation="sdpa",
                 device_map=train_device,
             )
+        else:
+            try:
+                model = AutoModelForCausalLM.from_pretrained(
+                    cfg.model_id,
+                    torch_dtype=torch_dtype,
+                    attn_implementation="flash_attention_2",
+                    device_map=train_device,
+                )
+            except (ImportError, RuntimeError) as e:
+                logger.warning(f"⚠️  Flash Attention 2 unavailable ({type(e).__name__}), using SDPA")
+                model = AutoModelForCausalLM.from_pretrained(
+                    cfg.model_id,
+                    torch_dtype=torch_dtype,
+                    attn_implementation="sdpa",
+                    device_map=train_device,
+                )
 
         tokenizer = AutoTokenizer.from_pretrained(cfg.model_id)
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.padding_side = "left"
-        tokenizer.chat_template = QWEN_CHAT_TEMPLATE
+        configure_tokenizer(tokenizer)
 
     # Prepare datasets
     logger.info("\n📊 Preparing datasets...")
@@ -1736,15 +2013,6 @@ def main() -> None:
         wandb.login(key=wandb_api_key)
         effective_project = args.wandb_project or os.getenv("WANDB_PROJECT", "grail")
         logger.info(f"  ✓ WandB logged in (project: {effective_project})")
-
-    # Calculate max_prompt_length (GRAIL_TRAINER_MAX_LENGTH - GRPO_MAX_COMPLETION_TOKENS)
-    max_prompt_length = cfg.max_length - cfg.max_new_tokens
-    if max_prompt_length <= 0:
-        raise ValueError(
-            "Invalid length config: max_length must be > max_new_tokens so prompts aren't "
-            "truncated to empty. "
-            f"Got max_length={cfg.max_length}, max_new_tokens={cfg.max_new_tokens}."
-        )
 
     # Calculate training schedule
     # Each optimizer step = generation_batch_size = effective_batch = 512 samples
@@ -1789,7 +2057,7 @@ def main() -> None:
         # ─────────────────────────────────────────────────────────────────────
         optim="adamw_torch",  # Optimizer type (default PyTorch AdamW)
         adam_beta1=0.9,  # Beta1 momentum (default: 0.9)
-        adam_beta2=0.999,  # Beta2 momentum (default: 0.999)
+        adam_beta2=cfg.adam_beta2,  # Beta2 momentum (default: 0.999)
         adam_epsilon=1e-8,  # Numerical stability (default: 1e-8)
         weight_decay=0.0,  # L2 regularization (default: 0.0)
         # ─────────────────────────────────────────────────────────────────────
@@ -1803,7 +2071,6 @@ def main() -> None:
         # ─────────────────────────────────────────────────────────────────────
         # Sequence Length (matching GRAIL trainer config)
         # ─────────────────────────────────────────────────────────────────────
-        max_prompt_length=max_prompt_length,  # max_length - max_completion_tokens
         max_completion_length=cfg.max_new_tokens,  # GRPO_MAX_COMPLETION_TOKENS
         # ─────────────────────────────────────────────────────────────────────
         # Importance Sampling Level
@@ -1829,7 +2096,7 @@ def main() -> None:
         num_completions_to_print=1,
         save_strategy="steps",
         save_steps=50,
-        bf16=True,
+        bf16=(cfg.dtype == "bfloat16"),
         # ─────────────────────────────────────────────────────────────────────
         # Memory Optimization
         # ─────────────────────────────────────────────────────────────────────
@@ -1878,7 +2145,7 @@ def main() -> None:
         param_change_enabled=True,
         param_change_thresholds=[0.0],  # Only track exact zero weight deltas
         sparse_quality_enabled=False,
-        snapshot_dtype="bfloat16",
+        snapshot_dtype=cfg.delta_checkpoint_dtype,  # Match training precision
         gradient_enabled=True,  # Enable gradient analysis
     )
     sparsity_analyzer = ModelAnalysisManager.create(sparsity_config)
@@ -1889,6 +2156,13 @@ def main() -> None:
         track_per_layer=False,
     )
     sparsity_analyzer.add_metric(gradient_sparsity)
+
+    # Add Adam sign descent metric
+    adam_sign_metrics = AdamSignDescentMetrics(
+        track_per_component=True,
+        histogram_samples=1_000_000,
+    )
+    sparsity_analyzer.add_metric(adam_sign_metrics)
 
     sparsity_callback = SparsityCallback(sparsity_analyzer)
     logger.info(f"  ✓ Sparsity analysis enabled (interval={sparsity_config.interval})")
@@ -1914,16 +2188,7 @@ def main() -> None:
         eval_every_n_steps=args.eval_every,
     )
 
-    # Monkey-patch VLLMClient to use custom group_port (avoids port conflicts in parallel runs)
-    from trl.extras import vllm_client as vllm_client_module
-    _original_init = vllm_client_module.VLLMClient.__init__
-
-    def _patched_init(self, *init_args, **init_kwargs):
-        init_kwargs.setdefault("group_port", args.group_port)
-        return _original_init(self, *init_args, **init_kwargs)
-
-    vllm_client_module.VLLMClient.__init__ = _patched_init
-    logger.info(f"  ✓ VLLMClient patched to use group_port={args.group_port}")
+    logger.info(f"  ✓ Using vllm_group_port={args.group_port} (set via GRPOConfig)")
 
     # Ensure CUDA device is correctly set before GRPOTrainer initialization
     # GRPOTrainer uses torch.cuda.current_device() for NCCL communicator setup
@@ -1954,6 +2219,7 @@ def main() -> None:
         wandb_config = {
             # Our hyperparameters (Config class)
             "grail/model_id": cfg.model_id,
+            "grail/dtype": cfg.dtype,
             "grail/learning_rate": cfg.lr,
             "grail/batch_size": cfg.batch_size,
             "grail/grad_accum_steps": cfg.grad_accum_steps,
@@ -1976,6 +2242,7 @@ def main() -> None:
             "grail/temperature": cfg.temperature,
             "grail/top_p": cfg.top_p,
             "grail/top_k": cfg.top_k,
+            "grail/adam_beta2": cfg.adam_beta2,
             "grail/num_iterations": args.num_iterations,
             "grail/seed": args.seed,
             "grail/dataset": args.dataset,

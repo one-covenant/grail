@@ -1,0 +1,3 @@
+[submodule "vendor/affinetes"]
+	path = vendor/affinetes
+	url = https://github.com/AffineFoundation/affinetes.git

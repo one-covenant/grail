@@ -404,13 +404,17 @@ class ValidationService:
         # Get trainer's bucket for checkpoints (one-time setup)
         if self._chain_manager and self._current_checkpoint_id is None:
             trainer_bucket = self._chain_manager.get_bucket(TRAINER_UID)
-            if trainer_bucket:
-                logger.info(f"✅ Using trainer UID {TRAINER_UID} bucket for checkpoints")
-                self._checkpoint_manager.credentials = trainer_bucket
-            else:
-                logger.warning(
-                    f"⚠️ Trainer UID {TRAINER_UID} bucket not found, using local credentials"
+            if not trainer_bucket:
+                raise RuntimeError(
+                    f"Trainer UID {TRAINER_UID} has no bucket commitment on-chain. "
+                    "Cannot validate without trainer checkpoint access."
                 )
+
+            logger.info(
+                "Trainer UID %d bucket retrieved from chain, switching checkpoint credentials",
+                TRAINER_UID,
+            )
+            self._checkpoint_manager.credentials = trainer_bucket
 
         # Unified checkpoint loading (fast path + slow path with fallback)
         timer_ctx = (
@@ -446,6 +450,18 @@ class ValidationService:
                 self._model, self._tokenizer = clear_model_and_tokenizer(
                     self._model, self._tokenizer
                 )
+                # gc.collect() inside clear_model_and_tokenizer runs while
+                # self._model still held the old ref (parameter vs attribute).
+                # Now self._model is None, so the old model is truly unreachable.
+                # Force collection of HF model circular refs BEFORE loading the
+                # new model — otherwise two copies coexist on GPU.
+                import gc
+
+                import torch
+
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 self._model = get_model(str(checkpoint_path), device=None, eval_mode=True)
                 self._tokenizer = get_tokenizer(str(checkpoint_path))
                 self._current_checkpoint_id = str(checkpoint_path)

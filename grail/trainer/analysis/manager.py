@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from grail.trainer.analysis.config import AnalysisConfig
+from grail.trainer.analysis.metrics.adam_sign_descent import AdamSignDescentMetrics
 from grail.trainer.analysis.metrics.base import AnalysisContext, MetricComputer
 from grail.trainer.analysis.metrics.parameter_change import ParameterChangeMetrics
 from grail.trainer.analysis.metrics.sparse_quality import SparseQualityMetrics
@@ -269,6 +270,17 @@ class ModelAnalysisManager:
         # Future: Add momentum metrics
         if config.momentum_enabled:
             logger.warning("Momentum analysis not yet implemented")
+
+        # Add Adam sign descent metrics
+        if config.adam_sign_enabled:
+            adam_sign = AdamSignDescentMetrics(
+                track_per_component=config.adam_sign_track_per_component,
+                track_per_layer=config.adam_sign_track_per_layer,
+                histogram_samples=config.adam_sign_histogram_samples,
+                near_lr_tolerance=config.adam_sign_near_lr_tolerance,
+            )
+            manager.add_metric(adam_sign)
+            logger.info("Added AdamSignDescentMetrics to analysis manager")
 
         return manager
 

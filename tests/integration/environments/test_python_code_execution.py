@@ -31,11 +31,12 @@ def _pull_task(env: object) -> dict[str, object]:
 
 def _build_solution(code: str, thinking: str = "") -> str:
     """Build completion with optional thinking block."""
+    from grail.shared.thinking import get_thinking_config
+
+    cfg = get_thinking_config()
     if thinking:
-        return (
-            f"<start_working_out>\n{thinking}\n</end_working_out>\n<SOLUTION>\n{code}\n</SOLUTION>"
-        )
-    return f"<SOLUTION>\n{code}\n</SOLUTION>"
+        return f"{cfg.thinking_open}\n{thinking}\n{cfg.thinking_close}\n{cfg.solution_open}\n{code}\n{cfg.solution_close}"
+    return f"{cfg.solution_open}\n{code}\n{cfg.solution_close}"
 
 
 # =============================================================================
