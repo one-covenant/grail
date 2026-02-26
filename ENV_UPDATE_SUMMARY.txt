@@ -195,4 +195,3 @@ Common Issues:
 
 Date Updated: 2025-10-19
 Configuration Version: Latest (aligned with .env.example)
-

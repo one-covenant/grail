@@ -192,10 +192,10 @@ def batch_size_grid_search() -> tuple[list[PodSpec], dict[str, list[ExperimentCo
 
     # Grid: (batch_size, grad_accum_steps) pairs that give effective_batch=512
     grid = [
-        (2, 256),  # 2 * 256 = 512
-        (4, 128),  # 4 * 128 = 512
-        (8, 64),  # 8 * 64 = 512
-        (16, 32),  # 16 * 32 = 512
+        (2, 256),   # 2 * 256 = 512
+        (4, 128),   # 4 * 128 = 512
+        (8, 64),    # 8 * 64 = 512
+        (16, 32),   # 16 * 32 = 512
     ]
 
     experiments = []
@@ -390,16 +390,8 @@ def multi_model_grpo_sweep() -> tuple[list[PodSpec], dict[str, list[ExperimentCo
         {"name": "qwen2.5-7b-iter1", "model": "Qwen/Qwen2.5-7B-Instruct", "num_iterations": 1},
         {"name": "qwen2.5-7b-iter8", "model": "Qwen/Qwen2.5-7B-Instruct", "num_iterations": 8},
         {"name": "qwen2.5-7b-iter16", "model": "Qwen/Qwen2.5-7B-Instruct", "num_iterations": 16},
-        {
-            "name": "llama3.2-1b-iter1",
-            "model": "meta-llama/Llama-3.2-1B-Instruct",
-            "num_iterations": 1,
-        },
-        {
-            "name": "llama3.2-3b-iter1",
-            "model": "meta-llama/Llama-3.2-3B-Instruct",
-            "num_iterations": 1,
-        },
+        {"name": "llama3.2-1b-iter1", "model": "meta-llama/Llama-3.2-1B-Instruct", "num_iterations": 1},
+        {"name": "llama3.2-3b-iter1", "model": "meta-llama/Llama-3.2-3B-Instruct", "num_iterations": 1},
         {"name": "gemma3-1b-iter1", "model": "google/gemma-3-1b-it", "num_iterations": 1},
         {"name": "gemma3-4b-iter1", "model": "google/gemma-3-4b-it", "num_iterations": 1},
     ]
@@ -418,7 +410,9 @@ def multi_model_grpo_sweep() -> tuple[list[PodSpec], dict[str, list[ExperimentCo
 
     # Empty experiments list - actual execution handled by deploy_parallel.py
     # which uses nohup_experiment_runner.py with the model configs
-    pod_experiments = {config["name"]: [] for config in model_configs}
+    pod_experiments = {
+        config["name"]: [] for config in model_configs
+    }
 
     return pods, pod_experiments
 
@@ -445,16 +439,8 @@ def active_models_grpo_sweep() -> tuple[list[PodSpec], dict[str, list[Experiment
     model_configs = [
         {"name": "qwen2.5-0.5b-iter1", "model": "Qwen/Qwen2.5-0.5B-Instruct", "num_iterations": 1},
         {"name": "qwen2.5-1.5b-iter1", "model": "Qwen/Qwen2.5-1.5B-Instruct", "num_iterations": 1},
-        {
-            "name": "llama3.2-1b-iter1",
-            "model": "meta-llama/Llama-3.2-1B-Instruct",
-            "num_iterations": 1,
-        },
-        {
-            "name": "llama3.2-3b-iter1",
-            "model": "meta-llama/Llama-3.2-3B-Instruct",
-            "num_iterations": 1,
-        },
+        {"name": "llama3.2-1b-iter1", "model": "meta-llama/Llama-3.2-1B-Instruct", "num_iterations": 1},
+        {"name": "llama3.2-3b-iter1", "model": "meta-llama/Llama-3.2-3B-Instruct", "num_iterations": 1},
         {"name": "gemma3-1b-iter1", "model": "google/gemma-3-1b-it", "num_iterations": 1},
         {"name": "gemma3-4b-iter1", "model": "google/gemma-3-4b-it", "num_iterations": 1},
     ]
@@ -470,7 +456,9 @@ def active_models_grpo_sweep() -> tuple[list[PodSpec], dict[str, list[Experiment
         for config in model_configs
     ]
 
-    pod_experiments = {config["name"]: [] for config in model_configs}
+    pod_experiments = {
+        config["name"]: [] for config in model_configs
+    }
 
     return pods, pod_experiments
 
@@ -478,6 +466,465 @@ def active_models_grpo_sweep() -> tuple[list[PodSpec], dict[str, list[Experiment
 # ============================================================================
 # Helper Functions
 # ============================================================================
+def iter_ablation_1_5b() -> tuple[list[PodSpec], dict[str, list[ExperimentConfig]]]:
+    """Iteration ablation for Qwen2.5-1.5B (iter8 and iter16).
+
+    Runs 2 model configurations across 2 pods (each 8xA100):
+    - Qwen2.5-1.5B-Instruct with num_iterations=8
+    - Qwen2.5-1.5B-Instruct with num_iterations=16
+
+    Each pod runs 4 seeds in parallel via run_parallel_training_nohup.sh.
+
+    Returns:
+        Tuple of (pod_specs, pod_to_experiments mapping)
+    """
+    model_configs = [
+        {"name": "qwen2.5-1.5b-iter8"},
+        {"name": "qwen2.5-1.5b-iter16"},
+    ]
+
+    pods = [
+        PodSpec(
+            name=config["name"],
+            gpu_type="A100",
+            gpu_count=8,
+            ttl_hours=24,
+        )
+        for config in model_configs
+    ]
+
+    pod_experiments = {config["name"]: [] for config in model_configs}
+
+    return pods, pod_experiments
+
+
+def gemma_1b_4b() -> tuple[list[PodSpec], dict[str, list[ExperimentConfig]]]:
+    """Gemma 3 model experiments (1B and 4B).
+
+    Runs 2 model configurations across 2 pods (each 8xA100):
+    - google/gemma-3-1b-it with num_iterations=1
+    - google/gemma-3-4b-it with num_iterations=1
+
+    Each pod runs 4 seeds in parallel via run_parallel_training_nohup.sh.
+
+    Returns:
+        Tuple of (pod_specs, pod_to_experiments mapping)
+    """
+    model_configs = [
+        {"name": "gemma3-1b-iter1"},
+        {"name": "gemma3-4b-iter1"},
+    ]
+
+    pods = [
+        PodSpec(
+            name=config["name"],
+            gpu_type="A100",
+            gpu_count=8,
+            ttl_hours=24,
+        )
+        for config in model_configs
+    ]
+
+    pod_experiments = {config["name"]: [] for config in model_configs}
+
+    return pods, pod_experiments
+
+
+def gemma_4b_only() -> tuple[list[PodSpec], dict[str, list[ExperimentConfig]]]:
+    """Gemma 3 4B model only (separate deployment).
+
+    Runs google/gemma-3-4b-it on a single 8xA100 pod.
+    Use this config to deploy gemma-4b separately from gemma-1b.
+
+    Hyperparameters:
+    - batch_size: 2 (4B model)
+    - grad_accum_steps: 256 (effective batch = 512)
+    - learning_rate: 3e-6
+    - num_instances: 4
+
+    Returns:
+        Tuple of (pod_specs, pod_to_experiments mapping)
+    """
+    pods = [
+        PodSpec(
+            name="gemma3-4b-iter1",
+            gpu_type="A100",
+            gpu_count=8,
+            ttl_hours=72,  # ~3 days for 4B model training
+        )
+    ]
+
+    pod_experiments = {"gemma3-4b-iter1": []}
+
+    return pods, pod_experiments
+
+
+def iter32_1_5b() -> tuple[list[PodSpec], dict[str, list[ExperimentConfig]]]:
+    """Iteration 32 experiment for Qwen2.5-1.5B.
+
+    Runs Qwen2.5-1.5B-Instruct with num_iterations=32 on a single 8xA100 pod.
+    All 4 seeds (42, 1337, 2024, 9999) run in parallel via run_parallel_training_nohup.sh.
+
+    Returns:
+        Tuple of (pod_specs, pod_to_experiments mapping)
+    """
+    pods = [
+        PodSpec(
+            name="qwen2.5-1.5b-iter32",
+            gpu_type="A100",
+            gpu_count=8,
+            ttl_hours=48,  # Longer TTL for iter32 (more training steps)
+        )
+    ]
+
+    pod_experiments = {"qwen2.5-1.5b-iter32": []}
+
+    return pods, pod_experiments
+
+
+def lr_sweep_1_5b() -> tuple[list[PodSpec], dict[str, list[ExperimentConfig]]]:
+    """Learning rate sweep for Qwen2.5-1.5B (5e-7 vs 5e-6).
+
+    Runs 2 model configurations across 2 pods (each 8xA100):
+    - Qwen2.5-1.5B-Instruct with learning_rate=5e-7
+    - Qwen2.5-1.5B-Instruct with learning_rate=5e-6
+
+    Each pod runs 4 seeds in parallel via run_parallel_training_nohup.sh.
+
+    Returns:
+        Tuple of (pod_specs, pod_to_experiments mapping)
+    """
+    pods = [
+        PodSpec(name="qwen2.5-1.5b-lr5e-7", gpu_type="A100", gpu_count=8, ttl_hours=96),
+        PodSpec(name="qwen2.5-1.5b-lr5e-6", gpu_type="A100", gpu_count=8, ttl_hours=96),
+    ]
+
+    pod_experiments = {
+        "qwen2.5-1.5b-lr5e-7": [],
+        "qwen2.5-1.5b-lr5e-6": [],
+    }
+
+    return pods, pod_experiments
+
+
+def lr_1e6_1_5b() -> tuple[list[PodSpec], dict[str, list[ExperimentConfig]]]:
+    """Single LR experiment for Qwen2.5-1.5B with lr=1e-6.
+
+    Runs Qwen2.5-1.5B-Instruct with learning_rate=1e-6 on a single 8xA100 pod.
+    All 4 seeds (42, 1337, 2024, 9999) run in parallel.
+
+    Returns:
+        Tuple of (pod_specs, pod_to_experiments mapping)
+    """
+    pods = [
+        PodSpec(name="qwen2.5-1.5b-lr1e-6", gpu_type="A100", gpu_count=8, ttl_hours=96),
+    ]
+
+    pod_experiments = {"qwen2.5-1.5b-lr1e-6": []}
+
+    return pods, pod_experiments
+
+
+def lr5e7_seed2024_retry() -> tuple[list[PodSpec], dict[str, list[ExperimentConfig]]]:
+    """Retry lr5e-7 seed2024 on a 2-GPU instance.
+
+    The original seed2024 got stuck at step 320/400. This runs just that seed
+    on a fresh 2xA100 instance.
+
+    Returns:
+        Tuple of (pod_specs, pod_to_experiments mapping)
+    """
+    pods = [
+        PodSpec(name="qwen2.5-1.5b-lr5e-7-seed2024", gpu_type="A100", gpu_count=2, ttl_hours=24),
+    ]
+
+    pod_experiments = {"qwen2.5-1.5b-lr5e-7-seed2024": []}
+
+    return pods, pod_experiments
+
+
+def mbpp_qwen_1_5b_iter1() -> tuple[list[PodSpec], dict[str, list[ExperimentConfig]]]:
+    """MBPP coding experiment with Qwen2.5-1.5B, iter1, lr=3e-6.
+
+    Runs GRPO training on MBPP (coding) dataset.
+    Uses CodeExecutionPool for fast test execution.
+
+    Hyperparameters:
+    - batch_size: 4
+    - grad_accum_steps: 128 (effective batch = 512)
+    - learning_rate: 3e-6
+    - num_instances: 4 (seeds 42, 1337, 2024, 9999)
+    - dataset: mbpp
+
+    Returns:
+        Tuple of (pod_specs, pod_to_experiments mapping)
+    """
+    pods = [
+        PodSpec(name="qwen2.5-1.5b-mbpp-iter1", gpu_type="A100", gpu_count=8, ttl_hours=24),
+    ]
+
+    pod_experiments = {p.name: [] for p in pods}
+
+    return pods, pod_experiments
+
+
+def qwen_1_5b_iter_sweep() -> tuple[list[PodSpec], dict[str, list[ExperimentConfig]]]:
+    """Qwen2.5-1.5B iteration sweep (8, 16, 32).
+
+    Runs 3 model configurations across 3 pods (each 8xA100):
+    - Qwen2.5-1.5B-Instruct with num_iterations=8
+    - Qwen2.5-1.5B-Instruct with num_iterations=16
+    - Qwen2.5-1.5B-Instruct with num_iterations=32
+
+    Each pod runs 4 seeds in parallel via run_parallel_training_nohup.sh.
+
+    Higher iterations = more off-policy steps reusing same rollouts.
+    Should be faster than iter1 due to fewer vLLM inference calls.
+
+    Returns:
+        Tuple of (pod_specs, pod_to_experiments mapping)
+    """
+    pods = [
+        PodSpec(name="qwen2.5-1.5b-iter8", gpu_type="A100", gpu_count=8, ttl_hours=24),
+        PodSpec(name="qwen2.5-1.5b-iter16", gpu_type="A100", gpu_count=8, ttl_hours=24),
+        PodSpec(name="qwen2.5-1.5b-iter32", gpu_type="A100", gpu_count=8, ttl_hours=24),
+    ]
+
+    pod_experiments = {p.name: [] for p in pods}
+
+    return pods, pod_experiments
+
+
+def qwen_7b_iter1() -> tuple[list[PodSpec], dict[str, list[ExperimentConfig]]]:
+    """Qwen2.5-7B experiment with num_iterations=1.
+
+    Runs Qwen2.5-7B-Instruct on a single 8xA100 pod.
+    All 4 seeds (42, 1337, 2024, 9999) run in parallel via run_parallel_training_nohup.sh.
+
+    Hyperparameters:
+    - batch_size: 2 (7B model with bf16)
+    - grad_accum_steps: 256 (effective batch = 512)
+    - learning_rate: 3e-6
+    - num_instances: 4
+
+    Returns:
+        Tuple of (pod_specs, pod_to_experiments mapping)
+    """
+    pods = [
+        PodSpec(
+            name="qwen2.5-7b-iter1",
+            gpu_type="A100",
+            gpu_count=8,
+            ttl_hours=132,  # ~5.5 days for 7B model training
+        )
+    ]
+
+    pod_experiments = {"qwen2.5-7b-iter1": []}
+
+    return pods, pod_experiments
+
+
+def sft_qwen_1_5b() -> tuple[list[PodSpec], dict[str, list[ExperimentConfig]]]:
+    """SFT experiment for Qwen2.5-1.5B on 8x A100.
+
+    Runs supervised fine-tuning on a single 8xA100 pod.
+    All 8 GPUs run independent SFT training (no vLLM needed).
+
+    Returns:
+        Tuple of (pod_specs, pod_to_experiments mapping)
+    """
+    pods = [
+        PodSpec(
+            name="qwen2.5-1.5b-sft",
+            gpu_type="A100",
+            gpu_count=8,
+            ttl_hours=24,
+        )
+    ]
+
+    pod_experiments = {"qwen2.5-1.5b-sft": []}
+
+    return pods, pod_experiments
+
+
+def sft_qwen_1_5b_4gpu() -> tuple[list[PodSpec], dict[str, list[ExperimentConfig]]]:
+    """SFT experiment for Qwen2.5-1.5B on 4x A100.
+
+    Runs supervised fine-tuning on a single 4xA100 pod (e.g., Hyperstack).
+    All 4 GPUs run independent SFT training (no vLLM needed).
+
+    Returns:
+        Tuple of (pod_specs, pod_to_experiments mapping)
+    """
+    pods = [
+        PodSpec(
+            name="qwen2.5-1.5b-sft-4gpu",
+            gpu_type="A100",
+            gpu_count=4,
+            ttl_hours=24,
+        )
+    ]
+
+    pod_experiments = {"qwen2.5-1.5b-sft-4gpu": []}
+
+    return pods, pod_experiments
+
+
+def sft_qwen_1_5b_4gpu_lr3e6() -> tuple[list[PodSpec], dict[str, list[ExperimentConfig]]]:
+    """SFT experiment for Qwen2.5-1.5B on 4x A100 with lr=3e-6.
+
+    Runs supervised fine-tuning with lower learning rate and fewer steps:
+    - max_steps: 100 (~2 epochs)
+    - learning_rate: 3e-6
+
+    Returns:
+        Tuple of (pod_specs, pod_to_experiments mapping)
+    """
+    pods = [
+        PodSpec(
+            name="qwen2.5-1.5b-sft-4gpu-lr3e6",
+            gpu_type="A100",
+            gpu_count=4,
+            ttl_hours=12,
+        )
+    ]
+
+    pod_experiments = {"qwen2.5-1.5b-sft-4gpu-lr3e6": []}
+
+    return pods, pod_experiments
+
+
+def qwen_1_5b_beta2_0_95() -> tuple[list[PodSpec], dict[str, list[ExperimentConfig]]]:
+    """Optimizer ablation: Qwen2.5-1.5B with adam_beta2=0.95.
+
+    Runs 4 instances (seeds 42, 1337, 2024, 9999) on 8 GPUs.
+    Tests the effect of lower beta2 on second-moment decay.
+
+    Returns:
+        Tuple of (pod_specs, pod_to_experiments mapping)
+    """
+    pods = [
+        PodSpec(
+            name="qwen2.5-1.5b-beta2-0.95",
+            gpu_type="A100",
+            gpu_count=8,
+            ttl_hours=24,
+        )
+    ]
+
+    pod_experiments = {"qwen2.5-1.5b-beta2-0.95": []}
+
+    return pods, pod_experiments
+
+
+def qwen_1_5b_fp32() -> tuple[list[PodSpec], dict[str, list[ExperimentConfig]]]:
+    """Full FP32 precision experiment: Qwen2.5-1.5B.
+
+    Runs a single instance (seed=42) on 2 GPUs (1 vLLM + 1 trainer).
+    Model weights, gradients, and computation all in float32 (no bf16 mixed precision).
+    Uses SDPA attention (Flash Attention 2 doesn't support fp32).
+
+    Returns:
+        Tuple of (pod_specs, pod_to_experiments mapping)
+    """
+    pods = [
+        PodSpec(
+            name="qwen2.5-1.5b-fp32",
+            gpu_type="H100",
+            gpu_count=2,
+            ttl_hours=24,
+        )
+    ]
+
+    pod_experiments = {"qwen2.5-1.5b-fp32": []}
+
+    return pods, pod_experiments
+
+
+def qwen_1_5b_sft_analysis() -> tuple[list[PodSpec], dict[str, list[ExperimentConfig]]]:
+    """SFT analysis experiment: Qwen2.5-1.5B with gradient/momentum/weight update tracking.
+
+    Single seed (42) on 1x H100. Companion to fp32 and bf16-analysis GRPO runs.
+
+    Returns:
+        Tuple of (pod_specs, pod_to_experiments mapping)
+    """
+    pods = [
+        PodSpec(
+            name="qwen2.5-1.5b-sft-analysis",
+            gpu_type="H100",
+            gpu_count=1,
+            ttl_hours=24,
+        )
+    ]
+
+    pod_experiments = {"qwen2.5-1.5b-sft-analysis": []}
+
+    return pods, pod_experiments
+
+
+def qwen_1_5b_bf16_analysis() -> tuple[list[PodSpec], dict[str, list[ExperimentConfig]]]:
+    """BF16 analysis experiment: Qwen2.5-1.5B with gradient/momentum/weight update tracking.
+
+    Runs a single instance (seed=42) on 2 GPUs (1 vLLM + 1 trainer).
+    Standard bf16 mixed precision (bf16 model weights + computation, fp32 optimizer states).
+    Paired with fp32 experiment for precision comparison.
+
+    Returns:
+        Tuple of (pod_specs, pod_to_experiments mapping)
+    """
+    pods = [
+        PodSpec(
+            name="qwen2.5-1.5b-bf16-analysis",
+            gpu_type="H100",
+            gpu_count=2,
+            ttl_hours=24,
+        )
+    ]
+
+    pod_experiments = {"qwen2.5-1.5b-bf16-analysis": []}
+
+    return pods, pod_experiments
+
+
+def sft_all_models() -> tuple[list[PodSpec], dict[str, list[ExperimentConfig]]]:
+    """SFT experiments for all supported models.
+
+    Runs supervised fine-tuning across multiple model sizes:
+    - Qwen2.5: 0.5B, 1.5B, 7B
+    - Llama-3.2: 1B, 3B
+    - Gemma-3: 1B, 4B
+
+    Each pod runs 8 independent SFT training instances (one per GPU).
+
+    Returns:
+        Tuple of (pod_specs, pod_to_experiments mapping)
+    """
+    model_configs = [
+        {"name": "qwen2.5-0.5b-sft"},
+        {"name": "qwen2.5-1.5b-sft"},
+        {"name": "qwen2.5-7b-sft"},
+        {"name": "llama3.2-1b-sft"},
+        {"name": "llama3.2-3b-sft"},
+        {"name": "gemma3-1b-sft"},
+        {"name": "gemma3-4b-sft"},
+    ]
+
+    pods = [
+        PodSpec(
+            name=config["name"],
+            gpu_type="A100",
+            gpu_count=8,
+            ttl_hours=24,
+        )
+        for config in model_configs
+    ]
+
+    pod_experiments = {config["name"]: [] for config in model_configs}
+
+    return pods, pod_experiments
+
+
 def get_config(name: str) -> tuple[list[PodSpec], dict[str, list[ExperimentConfig]]]:
     """Get a predefined configuration by name.
 
@@ -499,10 +946,35 @@ def get_config(name: str) -> tuple[list[PodSpec], dict[str, list[ExperimentConfi
         "test_qwen_0.5b": test_qwen_0_5b,
         "multi_model": multi_model_grpo_sweep,
         "active_models": active_models_grpo_sweep,
+        "iter_ablation_1_5b": iter_ablation_1_5b,
+        "gemma_1b_4b": gemma_1b_4b,
+        "gemma_4b_only": gemma_4b_only,
+        "iter32_1_5b": iter32_1_5b,
+        "lr_sweep_1_5b": lr_sweep_1_5b,
+        "lr_1e6_1_5b": lr_1e6_1_5b,
+        "lr5e7_seed2024_retry": lr5e7_seed2024_retry,
+        "mbpp_qwen_1_5b_iter1": mbpp_qwen_1_5b_iter1,
+        "qwen_1_5b_iter_sweep": qwen_1_5b_iter_sweep,
+        "qwen_7b_iter1": qwen_7b_iter1,
+        # Optimizer ablations
+        "qwen_1_5b_beta2_0_95": qwen_1_5b_beta2_0_95,
+        # Precision ablations
+        "qwen_1_5b_fp32": qwen_1_5b_fp32,
+        "qwen_1_5b_bf16_analysis": qwen_1_5b_bf16_analysis,
+        # SFT analysis
+        "qwen_1_5b_sft_analysis": qwen_1_5b_sft_analysis,
+        # SFT experiments
+        "sft_qwen_1_5b": sft_qwen_1_5b,
+        "sft_qwen_1_5b_4gpu": sft_qwen_1_5b_4gpu,
+        "sft_qwen_1_5b_4gpu_lr3e6": sft_qwen_1_5b_4gpu_lr3e6,
+        "sft_all_models": sft_all_models,
     }
 
     if name not in configs:
-        raise ValueError(f"Unknown configuration: {name}. Available: {list(configs.keys())}")
+        raise ValueError(
+            f"Unknown configuration: {name}. "
+            f"Available: {list(configs.keys())}"
+        )
 
     return configs[name]()
 
@@ -514,6 +986,7 @@ def list_configs() -> list[str]:
         List of configuration names
     """
     return [
+        # GRPO experiments
         "lr_sweep",
         "multi_dataset",
         "batch_grid",
@@ -522,4 +995,26 @@ def list_configs() -> list[str]:
         "test_qwen_0.5b",
         "multi_model",
         "active_models",
+        "iter_ablation_1_5b",
+        "gemma_1b_4b",
+        "gemma_4b_only",
+        "iter32_1_5b",
+        "lr_sweep_1_5b",
+        "lr_1e6_1_5b",
+        "lr5e7_seed2024_retry",
+        "mbpp_qwen_1_5b_iter1",
+        "qwen_1_5b_iter_sweep",
+        "qwen_7b_iter1",
+        # Optimizer ablations
+        "qwen_1_5b_beta2_0_95",
+        # Precision ablations
+        "qwen_1_5b_fp32",
+        "qwen_1_5b_bf16_analysis",
+        # SFT analysis
+        "qwen_1_5b_sft_analysis",
+        # SFT experiments
+        "sft_qwen_1_5b",
+        "sft_qwen_1_5b_4gpu",
+        "sft_qwen_1_5b_4gpu_lr3e6",
+        "sft_all_models",
     ]

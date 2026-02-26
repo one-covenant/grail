@@ -1,7 +1,7 @@
 #!/bin/bash
 # Real-time storage monitoring for grail-validator
 
-echo "=== GRAIL VALIDATOR STORAGE MONITOR ===" 
+echo "=== GRAIL VALIDATOR STORAGE MONITOR ==="
 echo "Start time: $(date)"
 echo ""
 
@@ -24,22 +24,22 @@ get_volume_size() {
 # Monitor loop - captures every 60 seconds
 for i in {1..30}; do
     TS=$(date '+%H:%M:%S')
-    
+
     # Container docker logs size
     LOG_SIZE=$(docker logs grail-validator 2>&1 | wc -c)
-    
+
     # Application grail.log size
     APP_LOG_SIZE=$(docker exec grail-validator stat -c%s /var/log/grail/grail.log 2>/dev/null || echo "0")
-    
+
     # Cache contents
     CACHE_SIZE=$(docker exec grail-validator du -sb /root/.cache 2>/dev/null | cut -f1 || echo "0")
     HF_SIZE=$(docker exec grail-validator du -sb /root/.cache/huggingface 2>/dev/null | cut -f1 || echo "0")
     WANDB_SIZE=$(docker exec grail-validator du -sb /root/.cache/wandb 2>/dev/null | cut -f1 || echo "0")
-    
+
     # Memory and CPU
     MEM=$(docker stats grail-validator --no-stream --format='{{.MemUsage}}' 2>/dev/null | cut -d' ' -f1)
     CPU=$(docker stats grail-validator --no-stream --format='{{.CPUPerc}}' 2>/dev/null)
-    
+
     # Format output
     echo "[$TS] Snapshot $i:"
     echo "  Docker logs: $(numfmt --to=iec-i --suffix=B $LOG_SIZE 2>/dev/null || echo "$LOG_SIZE B")"
@@ -49,10 +49,10 @@ for i in {1..30}; do
     echo "  └─ WandB: $(numfmt --to=iec-i --suffix=B $WANDB_SIZE 2>/dev/null || echo "$WANDB_SIZE B")"
     echo "  Memory: $MEM | CPU: $CPU"
     echo ""
-    
+
     [ $i -lt 30 ] && sleep 60
 done
 
-echo "=== FINAL ANALYSIS ===" 
+echo "=== FINAL ANALYSIS ==="
 echo "End time: $(date)"
 echo "Monitor duration: 29 minutes"

@@ -2,8 +2,7 @@
 """Debug script to inspect available Lium executors."""
 
 import os
-
-from lium import Config, Lium
+from lium import Lium, Config
 
 # Initialize Lium
 api_key = os.getenv("LIUM_API_KEY")
@@ -15,9 +14,9 @@ if not api_key:
 config = Config(api_key=api_key)
 lium = Lium(config)
 
-print("=" * 80)
+print("="*80)
 print("LIUM EXECUTOR DEBUG")
-print("=" * 80)
+print("="*80)
 
 # List all A100 executors
 print("\n🔍 Searching for A100 executors...")
@@ -43,17 +42,14 @@ for i, e in enumerate(executors[:10], 1):  # Show first 10
     print(f"   Location: {e.location}")
 
     # Check for bandwidth info
-    specs = e.specs if hasattr(e, "specs") else {}
+    specs = e.specs if hasattr(e, 'specs') else {}
     print(f"   Specs keys: {list(specs.keys()) if specs else 'None'}")
 
     # Try different bandwidth field names
     bandwidth_fields = [
-        "upload_speed",
-        "download_speed",
-        "network",
-        "bandwidth",
-        "upload_mbps",
-        "download_mbps",
+        'upload_speed', 'download_speed',
+        'network', 'bandwidth',
+        'upload_mbps', 'download_mbps',
     ]
     for field in bandwidth_fields:
         if field in specs:
@@ -61,9 +57,9 @@ for i, e in enumerate(executors[:10], 1):  # Show first 10
 
     print()
 
-print("=" * 80)
+print("="*80)
 print("FILTERS TO TEST")
-print("=" * 80)
+print("="*80)
 
 # Test the filter that's failing
 print("\n📋 Executors with 8+ GPUs and status='available':")
@@ -76,7 +72,7 @@ for e in executors:
 if not matching:
     print("   ❌ None found")
     print("\n   Available statuses:")
-    statuses = {e.status for e in executors}
+    statuses = set(e.status for e in executors)
     for status in statuses:
         count = sum(1 for e in executors if e.status == status)
         print(f"   - {status}: {count} executor(s)")

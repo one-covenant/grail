@@ -82,16 +82,16 @@ class OfflineRolloutGenerator:
         # Choose server backend
         backend_name = (self._cfg.backend or "sglang_server").lower()
 
-        # IMPORTANT: GRPOAlgorithm uses behavior-policy logprobs for importance sampling.
-        # Even if we *prefer* HF logprobs (ground truth), HF forward can fail (OOM, etc.).
-        # We therefore keep server chosen-logprob requests enabled when return_logprobs=True
-        # to provide a reliable fallback for training correctness.
+        # OPTIMIZATION: Only request logprobs from vLLM if HF model is NOT provided.
+        # When HF model is available, we compute ground-truth logprobs locally,
+        # so requesting them from vLLM wastes bandwidth and computation.
         request_server_logprobs = bool(getattr(self._cfg, "return_logprobs", True))
         if hf_model is not None and request_server_logprobs:
             logger.info(
-                "HF model provided - will compute logprobs locally when possible; "
-                "keeping server logprob requests enabled as a fallback for correctness."
+                "HF model provided - will compute logprobs locally instead of from server. "
+                "Disabling server logprob requests for efficiency."
             )
+            request_server_logprobs = False
 
         # Store decision for use in generate_groups
         self._request_server_logprobs = request_server_logprobs
@@ -492,16 +492,6 @@ class OfflineRolloutGenerator:
                         logger.debug(
                             "Using vLLM logprobs (HF model unavailable), comp_len=%d",
                             completion_len,
-                        )
-
-                    if (
-                        final_logprobs is None
-                        and bool(getattr(self._cfg, "return_logprobs", True))
-                        and completion_len > 0
-                    ):
-                        raise RuntimeError(
-                            "Missing token logprobs for rollout while return_logprobs=True. "
-                            "This would break importance sampling in GRPOAlgorithm."
                         )
 
                     # Package logprobs in full-sequence format for GRPO

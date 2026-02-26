@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import fnmatch
 import logging
-import re
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -25,15 +24,6 @@ except ModuleNotFoundError:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-_BUCKET_ID_LIKE_RE = re.compile(r"^[0-9a-f]{32}$")
-
-
-def _warn_if_bucket_looks_like_id(bucket_name: str) -> None:
-    if _BUCKET_ID_LIKE_RE.fullmatch(bucket_name):
-        logger.warning(
-            "R2 bucket value looks like an ID. Cloudflare R2's S3 API expects the bucket *name*.",
-            extra={"bucket_value": bucket_name},
-        )
 
 
 def _should_exclude(rel_path: Path, exclude_patterns: list[str]) -> bool:
@@ -151,7 +141,6 @@ class R2Uploader:
             logger.error("File not found", extra={"local_file": str(local_file)})
             return False
 
-        _warn_if_bucket_looks_like_id(bucket_name)
         for attempt in range(1, self.max_retries + 1):
             try:
                 logger.debug(
@@ -256,7 +245,6 @@ class R2Uploader:
             logger.warning("No files found to upload", extra={"local_dir": str(local_dir)})
             return (0, 0)
 
-        _warn_if_bucket_looks_like_id(bucket_name)
         logger.info(
             "Uploading directory",
             extra={
@@ -306,7 +294,6 @@ class R2Uploader:
         Returns:
             True if bucket is accessible, False otherwise
         """
-        _warn_if_bucket_looks_like_id(bucket_name)
         try:
             self.s3_client.head_bucket(Bucket=bucket_name)
             logger.info("Verified bucket access", extra={"bucket": bucket_name})
@@ -363,7 +350,6 @@ def upload_experiment_artifacts(
     """
     artifact_dirs = artifact_dirs or ["logs", "outputs", "checkpoints"]
     bucket_name = bucket_id
-    _warn_if_bucket_looks_like_id(bucket_name)
 
     uploader = R2Uploader(
         account_id=account_id,

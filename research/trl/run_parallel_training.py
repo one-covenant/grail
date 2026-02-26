@@ -89,6 +89,8 @@ class ProcessManager:
         seed_override: int | None = None,
         lr: float | None = None,
         fp32_master_weights: bool = False,
+        adam_beta2: float | None = None,
+        dtype: str | None = None,
     ):
         self.dataset = dataset
         self.eval_every = eval_every
@@ -103,6 +105,8 @@ class ProcessManager:
         self.seed_override = seed_override
         self.lr = lr
         self.fp32_master_weights = fp32_master_weights
+        self.adam_beta2 = adam_beta2
+        self.dtype = dtype
         # Output base directory for checkpoints, wandb, etc.
         # Use /ephemeral on cloud instances with limited home storage
         self.output_base = output_base or os.getenv("GRAIL_OUTPUT_BASE", ".")
@@ -279,6 +283,12 @@ class ProcessManager:
         # Add FP32 master weights flag if enabled
         if self.fp32_master_weights:
             cmd.append("--fp32-master-weights")
+        # Add adam_beta2 if provided
+        if self.adam_beta2 is not None:
+            cmd.extend(["--adam-beta2", str(self.adam_beta2)])
+        # Add dtype if provided
+        if self.dtype is not None:
+            cmd.extend(["--dtype", self.dtype])
 
         env = os.environ.copy()
         # NCCL weight sync requires both GPUs visible to enable peer access.
@@ -375,6 +385,7 @@ class ProcessManager:
         print(f"Model: {self.model_id}")
         print(f"Num Iterations: {self.num_iterations}")
         print(f"FP32 Master Weights: {self.fp32_master_weights}")
+        print(f"Dtype: {self.dtype or 'bfloat16'}")
         print(f"Instances: {len(self.seeds)} (starting at index {self.start_instance})")
         print(f"Seeds: {self.seeds}")
         print(f"GPU pairs: {self.gpu_pairs}")
@@ -532,6 +543,19 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use FP32 master weights with BF16 training (more memory, better precision).",
     )
+    parser.add_argument(
+        "--adam-beta2",
+        type=float,
+        default=None,
+        help="Override Adam beta2 (second moment decay rate, default: 0.999).",
+    )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        default=None,
+        choices=["bfloat16", "float32"],
+        help="Training precision dtype (default: bfloat16). Use float32 for full-precision training.",
+    )
     return parser.parse_args()
 
 
@@ -564,6 +588,8 @@ def main() -> None:
         seed_override=args.seed,
         lr=args.lr,
         fp32_master_weights=args.fp32_master_weights,
+        adam_beta2=args.adam_beta2,
+        dtype=args.dtype,
     )
     manager.run()
 

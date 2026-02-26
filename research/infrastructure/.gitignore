@@ -21,13 +21,9 @@ ENV/
 # IDE
 .vscode/
 .idea/
-.claude/
 *.swp
 *.swo
 *~
-
-# Generated pod info
-qwen_pods_ssh.json
 
 # OS
 .DS_Store

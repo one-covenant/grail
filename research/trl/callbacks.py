@@ -247,9 +247,9 @@ class SparsityCallback(TrainerCallback):
         histogram_data: dict[str, Any] = {}
 
         for key, value in analysis_metrics.items():
-            if key.startswith(self.HISTOGRAM_KEY_PREFIX):
-                # Strip prefix for cleaner wandb key
-                hist_name = key[len(self.HISTOGRAM_KEY_PREFIX) :]
+            if "/_histogram/" in key:
+                # Generic histogram detection: "prefix/_histogram/name" -> "prefix/name"
+                hist_name = key.replace("/_histogram/", "/")
                 histogram_data[hist_name] = value
             elif isinstance(value, (int, float)):
                 scalar_metrics[key] = float(value)
@@ -282,9 +282,9 @@ class SparsityCallback(TrainerCallback):
                 for k, v in scalar_metrics.items():
                     wandb_data[f"sparsity/{k}"] = v
 
-                # Add histograms with sparsity/gradient/ prefix
+                # Add histograms with sparsity/ prefix
                 for hist_name, hist_values in histogram_data.items():
-                    wandb_data[f"sparsity/gradient/{hist_name}"] = wandb.Histogram(hist_values)
+                    wandb_data[f"sparsity/{hist_name}"] = wandb.Histogram(hist_values)
 
                 wandb.log(wandb_data)
         except Exception:

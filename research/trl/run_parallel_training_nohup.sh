@@ -117,6 +117,16 @@ if [ -n "$FP32_MASTER_WEIGHTS" ] && [ "$FP32_MASTER_WEIGHTS" = "true" ]; then
     CMD="$CMD --fp32-master-weights"
 fi
 
+# Add Adam beta2 override if provided (GRAIL_ADAM_BETA2 env var)
+if [ -n "$GRAIL_ADAM_BETA2" ]; then
+    CMD="$CMD --adam-beta2 $GRAIL_ADAM_BETA2"
+fi
+
+# Add dtype override if provided (GRAIL_DTYPE env var)
+if [ -n "$GRAIL_DTYPE" ]; then
+    CMD="$CMD --dtype $GRAIL_DTYPE"
+fi
+
 nohup $CMD > "$LAUNCHER_LOG" 2>&1 &
 
 

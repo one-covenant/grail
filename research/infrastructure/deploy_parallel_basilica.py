@@ -125,6 +125,17 @@ MODEL_CONFIGS = {
         "num_instances": 4,
         "learning_rate": 5e-7,
     },
+    "qwen2.5-1.5b-lr5e-7-seed2024": {
+        "model": "Qwen/Qwen2.5-1.5B-Instruct",
+        "num_iterations": 1,
+        "wandb_project": "grail-basilica-sweep",
+        "wandb_tags": "qwen-1.5b,lr-sweep,lr5e-7,basilica,seed2024-retry",
+        "batch_size": 4,
+        "grad_accum_steps": 128,
+        "num_instances": 1,  # Single seed on 2 GPUs
+        "learning_rate": 5e-7,
+        "seed": 2024,  # Only seed 2024
+    },
     "qwen2.5-1.5b-lr5e-6": {
         "model": "Qwen/Qwen2.5-1.5B-Instruct",
         "num_iterations": 1,
@@ -156,9 +167,70 @@ MODEL_CONFIGS = {
         "learning_rate": 5e-5,
     },
     # ════════════════════════════════════════════════════════════════════════════
+    # MBPP CONFIGURATIONS (Coding Tasks)
+    # Note: MBPP requires CodeExecutionPool for test execution
+    # ════════════════════════════════════════════════════════════════════════════
+    "qwen2.5-1.5b-mbpp-iter1": {
+        "model": "Qwen/Qwen2.5-1.5B-Instruct",
+        "num_iterations": 1,
+        "wandb_project": "grail-basilica-sweep",
+        "wandb_tags": "qwen-1.5b,mbpp,iter1,basilica",
+        "batch_size": 4,
+        "grad_accum_steps": 128,
+        "num_instances": 4,  # 4 seeds on 8-GPU node (4 × 2 GPUs)
+        "learning_rate": 3e-6,
+        "dataset": "mbpp",  # Use MBPP coding dataset
+    },
+    # ════════════════════════════════════════════════════════════════════════════
+    # OPTIMIZER ABLATION CONFIGURATIONS
+    # ════════════════════════════════════════════════════════════════════════════
+    "qwen2.5-1.5b-beta2-0.95": {
+        "model": "Qwen/Qwen2.5-1.5B-Instruct",
+        "num_iterations": 1,
+        "wandb_project": "grail-basilica-sweep",
+        "wandb_tags": "qwen-1.5b,iter1,beta2-0.95,basilica",
+        "batch_size": 4,
+        "grad_accum_steps": 128,
+        "num_instances": 4,
+        "learning_rate": 3e-6,
+        "adam_beta2": 0.95,
+    },
+    "qwen2.5-1.5b-fp32": {
+        "model": "Qwen/Qwen2.5-1.5B-Instruct",
+        "num_iterations": 1,
+        "wandb_project": "grail-basilica-sweep",
+        "wandb_tags": "qwen-1.5b,iter1,fp32,basilica",
+        "batch_size": 4,
+        "grad_accum_steps": 128,
+        "num_instances": 1,
+        "learning_rate": 3e-6,
+        "dtype": "float32",
+    },
+    "qwen2.5-1.5b-bf16-analysis": {
+        "model": "Qwen/Qwen2.5-1.5B-Instruct",
+        "num_iterations": 1,
+        "wandb_project": "grail-basilica-sweep",
+        "wandb_tags": "qwen-1.5b,iter1,bf16,analysis,grad-momentum,basilica",
+        "batch_size": 4,
+        "grad_accum_steps": 128,
+        "num_instances": 1,
+        "learning_rate": 3e-6,
+    },
+    # ════════════════════════════════════════════════════════════════════════════
     # SFT CONFIGURATIONS (Supervised Fine-Tuning)
     # Note: SFT uses 1 GPU per instance (no vLLM needed), so can run up to 8 instances
     # ════════════════════════════════════════════════════════════════════════════
+    "qwen2.5-1.5b-sft-analysis": {
+        "trainer_type": "sft",
+        "model": "Qwen/Qwen2.5-1.5B-Instruct",
+        "max_steps": 400,
+        "wandb_project": "grail-basilica-sweep",
+        "wandb_tags": "qwen-1.5b,sft,analysis,lr3e-6,grad-momentum,basilica",
+        "batch_size": 4,
+        "grad_accum_steps": 32,
+        "num_instances": 1,
+        "learning_rate": 3e-6,
+    },
     "qwen2.5-0.5b-sft": {
         "trainer_type": "sft",
         "model": "Qwen/Qwen2.5-0.5B-Instruct",
@@ -345,13 +417,16 @@ async def _run_experiment_impl(
     # Default num_instances: 4 for GRPO (2 GPUs each), 4 for SFT (1 GPU each)
     default_num_instances = 4
 
+    # Use dataset from model config if specified, otherwise use command-line default
+    effective_dataset = model_cfg.get("dataset", dataset)
+
     config = ExperimentConfig(
         name=name,
         model_id=model_cfg["model"],
         num_iterations=model_cfg.get("num_iterations", 1),
         trainer_type=trainer_type,
         max_steps=model_cfg.get("max_steps", 400),
-        dataset=dataset,
+        dataset=effective_dataset,
         eval_every=eval_every,
         wandb_project=model_cfg.get("wandb_project", "grail-basilica-sweep"),
         wandb_tags=model_cfg.get("wandb_tags", ""),
@@ -367,6 +442,8 @@ async def _run_experiment_impl(
         vllm_nixl_port_base=model_cfg.get("vllm_nixl_port_base", 5557),
         vllm_master_port_base=model_cfg.get("vllm_master_port_base", 29500),
         learning_rate=model_cfg.get("learning_rate"),
+        adam_beta2=model_cfg.get("adam_beta2"),
+        dtype=model_cfg.get("dtype"),
     )
 
     logger.info(f"\n{'='*60}")

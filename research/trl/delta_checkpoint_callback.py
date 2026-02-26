@@ -2,14 +2,16 @@
 """Delta checkpoint callback for storing sparse parameter updates.
 
 Stores changed parameter VALUES (not deltas) after each optimizer step.
-Compares parameters in BF16 to find exact changes, stores new BF16 values
-at changed positions in sparse COO format.
+Compares parameters in a configurable dtype (BF16 or FP32) to find exact
+changes, stores new values at changed positions in sparse COO format.
 
 Key design:
-    - Compare in BF16: Matches what vLLM sees after weight sync
+    - Configurable comparison dtype via snapshot_dtype:
+        - "bfloat16": Matches what vLLM sees after weight sync (~2 bytes/param)
+        - "float32": Catches smaller changes invisible in BF16 (~4 bytes/param)
     - Store values, not deltas: W_new at changed positions
-    - Single snapshot: Only keep one BF16 snapshot (~2 bytes/param)
-    - Exact comparison: w_t != w_{t-1} finds bitwise changes in BF16
+    - Single snapshot: Only keep one snapshot per param
+    - Exact comparison: w_t != w_{t-1} finds bitwise changes in snapshot dtype
 
 Storage format per checkpoint:
     {
@@ -36,13 +38,20 @@ Reconstruction:
     1. Start with base weights W_0
     2. For each checkpoint, directly replace values at stored indices
     (No accumulation needed - each checkpoint has final values)
+
+Async Mode:
+    When async_save=True, delta computation and saving run in a background
+    thread (CPU-only), overlapping with the next training step. This can
+    save ~150-200s per step while using minimal extra memory (~6GB).
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 import torch
@@ -65,7 +74,7 @@ class DeltaCheckpointCallback(TrainerCallback):
 
     Timing (verified in transformers.Trainer:2740-2752):
         1. optimizer.step() is called (weights updated)
-        2. on_optimizer_step() callback runs ← we capture here
+        2. on_optimizer_step() callback runs <- we capture here
         3. zero_grad() is called (gradients cleared)
 
     Args:
@@ -73,28 +82,71 @@ class DeltaCheckpointCallback(TrainerCallback):
         enabled: Enable/disable delta checkpointing (default: True)
         save_metadata: Save metadata.json with checkpoint list (default: True)
         profiler: Optional profiler for timing measurements
+        async_save: Run delta computation and saving in background thread.
     """
 
     def __init__(
         self,
         output_dir: str,
         enabled: bool = True,
-        snapshot_dtype: str = "bfloat16",  # Kept for API compat, always uses BF16
+        snapshot_dtype: str = "bfloat16",
         save_metadata: bool = True,
         profiler: Any | None = None,
+        async_save: bool = True,
     ) -> None:
+        """Initialize delta checkpoint callback.
+
+        Args:
+            output_dir: Directory to save delta checkpoints.
+            enabled: Enable/disable delta checkpointing.
+            snapshot_dtype: Dtype for comparison and storage ("bfloat16" or "float32").
+                           BF16 matches vLLM's view; FP32 catches finer-grained changes.
+            save_metadata: Save metadata.json with checkpoint list.
+            profiler: Optional profiler for timing instrumentation.
+            async_save: Run delta computation and saving in background thread.
+                       Saves ~150-200s per step by overlapping with training.
+        """
         self.output_dir = Path(output_dir)
         self.enabled = enabled
         self.save_metadata = save_metadata
         self.step_count = 0
         self._profiler = profiler
 
-        # BF16 snapshot of previous weights (single copy, ~2 bytes/param)
-        self._old_bf16: dict[str, torch.Tensor] = {}
+        # Resolve snapshot dtype
+        _dtype_map = {"bfloat16": torch.bfloat16, "float32": torch.float32}
+        if snapshot_dtype not in _dtype_map:
+            raise ValueError(f"snapshot_dtype must be 'bfloat16' or 'float32', got '{snapshot_dtype}'")
+        self._snapshot_dtype: torch.dtype = _dtype_map[snapshot_dtype]
+        self._snapshot_dtype_name: str = snapshot_dtype
+
+        # Snapshot of previous weights (single copy)
+        self._old_snapshot: dict[str, torch.Tensor] = {}
+
+        # Async save configuration (CPU-only background thread)
+        self._async_save = async_save and enabled
+        self._executor: ThreadPoolExecutor | None = None
+        self._pending_future: Future | None = None
+        self._save_lock = Lock()  # Ensures sequential metadata updates
+        self._shutdown = False
 
         if self.enabled:
             self.output_dir.mkdir(parents=True, exist_ok=True)
-            logger.info(f"[DeltaCheckpoint] Initialized: output_dir={output_dir}, format=bf16_values")
+
+            if self._async_save:
+                # Single worker ensures saves happen in order
+                self._executor = ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="delta_checkpoint",
+                )
+                logger.info(
+                    f"[DeltaCheckpoint] Initialized with async save: "
+                    f"output_dir={output_dir}, dtype={snapshot_dtype}"
+                )
+            else:
+                logger.info(
+                    f"[DeltaCheckpoint] Initialized (sync mode): "
+                    f"output_dir={output_dir}, dtype={snapshot_dtype}"
+                )
         else:
             logger.info("[DeltaCheckpoint] Disabled (enabled=False)")
 
@@ -108,8 +160,10 @@ class DeltaCheckpointCallback(TrainerCallback):
     ) -> None:
         """Called after optimizer.step() but before zero_grad().
 
-        Compares current weights (as BF16) against previous BF16 snapshot,
-        finds changed positions, stores new BF16 values at those positions.
+        Compares current weights against previous snapshot (in configured dtype),
+        finds changed positions, stores new values at those positions.
+        In async mode, snapshot capture is synchronous but delta computation
+        and saving run in a background thread.
         """
         if not self.enabled or model is None:
             return
@@ -121,84 +175,227 @@ class DeltaCheckpointCallback(TrainerCallback):
 
         profiler = self._profiler
 
-        # First step: just capture BF16 snapshot, no comparison yet
-        if not self._old_bf16:
+        # First step: just capture snapshot, no comparison yet
+        if not self._old_snapshot:
             if profiler:
                 with profiler.track("delta_checkpoint_init"):
-                    self._capture_bf16_snapshot(model)
+                    self._capture_snapshot(model)
             else:
-                self._capture_bf16_snapshot(model)
-            logger.info(f"[DeltaCheckpoint] Step {self.step_count}: Initial BF16 snapshot captured")
+                self._capture_snapshot(model)
+            logger.info(
+                f"[DeltaCheckpoint] Step {self.step_count}: Initial snapshot captured "
+                f"(dtype={self._snapshot_dtype_name})"
+            )
             return
 
         # Compare and save changed values
-        if profiler:
-            with profiler.track("delta_checkpoint_compare_save"):
-                self._compare_and_save(model, step=self.step_count)
+        if self._async_save and self._executor is not None:
+            self._dispatch_async_save(model, step=self.step_count)
         else:
-            self._compare_and_save(model, step=self.step_count)
+            if profiler:
+                with profiler.track("delta_checkpoint_compare_save"):
+                    self._compare_and_save(model, step=self.step_count)
+            else:
+                self._compare_and_save(model, step=self.step_count)
 
         self.step_count += 1
 
-    def _capture_bf16_snapshot(self, model: Any) -> None:
-        """Capture all model parameters as BF16 on CPU."""
-        self._old_bf16.clear()
+    def _dispatch_async_save(self, model: Any, step: int) -> None:
+        """Capture snapshot and dispatch comparison to background thread.
+
+        Snapshot capture is synchronous (GPU->CPU copy), but the comparison
+        and save run in a background thread using only CPU tensors.
+        """
+        # Capture current snapshot (synchronous - must happen before next step)
+        current_snapshot: dict[str, torch.Tensor] = {}
         for name, param in model.named_parameters():
-            self._old_bf16[name] = param.data.detach().to(
-                device="cpu", dtype=torch.bfloat16
+            current_snapshot[name] = param.data.detach().to(
+                device="cpu", dtype=self._snapshot_dtype
+            ).clone()
+
+        # Hand off old + new snapshots to background thread
+        old_snapshot = self._old_snapshot
+        self._old_snapshot = current_snapshot  # Update for next step immediately
+
+        assert self._executor is not None
+        self._pending_future = self._executor.submit(
+            self._background_save_task,
+            old_snapshot,
+            current_snapshot,
+            step,
+        )
+
+    def _background_save_task(
+        self,
+        old_snapshot: dict[str, torch.Tensor],
+        current_snapshot: dict[str, torch.Tensor],
+        step: int,
+    ) -> None:
+        """Background task: compare snapshots and save delta (CPU only).
+
+        This method runs in a background thread and operates exclusively
+        on CPU tensors. It never touches GPU memory.
+        """
+        try:
+            sparse_layers = {}
+            total_params = 0
+            total_changed = 0
+
+            for name, new_vals in current_snapshot.items():
+                total_params += new_vals.numel()
+                old_vals = old_snapshot.get(name)
+                if old_vals is None:
+                    continue
+
+                mask = new_vals != old_vals
+                nnz = mask.sum().item()
+
+                if nnz > 0:
+                    indices = mask.nonzero(as_tuple=False).t()
+                    values = new_vals[mask]
+                    sparse_layers[name] = {
+                        "indices": indices.to(torch.int32),
+                        "values": values,
+                        "shape": tuple(new_vals.shape),
+                        "nnz": nnz,
+                    }
+                    total_changed += nnz
+
+            checkpoint = {
+                "step": step,
+                "timestamp": time.time(),
+                "format": "values",
+                "layers": sparse_layers,
+                "metadata": {
+                    "total_params": total_params,
+                    "total_changed": total_changed,
+                    "change_ratio": total_changed / total_params if total_params > 0 else 0.0,
+                    "num_changed_layers": len(sparse_layers),
+                    "dtype": self._snapshot_dtype_name,
+                },
+            }
+
+            path = self.output_dir / f"delta_{step:06d}.pt"
+            with self._save_lock:
+                torch.save(checkpoint, path, _use_new_zipfile_serialization=True)
+                if self.save_metadata:
+                    self._update_metadata(checkpoint["metadata"], step, path)
+
+            change_ratio = checkpoint["metadata"]["change_ratio"]
+            unchanged_ratio = 1.0 - change_ratio
+            logger.info(
+                f"[DeltaCheckpoint] Step {step}: "
+                f"{unchanged_ratio:.2%} unchanged, "
+                f"{total_changed:,}/{total_params:,} changed, "
+                f"{len(sparse_layers)}/{len(current_snapshot)} layers"
+            )
+
+        except Exception as e:
+            logger.error(f"[DeltaCheckpoint] Background save failed step {step}: {e}")
+
+    def _wait_for_pending(self) -> None:
+        """Wait for any pending background save to complete."""
+        if self._pending_future is not None:
+            try:
+                self._pending_future.result(timeout=600)  # 10 min timeout
+            except TimeoutError:
+                logger.error("[DeltaCheckpoint] Background save timed out after 10 minutes")
+            except Exception as e:
+                logger.error(f"[DeltaCheckpoint] Background save raised exception: {e}")
+            finally:
+                self._pending_future = None
+
+    def on_train_end(
+        self,
+        args: Any,
+        state: Any,
+        control: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Clean up resources when training ends."""
+        if not self.enabled:
+            return
+
+        # Wait for final background save to complete
+        if self._async_save:
+            logger.info("[DeltaCheckpoint] Waiting for final background save...")
+            self._wait_for_pending()
+
+        # Shutdown thread pool
+        self._shutdown_executor()
+
+        logger.info(f"[DeltaCheckpoint] Training complete. Saved {self.step_count} deltas.")
+
+    def _shutdown_executor(self) -> None:
+        """Gracefully shutdown the thread pool executor."""
+        if self._executor is not None and not self._shutdown:
+            self._shutdown = True
+            self._executor.shutdown(wait=True, cancel_futures=False)
+            self._executor = None
+            logger.debug("[DeltaCheckpoint] Background executor shutdown complete")
+
+    def __del__(self) -> None:
+        """Ensure executor is cleaned up on garbage collection."""
+        try:
+            self._shutdown_executor()
+        except Exception:
+            pass  # Ignore errors during garbage collection
+
+    def _capture_snapshot(self, model: Any) -> None:
+        """Capture all model parameters in snapshot dtype on CPU."""
+        self._old_snapshot.clear()
+        for name, param in model.named_parameters():
+            self._old_snapshot[name] = param.data.detach().to(
+                device="cpu", dtype=self._snapshot_dtype
             ).clone()
 
     def _compare_and_save(self, model: Any, step: int) -> None:
-        """Compare current weights to old BF16 snapshot, save changed values."""
+        """Compare current weights to old snapshot, save changed values."""
         sparse_layers = {}
         total_params = 0
         total_changed = 0
 
         for name, param in model.named_parameters():
-            # Convert current param to BF16 on CPU
-            new_bf16 = param.data.detach().to(device="cpu", dtype=torch.bfloat16)
-            total_params += new_bf16.numel()
+            new_vals = param.data.detach().to(device="cpu", dtype=self._snapshot_dtype)
+            total_params += new_vals.numel()
 
-            # Get old BF16 value
-            old_bf16 = self._old_bf16.get(name)
-            if old_bf16 is None:
+            old_vals = self._old_snapshot.get(name)
+            if old_vals is None:
                 # New parameter (shouldn't happen in normal training)
-                self._old_bf16[name] = new_bf16.clone()
+                self._old_snapshot[name] = new_vals.clone()
                 continue
 
-            # Find changed positions: exact BF16 comparison
-            # This catches any bit-level change in the BF16 representation
-            mask = (new_bf16 != old_bf16)
+            # Find changed positions: exact comparison in snapshot dtype
+            mask = (new_vals != old_vals)
             nnz = mask.sum().item()
 
             if nnz > 0:
-                # Extract indices and NEW values (not deltas)
                 indices = mask.nonzero(as_tuple=False).t()  # Shape: [ndim, nnz]
-                values = new_bf16[mask]  # Actual new BF16 values
+                values = new_vals[mask]
 
                 sparse_layers[name] = {
-                    "indices": indices.to(torch.int32),  # Compact indices
-                    "values": values,  # Already BF16
-                    "shape": tuple(new_bf16.shape),
+                    "indices": indices.to(torch.int32),
+                    "values": values,
+                    "shape": tuple(new_vals.shape),
                     "nnz": nnz,
                 }
                 total_changed += nnz
 
             # Update old snapshot for next comparison
-            self._old_bf16[name] = new_bf16.clone()
+            self._old_snapshot[name] = new_vals.clone()
 
         # Create and save checkpoint
         checkpoint = {
             "step": step,
             "timestamp": time.time(),
-            "format": "values",  # Indicates we store values, not deltas
+            "format": "values",
             "layers": sparse_layers,
             "metadata": {
                 "total_params": total_params,
                 "total_changed": total_changed,
                 "change_ratio": total_changed / total_params if total_params > 0 else 0.0,
                 "num_changed_layers": len(sparse_layers),
-                "dtype": "bfloat16",
+                "dtype": self._snapshot_dtype_name,
             },
         }
 
@@ -213,7 +410,7 @@ class DeltaCheckpointCallback(TrainerCallback):
             f"[DeltaCheckpoint] Step {step}: "
             f"{unchanged_ratio:.2%} unchanged, "
             f"{total_changed:,}/{total_params:,} changed, "
-            f"{len(sparse_layers)}/{len(self._old_bf16)} layers"
+            f"{len(sparse_layers)}/{len(self._old_snapshot)} layers"
         )
 
         # Update metadata file
@@ -336,7 +533,7 @@ def reconstruct_weights_at_step(
 
     Handles both formats:
     - "values" format: Directly applies new values at each step
-    - "deltas" format (legacy): Accumulates W_0 + Σ(deltas)
+    - "deltas" format (legacy): Accumulates W_0 + sum(deltas)
 
     Args:
         base_weights: Initial model weights (step 0)

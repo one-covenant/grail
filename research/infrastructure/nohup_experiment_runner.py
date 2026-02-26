@@ -13,6 +13,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 import asyncssh
 
@@ -27,11 +28,27 @@ class ExperimentConfig:
 
     name: str  # Experiment name (used for R2 folder)
     model_id: str  # HuggingFace model ID
-    num_iterations: int  # Number of GRPO training iterations
+    num_iterations: int  # Number of GRPO training iterations (ignored for SFT)
+    trainer_type: str = "grpo"  # Trainer type: "grpo" or "sft"
+    max_steps: int = 400  # Max training steps (used by SFT, ignored by GRPO)
     dataset: str = "math"  # Dataset to train on
     eval_every: int = 40  # Evaluation interval
     wandb_project: str = "grail-lium-sweep"  # W&B project for logging
     wandb_tags: str = ""  # Comma-separated W&B tags
+    batch_size: int | None = None  # Optional: batch size per device
+    grad_accum_steps: int | None = None  # Optional: gradient accumulation steps
+    num_instances: int = 4  # Number of parallel training instances (4 for 8-GPU nodes)
+    # New: support for running multiple experiments on same node
+    run_prefix: str | None = None  # GRAIL_RUN_PREFIX: unique prefix for run names
+    seed: int | None = None  # GRAIL_SEED: override seed
+    start_instance: int = 0  # GRAIL_START_INSTANCE: GRPO uses pair index; SFT uses GPU index
+    base_port: int = 8000  # GRAIL_BASE_PORT: vLLM server port
+    base_group_port: int = 51200  # GRAIL_BASE_GROUP_PORT: NCCL group port
+    vllm_nixl_port_base: int = 5557  # GRAIL_VLLM_NIXL_PORT_BASE
+    vllm_master_port_base: int = 29500  # GRAIL_VLLM_MASTER_PORT_BASE
+    learning_rate: float | None = None  # GRAIL_TRAINER_LR: override learning rate
+    adam_beta2: float | None = None  # GRAIL_ADAM_BETA2: override Adam beta2
+    dtype: str | None = None  # GRAIL_DTYPE: training precision ("bfloat16" or "float32")
 
 
 class NohupExperimentRunner:
@@ -72,7 +89,7 @@ class NohupExperimentRunner:
         ssh_port: int,
         r2_config: dict[str, str],
         ssh_user: str = "root",
-        ssh_key_path: str | None = None,
+        ssh_key_path: Optional[str] = None,
         remote_path: str = "~/grail",
     ):
         """Initialize experiment runner.
@@ -91,7 +108,7 @@ class NohupExperimentRunner:
         self.ssh_key_path = ssh_key_path
         self.remote_path = remote_path
         self.r2_config = r2_config
-        self._conn: asyncssh.SSHClientConnection | None = None
+        self._conn: Optional[asyncssh.SSHClientConnection] = None
 
     async def connect(self):
         """Establish SSH connection to the pod with keepalive."""
@@ -124,7 +141,7 @@ class NohupExperimentRunner:
     async def run_command(
         self,
         command: str,
-        timeout: int | None = None,
+        timeout: Optional[int] = None,
         check: bool = True,
     ) -> tuple[str, str, int]:
         """Run a command on the remote pod.
@@ -218,8 +235,7 @@ class NohupExperimentRunner:
             "--exclude=.DS_Store",
             # Lock files (will be regenerated)
             "--exclude=uv.lock",
-            "-e",
-            f"ssh -p {self.ssh_port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
+            "-e", f"ssh -p {self.ssh_port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
             f"{local_path}/",
             f"{self.ssh_user}@{self.ssh_host}:{self.remote_path}/",
         ]
@@ -240,15 +256,26 @@ class NohupExperimentRunner:
         """Setup Python environment on remote pod.
 
         Steps:
+        0. Fix /ephemeral permissions (if exists)
         1. Install uv (if not present)
         2. Run uv sync in research/trl
-        3. Run uv sync in tools/vllm-server
-        4. Login to HuggingFace (for gated models like Llama)
+        3. Install Flash Attention 2 (for faster training)
+        4. Run uv sync in tools/vllm-server
+        5. Login to HuggingFace (for gated models like Llama)
         """
         logger.info("Setting up Python environment")
 
+        # Step 0: Fix /ephemeral permissions if the directory exists
+        # Many cloud instances mount /ephemeral as root-owned
+        logger.info("  [0/5] Fixing /ephemeral permissions (if exists)...")
+        await self.run_command(
+            "test -d /ephemeral && sudo chown -R $(whoami):$(whoami) /ephemeral || true",
+            timeout=30,
+            check=False,
+        )
+
         # Step 1: Install uv (new installer puts it in ~/.local/bin)
-        logger.info("  [1/4] Installing uv...")
+        logger.info("  [1/5] Installing uv...")
         await self.run_command(
             "command -v uv || curl -LsSf https://astral.sh/uv/install.sh | sh",
             timeout=180,
@@ -259,24 +286,67 @@ class NohupExperimentRunner:
         uv_cmd = "$(command -v uv || echo $HOME/.local/bin/uv)"
 
         # Step 2: Sync TRL research dependencies (with all extras)
-        logger.info("  [2/4] Installing TRL research dependencies (with --all-extras)...")
+        logger.info("  [2/5] Installing TRL research dependencies (with --all-extras)...")
         await self.run_command(
             f"cd {self.remote_path}/research/trl && {uv_cmd} sync --all-extras",
             timeout=600,
         )
 
-        # Step 3: Sync vllm-server dependencies (with all extras)
-        logger.info("  [3/4] Installing VLLM server dependencies (with --all-extras)...")
+        # Step 3: Install Flash Attention 2 for faster training
+        # Uses --no-build-isolation as recommended for flash-attn with uv
+        # See: https://github.com/astral-sh/uv/issues/6437
+        logger.info("  [3/5] Installing Flash Attention 2...")
+        await self._install_flash_attention(uv_cmd)
+
+        # Step 4: Sync vllm-server dependencies (with all extras)
+        logger.info("  [4/5] Installing VLLM server dependencies (with --all-extras)...")
         await self.run_command(
             f"cd {self.remote_path}/tools/vllm-server && {uv_cmd} sync --all-extras",
             timeout=600,
         )
 
-        # Step 4: Login to HuggingFace if token is available (required for gated models like Llama)
-        logger.info("  [4/4] Setting up HuggingFace authentication...")
+        # Step 5: Login to HuggingFace if token is available (required for gated models like Llama)
+        logger.info("  [5/5] Setting up HuggingFace authentication...")
         await self._setup_huggingface_auth()
 
         logger.info("✓ Environment setup complete")
+
+    async def _install_flash_attention(self, uv_cmd: str):
+        """Install Flash Attention 2 for faster transformer training.
+
+        Flash Attention 2 provides significant speedups for attention computation
+        on NVIDIA GPUs. Installation requires --no-build-isolation flag with uv.
+
+        See: https://github.com/Dao-AILab/flash-attention
+        See: https://github.com/astral-sh/uv/issues/6437
+        """
+        # Check if flash-attn is already installed
+        check_cmd = (
+            f"cd {self.remote_path}/research/trl && "
+            f"source .venv/bin/activate 2>/dev/null && "
+            f"python -c 'import flash_attn; print(flash_attn.__version__)' 2>/dev/null"
+        )
+        stdout, _, exit_code = await self.run_command(check_cmd, check=False)
+
+        if exit_code == 0 and stdout.strip():
+            logger.info(f"  ✓ Flash Attention already installed (v{stdout.strip()})")
+            return
+
+        # Install flash-attn with --no-build-isolation (required for uv)
+        # This allows flash-attn to find torch during build
+        install_cmd = (
+            f"cd {self.remote_path}/research/trl && "
+            f"{uv_cmd} pip install flash-attn --no-build-isolation"
+        )
+
+        try:
+            await self.run_command(install_cmd, timeout=600, check=True)
+            logger.info("  ✓ Flash Attention 2 installed successfully")
+        except Exception as e:
+            # Flash attention is optional - training will work without it (just slower)
+            logger.warning(
+                f"  ⚠ Flash Attention installation failed (training will use default attention): {e}"
+            )
 
     async def _setup_huggingface_auth(self):
         """Setup HuggingFace authentication on remote pod.
@@ -317,15 +387,63 @@ class NohupExperimentRunner:
             Path to PID file on remote pod
         """
         logger.info(f"Starting training: {config.name}")
+        logger.info(f"  Trainer type: {config.trainer_type}")
         logger.info(f"  Model: {config.model_id}")
-        logger.info(f"  Num Iterations: {config.num_iterations}")
+        if config.trainer_type == "grpo":
+            logger.info(f"  Num Iterations: {config.num_iterations}")
+        else:
+            logger.info(f"  Max Steps: {config.max_steps}")
         logger.info(f"  Dataset: {config.dataset}")
         logger.info(f"  W&B Project: {config.wandb_project}")
+        if config.run_prefix:
+            logger.info(f"  Run Prefix: {config.run_prefix}")
+        if config.seed is not None:
+            logger.info(f"  Seed: {config.seed}")
+        if config.learning_rate is not None:
+            logger.info(f"  Learning Rate: {config.learning_rate}")
+        if config.adam_beta2 is not None:
+            logger.info(f"  Adam Beta2: {config.adam_beta2}")
+        if config.dtype is not None:
+            logger.info(f"  Dtype: {config.dtype}")
 
-        # Build environment variable exports for W&B
+        # GPU logging differs by trainer type
+        if config.trainer_type == "grpo":
+            # GRPO uses 2 GPUs per instance (vLLM + trainer)
+            logger.info(f"  Start Instance: {config.start_instance} (GPUs {config.start_instance*2},{config.start_instance*2+1})")
+            logger.info(f"  Base Port: {config.base_port}")
+        else:
+            # SFT uses 1 GPU per instance
+            logger.info(f"  Start Instance: {config.start_instance} (GPU {config.start_instance})")
+
+        # Build environment variable exports
         env_exports = f"export WANDB_PROJECT='{config.wandb_project}' && "
         if config.wandb_tags:
             env_exports += f"export WANDB_TAGS='{config.wandb_tags}' && "
+        # Use /ephemeral for outputs (large disk on Basilica instances)
+        env_exports += "export GRAIL_OUTPUT_BASE='/ephemeral' && "
+
+        # Port and instance configuration for running multiple experiments on same node
+        if config.run_prefix:
+            env_exports += f"export GRAIL_RUN_PREFIX='{config.run_prefix}' && "
+        if config.seed is not None:
+            env_exports += f"export GRAIL_SEED='{config.seed}' && "
+        env_exports += f"export GRAIL_START_INSTANCE='{config.start_instance}' && "
+
+        # GRPO-specific port configuration (SFT doesn't need these)
+        if config.trainer_type == "grpo":
+            env_exports += f"export GRAIL_BASE_PORT='{config.base_port}' && "
+            env_exports += f"export GRAIL_BASE_GROUP_PORT='{config.base_group_port}' && "
+            env_exports += f"export GRAIL_VLLM_NIXL_PORT_BASE='{config.vllm_nixl_port_base}' && "
+            env_exports += f"export GRAIL_VLLM_MASTER_PORT_BASE='{config.vllm_master_port_base}' && "
+
+        if config.learning_rate is not None:
+            env_exports += f"export GRAIL_TRAINER_LR='{config.learning_rate}' && "
+
+        if config.adam_beta2 is not None:
+            env_exports += f"export GRAIL_ADAM_BETA2='{config.adam_beta2}' && "
+
+        if config.dtype is not None:
+            env_exports += f"export GRAIL_DTYPE='{config.dtype}' && "
 
         # Source .env file to get HF_TOKEN and other environment variables
         # This ensures HuggingFace token is available for gated model downloads
@@ -335,23 +453,44 @@ class NohupExperimentRunner:
             f"set +a && "
         )
 
-        # Run the nohup script with W&B config and sourced environment
-        script_cmd = (
-            f"cd {self.remote_path}/research/trl && "
-            f"{source_env}"
-            f"{env_exports}"
-            f"./run_parallel_training_nohup.sh "
-            f"{config.dataset} {config.eval_every} {config.model_id} {config.num_iterations}"
-        )
+        # Build script command based on trainer type
+        batch_size_arg = str(config.batch_size) if config.batch_size is not None else ""
+        grad_accum_arg = str(config.grad_accum_steps) if config.grad_accum_steps is not None else ""
 
-        stdout, stderr, exit_code = await self.run_command(
+        if config.trainer_type == "grpo":
+            # GRPO: run_parallel_training_nohup.sh
+            # Args: dataset, eval_every, model_id, num_iterations, num_instances, batch_size, grad_accum_steps
+            script_cmd = (
+                f"cd {self.remote_path}/research/trl && "
+                f"{source_env}"
+                f"{env_exports}"
+                f"./run_parallel_training_nohup.sh "
+                f"{config.dataset} {config.eval_every} {config.model_id} {config.num_iterations} {config.num_instances} "
+                f"{batch_size_arg} {grad_accum_arg}"
+            )
+            pid_log_dir = "parallel_training"
+        else:
+            # SFT: run_parallel_sft_nohup.sh
+            # Args: dataset, eval_every, model_id, max_steps, num_instances, batch_size, grad_accum_steps
+            script_cmd = (
+                f"cd {self.remote_path}/research/trl && "
+                f"{source_env}"
+                f"{env_exports}"
+                f"./run_parallel_sft_nohup.sh "
+                f"{config.dataset} {config.eval_every} {config.model_id} {config.max_steps} {config.num_instances} "
+                f"{batch_size_arg} {grad_accum_arg}"
+            )
+            pid_log_dir = "parallel_sft"
+
+        _ = await self.run_command(
             script_cmd,
             timeout=30,
             check=True,
         )
 
-        # Extract PID file path from output
-        pid_file = f"{self.remote_path}/research/trl/logs/parallel_training/launcher.pid"
+        # PID file path uses run_prefix if provided
+        pid_suffix = config.run_prefix if config.run_prefix else "default"
+        pid_file = f"{self.remote_path}/research/trl/logs/{pid_log_dir}/launcher_{pid_suffix}.pid"
 
         logger.info(f"✓ Training started (PID file: {pid_file})")
         return pid_file
@@ -434,25 +573,27 @@ class NohupExperimentRunner:
 
             await asyncio.sleep(check_interval)
 
-    async def download_artifacts(self, local_download_dir: Path) -> Path:
+    async def download_artifacts(self, local_download_dir: Path, output_base: str = "/ephemeral") -> Path:
         """Download training artifacts from remote pod.
 
         Downloads logs/, outputs/, and checkpoints/ directories.
 
         Args:
             local_download_dir: Local directory to download artifacts to
+            output_base: Remote base directory for outputs (default: /ephemeral for Basilica)
 
         Returns:
             Path to downloaded artifacts directory
         """
         logger.info(f"Downloading artifacts to {local_download_dir}")
+        logger.info(f"  Remote output base: {output_base}")
 
         # Create local directory
         local_download_dir.mkdir(parents=True, exist_ok=True)
 
-        # Download each artifact directory
+        # Download each artifact directory from the output base
         for artifact_dir in ["logs", "outputs", "checkpoints"]:
-            remote_dir = f"{self.remote_path}/research/trl/{artifact_dir}"
+            remote_dir = f"{output_base}/{artifact_dir}"
             local_dir = local_download_dir / artifact_dir
 
             # Check if remote directory exists
@@ -469,8 +610,7 @@ class NohupExperimentRunner:
             rsync_cmd = [
                 "rsync",
                 "-avz",
-                "-e",
-                f"ssh -p {self.ssh_port} -o StrictHostKeyChecking=no",
+                f"-e", f"ssh -p {self.ssh_port} -o StrictHostKeyChecking=no",
                 f"{self.ssh_user}@{self.ssh_host}:{remote_dir}/",
                 f"{local_dir}/",
             ]
@@ -490,7 +630,7 @@ class NohupExperimentRunner:
         return local_download_dir
 
     async def upload_to_r2(self, local_dir: Path, experiment_name: str) -> bool:
-        """Upload artifacts to R2.
+        """Upload artifacts to R2 from local directory.
 
         Args:
             local_dir: Local directory containing artifacts
@@ -517,16 +657,78 @@ class NohupExperimentRunner:
 
         return success
 
+    async def upload_to_r2_remote(
+        self, experiment_name: str, output_base: str = "/ephemeral"
+    ) -> bool:
+        """Upload artifacts directly from remote server to R2.
+
+        This method runs the r2_uploader.py script on the remote server,
+        avoiding the need to download artifacts to the local machine first.
+
+        Args:
+            experiment_name: Experiment name (used as R2 prefix)
+            output_base: Remote base directory for outputs (default: /ephemeral)
+
+        Returns:
+            True if upload succeeded, False otherwise
+        """
+        logger.info(f"Uploading artifacts directly from remote to R2: experiments/{experiment_name}/")
+        logger.info(f"  Remote output base: {output_base}")
+
+        # First, ensure boto3 is installed in the TRL venv (required for r2_uploader)
+        logger.info("  Ensuring boto3 is installed...")
+        uv_cmd = "$(command -v uv || echo $HOME/.local/bin/uv)"
+        install_cmd = (
+            f"cd {self.remote_path}/research/trl && "
+            f"{uv_cmd} pip install boto3 tqdm 2>/dev/null || "
+            f"pip install boto3 tqdm 2>/dev/null || true"
+        )
+        await self.run_command(install_cmd, timeout=120, check=False)
+
+        # Build the upload command using r2_uploader.py on the remote server
+        # The r2_uploader expects: python r2_uploader.py <local_dir> <experiment_name>
+        # where local_dir contains logs/, outputs/, checkpoints/ subdirectories
+        upload_cmd = (
+            f"cd {self.remote_path}/research/infrastructure && "
+            f"source ../trl/.venv/bin/activate && "
+            f"export R2_BUCKET_NAME='{self.r2_config['bucket_id']}' && "
+            f"export R2_ACCOUNT_ID='{self.r2_config['account_id']}' && "
+            f"export R2_WRITE_ACCESS_KEY_ID='{self.r2_config['access_key']}' && "
+            f"export R2_WRITE_SECRET_ACCESS_KEY='{self.r2_config['secret_key']}' && "
+            f"python r2_uploader.py {output_base} {experiment_name}"
+        )
+
+        try:
+            stdout, stderr, exit_code = await self.run_command(
+                upload_cmd,
+                timeout=3600,  # 1 hour timeout for large uploads
+                check=False,
+            )
+
+            if exit_code == 0:
+                logger.info("✓ Remote upload to R2 complete")
+                return True
+            else:
+                logger.error(f"✗ Remote R2 upload failed (exit code {exit_code})")
+                logger.error(f"  stdout: {stdout[:1000] if stdout else 'empty'}")
+                logger.error(f"  stderr: {stderr[:1000] if stderr else 'empty'}")
+                return False
+
+        except Exception as e:
+            logger.error(f"✗ Remote R2 upload failed: {type(e).__name__}: {e}")
+            return False
+
     async def run_experiment(
         self,
         config: ExperimentConfig,
         local_code_path: Path,
-        local_env_path: Path | None = None,
+        local_env_path: Optional[Path] = None,
         sync_code: bool = True,
         setup_env: bool = True,
-        download_dir: Path | None = None,
+        download_dir: Optional[Path] = None,
         upload_to_r2: bool = True,
         cleanup_local: bool = False,
+        remote_upload: bool = True,
     ) -> bool:
         """Run complete experiment workflow.
 
@@ -536,9 +738,9 @@ class NohupExperimentRunner:
         3. Setup environment (if setup_env=True)
         4. Start training
         5. Monitor until completion
-        6. Download artifacts
-        7. Upload to R2 (if upload_to_r2=True)
-        8. Cleanup (if cleanup_local=True)
+        6. Upload to R2 directly from remote (if upload_to_r2=True and remote_upload=True)
+           OR download artifacts then upload (if remote_upload=False)
+        7. Cleanup (if cleanup_local=True)
 
         Args:
             config: Experiment configuration
@@ -549,6 +751,8 @@ class NohupExperimentRunner:
             download_dir: Local directory for downloads (default: ./downloads/{experiment_name})
             upload_to_r2: Whether to upload results to R2 (default: True)
             cleanup_local: Whether to delete local artifacts after R2 upload (default: False)
+            remote_upload: Whether to upload directly from remote server (default: True)
+                          If False, downloads to local first then uploads.
 
         Returns:
             True if experiment completed successfully, False otherwise
@@ -578,21 +782,28 @@ class NohupExperimentRunner:
             # Monitor until completion
             await self.monitor_training(pid_file)
 
-            # Download artifacts
-            download_dir = download_dir or Path(f"./downloads/{config.name}")
-            local_artifacts_dir = await self.download_artifacts(download_dir)
-
             # Upload to R2
             if upload_to_r2:
-                upload_success = await self.upload_to_r2(local_artifacts_dir, config.name)
-                if not upload_success:
-                    logger.error("R2 upload failed, keeping local artifacts")
-                    return False
+                if remote_upload:
+                    # Upload directly from remote server (no local download needed)
+                    upload_success = await self.upload_to_r2_remote(
+                        experiment_name=config.name,
+                        output_base="/ephemeral",
+                    )
+                else:
+                    # Legacy: download to local, then upload
+                    download_dir = download_dir or Path(f"./downloads/{config.name}")
+                    local_artifacts_dir = await self.download_artifacts(download_dir)
+                    upload_success = await self.upload_to_r2(local_artifacts_dir, config.name)
 
-            # Cleanup local files if requested
-            if cleanup_local and upload_to_r2:
-                logger.info(f"Cleaning up local artifacts: {local_artifacts_dir}")
-                shutil.rmtree(local_artifacts_dir)
+                    # Cleanup local files if requested
+                    if cleanup_local and upload_success:
+                        logger.info(f"Cleaning up local artifacts: {local_artifacts_dir}")
+                        shutil.rmtree(local_artifacts_dir)
+
+                if not upload_success:
+                    logger.error("R2 upload failed")
+                    return False
 
             logger.info(f"✓ Experiment {config.name} completed successfully")
             return True
@@ -600,13 +811,11 @@ class NohupExperimentRunner:
         except Exception as e:
             logger.error(f"✗ Experiment {config.name} failed: {type(e).__name__}: {e}")
             import traceback
-
             traceback.print_exc()
             # Flush logs to ensure error is captured (especially under nohup)
             for handler in logging.getLogger().handlers:
                 handler.flush()
             import sys
-
             sys.stdout.flush()
             sys.stderr.flush()
             return False

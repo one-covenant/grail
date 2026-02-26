@@ -3,8 +3,9 @@
 
 import inspect
 import json
+from typing import Any
 
-from lium import Config, Lium
+from lium import Lium, Config
 
 
 def test_lium_methods() -> None:
@@ -14,7 +15,10 @@ def test_lium_methods() -> None:
     print("=" * 80)
 
     # Get all public methods
-    methods = [m for m in dir(Lium) if not m.startswith("_") and callable(getattr(Lium, m))]
+    methods = [
+        m for m in dir(Lium)
+        if not m.startswith("_") and callable(getattr(Lium, m))
+    ]
 
     for method_name in methods:
         method = getattr(Lium, method_name)
@@ -39,7 +43,7 @@ def test_executor_fields() -> None:
         if executors:
             executor = executors[0]
             print(f"\nSample Executor: {executor.huid}")
-            print("Available attributes:")
+            print(f"Available attributes:")
             for attr in dir(executor):
                 if not attr.startswith("_"):
                     try:
@@ -49,7 +53,7 @@ def test_executor_fields() -> None:
                     except Exception:
                         pass
 
-            print("\nExecutor specs structure:")
+            print(f"\nExecutor specs structure:")
             print(json.dumps(executor.specs, indent=2, default=str))
 
     except Exception as e:
@@ -70,7 +74,7 @@ def test_pod_info_fields() -> None:
         if pods:
             pod = pods[0]
             print(f"\nSample Pod: {pod.name}")
-            print("Available attributes:")
+            print(f"Available attributes:")
             for attr in dir(pod):
                 if not attr.startswith("_"):
                     try:
@@ -99,9 +103,7 @@ def test_up_method() -> None:
     for param_name, param in sig.parameters.items():
         if param_name != "self":
             default = f" = {param.default}" if param.default != inspect.Parameter.empty else ""
-            annotation = (
-                f": {param.annotation}" if param.annotation != inspect.Parameter.empty else ""
-            )
+            annotation = f": {param.annotation}" if param.annotation != inspect.Parameter.empty else ""
             print(f"  {param_name}{annotation}{default}")
 
 
@@ -118,9 +120,7 @@ def test_down_method() -> None:
     for param_name, param in sig.parameters.items():
         if param_name != "self":
             default = f" = {param.default}" if param.default != inspect.Parameter.empty else ""
-            annotation = (
-                f": {param.annotation}" if param.annotation != inspect.Parameter.empty else ""
-            )
+            annotation = f": {param.annotation}" if param.annotation != inspect.Parameter.empty else ""
             print(f"  {param_name}{annotation}{default}")
 
 
@@ -137,9 +137,7 @@ def test_wait_ready_method() -> None:
     for param_name, param in sig.parameters.items():
         if param_name != "self":
             default = f" = {param.default}" if param.default != inspect.Parameter.empty else ""
-            annotation = (
-                f": {param.annotation}" if param.annotation != inspect.Parameter.empty else ""
-            )
+            annotation = f": {param.annotation}" if param.annotation != inspect.Parameter.empty else ""
             print(f"  {param_name}{annotation}{default}")
 
 
@@ -156,9 +154,7 @@ def test_schedule_termination_method() -> None:
     for param_name, param in sig.parameters.items():
         if param_name != "self":
             default = f" = {param.default}" if param.default != inspect.Parameter.empty else ""
-            annotation = (
-                f": {param.annotation}" if param.annotation != inspect.Parameter.empty else ""
-            )
+            annotation = f": {param.annotation}" if param.annotation != inspect.Parameter.empty else ""
             print(f"  {param_name}{annotation}{default}")
 
 
@@ -179,5 +175,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback
-
         traceback.print_exc()
