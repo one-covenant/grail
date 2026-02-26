@@ -560,9 +560,7 @@ class MinerValidator:
 
         import torch
 
-        from ..shared.constants import LAYER_INDEX
-
-        proof_batch_size = int(os.getenv("GRAIL_PROOF_BATCH_SIZE", "4"))
+        from ..shared.constants import LAYER_INDEX, PROOF_BATCH_SIZE
 
         # Collect valid token sequences
         token_seqs: list[list[int]] = []
@@ -584,7 +582,7 @@ class MinerValidator:
 
         result: dict[int, tuple[Any, Any]] = {}
         total = len(token_seqs)
-        sub_batch_size = proof_batch_size
+        sub_batch_size = PROOF_BATCH_SIZE
         pos = 0  # tracks how many sequences we've processed
 
         def _run_sub_batch_attempt(
@@ -675,7 +673,7 @@ class MinerValidator:
         logger.info(
             "Pre-computed batched forward: %d rollouts, sub-batch %d->%d",
             len(result),
-            proof_batch_size,
+            PROOF_BATCH_SIZE,
             sub_batch_size,
         )
         return result

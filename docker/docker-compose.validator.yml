@@ -67,7 +67,7 @@ services:
       # Triton kernel evaluation (requires 2 GPUs: GPU 0 = model, GPU 1 = kernel eval)
       - GRAIL_GPU_EVAL=${GRAIL_GPU_EVAL:-true}
       - KERNEL_EVAL_GPU_IDS=${KERNEL_EVAL_GPU_IDS:-1}
-      - KERNEL_EVAL_BACKEND=${KERNEL_EVAL_BACKEND:-subprocess}
+      - KERNEL_EVAL_BACKEND=${KERNEL_EVAL_BACKEND:-persistent}
       - KERNEL_EVAL_TIMEOUT=${KERNEL_EVAL_TIMEOUT:-60}
 
       # Performance tuning

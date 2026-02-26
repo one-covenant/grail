@@ -43,13 +43,15 @@
 
 ### Key Distinction: grail vs GRAIL
 
-- **grail** (lowercase): The Bittensor subnet implementation orchestrating miners and validators for verifiable post-training
+- **grail** (lowercase): The Bittensor subnet implementation orchestrating miners, validators, and a trainer for verifiable post-training
 - **GRAIL** (uppercase): The protocol that proves rollout authenticity and model identity
 
 ### Current Status
 
-- The current release is inference-only: miners generate rollouts and validators verify and score them.
-- Reinforcement learning post-training (e.g., GRPO trainer and model updates) will be added in a future version.
+- Miners generate rollouts with GRAIL proofs across multiple environments (currently **Triton Kernel**)
+- Validators verify proofs, evaluate kernel correctness on-GPU, and set weights on-chain
+- The trainer runs GRPO-based reinforcement learning on validated rollouts, publishing updated checkpoints each window
+- Model checkpoints are shared via R2 storage and automatically loaded by miners and validators
 
 ## Architecture
 
@@ -60,71 +62,74 @@ Prover/Verifier implementation with:
 - PRF-based index derivation and sketch commitments for token-level verification
 - Verifier-supplied challenge (drand + chain/window context)
 - Token and model-config validation; structured signatures bound to model identity
-- SAT problem binding and solution checks for end-to-end rollout verification
 
-#### 2. Rollout Generation (`grail/mining/rollout_generator.py`, `grail/environments/sat.py`)
+#### 2. Mining Engine (`grail/mining/engine.py`, `grail/environments/loop.py`)
 GRPO-style rollout system with:
-- Multiple rollouts per problem, token-level logprob tracking, advantage computation
-- Qwen-style chat template injection for reasoning/solution tagging
-- SAT-specific `SATRolloutGenerator` with modular reward vector composition
+- Multiple rollouts per problem (16 per group), token-level logprob tracking
+- 3-GPU pipeline mode: vLLM generation, HuggingFace proof computation, and kernel evaluation in parallel
+- Shared `forward_single_layer` function ensuring bit-identical results between miner and validator
 
 #### 3. Environment System (`grail/environments/`)
-Modular environments:
-- **SAT Problems** (`sat.py`): Deterministic 3-SAT generation, parsing, reward shaping
+Modular environments with a single active environment set network-wide:
+- **Triton Kernel** (`gpu_kernel/`) — *current default*: GPU kernel generation and on-GPU correctness evaluation using Triton
+- **3-SAT** (`sat.py`): Deterministic 3-SAT constraint satisfaction problems
 - **GSM8K** (`gsm8k_env.py`): Math word problems with step-by-step reasoning verification
-- **MATH** (`math_hendrycks_env.py`): Competition-level math problems from the Hendrycks MATH dataset
+- **MATH** (`math_hendrycks_env.py`): Competition-level math from the Hendrycks MATH dataset
 - **MBPP** (`python_code_env.py`): Python code generation from the MBPP benchmark
 - **HumanEval** (`python_code_env.py`): Function-level code generation from OpenAI HumanEval
 - **Affine Trace/Logic** (`affinetes/`): Affine type system trace and logic environments
-- **Triton Kernel** (`gpu_kernel/`): GPU kernel generation and correctness evaluation using Triton; requires dedicated GPU for kernel execution
 
-#### 4. Communication & Storage (`grail/infrastructure/comms.py`)
-Object-storage utilities for miner/validator coordination:
-- Upload mined rollouts (`sink_window_inferences`), publish validated rollouts (`upload_valid_rollouts`)
+#### 4. Trainer (`grail/trainer/`)
+Asynchronous GRPO trainer with:
+- Per-window training on validated rollouts fetched from R2
+- Delta checkpoint publishing (~99% bandwidth reduction vs full checkpoints)
+- Adaptive KL, importance sampling, and chunked logit computation for memory efficiency
 
-#### 5. Randomness & Chain
+#### 5. Communication & Storage (`grail/infrastructure/comms.py`)
+Object-storage utilities for miner/validator/trainer coordination:
+- Upload mined rollouts, publish validated rollouts, checkpoint management via R2
+
+#### 6. Randomness & Chain
 - Randomness (`grail/infrastructure/drand.py`): Robust drand v2-first client with fallbacks and a mock beacon for testing
 - Chain & credentials (`grail/infrastructure/chain.py`): Manages R2 credential commitments and metagraph access
 
-#### 6. CLI (`grail/cli/`)
-Typer-based CLI with subcommands: `mine`, `validate` (and experimental `train`).
-
- Best practices for miners:
-- Leave the final 2 blocks of each window for upload; generation should stop near the end automatically.
-- Prefer `uv sync` for reproducible installs.
+#### 7. CLI (`grail/cli/`)
+Typer-based CLI with subcommands: `mine`, `validate`, `train`.
 
 ## How It Works
 
 ### Post-Training Flow
 
-1. **Problem Generation**: Validators derive a SAT instance from a public seed that mixes drand randomness with the window’s block hash
-2. **Rollout Collection**: Miners generate multiple GRPO rollouts, tracking token ids and logprobs for proof construction
-3. **GRAIL Verification**: Validators verify tokens, the GRAIL commitment/opening against the claimed model, the deterministic SAT instance, and the reported solution
-4. **Reward & Weights**: Validators score miners over recent windows using unique/valid/successful rollout metrics with a superlinear curve, then normalize and set weights on-chain
-5. **Model Updates (planned)**: Validated rollouts will be used for post-training in a future release
+1. **Problem Generation**: The active environment generates problems using public randomness derived from drand and the window's block hash
+2. **Rollout Collection**: Miners generate 16 GRPO rollouts per problem, tracking token ids and logprobs for proof construction
+3. **GRAIL Verification**: Validators verify tokens, the GRAIL commitment/opening against the claimed model, and environment-specific evaluation (e.g., kernel correctness for Triton Kernel)
+4. **Reward & Weights**: Validators score miners based on unique valid rollouts with a superlinear curve (`SUPERLINEAR_EXPONENT = 4.0`), then normalize and set weights on-chain
+5. **Model Updates**: The trainer collects validated rollouts, runs GRPO training, and publishes updated model checkpoints to R2 each window
 
 ### Verifiable Inference
 
 The GRAIL protocol ensures:
 - Deterministic, publicly auditable challenges (drand + chain context)
 - Model-binding proof of token processing; no substitution or replay
-- Deterministic SAT instance reconstruction and solution verification
+- Environment-agnostic verification: the protocol works across all supported environments
 
 ## Technical Details
 
 ### Protocol & Config (from `grail/shared/constants.py`)
 - **PRIME_Q**: 2,147,483,647 (mod prime for sketches)
 - **CHALLENGE_K**: 16 (minimum challenged positions)
-- **WINDOW_LENGTH**: 50 blocks per scoring window
+- **PROOF_BATCH_SIZE**: 16 (fixed constant for miner/validator numerical consistency)
+- **WINDOW_LENGTH**: 30 blocks per scoring window
+- **ROLLOUTS_PER_PROBLEM**: 16
 
 ### Supported Environments
+- **Triton Kernel** (current default): GPU kernel generation — the model writes Triton kernels evaluated for correctness on a dedicated GPU
 - **3-SAT**: Variables 3–10, Clauses 5–20, Clause length 3; deterministic from seed
 - **GSM8K**: Math word problems from the GSM8K dataset with step-by-step reasoning verification
 - **MATH**: Competition-level mathematics from the Hendrycks MATH dataset
 - **MBPP**: Python code generation from the Mostly Basic Python Problems benchmark
 - **HumanEval**: Function-level code generation from the OpenAI HumanEval benchmark
 - **Affine Trace/Logic**: Affine type system environments for trace and logic reasoning
-- **Triton Kernel** (current default): GPU kernel generation — the model writes Triton kernels evaluated for correctness on a dedicated GPU
 
 ### Model Requirements
 - Hugging Face Transformers compatible, exposes token ids/logprobs
@@ -142,20 +147,27 @@ See [Miner Documentation](docs/miner.md) for comprehensive setup instructions in
 - Hardware and environment requirements
 - Wallet and network configuration
 - R2/S3 credentials setup
-- Dependency installation
+- Pipeline mode configuration (3-GPU)
 - Running the miner
 
 ### Validation Setup
 See [Validator Documentation](docs/validator.md) for comprehensive setup instructions including:
 - Hardware and environment requirements
+- Docker Compose or native deployment
 - Wallet and network configuration
-- Dependency installation
 - Running the validator
 
 ### Quick Start
 ```bash
-# Install dependencies
+# Clone and install
+git clone https://github.com/one-covenant/grail
+cd grail
+uv venv && source .venv/bin/activate
 uv sync
+
+# Configure environment
+cp .env.example .env
+# Edit .env with your wallet names, network, and R2 credentials
 
 # Run miner
 grail mine
@@ -167,6 +179,7 @@ grail validate
 **Important Notes:**
 - Randomness is fetched from drand; miners mix it with the window's block hash
 - Rollouts are uploaded to object storage (R2/S3); validators fetch, verify, score, and set weights
+- Model checkpoints evolve through training and are automatically loaded each window
 - For monitoring:
   - Miners and validators can log detailed metrics to the public W&B project: https://wandb.ai/tplr/grail
   - Real-time system logs and network statistics are available at the Grafana dashboard: https://grail-grafana.tplr.ai/
@@ -175,7 +188,7 @@ grail validate
 
 1. **Verifiable Training**: Cryptographic binding of rollouts to model and input
 2. **Decentralized Post-Training**: Internet-scale contribution and evaluation
-3. **Problem Agnostic**: Environment framework enables new domains beyond SAT
+3. **Environment Agnostic**: Modular framework supports multiple problem domains
 4. **Incentive Aligned**: On-chain weights reward sustained, verifiable improvements
 
 ## Contributing

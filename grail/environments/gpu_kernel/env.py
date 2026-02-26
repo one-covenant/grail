@@ -11,7 +11,7 @@ Key features:
 - KernelBench-backed (250 problems across 4 difficulty levels)
 - Unified kernel dataset support (10K+ rows from JSONL)
 - Structural validation works without GPU (provides training signal)
-- GPU correctness checking via pluggable backends (subprocess, affinetes, modal)
+- GPU correctness checking via pluggable backends (subprocess, persistent, affinetes, basilica)
 - Anti-reward-hacking detection signals
 - Decomposed reward: compilation, structure, gpu_compilation, correctness, format, thinking
 

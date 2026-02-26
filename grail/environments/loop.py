@@ -742,7 +742,8 @@ def _batched_forward_pass(
         sequence.  hidden: ``[seq_len, hidden_dim]`` on *device*.
         logits: ``[seq_len, vocab]`` on CPU.
     """
-    proof_batch_size = int(os.getenv("GRAIL_PROOF_BATCH_SIZE", "4"))
+    from ..shared.constants import PROOF_BATCH_SIZE
+
     batch_size = len(all_token_ids_batch)
     seq_lens = [len(seq) for seq in all_token_ids_batch]
     pad_id = getattr(model.config, "pad_token_id", None)
@@ -752,7 +753,7 @@ def _batched_forward_pass(
     per_seq_hidden: list[torch.Tensor] = []
     per_seq_logits: list[torch.Tensor] = []
 
-    sub_batch_size = proof_batch_size
+    sub_batch_size = PROOF_BATCH_SIZE
     pos = 0
 
     while pos < batch_size:
@@ -813,7 +814,7 @@ def _batched_forward_pass(
     logger.info(
         "Batched forward pass: %d seqs, sub-batch %d->%d (max_len=%d, min_len=%d)",
         batch_size,
-        proof_batch_size,
+        PROOF_BATCH_SIZE,
         sub_batch_size,
         max(seq_lens),
         min(seq_lens),
@@ -835,7 +836,7 @@ def compute_proofs(
     Two-phase design:
       Phase 1 — Forward passes via ``_batched_forward_pass`` (which internally
         calls ``forward_single_layer``, the same function the validator uses).
-        Sub-batch size is controlled by GRAIL_PROOF_BATCH_SIZE (default 4).
+        Sub-batch size is the constant PROOF_BATCH_SIZE (16).
         Falls back to sequential single-sequence passes on OOM.
       Phase 2 — Per-sequence commitment + logprob extraction from cached
         hidden states and logits.

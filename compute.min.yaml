@@ -23,9 +23,10 @@ compute_spec:
       required: true                       # Does the application require a GPU?
       min_vram: 24                         # Minimum GPU VRAM (GB)
       recommended_vram: 40                 # Recommended GPU VRAM (GB)
-      min_compute_capability: 9.0          # Minimum CUDA compute capability
-      recommended_compute_capability: 12.4 # Recommended CUDA compute capability
-      recommended_gpu: "NVIDIA A100 40GB (or 80GB)"  # Recommended GPU to purchase/rent
+      min_compute_capability: 8.0          # Minimum CUDA compute capability (A100 = 8.0)
+      recommended_compute_capability: 9.0  # Recommended CUDA compute capability (H100 = 9.0)
+      min_cuda_version: 12.1               # Minimum CUDA toolkit version
+      recommended_gpu: "NVIDIA A100 80GB (or H100)"  # Recommended GPU to purchase/rent
       min_amount: 1                        # Minimum GPUs (1 for text-only envs like SAT, GSM8K)
       recommended_amount: 3                # 3 GPUs for triton_kernel env: decoding + proof + kernel eval
       # GPU roles for triton_kernel environment:
@@ -64,9 +65,10 @@ compute_spec:
       required: true                       # Does the application require a GPU?
       min_vram: 24                         # Minimum GPU VRAM (GB)
       recommended_vram: 40                 # Recommended GPU VRAM (GB)
-      min_compute_capability: 9.0          # Minimum CUDA compute capability
-      recommended_compute_capability: 12.4 # Recommended CUDA compute capability
-      recommended_gpu: "NVIDIA A100 40GB (or 80GB)"  # Recommended GPU to purchase/rent
+      min_compute_capability: 8.0          # Minimum CUDA compute capability (A100 = 8.0)
+      recommended_compute_capability: 9.0  # Recommended CUDA compute capability (H100 = 9.0)
+      min_cuda_version: 12.1               # Minimum CUDA toolkit version
+      recommended_gpu: "NVIDIA A100 80GB (or H100)"  # Recommended GPU to purchase/rent
       min_amount: 2                        # 2 GPUs: GPU 0 = model inference / proof verification, GPU 1 = Triton kernel eval (A100/H100 for Triton JIT)
       recommended_amount: 2                # Recommended amount of GPUs
 

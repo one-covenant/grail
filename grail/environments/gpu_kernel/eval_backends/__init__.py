@@ -4,10 +4,10 @@ Provides a protocol-based abstraction for kernel evaluation with four backends:
 - SubprocessBackend: Per-eval subprocess isolation, GPU-pinned (default)
 - PersistentWorkerPool: Long-lived workers with CUDA context reuse
 - AffinetesBackend: Docker container pool via vendored Affinetes
-- ModalBackend: Serverless GPU via Modal
+- BasilicaBackend: Cloud GPU workers via Basilica (not yet implemented)
 
 Configuration via environment variables:
-    KERNEL_EVAL_BACKEND=subprocess|persistent|affinetes|modal
+    KERNEL_EVAL_BACKEND=subprocess|persistent|affinetes|basilica
     KERNEL_EVAL_GPU_IDS=0,1,2   (comma-separated PHYSICAL GPU indices, not relative to CUDA_VISIBLE_DEVICES)
     KERNEL_EVAL_TIMEOUT=60      (per-kernel timeout in seconds)
 """
@@ -137,7 +137,7 @@ def validate_gpu_config(gpu_ids: list[int], gpu_eval: bool) -> None:
             "Options:\n"
             "  - Install PyTorch: pip install torch\n"
             "  - Set gpu_eval=False (max reward = 0.35)\n"
-            "  - Use KERNEL_EVAL_BACKEND=modal (no local GPU needed)"
+            "  - Use KERNEL_EVAL_BACKEND=basilica (no local GPU needed)"
         ) from e
 
     if not torch.cuda.is_available():
@@ -145,7 +145,7 @@ def validate_gpu_config(gpu_ids: list[int], gpu_eval: bool) -> None:
             "gpu_eval=True but CUDA is not available.\n"
             "Options:\n"
             "  - Set gpu_eval=False (max reward = 0.35)\n"
-            "  - Use KERNEL_EVAL_BACKEND=modal (no local GPU needed)"
+            "  - Use KERNEL_EVAL_BACKEND=basilica (no local GPU needed)"
         )
 
     n_gpus = torch.cuda.device_count()
@@ -156,7 +156,7 @@ def validate_gpu_config(gpu_ids: list[int], gpu_eval: bool) -> None:
             f"  torch.cuda.device_count() = {n_gpus}\n\n"
             f"To fix:\n"
             f"  - Set KERNEL_EVAL_GPU_IDS to valid GPU indices (e.g. '0' or '0,1')\n"
-            f"  - Use KERNEL_EVAL_BACKEND=modal (no local GPU needed)\n"
+            f"  - Use KERNEL_EVAL_BACKEND=basilica (no local GPU needed)\n"
             f"  - Set gpu_eval=False (max reward = 0.35)"
         )
 
@@ -168,7 +168,7 @@ def validate_gpu_config(gpu_ids: list[int], gpu_eval: bool) -> None:
                 f"  Available: {device_names}\n\n"
                 f"To fix:\n"
                 f"  - Set KERNEL_EVAL_GPU_IDS to valid indices (0-{n_gpus - 1})\n"
-                f"  - Use KERNEL_EVAL_BACKEND=modal (no local GPU needed)"
+                f"  - Use KERNEL_EVAL_BACKEND=basilica (no local GPU needed)"
             )
 
     device_names = [torch.cuda.get_device_name(i) for i in gpu_ids]
@@ -198,8 +198,8 @@ def create_backend(
     """Create a kernel evaluation backend by name.
 
     Args:
-        name: Backend name ('subprocess', 'affinetes', 'modal').
-              Defaults to KERNEL_EVAL_BACKEND env var or 'subprocess'.
+        name: Backend name ('subprocess', 'persistent', 'affinetes', 'basilica').
+              Defaults to KERNEL_EVAL_BACKEND env var or 'persistent'.
         gpu_ids: GPU device indices. Defaults to KERNEL_EVAL_GPU_IDS env var.
         timeout: Per-kernel timeout. Defaults to KERNEL_EVAL_TIMEOUT env var or 60s.
         **kwargs: Additional backend-specific arguments.
@@ -231,12 +231,12 @@ def create_backend(
 
         return AffinetesBackend(gpu_ids=gpu_ids, timeout=timeout, **kwargs)
 
-    if name == "modal":
-        from .modal_backend import ModalBackend
+    if name == "basilica":
+        from .basilica_backend import BasilicaBackend
 
-        return ModalBackend(timeout=timeout, **kwargs)
+        return BasilicaBackend(timeout=timeout, **kwargs)
 
     raise ValueError(
         f"Unknown kernel eval backend: {name!r}. "
-        f"Must be one of: subprocess, persistent, affinetes, modal"
+        f"Must be one of: subprocess, persistent, affinetes, basilica"
     )

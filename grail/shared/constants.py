@@ -152,6 +152,11 @@ CHALLENGE_K = 16
 RNG_LABEL = {"sketch": b"sketch", "open": b"open", "sat": b"sat"}
 LAYER_INDEX = -1
 
+# Batch size for proof computation (log-softmax / GRAIL commitments).
+# Fixed constant: changing this can cause subtle numerical divergence between
+# miner and validator due to padding-induced floating-point differences.
+PROOF_BATCH_SIZE = 16
+
 # ────────────────  TERMINATION VALIDATION HPs  ────────────────
 
 MAX_NEW_TOKENS = 8192

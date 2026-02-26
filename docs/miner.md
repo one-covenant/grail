@@ -33,7 +33,7 @@ The active environment is set network-wide (currently **Triton Kernel**). The en
 
 ## Prerequisites
 
-- Any operating system (Linux, macOS, Windows)
+- Linux with NVIDIA GPU drivers installed (required for Triton Kernel environment; macOS/Windows may work for text-only environments but is untested)
 - Python (via `uv venv`) and Git
 - Bittensor wallet (cold/hot) registered on the target subnet (all neurons verify registration at startup and exit with a helpful error if not registered)
 - Cloudflare R2 (or S3-compatible) bucket and credentials
@@ -50,7 +50,7 @@ Hardware requirements:
   - **Separate physical GPU** — Kernel evaluation (Triton JIT compilation and GPU correctness checks). Set via `KERNEL_EVAL_GPU_IDS` using **physical** GPU index.
   - The kernel evaluation GPU should be **A100 80GB, H100, or equivalent** to support Triton JIT compilation
 - At least 64GB RAM recommended
-- Network bandwidth needs are modest; uploads are JSON rollouts
+- Network bandwidth needs are modest; uploads are Parquet rollout files
 
 ---
 
@@ -94,10 +94,10 @@ Set these in `.env` (see `.env.example` for full list and guidance):
   - `BT_WALLET_COLD` (coldkey name)
   - `BT_WALLET_HOT` (hotkey name)
 - Model & generation (dynamically loaded from R2 checkpoints)
-  - Model starts with `Qwen/Qwen3-4B-Instruct-2507` base but evolves through training
+  - The model is loaded automatically from R2 checkpoints and evolves through training
   - Miners automatically load the latest checkpoint from the previous window
-  - Maximum new tokens is fixed at 1024 (hardcoded constant)
-  - Rollouts per problem is fixed at 16 (hardcoded constant)
+  - Maximum new tokens is fixed at 8192 (hardcoded constant `MAX_NEW_TOKENS`)
+  - Rollouts per problem is fixed at 16 (hardcoded constant `ROLLOUTS_PER_PROBLEM`)
   - Models are shared via R2 storage and updated by the trainer after each window
   - No manual model configuration required - checkpoints are loaded automatically
 - Performance tuning
@@ -105,7 +105,7 @@ Set these in `.env` (see `.env.example` for full list and guidance):
 - Kernel evaluation (Triton Kernel environment only)
   - `GRAIL_GPU_EVAL` (true|false, default: false): Enable GPU-based kernel correctness evaluation. Must be `true` for the `triton_kernel` environment to verify generated kernels on-GPU.
   - `KERNEL_EVAL_GPU_IDS` (comma-separated, e.g. `2` or `2,3`): **Physical** GPU device indices for kernel evaluation (as shown by `nvidia-smi`, not relative to `CUDA_VISIBLE_DEVICES`). These GPUs must be separate from decoding and proof GPUs.
-  - `KERNEL_EVAL_BACKEND` (subprocess|modal, default: subprocess): Evaluation backend. `subprocess` runs each kernel in an isolated subprocess with its own CUDA context. `modal` uses serverless GPU (no local GPU needed).
+  - `KERNEL_EVAL_BACKEND` (persistent|subprocess|basilica, default: persistent): Evaluation backend. `persistent` uses a long-lived worker per GPU that reuses the CUDA context (~40x faster than subprocess, auto-recovers from CUDA sticky errors). `subprocess` runs each kernel in an isolated subprocess with its own CUDA context. `basilica` uses Basilica cloud GPU workers (no local GPU needed; not yet implemented).
   - `KERNEL_EVAL_TIMEOUT` (default: 60): Per-kernel evaluation timeout in seconds.
 - Object storage (R2/S3)
   - `R2_BUCKET_ID`, `R2_ACCOUNT_ID`
@@ -181,7 +181,7 @@ If checkpoints live on a different volume (e.g. ephemeral/tmpfs), set `GRAIL_PIP
 # .env configuration for triton_kernel mining with pipeline mode
 GRAIL_GPU_EVAL=true
 KERNEL_EVAL_GPU_IDS=2          # Physical GPU index for kernel eval (not relative to CUDA_VISIBLE_DEVICES)
-KERNEL_EVAL_BACKEND=subprocess  # Per-eval subprocess isolation (default)
+KERNEL_EVAL_BACKEND=persistent  # Long-lived worker, ~40x faster (default)
 KERNEL_EVAL_TIMEOUT=60          # Seconds per kernel (default)
 
 # Pipeline mode (recommended for 2+ GPUs)
@@ -196,7 +196,7 @@ CUDA_VISIBLE_DEVICES=0,1 grail -vv mine
 
 > **Note on GPU indices:** `GRAIL_PIPELINE_VLLM_GPU` and `GRAIL_PIPELINE_PROOF_GPU` are **relative** to `CUDA_VISIBLE_DEVICES`. `KERNEL_EVAL_GPU_IDS` is a **physical** GPU index (the eval subprocess overrides `CUDA_VISIBLE_DEVICES` internally).
 
-For miners without 3 GPUs or without A100/H100-class hardware, set `GRAIL_GPU_EVAL=false`. This disables on-GPU kernel evaluation (max reward capped at 0.35 based on compilation checks only), or use `KERNEL_EVAL_BACKEND=modal` for serverless GPU evaluation.
+For miners without 3 GPUs or without A100/H100-class hardware, set `GRAIL_GPU_EVAL=false`. This disables on-GPU kernel evaluation (max reward capped at 0.35 based on compilation checks only).
 
 ---
 
@@ -227,9 +227,9 @@ High-level loop (see `grail/cli/mine.py`):
 5. Upload the window's rollouts to R2/S3 with write credentials.
 6. Repeat on the next window (loading new checkpoint if available).
 
-Artifacts uploaded per rollout include:
+Artifacts uploaded per window (as a Parquet file) include per-rollout:
 - GRAIL commit (`tokens`, `s_vals`, signature, beacon)
-- SAT problem metadata (seed, clauses, difficulty)
+- Environment-specific problem metadata (e.g., kernel reference, problem ID)
 - GRPO data (reward, advantage, token logprobs, lengths, success)
 - Miner signature over a challenge derived from seed/block/nonce
 
@@ -266,7 +266,7 @@ Key points:
 
 - **GPU-intensive environments** (Triton Kernel): Use 3 GPUs with A100/H100 class for kernel eval. Ensure `GRAIL_GPU_EVAL=true` and `KERNEL_EVAL_GPU_IDS` are set correctly.
 - **Text-only environments** (SAT, GSM8K, MATH, etc.): 1 GPU is sufficient; any CUDA-capable accelerator works.
-- Models evolve through training: Start with `Qwen/Qwen3-4B-Instruct-2507` base but automatically load updated checkpoints from R2. Fixed at 8192 max new tokens and 16 rollouts per problem.
+- Models evolve through training: the initial base model is loaded from R2 and automatically updated with new checkpoints each window. Fixed at 8192 max new tokens and 16 rollouts per problem.
 - Reserve the final 2 blocks of each window for uploads; the miner does this automatically but avoid heavy generation near the end.
 - Use `--use-drand` (default) for robust challenge derivation; fall back with `--no-drand` only if needed.
 - Ensure R2 dual-credential setup: write locally, read credentials are committed on-chain by the miner.
