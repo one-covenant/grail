@@ -52,6 +52,11 @@ class ValidationContext:
     cached_logits: torch.Tensor | None = None  # [seq_len, vocab_size] on CPU
     verified_problem: Any | None = None  # SATProblem, CodeProblem, etc.
 
+    # Pre-computed logprobs at challenged positions (batch optimization).
+    # When set, LogprobValidator skips per-position log_softmax and uses
+    # these values directly.  Maps abs_token_index → log-probability.
+    precomputed_logprobs: dict[int, float] | None = None
+
     # Results accumulators (updated by validators)
     checks: dict[str, bool] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)

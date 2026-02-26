@@ -322,18 +322,22 @@ class LogprobValidator(Validator):
             mismatches = 0
             total = len(challenged_idxs)
             first_mismatch_details = None
+            precomputed = ctx.precomputed_logprobs
 
             for abs_idx in challenged_idxs:
-                # Next-token distribution is at previous position
-                pos = abs_idx - 1
-                if pos < 0 or pos >= logits.size(0):
-                    continue
-                dist = torch.log_softmax(logits[pos], dim=-1)
-                model_lp = float(dist[tokens[abs_idx]].item())
+                if precomputed is not None and abs_idx in precomputed:
+                    model_lp = precomputed[abs_idx]
+                else:
+                    # Fallback: compute per-position log_softmax
+                    pos = abs_idx - 1
+                    if pos < 0 or pos >= logits.size(0):
+                        continue
+                    dist = torch.log_softmax(logits[pos].float(), dim=-1)
+                    model_lp = float(dist[tokens[abs_idx]].item())
+
                 miner_lp = float(claimed[abs_idx])
                 if not self._close_lp(model_lp, miner_lp):
                     mismatches += 1
-                    # Capture first mismatch for debugging
                     if first_mismatch_details is None:
                         first_mismatch_details = {
                             "abs_index": abs_idx,

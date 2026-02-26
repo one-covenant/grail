@@ -21,6 +21,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..infrastructure.chain import GrailChainManager
 from ..infrastructure.comms import get_parquet_file
+from ..model.forward import forward_single_layer
 from ..shared.constants import (
     FAILURE_LOOKBACK_WINDOWS,
     MAX_ROLLOUT_FILE_SIZE_BYTES,
@@ -29,7 +30,6 @@ from ..shared.constants import (
 )
 from ..shared.digest import compute_completion_digest
 from .context import ValidationContext
-from .forward_utils import forward_single_layer
 from .pipeline import ValidationPipeline, get_hard_check_keys, get_soft_check_keys
 from .types import MinerResults
 
@@ -680,6 +680,83 @@ class MinerValidator:
         )
         return result
 
+    def _precompute_challenged_logprobs(
+        self,
+        inferences: list[dict],
+        indices_to_check: list[int],
+        batched_cache: dict[int, tuple[Any, Any]],
+        window_rand: str,
+    ) -> dict[int, dict[int, float]]:
+        """Pre-compute log-probabilities at all challenged positions in one batch.
+
+        Derives challenge positions for every rollout, gathers the logit rows,
+        runs a single vectorized ``log_softmax``, and returns a map of
+        ``inference_idx → {abs_token_pos: logprob}``.
+
+        This replaces 16 × 16 = 256 individual ``log_softmax`` calls in the
+        serial validation loop with one batched operation.
+        """
+        import torch
+
+        from ..protocol.crypto import indices_from_root_in_range
+        from ..shared.constants import CHALLENGE_K
+
+        result: dict[int, dict[int, float]] = {}
+
+        # Collect all (logit_row, target_token) pairs across all rollouts
+        logit_rows: list[torch.Tensor] = []
+        target_tokens: list[int] = []
+        # Track which rollout and abs_idx each entry belongs to
+        entry_map: list[tuple[int, int]] = []  # (inference_idx, abs_idx)
+
+        for inference_idx in indices_to_check:
+            cached = batched_cache.get(inference_idx)
+            if cached is None:
+                continue
+            _, cached_logits = cached  # [seq_len, vocab] on CPU
+
+            commit = inferences[inference_idx].get("commit", {})
+            tokens = commit.get("tokens", [])
+            rollout = commit.get("rollout", {})
+            prompt_len = int(rollout.get("prompt_length", 0))
+            completion_len = int(rollout.get("completion_length", 0))
+
+            if completion_len < CHALLENGE_K or not tokens:
+                continue
+
+            challenged_idxs = indices_from_root_in_range(
+                tokens,
+                window_rand,
+                prompt_len,
+                prompt_len + completion_len,
+                CHALLENGE_K,
+            )
+
+            for abs_idx in challenged_idxs:
+                pos = abs_idx - 1  # next-token prediction offset
+                if pos < 0 or pos >= cached_logits.size(0):
+                    continue
+                logit_rows.append(cached_logits[pos])
+                target_tokens.append(tokens[abs_idx])
+                entry_map.append((inference_idx, abs_idx))
+
+        if not logit_rows:
+            return result
+
+        # Single batched log_softmax across all challenged positions
+        stacked = torch.stack(logit_rows)  # [N, vocab_size]
+        log_probs = torch.log_softmax(stacked.float(), dim=-1)  # fp32 precision
+        target_tensor = torch.tensor(target_tokens, dtype=torch.long)
+        gathered = log_probs.gather(1, target_tensor.unsqueeze(-1)).squeeze(-1)
+
+        for i, (inference_idx, abs_idx) in enumerate(entry_map):
+            if inference_idx not in result:
+                result[inference_idx] = {}
+            result[inference_idx][abs_idx] = float(gathered[i].item())
+
+        del stacked, log_probs, target_tensor, gathered
+        return result
+
     async def _validate_rollouts(
         self,
         inferences: list[dict],
@@ -740,6 +817,7 @@ class MinerValidator:
         # On any failure, batched_cache is empty and the proof validator
         # falls back to per-rollout forward passes automatically.
         batched_cache: dict[int, tuple[Any, Any]] = {}
+        t_forward_start = time.monotonic()
         try:
             batched_cache = self._precompute_batched_forward(inferences, indices_to_check, model)
         except Exception as e:
@@ -747,6 +825,34 @@ class MinerValidator:
                 "Batched forward pre-computation failed, falling back to per-rollout: %s",
                 e,
             )
+        t_forward_elapsed = time.monotonic() - t_forward_start
+
+        # Pre-compute log_softmax at all challenged positions across all
+        # rollouts in one vectorized pass.  This avoids 16 × 16 = 256
+        # individual log_softmax calls inside the serial validation loop.
+        precomputed_logprobs_by_idx: dict[int, dict[int, float]] = {}
+        t_logprob_start = time.monotonic()
+        try:
+            precomputed_logprobs_by_idx = self._precompute_challenged_logprobs(
+                inferences,
+                indices_to_check,
+                batched_cache,
+                window_rand,
+            )
+        except Exception as e:
+            logger.warning("Batched logprob pre-computation failed: %s", e)
+        t_logprob_elapsed = time.monotonic() - t_logprob_start
+
+        logger.info(
+            "Pre-computation complete: forward=%.2fs, logprobs=%.2fs, "
+            "rollouts=%d, logprob_positions=%d",
+            t_forward_elapsed,
+            t_logprob_elapsed,
+            len(indices_to_check),
+            sum(len(v) for v in precomputed_logprobs_by_idx.values()),
+        )
+
+        t_validation_start = time.monotonic()
 
         for inference_idx in indices_to_check:
             # Update watchdog
@@ -852,6 +958,7 @@ class MinerValidator:
                     generation_params=generation_params or {},
                     cached_hidden_states=cached_hs,
                     cached_logits=cached_lg,
+                    precomputed_logprobs=precomputed_logprobs_by_idx.get(inference_idx),
                 )
 
                 if monitor:
@@ -913,6 +1020,19 @@ class MinerValidator:
                 logger.debug(f"Error processing inference: {e}")
                 state["pr_processing_err"] += 1
                 continue
+
+        t_validation_elapsed = time.monotonic() - t_validation_start
+
+        logger.info(
+            "Validation loop complete: forward=%.2fs, logprob_precompute=%.2fs, "
+            "serial_validation=%.2fs, total=%.2fs, valid=%d/%d",
+            t_forward_elapsed,
+            t_logprob_elapsed,
+            t_validation_elapsed,
+            t_forward_elapsed + t_logprob_elapsed + t_validation_elapsed,
+            state["valid_count"],
+            state["checked_count"],
+        )
 
         # Explicitly free GPU tensors from batched pre-computation.
         # hidden_states sit on GPU; without this they linger until gc runs.
