@@ -241,7 +241,7 @@ MIN_ROLLOUT_FILE_SIZE_BYTES = 200
 # Maximum file size for valid rollout window files (bytes).
 # Files above this threshold are rejected before download to prevent
 # resource exhaustion from oversized submissions.
-MAX_ROLLOUT_FILE_SIZE_BYTES = 250 * 1024 * 1024  # 250 MB
+MAX_ROLLOUT_FILE_SIZE_BYTES = 150 * 1024 * 1024  # 150 MB
 
 # ────────────────  TRUST LIST (VALIDATOR → TRAINER)  ────────────────
 TRUST_LIST_KEY_PREFIX = "grail/trust/trust_list_"
