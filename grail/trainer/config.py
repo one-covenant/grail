@@ -53,6 +53,10 @@ class TrainingConfig:
     # Gradient checkpointing for memory efficiency
     use_gradient_checkpointing: bool = constants.TRAINER_USE_GRADIENT_CHECKPOINTING
 
+    # Chunked logit computation (avoids materializing full vocab-sized tensors)
+    chunked_logits: bool = constants.TRAINER_CHUNKED_LOGITS
+    logit_chunk_size: int = constants.TRAINER_LOGIT_CHUNK_SIZE
+
     # Data loading
     rollouts_per_problem: int = constants.ROLLOUTS_PER_PROBLEM
 
@@ -69,7 +73,7 @@ class TrainingConfig:
 
     # Replay buffer configuration
     replay_buffer_enabled: bool = True
-    replay_buffer_max_windows: int = 1  # Store last 1 windows (~6 min of data)
+    replay_buffer_max_windows: int = 6  # Store last 6 windows for sufficient grad accum
     replay_buffer_recent_fraction: float = 0.5  # 50% samples from most recent window
     replay_buffer_decay_factor: float = 0.7  # Exponential decay for older windows
     replay_buffer_max_groups_per_epoch: int = 64  # Max groups to sample per epoch

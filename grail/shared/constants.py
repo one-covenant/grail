@@ -84,6 +84,12 @@ TRAINER_USE_GRADIENT_CHECKPOINTING = (
     os.getenv("GRAIL_TRAINER_USE_GRADIENT_CHECKPOINTING", "1") == "1"
 )
 
+# Chunked logit computation: apply lm_head in sequence-dimension chunks to avoid
+# materializing the full [batch, seq_len, vocab_size] logits tensor (~5.4 GB for
+# Qwen3-8B at seq_len=10K). Saves ~10 GB peak memory on single-GPU training.
+TRAINER_CHUNKED_LOGITS = os.getenv("GRAIL_TRAINER_CHUNKED_LOGITS", "1") == "1"
+TRAINER_LOGIT_CHUNK_SIZE = int(os.getenv("GRAIL_TRAINER_LOGIT_CHUNK_SIZE", "256"))
+
 # Trainer miner trust filtering (incentive-based via Yuma Consensus)
 TRAINER_MIN_TRUSTED_MINERS = int(os.getenv("GRAIL_TRAINER_MIN_TRUSTED_MINERS", "1"))
 
@@ -133,7 +139,7 @@ DELTA_CHECKPOINT_RETENTION_LIMIT = int(os.getenv("GRAIL_DELTA_CHECKPOINT_RETENTI
 CLEANUP_INTERVAL_UPLOADS = int(os.getenv("GRAIL_CLEANUP_INTERVAL_UPLOADS", "10"))
 
 # Trainer identity used for checkpoint publication
-TRAINER_UID = 80
+TRAINER_UID = 7
 
 # ────────────────  LOGGING  ────────────────
 
