@@ -6,35 +6,24 @@ This directory contains all Docker-related configuration files for the GRAIL pro
 
 ### Core Files
 - **`Dockerfile`** - Main Docker image definition for GRAIL miners and validators
+- **`docker-compose.validator.yml`** - Production validator deployment with Watchtower for automatic updates
+- **`compose.grafana.yaml`** - Grafana + Loki deployment for centralized logging
+- **`promtail.yml`** - Promtail configuration for log shipping to Loki
 
-### Docker Compose Files
-- **`docker-compose.validator.yml`** - Production deployment with Watchtower for automatic updates
-- **`docker-compose.local-subnet.yml`** - Local testing environment with Bittensor subnet
-- **`docker-compose.integration.yml`** - Integration testing configuration
+### Grafana
+- **`grafana/`** - Dashboards and provisioning configs for Grafana
 
 ## Quick Start
 
 ### Deploy a Validator
 
+See [Validator Setup Guide](../docs/validator.md) for full instructions.
+
 ```bash
-# Copy and configure environment (project root)
 cp .env.example .env
-# Edit .env with non-sensitive config (no private keys)
-# Provide wallet secrets via Docker secrets or a bind-mounted file read at runtime.
-# Start validator with auto-updates
-docker compose \
-  --env-file .env \
-  -f docker/docker-compose.validator.yml up -d
-```
+# Edit .env with your wallet names, network, and R2 credentials
 
-### Local Testing
-
-```bash
-# Automated setup
-./scripts/setup-local-subnet.sh
-
-# Or manual startup
-docker-compose -f docker/docker-compose.local-subnet.yml up -d
+docker compose --env-file .env -f docker/docker-compose.validator.yml up -d
 ```
 
 ## Building Images
@@ -47,9 +36,3 @@ To build locally:
 ```bash
 docker build -f docker/Dockerfile -t grail:local .
 ```
-
-## Documentation
-
-For detailed deployment instructions, see:
-- [Validator Deployment Guide](../docs/VALIDATOR_DEPLOYMENT.md)
-- [Local Subnet Testing](../docs/local-subnet-testing.md)
