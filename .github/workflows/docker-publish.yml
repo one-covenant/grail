@@ -127,9 +127,6 @@ jobs:
             type=raw,value=${{ github.event.inputs.tag }}-{{date 'YYYYMMDD'}}
             type=sha,prefix=${{ github.event.inputs.tag }}-
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 

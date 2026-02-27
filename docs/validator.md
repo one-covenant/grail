@@ -39,6 +39,7 @@ Grail validators:
 
 - Linux with NVIDIA GPU drivers installed
 - Docker and Docker Compose installed
+- [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed (required for GPU passthrough to Docker containers)
 - **2x NVIDIA GPUs** (A100 or H100 recommended) for Triton kernel evaluation
   - GPU 0: Model inference / proof verification
   - GPU 1: Triton kernel compilation + correctness evaluation
@@ -49,12 +50,6 @@ Grail validators:
 - Optional: WandB account for monitoring
 
 For detailed hardware specifications, see [`compute.min.yaml`](../compute.min.yaml).
-
-Hardware requirements:
-- **Linux with 2x NVIDIA GPUs** (A100/H100 recommended for Triton JIT compatibility)
-  - GPU 0: Model inference and proof verification
-  - GPU 1: Triton kernel evaluation (compilation + correctness checks)
-- At least 40GB RAM recommended for optimal performance
 
 ---
 
@@ -70,6 +65,11 @@ cd grail
 # Configure environment
 cp .env.example .env
 # Edit .env with your wallet names, network, and R2 credentials
+
+# If you have a large storage mount (e.g., /ephemeral, /mnt/data), set it in .env:
+#   GRAIL_HOST_STORAGE_PATH=/ephemeral
+#   GRAIL_CACHE_DIR=/ephemeral/grail_cache
+# Otherwise the default ~/grail-storage is used.
 
 # Run validator with Docker Compose
 docker compose --env-file .env -f docker/docker-compose.validator.yml up -d
