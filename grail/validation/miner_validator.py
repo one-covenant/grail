@@ -690,7 +690,7 @@ class MinerValidator:
         runs a single vectorized ``log_softmax``, and returns a map of
         ``inference_idx → {abs_token_pos: logprob}``.
 
-        This replaces 16 × 16 = 256 individual ``log_softmax`` calls in the
+        This replaces 16 × 32 = 512 individual ``log_softmax`` calls in the
         serial validation loop with one batched operation.
         """
         import torch
@@ -825,7 +825,7 @@ class MinerValidator:
         t_forward_elapsed = time.monotonic() - t_forward_start
 
         # Pre-compute log_softmax at all challenged positions across all
-        # rollouts in one vectorized pass.  This avoids 16 × 16 = 256
+        # rollouts in one vectorized pass.  This avoids 16 × 32 = 512
         # individual log_softmax calls inside the serial validation loop.
         precomputed_logprobs_by_idx: dict[int, dict[int, float]] = {}
         t_logprob_start = time.monotonic()

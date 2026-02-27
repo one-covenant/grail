@@ -117,7 +117,7 @@ The GRAIL protocol ensures:
 
 ### Protocol & Config (from `grail/shared/constants.py`)
 - **PRIME_Q**: 2,147,483,647 (mod prime for sketches)
-- **CHALLENGE_K**: 16 (minimum challenged positions)
+- **CHALLENGE_K**: 32 (minimum challenged positions)
 - **PROOF_BATCH_SIZE**: 16 (fixed constant for miner/validator numerical consistency)
 - **WINDOW_LENGTH**: 30 blocks per scoring window
 - **ROLLOUTS_PER_PROBLEM**: 16

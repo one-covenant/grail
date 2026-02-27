@@ -148,7 +148,7 @@ TRACE = 5
 # ────────────────  GRAIL CRYPTOGRAPHIC CONSTANTS  ────────────────
 
 PRIME_Q = 2_147_483_647
-CHALLENGE_K = 16
+CHALLENGE_K = 32
 RNG_LABEL = {"sketch": b"sketch", "open": b"open", "sat": b"sat"}
 LAYER_INDEX = -1
 

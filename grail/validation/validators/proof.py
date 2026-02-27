@@ -34,7 +34,7 @@ class GRAILProofValidator(Validator):
     3. Sketch verification at challenged indices
     4. Caches logits for downstream validators (termination check)
 
-    Security: ~10^-117 forgery probability with sketch check at k=16 positions.
+    Security: ~10^-234 forgery probability with sketch check at k=32 positions.
     """
 
     check_name = "proof_valid"

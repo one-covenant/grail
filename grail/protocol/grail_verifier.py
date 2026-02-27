@@ -8,7 +8,7 @@ Key innovations:
 2. Logarithmic bucketing: Coarse quantization reduces sensitivity
 3. Sketch verification: Random linear projection for cryptographic binding
 
-Security: ~10^-117 forgery probability across k=16 positions with sketch-only verification.
+Security: ~10^-234 forgery probability across k=32 positions with sketch-only verification.
 """
 
 from __future__ import annotations
@@ -141,8 +141,8 @@ def adaptive_sketch_tolerance(
         tolerance = base + growth * sqrt(position)
 
     Security is not affected: even at tolerance=300 (pos=8000), a cheater
-    with wrong hidden states (expected sketch diff ~1600) has < 10^-14
-    probability of passing all 16 challenged positions.
+    with wrong hidden states (expected sketch diff ~1600) has < 10^-23
+    probability of passing all 32 challenged positions.
 
     Args:
         position: Token position in sequence
@@ -158,7 +158,7 @@ class GRAILVerifier:
     """Sketch-based verifier for framework-agnostic hidden state proofs.
 
     Uses a single sketch check (random linear projection of bucketed top-k activations)
-    which provides sufficient security (~10^-117 forgery probability) while being
+    which provides sufficient security (~10^-234 forgery probability) while being
     robust to floating-point variations across GPUs and frameworks.
     """
 

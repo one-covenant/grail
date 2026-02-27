@@ -54,7 +54,7 @@ class RolloutMetadata(BaseModel):
 class Commit(BaseModel):
     """Commit data with tokens, activation commitments, and metadata."""
 
-    tokens: list[int] = Field(min_length=10)  # >= CHALLENGE_K
+    tokens: list[int] = Field(min_length=32)  # >= CHALLENGE_K
     commitments: list[dict]
     proof_version: str
     model: ModelInfo

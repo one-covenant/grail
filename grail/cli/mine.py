@@ -901,7 +901,7 @@ async def generate_rollouts_for_window(
             # COMPLETION LENGTH GATE: Drop entire group if any rollout is too short
             # ─────────────────────────────────────────────────────────────────────
             # Validators require at least CHALLENGE_K tokens in the completion region
-            # to perform cryptographic verification (sketch checks at k=16 positions).
+            # to perform cryptographic verification (sketch checks at k=32 positions).
             # If any rollout in the group has completion_length < CHALLENGE_K, the
             # validator will reject that rollout. Rather than waste bandwidth uploading
             # a partially valid group, we drop the entire group preemptively.
