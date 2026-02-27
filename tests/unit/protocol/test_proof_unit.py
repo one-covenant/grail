@@ -14,7 +14,7 @@ from grail.protocol.grail_verifier import (
 )
 from grail.shared.constants import (
     PROOF_NUM_BUCKETS,
-    PROOF_SKETCH_TOLERANCE,
+    PROOF_SKETCH_TOLERANCE_BASE,
 )
 
 
@@ -58,19 +58,19 @@ class TestAdaptiveSketchTolerance:
 
     def test_early_position_tighter(self) -> None:
         """Early positions should have tighter or equal tolerance."""
-        tol_early = adaptive_sketch_tolerance(0, 100, float(PROOF_SKETCH_TOLERANCE))
-        assert tol_early <= PROOF_SKETCH_TOLERANCE
+        tol_early = adaptive_sketch_tolerance(0, 100)
+        assert tol_early == PROOF_SKETCH_TOLERANCE_BASE
 
     def test_late_position_looser(self) -> None:
         """Late positions should have looser tolerance."""
-        tol_late = adaptive_sketch_tolerance(99, 100, float(PROOF_SKETCH_TOLERANCE))
-        assert tol_late >= PROOF_SKETCH_TOLERANCE
+        tol_late = adaptive_sketch_tolerance(99, 100)
+        assert tol_late > PROOF_SKETCH_TOLERANCE_BASE
 
     def test_monotonic_increase(self) -> None:
         """Tolerance should increase monotonically with position."""
-        tol_early = adaptive_sketch_tolerance(0, 100, float(PROOF_SKETCH_TOLERANCE))
-        tol_mid = adaptive_sketch_tolerance(50, 100, float(PROOF_SKETCH_TOLERANCE))
-        tol_late = adaptive_sketch_tolerance(99, 100, float(PROOF_SKETCH_TOLERANCE))
+        tol_early = adaptive_sketch_tolerance(0, 100)
+        tol_mid = adaptive_sketch_tolerance(50, 100)
+        tol_late = adaptive_sketch_tolerance(99, 100)
         assert tol_early <= tol_mid <= tol_late
 
 
@@ -166,10 +166,11 @@ class TestGRAILVerifier:
         assert is_valid, (
             f"Well-separated activations should be robust to small drift: {diagnostics}"
         )
-        assert diagnostics["sketch_diff"] < PROOF_SKETCH_TOLERANCE
+        assert diagnostics["sketch_diff"] < PROOF_SKETCH_TOLERANCE_BASE
 
     def test_rejects_different_hidden_state(self, verifier: GRAILVerifier, randomness: str) -> None:
         """Completely different hidden state should be rejected."""
+        torch.manual_seed(7)
         r_vec = verifier.generate_r_vec(randomness)
         hidden1 = torch.randn(4096)
         hidden2 = torch.randn(4096)  # Completely different

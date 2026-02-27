@@ -265,12 +265,14 @@ PROOF_NUM_BUCKETS = 16  # Buckets per sign
 # Small bounded coefficients for sketch robustness
 PROOF_COEFF_RANGE = 127  # r ∈ [-127, 127]
 
-# Sketch tolerance: modular distance on dot product
-# Calibrated empirically via cross-framework tests
-PROOF_SKETCH_TOLERANCE = 50
+# Sketch tolerance: base tolerance at position 0 (no FP drift expected)
+PROOF_SKETCH_TOLERANCE_BASE = 30
 
-# Adaptive tolerance: position importance decay rate
-PROOF_POSITION_IMPORTANCE_DECAY = 100.0
+# Sketch tolerance: sqrt growth factor per position.
+# FP divergence in causal attention grows as O(sqrt(P)) from different
+# reduction orders across SDPA implementations, torch versions, and GPUs.
+# tolerance(P) = base + growth * sqrt(P)
+PROOF_SKETCH_TOLERANCE_GROWTH = 3.0
 
 # GRAIL proof version
 GRAIL_PROOF_VERSION = "v1"

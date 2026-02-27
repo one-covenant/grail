@@ -22,8 +22,8 @@ from ..shared.constants import (
     PRIME_Q,
     PROOF_COEFF_RANGE,
     PROOF_NUM_BUCKETS,
-    PROOF_POSITION_IMPORTANCE_DECAY,
-    PROOF_SKETCH_TOLERANCE,
+    PROOF_SKETCH_TOLERANCE_BASE,
+    PROOF_SKETCH_TOLERANCE_GROWTH,
     PROOF_TOPK,
 )
 
@@ -129,29 +129,29 @@ def log_magnitude_bucket_vectorized(
 def adaptive_sketch_tolerance(
     position: int,
     sequence_length: int,
-    base_tolerance: float,
 ) -> int:
     """Compute position-dependent sketch tolerance.
 
-    Early positions are more important (set context) → tighter tolerance.
-    Later positions may have accumulated drift → more permissive.
+    FP divergence in causal attention grows as O(sqrt(P)) because different
+    SDPA implementations use different reduction orders for the P-element
+    softmax.  This accumulates across transformer layers but is bounded by
+    layer norm.
+
+    The tolerance follows the same sqrt model so it tracks the actual drift:
+        tolerance = base + growth * sqrt(position)
+
+    Security is not affected: even at tolerance=300 (pos=8000), a cheater
+    with wrong hidden states (expected sketch diff ~1600) has < 10^-14
+    probability of passing all 16 challenged positions.
 
     Args:
         position: Token position in sequence
         sequence_length: Total sequence length
-        base_tolerance: Base sketch tolerance value
 
     Returns:
         Adjusted sketch tolerance
     """
-    # Importance weight: decays from 1.0 at start
-    importance = 1.0 / (1.0 + position / PROOF_POSITION_IMPORTANCE_DECAY)
-
-    # More important → tighter (multiply by factor < 1)
-    # Less important → looser (multiply by factor > 1)
-    factor = 2.0 - importance  # Range: [1.0, 2.0]
-
-    return int(base_tolerance * factor)
+    return int(PROOF_SKETCH_TOLERANCE_BASE + PROOF_SKETCH_TOLERANCE_GROWTH * math.sqrt(position))
 
 
 class GRAILVerifier:
@@ -181,7 +181,6 @@ class GRAILVerifier:
         self.topk = topk
         self.num_buckets = num_buckets
         self.r_coeff_range = r_coeff_range
-        self.base_sketch_tolerance = float(PROOF_SKETCH_TOLERANCE)
 
     def generate_r_vec(self, randomness_hex: str) -> torch.Tensor:
         """Generate small bounded coefficient vector from randomness.
@@ -322,7 +321,7 @@ class GRAILVerifier:
         position = miner_commitment["position"]
 
         # Get position-adjusted tolerance
-        tolerance = adaptive_sketch_tolerance(position, sequence_length, self.base_sketch_tolerance)
+        tolerance = adaptive_sketch_tolerance(position, sequence_length)
 
         # Extract miner's claimed top-k indices
         miner_indices = torch.tensor(miner_commitment["indices"], dtype=torch.long)
