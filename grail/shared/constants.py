@@ -139,7 +139,7 @@ DELTA_CHECKPOINT_RETENTION_LIMIT = int(os.getenv("GRAIL_DELTA_CHECKPOINT_RETENTI
 CLEANUP_INTERVAL_UPLOADS = int(os.getenv("GRAIL_CLEANUP_INTERVAL_UPLOADS", "10"))
 
 # Trainer identity used for checkpoint publication
-TRAINER_UID = 7
+TRAINER_UID = 0
 
 # ────────────────  LOGGING  ────────────────
 
