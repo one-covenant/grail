@@ -29,8 +29,8 @@ class TestLogMagnitudeBucket:
 
     def test_sign_preservation(self) -> None:
         """Bucket function preserves sign."""
-        bucket_pos = log_magnitude_bucket(1.0)
-        bucket_neg = log_magnitude_bucket(-1.0)
+        bucket_pos = log_magnitude_bucket(2.0)
+        bucket_neg = log_magnitude_bucket(-2.0)
         assert bucket_pos > 0
         assert bucket_neg < 0
         assert bucket_pos == -bucket_neg

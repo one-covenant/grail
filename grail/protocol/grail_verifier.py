@@ -40,7 +40,7 @@ def log_magnitude_bucket(value: float, num_buckets: int = PROOF_NUM_BUCKETS) -> 
 
     Args:
         value: Activation value to bucket
-        num_buckets: Number of buckets per sign (default: 16)
+        num_buckets: Number of buckets per sign (default: 8)
 
     Returns:
         Signed bucket index in [-num_buckets+1, 0, num_buckets-1]
@@ -92,7 +92,7 @@ def log_magnitude_bucket_vectorized(
 
     Args:
         values: Activation values, any shape (e.g. [seq_len, topk]).
-        num_buckets: Buckets per sign (default 16).
+        num_buckets: Buckets per sign (default 8).
 
     Returns:
         Signed bucket indices (int64), same shape. Range [-(num_buckets-1), num_buckets-1].
@@ -278,9 +278,9 @@ class GRAILVerifier:
         del signed_values
 
         # Step 3: Batched sketch via matrix-vector product
-        # Max |dot| = topk * 15 * 127 = 60,960 — fits in int32, but CUDA
+        # Max |dot| = topk * 7 * 127 = 28,448 — fits in int32, but CUDA
         # doesn't support int matmul ("addmv_impl_cuda" not implemented for 'Int').
-        # Use float32 — exact for integers up to 2^24 (our max is 60,960).
+        # Use float32 — exact for integers up to 2^24 (our max is 28,448).
         buckets_f = buckets.to(torch.float32)
         r_vec_f = r_vec.to(torch.float32).to(buckets_f.device)
         sketches = (buckets_f @ r_vec_f).to(torch.int64)  # [seq_len]

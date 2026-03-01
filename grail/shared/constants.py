@@ -260,7 +260,7 @@ TRUST_LIST_MAX_STALENESS_WINDOWS = int(os.getenv("GRAIL_TRUST_LIST_MAX_STALENESS
 PROOF_TOPK = 32
 
 # Logarithmic bucketing parameters
-PROOF_NUM_BUCKETS = 16  # Buckets per sign
+PROOF_NUM_BUCKETS = 8  # Buckets per sign
 
 # Small bounded coefficients for sketch robustness
 PROOF_COEFF_RANGE = 127  # r ∈ [-127, 127]
