@@ -213,11 +213,11 @@ GRAIL_BURN_PERCENTAGE = 80.0
 
 # ────────────────  UNIQUE ROLLOUTS CAP  ────────────────
 
-# Maximum unique rollouts per miner that count toward weight allocation.
-# Miners are rewarded proportionally to how close they are to this cap.
-# This cap covers the full 12-window rolling period (5120 per window × 12 windows).
-UNIQUE_ROLLOUTS_CAP = 61440
-UNIQUE_ROLLOUTS_CAP_ENABLED = os.getenv("GRAIL_UNIQUE_ROLLOUTS_CAP_ENABLED", "0") == "1"
+# Maximum unique rollouts per miner PER WINDOW that count toward weight allocation.
+# The effective period cap = this value × rolling_windows (currently 12).
+# Miners are rewarded proportionally to how close they are to the period cap.
+UNIQUE_ROLLOUTS_CAP = 2500
+UNIQUE_ROLLOUTS_CAP_ENABLED = True
 
 # ────────────────  MINER SAMPLING (VALIDATION COST CONTROL)  ────────────────
 

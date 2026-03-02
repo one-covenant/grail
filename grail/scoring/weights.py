@@ -62,6 +62,9 @@ class WeightComputer:
             self.window_length,
         )
 
+        # Effective cap for the rolling period (per-window cap x number of windows)
+        period_cap = UNIQUE_ROLLOUTS_CAP * self.rolling_windows
+
         # Compute raw scores
         raw_scores = []
         for hotkey in meta_hotkeys:
@@ -107,7 +110,7 @@ class WeightComputer:
 
             # Cap-proportional scoring: reward based on fraction of cap reached
             if self.cap_enabled:
-                capped_unique = min(total_unique_extrapolated, UNIQUE_ROLLOUTS_CAP)
+                capped_unique = min(total_unique_extrapolated, period_cap)
             else:
                 capped_unique = total_unique_extrapolated
 
@@ -119,7 +122,7 @@ class WeightComputer:
         # Normalize against theoretical max (cap^exponent)
         # This ensures miners are rewarded proportionally to cap achievement
         if self.cap_enabled:
-            max_score = UNIQUE_ROLLOUTS_CAP**self.superlinear_exponent
+            max_score = period_cap**self.superlinear_exponent
             cap_relative = [score / max_score for score in raw_scores]
             total_cap_relative = math.fsum(cap_relative)
         else:

@@ -170,8 +170,8 @@ class TestBurnMechanism:
         """With cap enabled and low output, burn gets MORE than base percentage."""
         hotkeys = ["burn", "m1"]
         uids = [0, 1]
-        # 6144 = 10% of cap -> total_cap_relative ~ 0.1
-        w = _compute(hotkeys, uids, {"m1": 6144}, {"m1": 1}, cap_enabled=True)
+        # 250 = 10% of per-window cap (2500) with rolling_windows=1 -> total_cap_relative ~ 0.1
+        w = _compute(hotkeys, uids, {"m1": 250}, {"m1": 1}, cap_enabled=True)
         # Miner gets remaining_fraction * total_cap_relative = 0.2 * 0.1 = 0.02
         assert math.isclose(w[1], 0.02, abs_tol=1e-9)
         assert w[0] > 0.80  # Burn absorbs underproduction
