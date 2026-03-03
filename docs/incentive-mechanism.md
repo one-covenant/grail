@@ -52,7 +52,10 @@ Producing more rollouts yields proportionally more weight. Burn is fixed at 80% 
 
 ## Verification Pipeline
 
-Every rollout a validator checks passes through 9 sequential validators. A hard failure on any step rejects the rollout immediately. A soft failure is logged but does not reject.
+Every rollout a validator checks passes through 9 sequential validators. There are two severity levels:
+
+- **Hard**: A single failure immediately rejects the rollout. The pipeline stops, no further checks run.
+- **Soft**: A single failure does not reject the rollout. Instead, soft failures accumulate across all checked rollouts for that miner. If more than 51% of checked rollouts fail the soft check (`STOCHASTIC_CHECK_FAILURE_THRESHOLD = 0.51`), the entire miner is rejected for that window, same as a hard failure. Below that threshold, the miner passes normally.
 
 | # | Validator | Severity | What It Checks |
 |---|-----------|----------|----------------|
@@ -64,7 +67,9 @@ Every rollout a validator checks passes through 9 sequential validators. A hard 
 | 6 | Environment Evaluation | Hard | Generated code is executed and evaluated for correctness (Triton kernel: compiled and run against reference) |
 | 7 | Reward | Hard | Miner's claimed reward matches validator-recomputed reward (rel_tol=0.02) |
 | 8 | Logprob | Hard | Miner's log-probability values match recomputed values |
-| 9 | Distribution | Soft | Heuristic checks on sampling distribution shape |
+| 9 | Distribution | Soft | Heuristic checks on token probability distribution (detects wrong model, prefill tricks, bimodal distributions) |
+
+Currently the only soft check is Distribution. It flags rollouts where chosen-token probabilities look inconsistent with sampling from the expected model (e.g., suspiciously low median probability, extremely low minimum probability, low Q10 in the initial window). A few flagged rollouts are tolerated, but if the majority fail, the miner is gated.
 
 ### Sampling Strategy
 
@@ -149,5 +154,6 @@ This means a single bad window can zero your weight for ~1.4 hours. Consistent, 
 | `MAX_SAMPLES_PER_MINER` | 64 | Max rollouts checked per miner per window |
 | `MINER_SAMPLE_RATE` | 25% | Fraction of miners checked per window |
 | `FAILURE_LOOKBACK_WINDOWS` | 14 | Windows to look back for failures |
+| `STOCHASTIC_CHECK_FAILURE_THRESHOLD` | 51% | Soft-failure fraction to reject miner |
 | `COPYCAT_WINDOW_THRESHOLD` | 5% | Per-window overlap threshold |
 | `COPYCAT_INTERVAL_THRESHOLD` | 3% | Per-interval overlap threshold |
