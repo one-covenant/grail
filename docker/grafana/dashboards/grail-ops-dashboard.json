@@ -1,0 +1,926 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "table",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Miner Leaderboard",
+      "tooltip": "Go to miner leaderboard",
+      "type": "link",
+      "url": "/d/grail-leaderboard"
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "Validator Verdicts",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "Per-miner validation outcomes for the most recent windows.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" },
+            "filterable": false,
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Window" },
+            "properties": [
+              { "id": "custom.width", "value": 70 },
+              { "id": "custom.align", "value": "center" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "UID" },
+            "properties": [
+              { "id": "custom.width", "value": 55 },
+              { "id": "custom.align", "value": "center" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Valid" },
+            "properties": [
+              { "id": "custom.width", "value": 55 },
+              { "id": "custom.align", "value": "right" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Checked" },
+            "properties": [
+              { "id": "custom.width", "value": 65 },
+              { "id": "custom.align", "value": "right" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Total" },
+            "properties": [
+              { "id": "custom.width", "value": 65 },
+              { "id": "custom.align", "value": "right" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Est. Unique" },
+            "properties": [
+              { "id": "custom.width", "value": 80 },
+              { "id": "custom.align", "value": "right" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Success %" },
+            "properties": [
+              { "id": "custom.width", "value": 80 },
+              { "id": "custom.align", "value": "right" },
+              { "id": "decimals", "value": 1 },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "red", "value": null },
+                    { "color": "yellow", "value": 80 },
+                    { "color": "green", "value": 95 }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": { "mode": "basic", "type": "color-background" }
+              },
+              { "id": "color", "value": { "mode": "thresholds" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Failure" },
+            "properties": [
+              { "id": "custom.width", "value": 55 },
+              { "id": "custom.align", "value": "center" },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "transparent", "value": null },
+                    { "color": "red", "value": 1 }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": { "mode": "basic", "type": "color-background" }
+              },
+              { "id": "color", "value": { "mode": "thresholds" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Reason" },
+            "properties": [
+              { "id": "custom.width", "value": 140 },
+              { "id": "custom.align", "value": "left" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Time (s)" },
+            "properties": [
+              { "id": "custom.width", "value": 70 },
+              { "id": "custom.align", "value": "right" },
+              { "id": "decimals", "value": 1 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Hotkey" },
+            "properties": [
+              { "id": "custom.width", "value": 85 },
+              { "id": "custom.align", "value": "left" }
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 1 },
+      "id": 1,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "enablePagination": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "Window" }]
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "editorMode": "code",
+          "expr": "{logger=\"grail.validator.verdict\"} | regexp `] (?P<raw>{.+})` | line_format `{{.raw}}` | json | __error__=``",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Validation Verdicts",
+      "transformations": [
+        {
+          "id": "extractFields",
+          "options": { "format": "json", "replace": false, "source": "Line" }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Line": true, "Time": true, "id": true, "tsNs": true,
+              "labels": true, "event": true, "found_file": true,
+              "estimated_successful": true, "prompt_mismatch_count": true,
+              "validation_blocks": true
+            },
+            "indexByName": {
+              "window": 0, "uid": 1, "valid_count": 2, "checked_count": 3,
+              "total_inferences": 4, "estimated_unique": 5, "success_rate": 6,
+              "failure_flag": 7, "failure_reason": 8, "validation_sec": 9,
+              "hotkey_short": 10
+            },
+            "renameByName": {
+              "window": "Window", "uid": "UID", "valid_count": "Valid",
+              "checked_count": "Checked", "total_inferences": "Total",
+              "estimated_unique": "Est. Unique", "success_rate": "Success %",
+              "failure_flag": "Failure", "failure_reason": "Reason",
+              "validation_sec": "Time (s)", "hotkey_short": "Hotkey"
+            }
+          }
+        },
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              { "destinationType": "number", "targetField": "Window" },
+              { "destinationType": "number", "targetField": "UID" },
+              { "destinationType": "number", "targetField": "Valid" },
+              { "destinationType": "number", "targetField": "Checked" },
+              { "destinationType": "number", "targetField": "Total" },
+              { "destinationType": "number", "targetField": "Est. Unique" },
+              { "destinationType": "number", "targetField": "Success %" },
+              { "destinationType": "number", "targetField": "Failure" },
+              { "destinationType": "number", "targetField": "Time (s)" }
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": { "fields": {}, "sort": [{ "field": "Window", "desc": true }] }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "Count of validation failures in the selected time range.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 13 },
+      "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "editorMode": "code",
+          "expr": "count_over_time({logger=\"grail.validator.verdict\"} |= `\"failure_flag\":1` [$__range])",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Failures",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
+      "id": 200,
+      "title": "Miner Windows",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "Per-window rollout counts and success rate over time.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" },
+            "filterable": false,
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Window" },
+            "properties": [
+              { "id": "custom.width", "value": 70 },
+              { "id": "custom.align", "value": "center" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Total" },
+            "properties": [
+              { "id": "custom.width", "value": 70 },
+              { "id": "custom.align", "value": "right" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Success" },
+            "properties": [
+              { "id": "custom.width", "value": 70 },
+              { "id": "custom.align", "value": "right" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Failed" },
+            "properties": [
+              { "id": "custom.width", "value": 65 },
+              { "id": "custom.align", "value": "right" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Success %" },
+            "properties": [
+              { "id": "custom.width", "value": 80 },
+              { "id": "custom.align", "value": "right" },
+              { "id": "decimals", "value": 1 },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "red", "value": null },
+                    { "color": "yellow", "value": 80 },
+                    { "color": "green", "value": 95 }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": { "mode": "basic", "type": "color-background" }
+              },
+              { "id": "color", "value": { "mode": "thresholds" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Avg Reward" },
+            "properties": [
+              { "id": "custom.width", "value": 80 },
+              { "id": "custom.align", "value": "right" },
+              { "id": "decimals", "value": 4 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Time (s)" },
+            "properties": [
+              { "id": "custom.width", "value": 70 },
+              { "id": "custom.align", "value": "right" },
+              { "id": "decimals", "value": 1 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Gen (s)" },
+            "properties": [
+              { "id": "custom.width", "value": 65 },
+              { "id": "custom.align", "value": "right" },
+              { "id": "decimals", "value": 2 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Roll/min" },
+            "properties": [
+              { "id": "custom.width", "value": 70 },
+              { "id": "custom.align", "value": "right" },
+              { "id": "decimals", "value": 1 }
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 19 },
+      "id": 3,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "enablePagination": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "Window" }]
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "editorMode": "code",
+          "expr": "{logger=\"grail.miner.window\"} | regexp `] (?P<raw>{.+})` | line_format `{{.raw}}` | json | __error__=``",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Miner Window Summaries",
+      "transformations": [
+        {
+          "id": "extractFields",
+          "options": { "format": "json", "replace": false, "source": "Line" }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Line": true, "Time": true, "id": true, "tsNs": true,
+              "labels": true, "event": true
+            },
+            "indexByName": {
+              "window": 0, "total_rollouts": 1, "successful_rollouts": 2,
+              "failed_rollouts": 3, "success_rate": 4, "avg_reward": 5,
+              "elapsed_sec": 6, "avg_gen_sec": 7, "rollouts_per_min": 8
+            },
+            "renameByName": {
+              "window": "Window", "total_rollouts": "Total",
+              "successful_rollouts": "Success", "failed_rollouts": "Failed",
+              "success_rate": "Success %", "avg_reward": "Avg Reward",
+              "elapsed_sec": "Time (s)", "avg_gen_sec": "Gen (s)",
+              "rollouts_per_min": "Roll/min"
+            }
+          }
+        },
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              { "destinationType": "number", "targetField": "Window" },
+              { "destinationType": "number", "targetField": "Total" },
+              { "destinationType": "number", "targetField": "Success" },
+              { "destinationType": "number", "targetField": "Failed" },
+              { "destinationType": "number", "targetField": "Success %" },
+              { "destinationType": "number", "targetField": "Avg Reward" },
+              { "destinationType": "number", "targetField": "Time (s)" },
+              { "destinationType": "number", "targetField": "Gen (s)" },
+              { "destinationType": "number", "targetField": "Roll/min" }
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": { "fields": {}, "sort": [{ "field": "Window", "desc": true }] }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 30 },
+      "id": 300,
+      "title": "Pipeline Timing",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "Generation, evaluation, and proof timing breakdown per GRPO group.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" },
+            "filterable": false,
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Gen (s)" },
+            "properties": [
+              { "id": "custom.width", "value": 70 },
+              { "id": "custom.align", "value": "right" },
+              { "id": "decimals", "value": 2 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Eval (s)" },
+            "properties": [
+              { "id": "custom.width", "value": 70 },
+              { "id": "custom.align", "value": "right" },
+              { "id": "decimals", "value": 2 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Proof (s)" },
+            "properties": [
+              { "id": "custom.width", "value": 70 },
+              { "id": "custom.align", "value": "right" },
+              { "id": "decimals", "value": 2 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Wait (s)" },
+            "properties": [
+              { "id": "custom.width", "value": 65 },
+              { "id": "custom.align", "value": "right" },
+              { "id": "decimals", "value": 2 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Total (s)" },
+            "properties": [
+              { "id": "custom.width", "value": 75 },
+              { "id": "custom.align", "value": "right" },
+              { "id": "decimals", "value": 2 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Rollouts" },
+            "properties": [
+              { "id": "custom.width", "value": 70 },
+              { "id": "custom.align", "value": "right" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Tokens" },
+            "properties": [
+              { "id": "custom.width", "value": 70 },
+              { "id": "custom.align", "value": "right" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Tok/s" },
+            "properties": [
+              { "id": "custom.width", "value": 65 },
+              { "id": "custom.align", "value": "right" },
+              { "id": "decimals", "value": 1 },
+              {
+                "id": "color",
+                "value": { "mode": "continuous-greens" }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": { "mode": "gradient", "type": "color-background" }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 31 },
+      "id": 4,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "enablePagination": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "editorMode": "code",
+          "expr": "{logger=\"grail.miner.timing\"} | regexp `] (?P<raw>{.+})` | line_format `{{.raw}}` | json | __error__=``",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Pipeline Timing Breakdown",
+      "transformations": [
+        {
+          "id": "extractFields",
+          "options": { "format": "json", "replace": false, "source": "Line" }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Line": true, "Time": true, "id": true, "tsNs": true,
+              "labels": true, "event": true
+            },
+            "indexByName": {
+              "gen_sec": 0, "eval_sec": 1, "proof_sec": 2,
+              "proof_wait_sec": 3, "group_sec": 4, "num_rollouts": 5,
+              "total_completion_tokens": 6, "tokens_per_sec": 7
+            },
+            "renameByName": {
+              "gen_sec": "Gen (s)", "eval_sec": "Eval (s)",
+              "proof_sec": "Proof (s)", "proof_wait_sec": "Wait (s)",
+              "group_sec": "Total (s)", "num_rollouts": "Rollouts",
+              "total_completion_tokens": "Tokens", "tokens_per_sec": "Tok/s"
+            }
+          }
+        },
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              { "destinationType": "number", "targetField": "Gen (s)" },
+              { "destinationType": "number", "targetField": "Eval (s)" },
+              { "destinationType": "number", "targetField": "Proof (s)" },
+              { "destinationType": "number", "targetField": "Wait (s)" },
+              { "destinationType": "number", "targetField": "Total (s)" },
+              { "destinationType": "number", "targetField": "Rollouts" },
+              { "destinationType": "number", "targetField": "Tokens" },
+              { "destinationType": "number", "targetField": "Tok/s" }
+            ]
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 42 },
+      "id": 400,
+      "title": "Checkpoints",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "Checkpoint load events showing method (fast/full), success, and load time.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" },
+            "filterable": false,
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Window" },
+            "properties": [
+              { "id": "custom.width", "value": 70 },
+              { "id": "custom.align", "value": "center" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Method" },
+            "properties": [
+              { "id": "custom.width", "value": 65 },
+              { "id": "custom.align", "value": "center" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Success" },
+            "properties": [
+              { "id": "custom.width", "value": 65 },
+              { "id": "custom.align", "value": "center" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Fast" },
+            "properties": [
+              { "id": "custom.width", "value": 55 },
+              { "id": "custom.align", "value": "center" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Prev Window" },
+            "properties": [
+              { "id": "custom.width", "value": 85 },
+              { "id": "custom.align", "value": "center" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Load (s)" },
+            "properties": [
+              { "id": "custom.width", "value": 70 },
+              { "id": "custom.align", "value": "right" },
+              { "id": "decimals", "value": 2 }
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 43 },
+      "id": 5,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "enablePagination": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "Window" }]
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "editorMode": "code",
+          "expr": "{logger=\"grail.miner.checkpoint\"} | regexp `] (?P<raw>{.+})` | line_format `{{.raw}}` | json | __error__=``",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Checkpoint Events",
+      "transformations": [
+        {
+          "id": "extractFields",
+          "options": { "format": "json", "replace": false, "source": "Line" }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Line": true, "Time": true, "id": true, "tsNs": true,
+              "labels": true, "event": true
+            },
+            "indexByName": {
+              "window": 0, "method": 1, "success": 2,
+              "is_fast_path": 3, "prev_window": 4, "load_sec": 5
+            },
+            "renameByName": {
+              "window": "Window", "method": "Method", "success": "Success",
+              "is_fast_path": "Fast", "prev_window": "Prev Window",
+              "load_sec": "Load (s)"
+            }
+          }
+        },
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              { "destinationType": "number", "targetField": "Window" },
+              { "destinationType": "number", "targetField": "Prev Window" },
+              { "destinationType": "number", "targetField": "Load (s)" }
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": { "fields": {}, "sort": [{ "field": "Window", "desc": true }] }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 52 },
+      "id": 500,
+      "title": "Network Stats",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "Network-wide statistics at each weight submission interval.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" },
+            "filterable": false,
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Interval" },
+            "properties": [
+              { "id": "custom.width", "value": 65 },
+              { "id": "custom.align", "value": "center" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Block" },
+            "properties": [
+              { "id": "custom.width", "value": 70 },
+              { "id": "custom.align", "value": "center" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Registered" },
+            "properties": [
+              { "id": "custom.width", "value": 80 },
+              { "id": "custom.align", "value": "right" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Active" },
+            "properties": [
+              { "id": "custom.width", "value": 65 },
+              { "id": "custom.align", "value": "right" },
+              {
+                "id": "color",
+                "value": { "mode": "continuous-greens" }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": { "mode": "gradient", "type": "color-background" }
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Unique Rollouts" },
+            "properties": [
+              { "id": "custom.width", "value": 110 },
+              { "id": "custom.align", "value": "right" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Avg Weight" },
+            "properties": [
+              { "id": "custom.width", "value": 85 },
+              { "id": "custom.align", "value": "right" },
+              { "id": "decimals", "value": 6 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Max Weight" },
+            "properties": [
+              { "id": "custom.width", "value": 85 },
+              { "id": "custom.align", "value": "right" },
+              { "id": "decimals", "value": 6 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Median Weight" },
+            "properties": [
+              { "id": "custom.width", "value": 100 },
+              { "id": "custom.align", "value": "right" },
+              { "id": "decimals", "value": 6 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Failures" },
+            "properties": [
+              { "id": "custom.width", "value": 70 },
+              { "id": "custom.align", "value": "center" },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "transparent", "value": null },
+                    { "color": "red", "value": 1 }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": { "mode": "basic", "type": "color-background" }
+              },
+              { "id": "color", "value": { "mode": "thresholds" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Avg Success %" },
+            "properties": [
+              { "id": "custom.width", "value": 100 },
+              { "id": "custom.align", "value": "right" },
+              { "id": "decimals", "value": 1 }
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 53 },
+      "id": 6,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "enablePagination": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "Interval" }]
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "editorMode": "code",
+          "expr": "{logger=\"grail.validator.network\"} | regexp `] (?P<raw>{.+})` | line_format `{{.raw}}` | json | __error__=``",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Network Statistics",
+      "transformations": [
+        {
+          "id": "extractFields",
+          "options": { "format": "json", "replace": false, "source": "Line" }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Line": true, "Time": true, "id": true, "tsNs": true,
+              "labels": true, "event": true
+            },
+            "indexByName": {
+              "interval": 0, "block": 1, "total_miners": 2,
+              "active_miners": 3, "total_unique_rollouts": 4,
+              "avg_weight": 5, "max_weight": 6, "median_weight": 7,
+              "total_failures": 8, "avg_success_rate": 9
+            },
+            "renameByName": {
+              "interval": "Interval", "block": "Block",
+              "total_miners": "Registered", "active_miners": "Active",
+              "total_unique_rollouts": "Unique Rollouts",
+              "avg_weight": "Avg Weight", "max_weight": "Max Weight",
+              "median_weight": "Median Weight",
+              "total_failures": "Failures",
+              "avg_success_rate": "Avg Success %"
+            }
+          }
+        },
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              { "destinationType": "number", "targetField": "Interval" },
+              { "destinationType": "number", "targetField": "Block" },
+              { "destinationType": "number", "targetField": "Registered" },
+              { "destinationType": "number", "targetField": "Active" },
+              { "destinationType": "number", "targetField": "Unique Rollouts" },
+              { "destinationType": "number", "targetField": "Avg Weight" },
+              { "destinationType": "number", "targetField": "Max Weight" },
+              { "destinationType": "number", "targetField": "Median Weight" },
+              { "destinationType": "number", "targetField": "Failures" },
+              { "destinationType": "number", "targetField": "Avg Success %" }
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": { "fields": {}, "sort": [{ "field": "Interval", "desc": true }] }
+        }
+      ],
+      "type": "table"
+    }
+  ],
+  "refresh": "",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["grail", "ops", "mining", "validation"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "GRAIL Operations",
+  "uid": "grail-ops",
+  "version": 1,
+  "weekStart": ""
+}
