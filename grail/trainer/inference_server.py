@@ -37,6 +37,9 @@ class ServerConfig:
     tokenizer_name: str | None = None  # Explicit tokenizer name/path (e.g. "Qwen/Qwen3-8B")
     env: dict[str, str] | None = None  # Environment variables for subprocess
     enable_sleep_mode: bool = False  # Enable vLLM sleep mode for on-the-fly weight sync
+    tensor_parallel_size: int = (
+        1  # vLLM tensor parallelism (requires matching CUDA_VISIBLE_DEVICES)
+    )
 
 
 class InferenceServerManager(ABC):
@@ -602,7 +605,7 @@ class VLLMServerManager(InferenceServerManager):
             "--kv-cache-dtype",
             str(self._eval_config.vllm_kv_cache_dtype),
             "--tensor-parallel-size",
-            "1",
+            str(self._config.tensor_parallel_size),
             # Memory optimizations from EvalConfig to prevent OOM during KV cache allocation
             "--gpu-memory-utilization",
             str(self._eval_config.vllm_gpu_memory_utilization),
@@ -651,7 +654,8 @@ class SGLangServerManager(InferenceServerManager):
         if not self._config.model_path:
             raise ValueError("No model_path provided for SGLang server")
 
-        if not os.path.exists(self._config.model_path):
+        # Allow both local paths and HuggingFace model IDs (e.g. "Qwen/Qwen3-8B")
+        if not os.path.exists(self._config.model_path) and "/" not in self._config.model_path:
             raise FileNotFoundError(f"Model path does not exist: {self._config.model_path}")
 
         # Allocate port and build command
@@ -671,7 +675,18 @@ class SGLangServerManager(InferenceServerManager):
             popen_env = os.environ.copy()
             if self._config.env:
                 popen_env.update(self._config.env)
-                logger.info("SGLang server using custom environment: %s", self._config.env)
+                cuda_env = self._config.env.get("CUDA_VISIBLE_DEVICES")
+                if cuda_env is not None:
+                    logger.info("Launching SGLang with CUDA_VISIBLE_DEVICES=%s", cuda_env)
+            # Ensure the Python executable's directory is on PATH so that
+            # tools installed in the same venv (e.g. ninja for flashinfer JIT)
+            # are discoverable by SGLang subprocesses.
+            import sys
+
+            python_bin_dir = os.path.dirname(os.path.abspath(sys.executable))
+            existing_path = popen_env.get("PATH", "")
+            if python_bin_dir not in existing_path.split(os.pathsep):
+                popen_env["PATH"] = f"{python_bin_dir}{os.pathsep}{existing_path}"
 
             self._process = subprocess.Popen(
                 cmd,
@@ -714,6 +729,23 @@ class SGLangServerManager(InferenceServerManager):
                 "Enable stream_server_logs=True in EvalConfig to see SGLang stderr."
             )
 
+        # Discover model id from server to ensure correct model_name for requests
+        try:
+            import requests as _requests
+
+            resp = _requests.get(ready_url, timeout=10.0)
+            if resp.status_code == 200:
+                payload = resp.json()
+                data = payload.get("data", []) if isinstance(payload, dict) else []
+                if data and isinstance(data, list):
+                    first = data[0]
+                    model_id = first.get("id") if isinstance(first, dict) else None
+                    if model_id:
+                        self._config.model_name_override = str(model_id)
+                        logger.info("Discovered SGLang model id: %s", model_id)
+        except Exception as exc:
+            logger.debug("Failed to discover SGLang model id (non-fatal): %s", exc)
+
     async def _stop_server(self) -> None:
         """Terminate SGLang server and wait for GPU memory release."""
         await self._stop_process_logger()
@@ -727,12 +759,16 @@ class SGLangServerManager(InferenceServerManager):
 
     def _build_command(self) -> list[str]:
         """Build SGLang server launch command with optimized parameters."""
+        import sys
+
         cmd = [
-            "python",
+            sys.executable,
             "-m",
             "sglang.launch_server",
             "--model-path",
             self._config.model_path,
+            "--served-model-name",
+            self.model_name,
             "--host",
             self._config.host,
             "--port",
@@ -740,7 +776,7 @@ class SGLangServerManager(InferenceServerManager):
             "--dtype",
             self._config.dtype,
             "--tp-size",
-            "1",
+            str(self._config.tensor_parallel_size),
             # Memory optimizations from EvalConfig to prevent OOM during KV cache allocation
             "--mem-fraction-static",
             str(self._eval_config.sglang_mem_fraction_static),
