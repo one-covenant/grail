@@ -42,15 +42,12 @@ MODEL_SCHEMA = pa.struct(
 # Rollout data nested structure
 ROLLOUT_SCHEMA = pa.struct(
     [
-        ("trajectory", pa.string()),  # JSON-encoded for complex nested lists
         ("total_reward", pa.float64()),
         ("advantage", pa.float64()),
         ("success", pa.bool_()),
-        ("token_logprobs", pa.list_(pa.float64())),
+        ("token_logprobs", pa.list_(pa.float32())),
         ("prompt_length", pa.int32()),
         ("completion_length", pa.int32()),
-        ("satisfied_clauses", pa.int32()),
-        ("assignment", pa.list_(pa.bool_())),
     ]
 )
 
@@ -117,13 +114,6 @@ def _convert_inference_to_row(inference: dict[str, Any]) -> dict[str, Any]:
     elif not isinstance(token_logprobs, list):
         token_logprobs = list(token_logprobs) if hasattr(token_logprobs, "__iter__") else []
 
-    # Handle assignment - ensure it's a list of bools
-    assignment = rollout_data.get("assignment")
-    if assignment is None:
-        assignment = []
-    elif not isinstance(assignment, list):
-        assignment = list(assignment) if hasattr(assignment, "__iter__") else []
-
     # Handle tokens - ensure it's a list of ints
     tokens = commit.get("tokens")
     if tokens is None:
@@ -154,15 +144,12 @@ def _convert_inference_to_row(inference: dict[str, Any]) -> dict[str, Any]:
             "signature": str(commit.get("signature", "")),
             "beacon": json.dumps(commit.get("beacon", {})),
             "rollout": {
-                "trajectory": json.dumps(rollout_data.get("trajectory", [])),
                 "total_reward": float(rollout_data.get("total_reward", 0.0)),
                 "advantage": float(rollout_data.get("advantage", 0.0)),
                 "success": bool(rollout_data.get("success", False)),
                 "token_logprobs": [float(lp) for lp in token_logprobs],
                 "prompt_length": int(rollout_data.get("prompt_length", 0)),
                 "completion_length": int(rollout_data.get("completion_length", 0)),
-                "satisfied_clauses": int(rollout_data.get("satisfied_clauses", 0)),
-                "assignment": [bool(a) for a in assignment],
             },
         },
         "timestamp": float(inference.get("timestamp", 0.0)),
@@ -197,10 +184,6 @@ def _convert_row_to_inference(row: dict[str, Any]) -> dict[str, Any]:
     if isinstance(beacon, str):
         beacon = json.loads(beacon)
 
-    trajectory = rollout_data.get("trajectory", "[]")
-    if isinstance(trajectory, str):
-        trajectory = json.loads(trajectory)
-
     return {
         "window_start": row.get("window_start"),
         "block": row.get("block"),
@@ -223,15 +206,12 @@ def _convert_row_to_inference(row: dict[str, Any]) -> dict[str, Any]:
             "signature": commit.get("signature"),
             "beacon": beacon,
             "rollout": {
-                "trajectory": trajectory,
                 "total_reward": rollout_data.get("total_reward"),
                 "advantage": rollout_data.get("advantage"),
                 "success": rollout_data.get("success"),
                 "token_logprobs": list(rollout_data.get("token_logprobs", [])),
                 "prompt_length": rollout_data.get("prompt_length"),
                 "completion_length": rollout_data.get("completion_length"),
-                "satisfied_clauses": rollout_data.get("satisfied_clauses"),
-                "assignment": list(rollout_data.get("assignment", [])),
             },
         },
         "timestamp": row.get("timestamp"),
@@ -285,7 +265,8 @@ def serialize_window_to_parquet(window_data: dict[str, Any]) -> bytes:
     pq.write_table(
         table,
         buffer,
-        compression="snappy",
+        compression="zstd",
+        compression_level=1,
         use_dictionary=True,
         write_statistics=True,
     )
