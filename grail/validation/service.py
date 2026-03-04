@@ -63,6 +63,7 @@ from .window_processor import WindowProcessor
 
 logger = logging.getLogger(__name__)
 leaderboard_logger = logging.getLogger("grail.leaderboard")
+network_logger = logging.getLogger("grail.validator.network")
 
 # Weight submission constants
 WEIGHT_SUBMISSION_INTERVAL_BLOCKS = 360
@@ -838,6 +839,53 @@ class ValidationService:
                 current_interval=current_interval,
                 current_block=current_block,
             )
+
+            # Emit structured network stats log
+            try:
+                active_weights = [float(w) for _, w in non_zero_weights]
+                sorted_weights = sorted(active_weights)
+                mid = len(sorted_weights) // 2
+                median_w = (
+                    (
+                        sorted_weights[mid]
+                        if len(sorted_weights) % 2
+                        else (sorted_weights[mid - 1] + sorted_weights[mid]) / 2
+                    )
+                    if sorted_weights
+                    else 0.0
+                )
+
+                total_unique = 0
+                total_successful = 0
+                total_inferences = 0
+                total_failures = 0
+                for hk, _ in non_zero_weights:
+                    for _ws, m in self._inference_counts[hk].items():
+                        total_unique += m.get("estimated_unique", 0)
+                        total_successful += m.get("estimated_successful", 0)
+                        total_inferences += m.get("total", 0)
+                    total_failures += self._failure_counts.get(hk, 0)
+
+                net_entry = {
+                    "event": "network_stats",
+                    "interval": current_interval,
+                    "block": current_block,
+                    "total_miners": len(meta.uids),
+                    "active_miners": len(non_zero_weights),
+                    "total_unique_rollouts": total_unique,
+                    "avg_weight": round(sum(active_weights) / len(active_weights), 6)
+                    if active_weights
+                    else 0.0,
+                    "max_weight": round(max(active_weights), 6) if active_weights else 0.0,
+                    "median_weight": round(median_w, 6),
+                    "total_failures": total_failures,
+                    "avg_success_rate": round(total_successful / total_inferences * 100, 1)
+                    if total_inferences
+                    else 0.0,
+                }
+                network_logger.info(json.dumps(net_entry))
+            except Exception:
+                logger.debug("Failed to emit network stats log", exc_info=True)
 
         # Log top miners by weight to monitoring (W&B)
         if self._monitor and non_zero_weights:

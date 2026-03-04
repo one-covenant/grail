@@ -7,6 +7,7 @@ single window.
 from __future__ import annotations
 
 import gc
+import json
 import logging
 import time
 from collections import Counter
@@ -18,10 +19,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from ..infrastructure.chain import GrailChainManager
 from ..logging_utils import miner_log_context
 from .copycat_service import CopycatService
-from .miner_validator import MinerValidator
+from .miner_validator import FAILURE_FLAG_KEY, MinerValidator
 from .types import MinerResults, WindowResults
 
 logger = logging.getLogger(__name__)
+verdict_logger = logging.getLogger("grail.validator.verdict")
 
 
 class WindowProcessor:
@@ -193,6 +195,33 @@ class WindowProcessor:
                 invalid_signatures += pr_invalid_sig
                 invalid_proofs += pr_invalid_proof
                 processing_errors += pr_processing_err
+
+                # Emit structured verdict log
+                try:
+                    m = result.metrics or {}
+                    total_inf = m.get("total", 0)
+                    est_succ = m.get("estimated_successful", 0)
+                    verdict_entry = {
+                        "event": "verdict",
+                        "window": window,
+                        "uid": result.uid,
+                        "hotkey_short": miner_hotkey[:8],
+                        "found_file": result.found_file,
+                        "valid_count": m.get("valid", 0),
+                        "checked_count": m.get("checked", 0),
+                        "total_inferences": total_inf,
+                        "estimated_unique": m.get("estimated_unique", 0),
+                        "estimated_successful": est_succ,
+                        "success_rate": round(est_succ / total_inf * 100, 1) if total_inf else 0.0,
+                        "failure_flag": m.get(FAILURE_FLAG_KEY, 0),
+                        "failure_reason": result.failure_reason,
+                        "prompt_mismatch_count": m.get("prompt_mismatch", 0),
+                        "validation_sec": round(sec, 1),
+                        "validation_blocks": blk,
+                    }
+                    verdict_logger.info(json.dumps(verdict_entry))
+                except Exception:
+                    logger.debug("Failed to emit verdict log", exc_info=True)
 
             except Exception as e:
                 # Log the error with miner context (uid already set above)
