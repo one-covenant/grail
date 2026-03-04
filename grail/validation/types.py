@@ -33,6 +33,7 @@ class MinerResults:
     processed_counts: tuple[int, int, int, int]
     digest_counter: Counter[str] | None
     total_inferences_in_file: int
+    failure_reason: str | None = None
 
 
 @dataclass

@@ -62,6 +62,7 @@ class ValidationMetrics:
     prompt_valid_count: int
     prompt_mismatch_count: int
     failure_flag: int
+    failure_reason: str | None = None
 
     def to_dict(self) -> dict[str, int]:
         """Convert to dictionary format for weight computation."""
@@ -793,6 +794,7 @@ class MinerValidator:
             "soft_failures": 0,
             "hard_failure": False,
             "soft_gate_triggered": False,
+            "failure_reason": None,
             "prompt_valid_count": 0,
             "prompt_mismatch_count": 0,
             "pr_total": 0,
@@ -1127,6 +1129,7 @@ class MinerValidator:
             failed_check = next(
                 (k for k in self._hard_check_keys if not checks.get(k, False)), None
             )
+            state["failure_reason"] = f"hard:{failed_check}" if failed_check else "hard:unknown"
             if failed_check:
                 logger.warning(
                     f"Hard verification failed on check '{failed_check}'; invalidating uid"
@@ -1150,6 +1153,7 @@ class MinerValidator:
             if state["soft_failures"] >= soft_fail_cutoff:
                 state["soft_gate_triggered"] = True
                 soft_name = self._soft_check_key or "soft_check"
+                state["failure_reason"] = f"soft:{soft_name}"
                 logger.warning(
                     f"Soft-check threshold reached for '{soft_name}' "
                     f"({state['soft_failures']}/{total_planned_checks}); invalidating uid"
@@ -1442,6 +1446,7 @@ class MinerValidator:
             prompt_valid_count=0,
             prompt_mismatch_count=0,
             failure_flag=1,
+            failure_reason=f"file:{reason}",
         )
 
         return MinerResults(
@@ -1453,6 +1458,7 @@ class MinerValidator:
             processed_counts=(0, 0, 0, 0),
             digest_counter=None,
             total_inferences_in_file=0,
+            failure_reason=f"file:{reason}",
         )
 
     async def _create_failure_result(
@@ -1478,6 +1484,7 @@ class MinerValidator:
             prompt_valid_count=0,
             prompt_mismatch_count=state["prompt_mismatch_count"],
             failure_flag=1,
+            failure_reason=state.get("failure_reason"),
         )
 
         logger.warning(
@@ -1524,6 +1531,7 @@ class MinerValidator:
             ),
             digest_counter=None,
             total_inferences_in_file=total_inferences,
+            failure_reason=state.get("failure_reason"),
         )
 
     async def _create_grpo_failure_result(
