@@ -44,6 +44,7 @@ from ..shared.constants import (
     TRAINER_UID,
     TRUST_LIST_KEY_PREFIX,
     TRUST_LIST_VERSION,
+    UNIQUE_ROLLOUTS_CAP,
     WINDOW_LENGTH,
 )
 from ..shared.window_utils import (
@@ -61,6 +62,7 @@ from .sampling import MinerSampler
 from .window_processor import WindowProcessor
 
 logger = logging.getLogger(__name__)
+leaderboard_logger = logging.getLogger("grail.leaderboard")
 
 # Weight submission constants
 WEIGHT_SUBMISSION_INTERVAL_BLOCKS = 360
@@ -827,9 +829,19 @@ class ValidationService:
             except Exception as e:
                 logger.error(f"Failed to submit weights: {e}")
 
+        # Emit structured leaderboard logs for Grafana (only after successful submission)
+        if non_zero_weights and self._last_weights_interval_submitted == current_interval:
+            uid_by_hotkey = dict(zip(meta.hotkeys, meta.uids, strict=True))
+            self._emit_leaderboard_logs(
+                non_zero_weights=non_zero_weights,
+                uid_by_hotkey=uid_by_hotkey,
+                current_interval=current_interval,
+                current_block=current_block,
+            )
+
         # Log top miners by weight to monitoring (W&B)
         if self._monitor and non_zero_weights:
-            # Build UID mapping and select top-K by weight
+            # Build UID mapping (may already exist from leaderboard block above)
             uid_by_hotkey = dict(zip(meta.hotkeys, meta.uids, strict=True))
             top_k = 5
             top_miners = sorted(non_zero_weights, key=lambda x: float(x[1]), reverse=True)[:top_k]
@@ -982,6 +994,59 @@ class ValidationService:
             # Compute per-UID rollout statistics over the rolling window (12 windows)
             # For all miners with non-zero weight
             await self._log_per_uid_rollout_stats(non_zero_weights, uid_by_hotkey)
+
+    def _emit_leaderboard_logs(
+        self,
+        non_zero_weights: list[tuple[str, float]],
+        uid_by_hotkey: dict[str, int],
+        current_interval: int,
+        current_block: int,
+    ) -> None:
+        """Emit structured JSON log lines for each miner with non-zero weight.
+
+        Logs to a dedicated 'grail.leaderboard' logger so Promtail captures them
+        with a distinct label for Grafana dashboard queries.
+        """
+        sorted_miners = sorted(non_zero_weights, key=lambda x: float(x[1]), reverse=True)
+        period_cap = UNIQUE_ROLLOUTS_CAP * WEIGHT_ROLLING_WINDOWS
+
+        for rank, (hk, weight) in enumerate(sorted_miners, start=1):
+            uid = uid_by_hotkey.get(hk)
+
+            # Aggregate metrics across all windows
+            total_rollouts = 0
+            total_unique = 0
+            total_successful = 0
+            windows_with_data = 0
+
+            for _window_start, metrics in self._inference_counts[hk].items():
+                total_rollouts += metrics.get("total", 0)
+                total_unique += metrics.get("estimated_unique", 0)
+                total_successful += metrics.get("estimated_successful", 0)
+                windows_with_data += 1
+
+            unique_per_window = total_unique / windows_with_data if windows_with_data > 0 else 0.0
+            cap_pct = (total_unique / period_cap * 100) if period_cap > 0 else 0.0
+            success_rate = total_successful / total_rollouts * 100 if total_rollouts > 0 else 0.0
+
+            entry = {
+                "event": "leaderboard",
+                "rank": rank,
+                "uid": uid,
+                "weight": round(float(weight), 6),
+                "unique_rollouts": total_unique,
+                "unique_per_window": round(unique_per_window, 1),
+                "cap_pct": round(cap_pct, 1),
+                "total_rollouts": total_rollouts,
+                "success_rate": round(success_rate, 1),
+                "windows_active": self._availability_counts.get(hk, 0),
+                "windows_checked": self._selection_counts.get(hk, 0),
+                "failure_count": self._failure_counts.get(hk, 0),
+                "interval": current_interval,
+                "block": current_block,
+                "hotkey_short": hk[:8],
+            }
+            leaderboard_logger.info(json.dumps(entry))
 
     def _compute_target_validation_window(self, current_block: int) -> int:
         """Compute the target window for validation based on current block.
