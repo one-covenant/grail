@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import time as _time_mod
 import traceback
 from types import SimpleNamespace
 
@@ -43,6 +45,7 @@ from grail.shared.window_utils import (
 from .base import BaseNeuron
 
 logger = logging.getLogger(__name__)
+checkpoint_logger = logging.getLogger("grail.miner.checkpoint")
 
 
 class MinerNeuron(BaseNeuron):
@@ -217,11 +220,28 @@ class MinerNeuron(BaseNeuron):
                         if monitor
                         else contextlib.nullcontext()
                     )
+                    _ckpt_t0 = _time_mod.monotonic()
                     with timer_ctx:
                         result, checkpoint_path = await checkpoint_manager.load_or_update_model(
                             window_start, model, current_checkpoint_window
                         )
+                    _ckpt_load_sec = _time_mod.monotonic() - _ckpt_t0
                     self.heartbeat()
+
+                    # Emit structured checkpoint log
+                    try:
+                        ckpt_entry = {
+                            "event": "checkpoint",
+                            "window": window_start,
+                            "method": result.method,
+                            "success": result.success,
+                            "is_fast_path": result.is_fast_path,
+                            "prev_window": current_checkpoint_window,
+                            "load_sec": round(_ckpt_load_sec, 2),
+                        }
+                        checkpoint_logger.info(json.dumps(ckpt_entry))
+                    except Exception:
+                        logger.debug("Failed to emit checkpoint log", exc_info=True)
 
                     if result.success:
                         if result.is_fast_path:
@@ -276,7 +296,10 @@ class MinerNeuron(BaseNeuron):
                                         else None
                                     )
                                     model = get_model(
-                                        str(checkpoint_path), device=model_device, eval_mode=True
+                                        str(checkpoint_path),
+                                        device=model_device,
+                                        eval_mode=True,
+                                        use_flash_attention=True,
                                     )
                                     tokenizer = get_tokenizer(str(checkpoint_path))
 

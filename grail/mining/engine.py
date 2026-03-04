@@ -1,14 +1,13 @@
-"""Pipelined mining engine orchestrating 3 GPUs.
+"""Pipelined mining engine.
 
-GPU 0 = generation (vLLM/SGLang), GPU 1 = HF proofs, GPU 2/3 = kernel eval.
-
-Key optimization: after generation completes, proof computation (GPU 1) and
-kernel eval (GPU 2/3) run **in parallel** since proofs only need token IDs,
-not env rewards.
+After generation completes, proof computation and kernel eval run **in parallel**
+since proofs only need token IDs, not env rewards. Kernel eval dispatches env.step()
+calls across multiple GPUs via ThreadPoolExecutor.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Callable
@@ -27,6 +26,7 @@ from .proof_worker import ProofWorker
 from .weight_sync import WeightSyncStrategy
 
 logger = logging.getLogger(__name__)
+timing_logger = logging.getLogger("grail.miner.timing")
 
 
 class PipelinedMiningEngine:
@@ -53,6 +53,7 @@ class PipelinedMiningEngine:
         self._proof_worker = proof_worker
         self._gen_params = gen_params or GenerationParams()
         self._proof_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="proof")
+        self._eval_executor = ThreadPoolExecutor(max_workers=32, thread_name_prefix="eval")
 
     # ------------------------------------------------------------------
     # Public API
@@ -98,6 +99,11 @@ class PipelinedMiningEngine:
         all_proof_results: list[tuple[list[dict], list[float], bytes, dict, str]] = []
 
         group_start = time.time()
+        total_gen_time = 0.0
+        total_eval_time = 0.0
+        total_proof_time = 0.0
+        total_proof_wait = 0.0
+        total_tokens = 0
 
         for batch_start in range(0, count, batch_size):
             batch_end = min(batch_start + batch_size, count)
@@ -135,6 +141,7 @@ class PipelinedMiningEngine:
             gen_start = time.time()
             gen_results = await backend.generate(prompt_ids_batch, params=self._gen_params)
             gen_time = time.time() - gen_start
+            total_gen_time += gen_time
 
             # Extract all_ids and prompt_lens for proof submission
             gen_all_ids: list[list[int]] = []
@@ -148,6 +155,7 @@ class PipelinedMiningEngine:
                 completion_lengths.append(len(all_ids) - prompt_len)
 
             total_completion_tokens = sum(completion_lengths)
+            total_tokens += total_completion_tokens
             logger.info(
                 "TIMING gen=%.2fs (%d prompts, %d total_completion_tokens, "
                 "min/avg/max=%d/%.0f/%d tokens, %.0f tok/s)",
@@ -172,24 +180,37 @@ class PipelinedMiningEngine:
                 wallet,
             )
 
-            # 5. Step environments for kernel eval (GPU 2/3, runs in parallel with proofs)
+            # 5. Parallel kernel eval (runs in parallel with proofs)
             eval_start = time.time()
-            batch_data: list[tuple[list[int], int, float, dict]] = []
-            per_eval_times: list[float] = []
-            for env_idx, env in enumerate(envs):
-                all_ids = gen_all_ids[env_idx]
-                prompt_len = gen_prompt_lens[env_idx]
+
+            def _eval_single(
+                env_idx: int,
+                _envs: list = envs,  # noqa: B006
+                _all_ids: list = gen_all_ids,  # noqa: B006
+                _prompt_lens: list = gen_prompt_lens,  # noqa: B006
+            ) -> tuple[list[int], int, float, dict, float]:
+                env = _envs[env_idx]
+                all_ids = _all_ids[env_idx]
+                prompt_len = _prompt_lens[env_idx]
                 completion_ids = all_ids[prompt_len:]
                 completion_text = tokenizer.decode(completion_ids, skip_special_tokens=False)
-
                 t0 = time.time()
                 _next_obs, reward, _terminated, _truncated, info = env.step(
                     ChatMessage(role="assistant", content=completion_text)
                 )
-                per_eval_times.append(time.time() - t0)
-                batch_data.append((all_ids, prompt_len, float(reward), info))
+                return all_ids, prompt_len, float(reward), info, time.time() - t0
+
+            eval_futures = [self._eval_executor.submit(_eval_single, i) for i in range(batch_count)]
+
+            batch_data: list[tuple[list[int], int, float, dict]] = []
+            per_eval_times: list[float] = []
+            for future in eval_futures:
+                all_ids, prompt_len, reward, info, eval_dur = future.result()
+                batch_data.append((all_ids, prompt_len, reward, info))
+                per_eval_times.append(eval_dur)
 
             eval_time = time.time() - eval_start
+            total_eval_time += eval_time
             rewards = [d[2] for d in batch_data]
             logger.info(
                 "TIMING kernel_eval_total=%.2fs (per_eval=[%s]) "
@@ -209,6 +230,8 @@ class PipelinedMiningEngine:
                 proof_results = proof_future.result(timeout=600)
                 proof_time = time.time() - proof_start
                 proof_wait = max(0, proof_time - eval_time)
+                total_proof_time += proof_time
+                total_proof_wait += proof_wait
                 logger.info(
                     "TIMING proof=%.2fs (eval_overlap=%.2fs, extra_wait=%.2fs)",
                     proof_time,
@@ -244,6 +267,25 @@ class PipelinedMiningEngine:
             max((r.reward for r in rollouts), default=0),
         )
 
+        # Emit structured timing log
+        try:
+            timing_entry = {
+                "event": "group_timing",
+                "gen_sec": round(total_gen_time, 2),
+                "eval_sec": round(total_eval_time, 2),
+                "proof_sec": round(total_proof_time, 2),
+                "proof_wait_sec": round(total_proof_wait, 2),
+                "group_sec": round(group_time, 2),
+                "num_rollouts": len(rollouts),
+                "total_completion_tokens": total_tokens,
+                "tokens_per_sec": round(total_tokens / total_gen_time, 1)
+                if total_gen_time > 0
+                else 0.0,
+            }
+            timing_logger.info(json.dumps(timing_entry))
+        except Exception:
+            logger.debug("Failed to emit timing log", exc_info=True)
+
         return rollouts
 
     def submit_proofs(
@@ -267,5 +309,6 @@ class PipelinedMiningEngine:
     def shutdown(self) -> None:
         """Release resources."""
         self._proof_executor.shutdown(wait=False)
+        self._eval_executor.shutdown(wait=False)
         self._proof_worker.shutdown()
         logger.info("PipelinedMiningEngine shutdown complete")

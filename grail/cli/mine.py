@@ -4,6 +4,7 @@
 # --------------------------------------------------------------------------- #
 import asyncio
 import hashlib
+import json
 import logging
 import math
 import os
@@ -34,6 +35,7 @@ from . import console
 #                       Constants & global singletons                         #
 # --------------------------------------------------------------------------- #
 logger = logging.getLogger("grail")
+window_logger = logging.getLogger("grail.miner.window")
 
 
 # --------------------------------------------------------------------------- #
@@ -960,6 +962,31 @@ async def generate_rollouts_for_window(
         if successful_rollouts > 0:
             avg_reward = total_reward / successful_rollouts
             await monitor.log_gauge("mining/average_reward", avg_reward)
+
+    # Emit structured window summary log
+    try:
+        total_attempts = successful_rollouts + failed_rollouts
+        window_entry = {
+            "event": "window_summary",
+            "window": window_start,
+            "total_rollouts": len(inferences),
+            "successful_rollouts": successful_rollouts,
+            "failed_rollouts": failed_rollouts,
+            "success_rate": round(successful_rollouts / total_attempts * 100, 1)
+            if total_attempts
+            else 0.0,
+            "avg_reward": round(total_reward / successful_rollouts, 4)
+            if successful_rollouts
+            else 0.0,
+            "elapsed_sec": round(elapsed_time, 1),
+            "avg_gen_sec": round(avg_gen_time, 2),
+            "rollouts_per_min": round(len(inferences) / (elapsed_time / 60), 1)
+            if elapsed_time > 0
+            else 0.0,
+        }
+        window_logger.info(json.dumps(window_entry))
+    except Exception:
+        logger.debug("Failed to emit window summary log", exc_info=True)
 
     return inferences
 
