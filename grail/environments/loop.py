@@ -697,7 +697,6 @@ class GRPORollout:
     completion_length: int
     reward: float
     advantage: float
-    trajectory: list[tuple[Any, Any, float]]
     success: bool
     commitments: list[dict]
     signature: bytes
@@ -1032,8 +1031,6 @@ def assemble_rollouts(
         proof_version,
     ) in zip(batch_data, proof_results, strict=False):
         completion_ids = all_ids[prompt_len:]
-        action_val = info.get("assignment", [])
-        trajectory = [(0, action_val, reward)]
 
         rollout = GRPORollout(
             tokens=all_ids,
@@ -1042,7 +1039,6 @@ def assemble_rollouts(
             completion_length=int(len(completion_ids)),
             reward=reward,
             advantage=0.0,
-            trajectory=trajectory,
             success=bool(info.get("success", False)),
             commitments=commitments,
             signature=signature,

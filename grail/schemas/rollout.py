@@ -8,8 +8,6 @@ Defines the expected schema for miner-submitted rollouts with:
 
 from __future__ import annotations
 
-from typing import Any
-
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -43,12 +41,9 @@ class RolloutMetadata(BaseModel):
     success: bool
     total_reward: float
     advantage: float
-    assignment: list[bool]
 
-    # Training metadata (not validated, kept for future GRPO training)
-    trajectory: list[Any] = Field(default_factory=list)
+    # Training metadata (not validated, kept for GRPO training)
     token_logprobs: list[float] = Field(default_factory=list)
-    satisfied_clauses: int = 0
 
 
 class Commit(BaseModel):
@@ -85,9 +80,6 @@ class Commit(BaseModel):
                 f"must equal tokens length {len(tokens)}"
             )
         return v
-
-    # Note: Assignment shape validation is environment-specific and validated
-    # via environment adapters during EnvironmentEvaluationValidator.
 
 
 class RolloutData(BaseModel):
