@@ -1456,9 +1456,6 @@ async def upload_to_huggingface(
                 "sat_clauses": json.dumps(sat_problem.get("clauses", [])),  # Store as JSON string
                 # Solution
                 "solution_success": rollout_data.get("success", False),
-                "solution_assignment": json.dumps(rollout_data.get("assignment", [])),
-                "solution_trajectory": json.dumps(rollout_data.get("trajectory", [])),
-                "solution_satisfied_clauses": rollout_data.get("satisfied_clauses", 0),
                 "solution_total_reward": rollout_data.get("total_reward", 0.0),
                 # GRAIL proof (store as JSON strings for complex fields)
                 "grail_tokens": json.dumps(commit.get("tokens", [])),
@@ -1614,8 +1611,6 @@ async def download_from_huggingface(
         # Decode JSON strings back to objects
         for rollout in rollouts:
             rollout["sat_clauses"] = json.loads(rollout.get("sat_clauses", "[]"))
-            rollout["solution_assignment"] = json.loads(rollout.get("solution_assignment", "[]"))
-            rollout["solution_trajectory"] = json.loads(rollout.get("solution_trajectory", "[]"))
             rollout["grail_tokens"] = json.loads(rollout.get("grail_tokens", "[]"))
             rollout["grail_s_vals"] = json.loads(rollout.get("grail_s_vals", "[]"))
             rollout["grail_beacon"] = json.loads(rollout.get("grail_beacon", "{}"))

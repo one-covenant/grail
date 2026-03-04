@@ -323,33 +323,6 @@ async def maybe_log_debug_sample(
         return text_logs_emitted
 
 
-def extract_assignment_from_rollout(rollout: Any) -> list[bool]:
-    """Extract boolean assignment from rollout trajectory if available."""
-    if rollout.trajectory and isinstance(rollout.trajectory[0][1], list):
-        return rollout.trajectory[0][1]
-    return []
-
-
-def count_satisfied_clauses(sat_problem: Any, assignment: list[bool]) -> int:
-    """Count how many SAT clauses are satisfied by a boolean assignment."""
-    if not assignment:
-        return 0
-    satisfied = 0
-    for clause in sat_problem.clauses:
-        clause_satisfied = False
-        for lit in clause:
-            idx = abs(lit) - 1
-            if idx < 0 or idx >= len(assignment):
-                continue
-            value = assignment[idx]
-            if (lit > 0 and value) or (lit < 0 and not value):
-                clause_satisfied = True
-                break
-        if clause_satisfied:
-            satisfied += 1
-    return satisfied
-
-
 async def log_generation_timing(
     subtensor: bt.subtensor,
     timers: MiningTimers,
@@ -420,7 +393,7 @@ def package_rollout_data(
     Args:
         model: Loaded model (for name_or_path)
         wallet: Miner wallet for signing
-        rollout: Generated rollout with tokens/commitments/trajectory
+        rollout: Generated rollout with tokens/commitments
         base_nonce: Base nonce for the group
         rollout_idx: Index within the group
         total_in_group: Total rollouts in group
@@ -449,10 +422,6 @@ def package_rollout_data(
         wallet=wallet,
     )
 
-    assignment = extract_assignment_from_rollout(rollout)
-    # satisfied_clauses retained for backward-compat field; set to 0 in env-agnostic mode
-    satisfied_clauses = 0
-
     payload = {
         "window_start": window_start,
         "block": current_block,
@@ -475,15 +444,12 @@ def package_rollout_data(
             "signature": commit_sig.hex(),
             "beacon": rollout.beacon,
             "rollout": {
-                "trajectory": rollout.trajectory,
                 "total_reward": rollout.reward,
                 "advantage": rollout.advantage,
                 "success": rollout.success,
                 "token_logprobs": rollout.token_logprobs,
                 "prompt_length": rollout.prompt_length,
                 "completion_length": rollout.completion_length,
-                "satisfied_clauses": satisfied_clauses,
-                "assignment": assignment,
             },
         },
         "timestamp": time.time(),
