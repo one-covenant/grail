@@ -221,9 +221,6 @@ def test_single_rollout_proof_cycle(
             "advantage": 0.0,
             "success": False,
             "token_logprobs": [0.0] * prompt_len + logprobs,
-            "trajectory": [],
-            "assignment": [],
-            "satisfied_clauses": 0,
         },
     }
 

@@ -148,10 +148,7 @@ def test_pipeline_golden_valid_rollout(
             "success": True,
             "total_reward": 0.8,
             "advantage": 0.0,
-            "assignment": [],
-            "trajectory": [],
             "token_logprobs": [0.0] * prompt_len + [0.0 for _ in completion_ids],
-            "satisfied_clauses": 0,
         },
     }
 

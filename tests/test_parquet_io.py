@@ -33,15 +33,12 @@ def _create_sample_inference() -> dict:
             "signature": "abc123signature",
             "beacon": {"round": 1234, "randomness": "0xbeacon"},
             "rollout": {
-                "trajectory": [["step1", [True, False]], ["step2", [True, True]]],
                 "total_reward": 0.75,
                 "advantage": 0.25,
                 "success": True,
                 "token_logprobs": [-0.1, -0.2, -0.3, -0.4, -0.5],
                 "prompt_length": 3,
                 "completion_length": 5,
-                "satisfied_clauses": 10,
-                "assignment": [True, False, True, False],
             },
         },
         "timestamp": 1700000000.123,
@@ -149,9 +146,6 @@ class TestParquetSerialization:
         assert restored_rollout["prompt_length"] == original_rollout["prompt_length"]
         assert restored_rollout["completion_length"] == original_rollout["completion_length"]
 
-        # Check variable-length arrays
-        assert restored_rollout["assignment"] == original_rollout["assignment"]
-
         # Token logprobs should be approximately equal (floats)
         for orig, rest in zip(
             original_rollout["token_logprobs"],
@@ -175,9 +169,6 @@ class TestParquetSerialization:
 
         # Check beacon (JSON-encoded dict)
         assert restored_commit["beacon"] == original_commit["beacon"]
-
-        # Check trajectory (JSON-encoded nested list)
-        assert restored_commit["rollout"]["trajectory"] == original_commit["rollout"]["trajectory"]
 
     def test_empty_inferences(self) -> None:
         """Test handling of empty inferences list."""
