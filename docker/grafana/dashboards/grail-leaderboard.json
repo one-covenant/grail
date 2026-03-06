@@ -363,6 +363,43 @@
           }
         },
         {
+          "id": "groupBy",
+          "options": {
+            "fields": {
+              "UID": { "aggregations": [], "operation": "groupby" },
+              "Rank": { "aggregations": ["last"], "operation": "aggregate" },
+              "Weight": { "aggregations": ["last"], "operation": "aggregate" },
+              "Cap %": { "aggregations": ["last"], "operation": "aggregate" },
+              "Unique": { "aggregations": ["last"], "operation": "aggregate" },
+              "Unique/Win": { "aggregations": ["last"], "operation": "aggregate" },
+              "Total": { "aggregations": ["last"], "operation": "aggregate" },
+              "Success %": { "aggregations": ["last"], "operation": "aggregate" },
+              "Active/12": { "aggregations": ["last"], "operation": "aggregate" },
+              "Checked": { "aggregations": ["last"], "operation": "aggregate" },
+              "Failures": { "aggregations": ["last"], "operation": "aggregate" },
+              "Hotkey": { "aggregations": ["last"], "operation": "aggregate" }
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "Rank (last)": "Rank",
+              "Weight (last)": "Weight",
+              "Cap % (last)": "Cap %",
+              "Unique (last)": "Unique",
+              "Unique/Win (last)": "Unique/Win",
+              "Total (last)": "Total",
+              "Success % (last)": "Success %",
+              "Active/12 (last)": "Active/12",
+              "Checked (last)": "Checked",
+              "Failures (last)": "Failures",
+              "Hotkey (last)": "Hotkey"
+            }
+          }
+        },
+        {
           "id": "sortBy",
           "options": {
             "fields": {},

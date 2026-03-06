@@ -85,7 +85,7 @@
         "graphMode": "none",
         "justifyMode": "center",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "textMode": "value"
       },
       "targets": [
@@ -93,7 +93,7 @@
           "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
           "expr": "count_over_time({logger=\"grail.validator.verdict\"} [$__range])",
-          "queryType": "range",
+          "queryType": "instant",
           "refId": "A"
         }
       ],
@@ -125,15 +125,15 @@
         "graphMode": "none",
         "justifyMode": "center",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "textMode": "value"
       },
       "targets": [
         {
           "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
-          "expr": "count_over_time({logger=\"grail.validator.verdict\"} |= `\"failure_flag\":1` [$__range])",
-          "queryType": "range",
+          "expr": "count_over_time({logger=\"grail.validator.verdict\"} |= `\"failure_flag\": 1` [$__range])",
+          "queryType": "instant",
           "refId": "A"
         }
       ],
@@ -158,7 +158,7 @@
         "graphMode": "none",
         "justifyMode": "center",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "textMode": "value"
       },
       "targets": [
@@ -166,7 +166,7 @@
           "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
           "expr": "count_over_time({logger=\"grail.miner.checkpoint\"} [$__range])",
-          "queryType": "range",
+          "queryType": "instant",
           "refId": "A"
         }
       ],
@@ -191,7 +191,7 @@
         "graphMode": "none",
         "justifyMode": "center",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "textMode": "value"
       },
       "targets": [
@@ -199,7 +199,7 @@
           "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
           "expr": "count_over_time({logger=\"grail.validator.network\"} [$__range])",
-          "queryType": "range",
+          "queryType": "instant",
           "refId": "A"
         }
       ],
@@ -235,7 +235,7 @@
       "type": "logs"
     }
   ],
-  "refresh": "30s",
+  "refresh": "1m",
   "schemaVersion": 38,
   "style": "dark",
   "tags": ["grail", "home"],
