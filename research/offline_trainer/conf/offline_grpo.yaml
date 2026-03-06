@@ -71,6 +71,16 @@ train:
   is_ratio_max: 2.5  # GRAIL_TRAINER_IS_RATIO_MAX
   logratio_clamp: 0.92  # GRAIL_TRAINER_LOGRATIO_CLAMP
 
+  # GRPO variant and importance sampling level
+  # Variants: grpo (per-sequence avg), bnpo (global token avg), dapo (distributed), dr_grpo (fixed denom)
+  grpo_variant: "grpo"  # "grpo" for offline (dapo needs distributed context)
+  importance_sampling_level: "sequence"  # sequence|token
+
+  # Memory efficiency
+  use_gradient_checkpointing: true  # Reduces activation memory ~20-30%
+  chunked_logits: false  # Apply lm_head in chunks (useful for large models)
+  logit_chunk_size: 256  # Tokens per chunk when chunked_logits=true
+
   # Adaptive KL (disabled when kl_coef=0)
   adaptive_kl: false  # Disabled since kl_coef=0
   kl_target: 0.04  # TRAINER_KL_TARGET (inactive)

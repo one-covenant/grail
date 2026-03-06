@@ -14,7 +14,7 @@ train:
   lr: 2.0e-6  # Better convergence for math (CRITICAL FIX: was 1.0e6!)
   grad_accum_steps: 32  # Effective batch: 128 (faster iteration)
   grad_clip: 1.0  # Tighter clipping for stability
-  warmup_steps: 50  # 5% warmup for better convergence
+  warmup_steps: 5  # 5% warmup (5 of 100 iterations)
   max_length: 1024
   group_adv_sum_tol: 0.01
 
@@ -36,6 +36,9 @@ train:
   ppo_clip_eps_upper: 0.28  # TRAINER_PPO_CLIP_EPS_UPPER
   is_ratio_max: 2.5  # GRAIL_TRAINER_IS_RATIO_MAX
   logratio_clamp: 0.92  # GRAIL_TRAINER_LOGRATIO_CLAMP
+
+  # GRPO variant
+  grpo_variant: "grpo"  # Per-sequence avg for offline training
 
 # Data
 data:

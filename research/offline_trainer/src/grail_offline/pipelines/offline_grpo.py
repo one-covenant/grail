@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
+import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +38,10 @@ from grail_offline.data.offline_rollouts import OfflineRolloutGenerator, Rollout
 
 logger = logging.getLogger(__name__)
 
+# Match main trainer (training_process.py)
+OPTIMIZER_BETAS = (0.9, 0.95)
+OPTIMIZER_WEIGHT_DECAY = 0.1
+
 
 def _set_global_seed(seed: int) -> None:
     """Set global random seeds for reproducibility."""
@@ -44,18 +51,20 @@ def _set_global_seed(seed: int) -> None:
     torch.manual_seed(seed_i)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed_i)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def _select_iteration_seeds(all_seeds: list[int], iteration: int, per_iter: int) -> list[int]:
-    """Select seeds for current iteration with wraparound."""
+    """Select seeds for current iteration with wraparound.
+
+    Uses modular indexing to avoid duplicate seeds when per_iter > len(all_seeds).
+    """
     n = len(all_seeds)
     if n == 0:
         return []
     start = (iteration * per_iter) % n
-    end = start + per_iter
-    if end <= n:
-        return all_seeds[start:end]
-    return all_seeds[start:] + all_seeds[: end - n]
+    return [all_seeds[(start + i) % n] for i in range(per_iter)]
 
 
 def _create_env_factory(environment: str) -> Any:
@@ -111,71 +120,39 @@ def _save_checkpoint_for_vllm(
     return checkpoint_dir
 
 
-def _delete_directory_recursive(directory: Path) -> None:
-    """Recursively delete a directory and all its contents.
+def _prune_directories(parent: Path, pattern: str, keep_last_k: int) -> None:
+    """Remove old directories matching pattern, keeping only the last K.
 
     Args:
-        directory: Directory path to delete
+        parent: Parent directory to search
+        pattern: Glob pattern for matching directories
+        keep_last_k: Number of most recent directories to keep
     """
-    for sub in directory.glob("**/*"):
-        if sub.is_file():
-            sub.unlink(missing_ok=True)
-    for subdir in sorted(directory.glob("**/*"), reverse=True):
-        if subdir.is_dir():
-            subdir.rmdir()
-    directory.rmdir()
-
-
-def _prune_old_checkpoints(ckpt_dir: Path, keep_last_k: int) -> None:
-    """Remove old checkpoints, keeping only the last K.
-
-    Args:
-        ckpt_dir: Directory containing checkpoints
-        keep_last_k: Number of most recent checkpoints to keep
-    """
-    existing = sorted([p for p in ckpt_dir.iterdir() if p.is_dir()])
+    existing = sorted(p for p in parent.glob(pattern) if p.is_dir())
     if len(existing) <= keep_last_k:
         return
 
     logger.info(
-        "Pruning old checkpoints",
-        extra={"keep": keep_last_k, "existing": len(existing)},
+        "Pruning old directories",
+        extra={"pattern": pattern, "keep": keep_last_k, "existing": len(existing)},
     )
     for old in existing[:-keep_last_k]:
         try:
-            _delete_directory_recursive(old)
-            logger.info("Deleted old checkpoint", extra={"path": str(old)})
+            shutil.rmtree(old)
+            logger.debug("Deleted directory", extra={"path": str(old)})
         except Exception as e:
             logger.warning(
-                "Failed to delete checkpoint",
+                "Failed to delete directory",
                 extra={"path": str(old), "error": str(e)},
             )
 
 
-def _prune_vllm_checkpoints(workdir: Path, keep_last_k: int) -> None:
-    """Remove old vLLM checkpoints, keeping only the last K.
-
-    Args:
-        workdir: Working directory containing vLLM checkpoints
-        keep_last_k: Number of most recent vLLM checkpoints to keep
-    """
-    existing_vllm = sorted(workdir.glob("vllm_checkpoint_iter_*"))
-    if len(existing_vllm) <= keep_last_k:
+async def _log_metrics(monitor: Any, prefix: str, metrics: dict[str, float]) -> None:
+    """Log metrics to monitor under a given prefix."""
+    if not monitor:
         return
-
-    logger.debug(
-        "Pruning old vLLM checkpoints",
-        extra={"keep": keep_last_k, "existing": len(existing_vllm)},
-    )
-    for old_vllm in existing_vllm[:-keep_last_k]:
-        try:
-            _delete_directory_recursive(old_vllm)
-            logger.debug("Pruned vLLM checkpoint", extra={"path": str(old_vllm)})
-        except Exception as e:
-            logger.warning(
-                "Failed to prune vLLM checkpoint",
-                extra={"path": str(old_vllm), "error": str(e)},
-            )
+    for name, value in metrics.items():
+        await monitor.log_gauge(f"{prefix}/{name}", float(value))
 
 
 async def _log_rollout_stats(monitor: Any, groups: list[Any]) -> None:
@@ -183,33 +160,17 @@ async def _log_rollout_stats(monitor: Any, groups: list[Any]) -> None:
     if not monitor:
         return
 
-    await monitor.log_gauge("training/num_groups", len(groups))
-    await monitor.log_gauge("training/num_rollouts", sum(len(g.rollouts) for g in groups))
-
     all_rewards = [r.reward for g in groups for r in g.rollouts]
     all_successes = [r.success for g in groups for r in g.rollouts]
+    stats: dict[str, float] = {
+        "num_groups": float(len(groups)),
+        "num_rollouts": float(sum(len(g.rollouts) for g in groups)),
+    }
     if all_rewards:
-        await monitor.log_gauge("training/rollout_reward_mean", float(np.mean(all_rewards)))
-        await monitor.log_gauge("training/rollout_reward_std", float(np.std(all_rewards)))
-        await monitor.log_gauge("training/rollout_success_rate", float(np.mean(all_successes)))
-
-
-async def _log_training_metrics(monitor: Any, metrics: dict[str, float]) -> None:
-    """Log training metrics to monitor."""
-    if not monitor:
-        return
-
-    for metric_name, metric_value in metrics.items():
-        await monitor.log_gauge(f"training/{metric_name}", float(metric_value))
-
-
-async def _log_eval_metrics(monitor: Any, metrics: dict[str, float]) -> None:
-    """Log evaluation metrics to monitor."""
-    if not monitor:
-        return
-
-    for metric_name, metric_value in metrics.items():
-        await monitor.log_gauge(f"eval/{metric_name}", float(metric_value))
+        stats["rollout_reward_mean"] = float(np.mean(all_rewards))
+        stats["rollout_reward_std"] = float(np.std(all_rewards))
+        stats["rollout_success_rate"] = float(np.mean(all_successes))
+    await _log_metrics(monitor, "training", stats)
 
 
 async def _run_evaluation(
@@ -274,7 +235,7 @@ async def _run_evaluation(
     try:
         eval_metrics = await evaluator.run_cycle(plan)
 
-        await _log_eval_metrics(monitor, eval_metrics)
+        await _log_metrics(monitor, "eval", eval_metrics)
 
         logger.info(
             "Evaluation complete",
@@ -290,6 +251,39 @@ async def _run_evaluation(
         )
     finally:
         evaluator.shutdown()
+
+
+def _sync_kl_constant(kl_coef: float) -> None:
+    """Patch TRAINER_KL_COEF constant to match config.
+
+    is_kl_enabled() in grail.shared.constants reads the module-level
+    TRAINER_KL_COEF constant, which is evaluated once at import time from
+    the env var. Setting the env var at runtime has no effect on the
+    already-loaded constant. We must patch the constant directly.
+    """
+    import grail.shared.constants as _constants
+
+    _constants.TRAINER_KL_COEF = kl_coef
+    os.environ["GRAIL_TRAINER_KL_COEF"] = str(kl_coef)
+
+
+def _create_lr_scheduler(
+    optimizer: torch.optim.Optimizer,
+    warmup_steps: int,
+) -> torch.optim.lr_scheduler.LambdaLR:
+    """Create warmup + constant LR scheduler matching the main trainer.
+
+    The scheduler steps once per training iteration. warmup_steps is the
+    number of iterations over which the LR linearly ramps from 0 to the
+    configured base LR, then stays constant.
+    """
+
+    def lr_lambda(current_step: int) -> float:
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        return 1.0
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
 async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = None) -> None:
@@ -311,6 +305,11 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
         monitor: Optional monitoring manager for metrics logging
     """
     _set_global_seed(int(cfg.seed))
+
+    # Patch the module-level TRAINER_KL_COEF constant so that is_kl_enabled()
+    # (called inside GRPOAlgorithm.train_epoch) returns the correct value.
+    kl_coef = float(cfg.train.kl_coef)
+    _sync_kl_constant(kl_coef)
 
     # Setup directories
     metrics_dir = workdir / "metrics"
@@ -342,11 +341,17 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
     tokenizer = get_tokenizer(train_id)
     configure_tokenizer(tokenizer)
 
-    kl_enabled = float(cfg.train.kl_coef) > 0.0
+    # Enable gradient checkpointing for memory efficiency (matches main trainer)
+    use_grad_ckpt = bool(cfg.train.get("use_gradient_checkpointing", True))
+    if use_grad_ckpt and hasattr(train_model, "gradient_checkpointing_enable"):
+        train_model.gradient_checkpointing_enable()
+        logger.info("Gradient checkpointing enabled")
+
+    kl_enabled = kl_coef > 0.0
     ref_model = None
     if kl_enabled:
         ref_model = get_model(ref_id, device=training_device, eval_mode=True)
-        logger.info("Loaded train and ref models", extra={"kl_coef": cfg.train.kl_coef})
+        logger.info("Loaded train and ref models", extra={"kl_coef": kl_coef})
     else:
         logger.info("Loaded train model only (KL disabled)")
 
@@ -391,8 +396,6 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
         stream_server_logs=True,
     )
 
-    import sys
-
     server_manager = VLLMServerManager(
         config=server_config,
         eval_config=eval_config,
@@ -406,12 +409,12 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
         model_name = server_manager.model_name
         logger.info(f"✓ vLLM server ready at {base_url} serving {model_name}")
 
-        # Create optimizer and accelerator
+        # Create optimizer and accelerator (match main trainer betas)
         optimizer = torch.optim.AdamW(
             train_model.parameters(),
             lr=float(cfg.train.lr),
-            betas=(0.9, 0.999),
-            weight_decay=0.1,
+            betas=OPTIMIZER_BETAS,
+            weight_decay=OPTIMIZER_WEIGHT_DECAY,
         )
         accelerator = Accelerator(mixed_precision="no")
 
@@ -440,6 +443,11 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
         )
 
         # Create training config from hydra config
+        grpo_variant = str(cfg.train.get("grpo_variant", "grpo"))
+        is_level = str(cfg.train.get("importance_sampling_level", "sequence"))
+        chunked = bool(cfg.train.get("chunked_logits", False))
+        chunk_size = int(cfg.train.get("logit_chunk_size", 256))
+
         train_cfg = TrainingConfig(
             # Basic training parameters
             lr=float(cfg.train.lr),
@@ -448,7 +456,7 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
             warmup_steps=int(cfg.train.warmup_steps),
             max_length=int(cfg.train.max_length),
             # Loss coefficients
-            kl_coef=float(cfg.train.kl_coef),
+            kl_coef=kl_coef,
             entropy_coef=float(cfg.train.entropy_coef),
             kl_target=float(cfg.train.kl_target),
             kl_adapt_rate=float(cfg.train.kl_adapt_rate),
@@ -464,6 +472,12 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
             # Importance sampling
             use_is=bool(cfg.train.use_is),
             is_ratio_max=float(cfg.train.is_ratio_max),
+            # GRPO variant and IS level
+            grpo_variant=grpo_variant,
+            # Memory efficiency
+            use_gradient_checkpointing=use_grad_ckpt,
+            chunked_logits=chunked,
+            logit_chunk_size=chunk_size,
             # Data loading and filtering
             rollouts_per_problem=int(cfg.data.rollouts_per_problem),
             group_adv_sum_tolerance=float(cfg.train.group_adv_sum_tol),
@@ -474,14 +488,24 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
         num_train_seeds = int(cfg.data.num_train_seeds)
         all_train_seeds = [train_seed_start + i for i in range(num_train_seeds)]
 
-        # Initialize GRPO algorithm with config (CRITICAL: config must be passed!)
-        adaptive_kl = bool(cfg.train.adaptive_kl) if hasattr(cfg.train, "adaptive_kl") else False
-        algorithm = GRPOAlgorithm(adaptive_kl_enabled=adaptive_kl, config=train_cfg)
+        # Create LR scheduler (stepped once per iteration, matching main trainer pattern)
+        warmup_iters = int(cfg.train.warmup_steps)
+        scheduler = _create_lr_scheduler(optimizer, warmup_steps=warmup_iters)
+        logger.info(
+            "LR scheduler created (warmup + constant)",
+            extra={"warmup_iterations": warmup_iters, "total_iterations": int(cfg.train.iterations)},
+        )
+
+        # Initialize GRPO algorithm with config
+        adaptive_kl = bool(cfg.train.get("adaptive_kl", False))
+        algorithm = GRPOAlgorithm(
+            adaptive_kl_enabled=adaptive_kl,
+            grpo_variant=grpo_variant,
+            importance_sampling_level=is_level,
+            config=train_cfg,
+        )
 
         # Log configuration
-        logger.info("=" * 80)
-        logger.info("OFFLINE TRAINER CONFIGURATION")
-        logger.info("=" * 80)
         logger.info(
             "Training configuration",
             extra={
@@ -494,13 +518,16 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
                 "rollouts_per_problem": cfg.data.rollouts_per_problem,
                 "batch_size": cfg.train.batch_size,
                 "learning_rate": cfg.train.lr,
-                "kl_coef": cfg.train.kl_coef,
+                "grpo_variant": grpo_variant,
+                "is_level": is_level,
+                "kl_coef": kl_coef,
                 "adaptive_kl": adaptive_kl,
+                "gradient_checkpointing": use_grad_ckpt,
+                "optimizer_betas": OPTIMIZER_BETAS,
                 "eval_enabled": cfg.eval.enabled,
                 "eval_interval": cfg.eval.interval,
             },
         )
-        logger.info("=" * 80)
 
         # Main training loop (inside server context)
         for it in range(int(cfg.train.iterations)):
@@ -551,7 +578,10 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
                 config=train_cfg,
             )
 
-            await _log_training_metrics(monitor, metrics)
+            await _log_metrics(monitor, "training", metrics)
+
+            # Step LR scheduler after each training epoch
+            scheduler.step()
 
             logger.info(
                 "Training epoch completed",
@@ -579,7 +609,7 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
 
             # Prune old vLLM checkpoints to manage disk space
             keep_vllm = int(cfg.checkpoint.get("keep_last_vllm_k", 3))
-            _prune_vllm_checkpoints(workdir, keep_vllm)
+            _prune_directories(workdir, "vllm_checkpoint_iter_*", keep_vllm)
 
             # Periodic evaluation
             if bool(cfg.eval.enabled) and (it % int(cfg.eval.interval) == 0):
@@ -604,7 +634,7 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
                 tokenizer.save_pretrained(out)
                 logger.info("Checkpoint saved", extra={"path": str(out)})
 
-                _prune_old_checkpoints(ckpt_dir, int(cfg.checkpoint.keep_last_k))
+                _prune_directories(ckpt_dir, "iter_*", int(cfg.checkpoint.keep_last_k))
 
     # Server context manager handles cleanup automatically
     logger.info("✓ Training complete, vLLM server shutting down...")
