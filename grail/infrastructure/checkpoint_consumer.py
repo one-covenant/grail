@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import shutil
+import time
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -643,6 +644,36 @@ class CheckpointManager:
             )
 
         for candidate in self.cache_root.glob("checkpoint-*"):
+            # Clean up orphaned .partial directories (from crashed/interrupted downloads).
+            # A .partial dir is safe to remove if it is not owned by a currently running process.
+            if candidate.name.endswith(".partial"):
+                try:
+                    # Format: checkpoint-{window}.{pid}.{uuid}.partial
+                    parts = candidate.name.split(".")
+                    pid = int(parts[-3])
+                    # Check if the process that created it is still alive
+                    try:
+                        os.kill(pid, 0)
+                    except OSError:
+                        # Process is dead, safe to clean up
+                        logger.info(
+                            "Removing orphaned partial checkpoint %s (owner PID %s is dead)",
+                            candidate.name,
+                            pid,
+                        )
+                        shutil.rmtree(candidate, ignore_errors=True)
+                except (IndexError, ValueError):
+                    # Can't parse PID, remove if older than 1 hour
+                    age_seconds = time.time() - candidate.stat().st_mtime
+                    if age_seconds > 3600:
+                        logger.info(
+                            "Removing stale partial checkpoint %s (age: %.0fs)",
+                            candidate.name,
+                            age_seconds,
+                        )
+                        shutil.rmtree(candidate, ignore_errors=True)
+                continue
+
             try:
                 suffix = candidate.name.split("-")[1]
                 window = int(suffix)
