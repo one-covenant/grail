@@ -7,8 +7,8 @@ from typing import Any
 
 import torch
 
-from grail.environments.core import ChatMessage, MultiTurnEnv, Observation
 from grail.environments.backends import GenerationParams, TextGenBackend
+from grail.environments.core import ChatMessage, MultiTurnEnv, Observation
 
 
 class DummyTokenizer:

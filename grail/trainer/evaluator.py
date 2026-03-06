@@ -21,8 +21,8 @@ from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, T
 from tenacity import before_sleep_log, retry, stop_after_attempt, wait_exponential
 
 from grail.environments.core import ChatMessage, MultiTurnEnv
-from grail.environments.execution import CodeExecutionPool, set_global_execution_pool
 from grail.environments.episode import AgentEnvLoop
+from grail.environments.execution import CodeExecutionPool, set_global_execution_pool
 from grail.environments.vector import EnvVector
 from grail.trainer.config import EvalConfig
 from grail.trainer.eval_planner import EvaluationPlan

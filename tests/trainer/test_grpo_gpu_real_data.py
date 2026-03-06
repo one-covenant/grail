@@ -48,8 +48,8 @@ from accelerate import Accelerator
 from dotenv import load_dotenv
 from scipy import stats
 
-from grail.environments.gsm8k_env import GSM8KEnv
 from grail.environments.episode import AgentEnvLoop
+from grail.environments.gsm8k_env import GSM8KEnv
 
 logger = logging.getLogger(__name__)
 

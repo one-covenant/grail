@@ -67,8 +67,8 @@ def test_miner_proofs_pass_validator_verification(
     Note: Tests only proof validation, not full pipeline (env prompt validation
     requires matching environment seeds which are complex to mock correctly).
     """
-    from grail.environments.factory import create_env
     from grail.environments.episode import AgentEnvLoop
+    from grail.environments.factory import create_env
     from grail.protocol.signatures import sign_commit_binding
     from grail.shared.constants import ROLLOUTS_PER_PROBLEM
     from grail.validation.context import ValidationContext
@@ -166,8 +166,8 @@ def test_single_rollout_proof_cycle(
     mock_wallet: Any,
 ) -> None:
     """Simplified single-rollout test for debugging."""
-    from grail.environments.factory import create_env
     from grail.environments.episode import AgentEnvLoop
+    from grail.environments.factory import create_env
     from grail.validation.context import ValidationContext
     from grail.validation.validators.proof import GRAILProofValidator
 

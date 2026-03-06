@@ -20,7 +20,6 @@ from grail.environments.episode import AgentEnvLoop
 from grail.environments.rollout import GRPORollout, assemble_rollouts
 from tests.fixtures.fakes import DummyModel, DummyTokenizer, FakeBackend
 
-
 # ── GenerationParams ──────────────────────────────────────────────────
 
 
@@ -126,9 +125,7 @@ def test_episode_generate_batch_shapes():
     """generate_from_prompt_ids_batch returns correct tuple shapes."""
     loop = _make_loop()
     prompt_ids = [[10, 20, 30], [40, 50]]
-    results = asyncio.run(
-        loop.generate_from_prompt_ids_batch(prompt_ids, trim_right_padding=False)
-    )
+    results = asyncio.run(loop.generate_from_prompt_ids_batch(prompt_ids, trim_right_padding=False))
     assert len(results) == 2
     for all_ids, prompt_len, lp in results:
         assert isinstance(all_ids, list)

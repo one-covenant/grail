@@ -212,7 +212,9 @@ class WindowProcessor:
                         "total_inferences": total_inf,
                         "estimated_unique": int(m.get("estimated_unique", 0)),
                         "estimated_successful": est_succ,
-                        "success_rate": round(float(est_succ / total_inf * 100), 1) if total_inf else 0.0,
+                        "success_rate": round(float(est_succ / total_inf * 100), 1)
+                        if total_inf
+                        else 0.0,
                         "failure_flag": int(m.get(FAILURE_FLAG_KEY, 0)),
                         "failure_reason": result.failure_reason or "",
                         "prompt_mismatch_count": int(m.get("prompt_mismatch", 0)),
