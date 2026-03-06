@@ -66,10 +66,8 @@ dev = [
     "pre-commit>=2.20.0",
     "bittensor-cli>=9.12.0",
 ]
-sglang = [
-    "sglang[all]>=0.4.0",      # SGLang inference backend (alternative to vLLM)
-    "httpx>=0.24.0",           # Async HTTP client for weight sync API
-]
+# NOTE: SGLang is installed separately on GPU nodes (conflicts with bittensor in lock resolution):
+#   uv pip install "sglang[all]>=0.4.0" httpx --prerelease=allow
 quantization = [
     "auto-gptq>=0.7.1",        # GPTQ quantized models
     "autoawq>=0.2.7",          # AWQ quantized models
@@ -81,7 +79,7 @@ experiments = [
 ]
 
 all = [
-    "grail[dev,experiments,quantization,sglang]",
+    "grail[dev,experiments,quantization]",
 ]
 
 [project.scripts]
