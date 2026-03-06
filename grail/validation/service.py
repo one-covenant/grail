@@ -1080,7 +1080,7 @@ class ValidationService:
             entry = {
                 "event": "leaderboard",
                 "rank": rank,
-                "uid": int(uid) if uid is not None else None,
+                "uid": int(uid) if uid is not None else -1,
                 "weight": round(float(weight), 6),
                 "unique_rollouts": int(total_unique),
                 "unique_per_window": round(float(unique_per_window), 1),

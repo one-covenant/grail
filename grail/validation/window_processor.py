@@ -204,7 +204,7 @@ class WindowProcessor:
                     verdict_entry = {
                         "event": "verdict",
                         "window": int(window),
-                        "uid": int(result.uid) if result.uid is not None else None,
+                        "uid": int(result.uid) if result.uid is not None else -1,
                         "hotkey_short": miner_hotkey[:8],
                         "found_file": bool(result.found_file),
                         "valid_count": int(m.get("valid", 0)),
@@ -214,7 +214,7 @@ class WindowProcessor:
                         "estimated_successful": est_succ,
                         "success_rate": round(float(est_succ / total_inf * 100), 1) if total_inf else 0.0,
                         "failure_flag": int(m.get(FAILURE_FLAG_KEY, 0)),
-                        "failure_reason": result.failure_reason,
+                        "failure_reason": result.failure_reason or "",
                         "prompt_mismatch_count": int(m.get("prompt_mismatch", 0)),
                         "validation_sec": round(float(sec), 1),
                         "validation_blocks": int(blk),
