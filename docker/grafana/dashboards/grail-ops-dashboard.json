@@ -12,6 +12,7 @@
       }
     ]
   },
+  "description": "Validator verdicts, miner window rollups, pipeline timing, checkpoint events, and network statistics.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -19,44 +20,221 @@
   "links": [
     {
       "asDropdown": false,
+      "icon": "apps",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Home",
+      "tooltip": "Monitoring hub",
+      "type": "link",
+      "url": "/d/grail-home"
+    },
+    {
+      "asDropdown": false,
       "icon": "table",
       "includeVars": false,
       "keepTime": true,
       "tags": [],
       "targetBlank": false,
-      "title": "Miner Leaderboard",
-      "tooltip": "Go to miner leaderboard",
+      "title": "Leaderboard",
+      "tooltip": "Miner leaderboard",
       "type": "link",
       "url": "/d/grail-leaderboard"
+    },
+    {
+      "asDropdown": false,
+      "icon": "doc",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Log Explorer",
+      "tooltip": "Raw log explorer",
+      "type": "link",
+      "url": "/d/grail-log-explorer"
     }
   ],
   "liveNow": false,
   "panels": [
     {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "Total validation runs in the selected time range.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "text", "mode": "fixed" },
+          "noValue": "--"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 0, "y": 0 },
+      "id": 10,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "editorMode": "code",
+          "expr": "count_over_time({logger=\"grail.validator.verdict\"} [$__range])",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Validations",
+      "transparent": true,
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "Validation failures in the selected time range.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "noValue": "--",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 3, "y": 0 },
+      "id": 11,
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "editorMode": "code",
+          "expr": "count_over_time({logger=\"grail.validator.verdict\"} |= `\"failure_flag\":1` [$__range])",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Failures",
+      "transparent": true,
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "Total checkpoint loads in the selected time range.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "text", "mode": "fixed" },
+          "noValue": "--"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 6, "y": 0 },
+      "id": 12,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "editorMode": "code",
+          "expr": "count_over_time({logger=\"grail.miner.checkpoint\"} [$__range])",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Checkpoints",
+      "transparent": true,
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "Total weight submissions in the selected time range.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "text", "mode": "fixed" },
+          "noValue": "--"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 9, "y": 0 },
+      "id": 13,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "editorMode": "code",
+          "expr": "count_over_time({logger=\"grail.validator.network\"} [$__range])",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Weight Sets",
+      "transparent": true,
+      "type": "stat"
+    },
+    {
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 0 },
+      "id": 14,
+      "options": {
+        "code": { "language": "plaintext", "showLineNumbers": false, "showMiniMap": false },
+        "content": "Panels populate after the validator completes its first full validation cycle. Each cycle validates all active miners for a window, then emits structured logs.\n\nIf counters show **--**, widen the time range or wait for the next cycle to finish.",
+        "mode": "markdown"
+      },
+      "transparent": true,
+      "title": "",
+      "type": "text"
+    },
+    {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 4 },
       "id": 100,
       "title": "Validator Verdicts",
       "type": "row"
     },
     {
       "datasource": { "type": "loki", "uid": "loki" },
-      "description": "Per-miner validation outcomes for the most recent windows.",
+      "description": "Per-miner validation outcomes. Each row is one miner evaluated in one window.",
       "fieldConfig": {
         "defaults": {
           "custom": {
             "align": "auto",
             "cellOptions": { "type": "auto" },
-            "filterable": false,
+            "filterable": true,
             "inspect": false
-          }
+          },
+          "noValue": "-"
         },
         "overrides": [
           {
             "matcher": { "id": "byName", "options": "Window" },
             "properties": [
-              { "id": "custom.width", "value": 70 },
-              { "id": "custom.align", "value": "center" }
+              { "id": "custom.width", "value": 90 },
+              { "id": "custom.align", "value": "left" },
+              { "id": "custom.filterable", "value": false }
             ]
           },
           {
@@ -69,14 +247,14 @@
           {
             "matcher": { "id": "byName", "options": "Valid" },
             "properties": [
-              { "id": "custom.width", "value": 55 },
+              { "id": "custom.width", "value": 60 },
               { "id": "custom.align", "value": "right" }
             ]
           },
           {
             "matcher": { "id": "byName", "options": "Checked" },
             "properties": [
-              { "id": "custom.width", "value": 65 },
+              { "id": "custom.width", "value": 75 },
               { "id": "custom.align", "value": "right" }
             ]
           },
@@ -90,38 +268,45 @@
           {
             "matcher": { "id": "byName", "options": "Est. Unique" },
             "properties": [
-              { "id": "custom.width", "value": 80 },
+              { "id": "custom.width", "value": 90 },
               { "id": "custom.align", "value": "right" }
             ]
           },
           {
             "matcher": { "id": "byName", "options": "Success %" },
             "properties": [
-              { "id": "custom.width", "value": 80 },
+              { "id": "custom.width", "value": 100 },
               { "id": "custom.align", "value": "right" },
               { "id": "decimals", "value": 1 },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "gradient",
+                  "type": "gauge",
+                  "valueDisplayMode": "text"
+                }
+              },
               {
                 "id": "thresholds",
                 "value": {
                   "mode": "absolute",
                   "steps": [
                     { "color": "red", "value": null },
+                    { "color": "orange", "value": 50 },
                     { "color": "yellow", "value": 80 },
                     { "color": "green", "value": 95 }
                   ]
                 }
               },
-              {
-                "id": "custom.cellOptions",
-                "value": { "mode": "basic", "type": "color-background" }
-              },
-              { "id": "color", "value": { "mode": "thresholds" } }
+              { "id": "color", "value": { "mode": "thresholds" } },
+              { "id": "min", "value": 0 },
+              { "id": "max", "value": 100 }
             ]
           },
           {
             "matcher": { "id": "byName", "options": "Failure" },
             "properties": [
-              { "id": "custom.width", "value": 55 },
+              { "id": "custom.width", "value": 60 },
               { "id": "custom.align", "value": "center" },
               {
                 "id": "thresholds",
@@ -129,7 +314,7 @@
                   "mode": "absolute",
                   "steps": [
                     { "color": "transparent", "value": null },
-                    { "color": "red", "value": 1 }
+                    { "color": "dark-red", "value": 1 }
                   ]
                 }
               },
@@ -143,14 +328,14 @@
           {
             "matcher": { "id": "byName", "options": "Reason" },
             "properties": [
-              { "id": "custom.width", "value": 140 },
+              { "id": "custom.width", "value": 150 },
               { "id": "custom.align", "value": "left" }
             ]
           },
           {
             "matcher": { "id": "byName", "options": "Time (s)" },
             "properties": [
-              { "id": "custom.width", "value": 70 },
+              { "id": "custom.width", "value": 75 },
               { "id": "custom.align", "value": "right" },
               { "id": "decimals", "value": 1 }
             ]
@@ -158,17 +343,23 @@
           {
             "matcher": { "id": "byName", "options": "Hotkey" },
             "properties": [
-              { "id": "custom.width", "value": 85 },
-              { "id": "custom.align", "value": "left" }
+              { "id": "custom.width", "value": 95 },
+              { "id": "custom.align", "value": "left" },
+              { "id": "color", "value": { "fixedColor": "text", "mode": "fixed" } },
+              {
+                "id": "custom.cellOptions",
+                "value": { "type": "auto" }
+              }
             ]
           }
         ]
       },
-      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 1 },
+      "gridPos": { "h": 14, "w": 24, "x": 0, "y": 5 },
       "id": 1,
       "options": {
         "cellHeight": "sm",
-        "footer": { "countRows": false, "enablePagination": false, "fields": "", "reducer": ["sum"], "show": false },
+        "footer": { "countRows": true, "enablePagination": true, "fields": "", "reducer": ["count"], "show": true },
+        "frameIndex": 0,
         "showHeader": true,
         "sortBy": [{ "desc": true, "displayName": "Window" }]
       },
@@ -235,53 +426,15 @@
       "type": "table"
     },
     {
-      "datasource": { "type": "loki", "uid": "loki" },
-      "description": "Count of validation failures in the selected time range.",
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 1 }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 13 },
-      "id": 2,
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "datasource": { "type": "loki", "uid": "loki" },
-          "editorMode": "code",
-          "expr": "count_over_time({logger=\"grail.validator.verdict\"} |= `\"failure_flag\":1` [$__range])",
-          "queryType": "range",
-          "refId": "A"
-        }
-      ],
-      "title": "Failures",
-      "type": "stat"
-    },
-    {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 19 },
       "id": 200,
       "title": "Miner Windows",
       "type": "row"
     },
     {
       "datasource": { "type": "loki", "uid": "loki" },
-      "description": "Per-window rollout counts and success rate over time.",
+      "description": "Per-window rollout counts, success rate, and throughput.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -289,20 +442,21 @@
             "cellOptions": { "type": "auto" },
             "filterable": false,
             "inspect": false
-          }
+          },
+          "noValue": "-"
         },
         "overrides": [
           {
             "matcher": { "id": "byName", "options": "Window" },
             "properties": [
-              { "id": "custom.width", "value": 70 },
-              { "id": "custom.align", "value": "center" }
+              { "id": "custom.width", "value": 90 },
+              { "id": "custom.align", "value": "left" }
             ]
           },
           {
             "matcher": { "id": "byName", "options": "Total" },
             "properties": [
-              { "id": "custom.width", "value": 70 },
+              { "id": "custom.width", "value": 65 },
               { "id": "custom.align", "value": "right" }
             ]
           },
@@ -316,24 +470,15 @@
           {
             "matcher": { "id": "byName", "options": "Failed" },
             "properties": [
-              { "id": "custom.width", "value": 65 },
-              { "id": "custom.align", "value": "right" }
-            ]
-          },
-          {
-            "matcher": { "id": "byName", "options": "Success %" },
-            "properties": [
-              { "id": "custom.width", "value": 80 },
+              { "id": "custom.width", "value": 60 },
               { "id": "custom.align", "value": "right" },
-              { "id": "decimals", "value": 1 },
               {
                 "id": "thresholds",
                 "value": {
                   "mode": "absolute",
                   "steps": [
-                    { "color": "red", "value": null },
-                    { "color": "yellow", "value": 80 },
-                    { "color": "green", "value": 95 }
+                    { "color": "transparent", "value": null },
+                    { "color": "dark-red", "value": 1 }
                   ]
                 }
               },
@@ -345,9 +490,40 @@
             ]
           },
           {
+            "matcher": { "id": "byName", "options": "Success %" },
+            "properties": [
+              { "id": "custom.width", "value": 100 },
+              { "id": "custom.align", "value": "right" },
+              { "id": "decimals", "value": 1 },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "gradient",
+                  "type": "gauge",
+                  "valueDisplayMode": "text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "red", "value": null },
+                    { "color": "orange", "value": 50 },
+                    { "color": "yellow", "value": 80 },
+                    { "color": "green", "value": 95 }
+                  ]
+                }
+              },
+              { "id": "color", "value": { "mode": "thresholds" } },
+              { "id": "min", "value": 0 },
+              { "id": "max", "value": 100 }
+            ]
+          },
+          {
             "matcher": { "id": "byName", "options": "Avg Reward" },
             "properties": [
-              { "id": "custom.width", "value": 80 },
+              { "id": "custom.width", "value": 90 },
               { "id": "custom.align", "value": "right" },
               { "id": "decimals", "value": 4 }
             ]
@@ -355,7 +531,7 @@
           {
             "matcher": { "id": "byName", "options": "Time (s)" },
             "properties": [
-              { "id": "custom.width", "value": 70 },
+              { "id": "custom.width", "value": 75 },
               { "id": "custom.align", "value": "right" },
               { "id": "decimals", "value": 1 }
             ]
@@ -371,18 +547,27 @@
           {
             "matcher": { "id": "byName", "options": "Roll/min" },
             "properties": [
-              { "id": "custom.width", "value": 70 },
+              { "id": "custom.width", "value": 80 },
               { "id": "custom.align", "value": "right" },
-              { "id": "decimals", "value": 1 }
+              { "id": "decimals", "value": 1 },
+              {
+                "id": "color",
+                "value": { "mode": "continuous-greens" }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": { "mode": "gradient", "type": "color-background" }
+              }
             ]
           }
         ]
       },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 19 },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 20 },
       "id": 3,
       "options": {
         "cellHeight": "sm",
-        "footer": { "countRows": false, "enablePagination": false, "fields": "", "reducer": ["sum"], "show": false },
+        "footer": { "countRows": true, "enablePagination": true, "fields": "", "reducer": ["count"], "show": true },
+        "frameIndex": 0,
         "showHeader": true,
         "sortBy": [{ "desc": true, "displayName": "Window" }]
       },
@@ -454,7 +639,7 @@
     },
     {
       "datasource": { "type": "loki", "uid": "loki" },
-      "description": "Generation, evaluation, and proof timing breakdown per GRPO group.",
+      "description": "Generation, evaluation, and proof timing per GRPO group.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -462,43 +647,60 @@
             "cellOptions": { "type": "auto" },
             "filterable": false,
             "inspect": false
-          }
+          },
+          "noValue": "-"
         },
         "overrides": [
           {
             "matcher": { "id": "byName", "options": "Gen (s)" },
             "properties": [
-              { "id": "custom.width", "value": 70 },
+              { "id": "custom.width", "value": 80 },
               { "id": "custom.align", "value": "right" },
-              { "id": "decimals", "value": 2 }
+              { "id": "decimals", "value": 2 },
+              {
+                "id": "color",
+                "value": { "mode": "continuous-BlPu" }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": { "mode": "gradient", "type": "color-background" }
+              }
             ]
           },
           {
             "matcher": { "id": "byName", "options": "Eval (s)" },
             "properties": [
-              { "id": "custom.width", "value": 70 },
+              { "id": "custom.width", "value": 80 },
               { "id": "custom.align", "value": "right" },
-              { "id": "decimals", "value": 2 }
+              { "id": "decimals", "value": 2 },
+              {
+                "id": "color",
+                "value": { "mode": "continuous-BlPu" }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": { "mode": "gradient", "type": "color-background" }
+              }
             ]
           },
           {
             "matcher": { "id": "byName", "options": "Proof (s)" },
             "properties": [
-              { "id": "custom.width", "value": 70 },
+              { "id": "custom.width", "value": 80 },
               { "id": "custom.align", "value": "right" },
-              { "id": "decimals", "value": 2 }
+              { "id": "decimals", "value": 2 },
+              {
+                "id": "color",
+                "value": { "mode": "continuous-BlPu" }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": { "mode": "gradient", "type": "color-background" }
+              }
             ]
           },
           {
             "matcher": { "id": "byName", "options": "Wait (s)" },
-            "properties": [
-              { "id": "custom.width", "value": 65 },
-              { "id": "custom.align", "value": "right" },
-              { "id": "decimals", "value": 2 }
-            ]
-          },
-          {
-            "matcher": { "id": "byName", "options": "Total (s)" },
             "properties": [
               { "id": "custom.width", "value": 75 },
               { "id": "custom.align", "value": "right" },
@@ -506,23 +708,31 @@
             ]
           },
           {
+            "matcher": { "id": "byName", "options": "Total (s)" },
+            "properties": [
+              { "id": "custom.width", "value": 80 },
+              { "id": "custom.align", "value": "right" },
+              { "id": "decimals", "value": 2 }
+            ]
+          },
+          {
             "matcher": { "id": "byName", "options": "Rollouts" },
             "properties": [
-              { "id": "custom.width", "value": 70 },
+              { "id": "custom.width", "value": 75 },
               { "id": "custom.align", "value": "right" }
             ]
           },
           {
             "matcher": { "id": "byName", "options": "Tokens" },
             "properties": [
-              { "id": "custom.width", "value": 70 },
+              { "id": "custom.width", "value": 75 },
               { "id": "custom.align", "value": "right" }
             ]
           },
           {
             "matcher": { "id": "byName", "options": "Tok/s" },
             "properties": [
-              { "id": "custom.width", "value": 65 },
+              { "id": "custom.width", "value": 75 },
               { "id": "custom.align", "value": "right" },
               { "id": "decimals", "value": 1 },
               {
@@ -541,7 +751,8 @@
       "id": 4,
       "options": {
         "cellHeight": "sm",
-        "footer": { "countRows": false, "enablePagination": false, "fields": "", "reducer": ["sum"], "show": false },
+        "footer": { "countRows": true, "enablePagination": true, "fields": "", "reducer": ["count"], "show": true },
+        "frameIndex": 0,
         "showHeader": true
       },
       "targets": [
@@ -599,14 +810,14 @@
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 42 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 },
       "id": 400,
       "title": "Checkpoints",
       "type": "row"
     },
     {
       "datasource": { "type": "loki", "uid": "loki" },
-      "description": "Checkpoint load events showing method (fast/full), success, and load time.",
+      "description": "Checkpoint load events: method (fast/full), success, and duration.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -614,59 +825,86 @@
             "cellOptions": { "type": "auto" },
             "filterable": false,
             "inspect": false
-          }
+          },
+          "noValue": "-"
         },
         "overrides": [
           {
             "matcher": { "id": "byName", "options": "Window" },
             "properties": [
-              { "id": "custom.width", "value": 70 },
-              { "id": "custom.align", "value": "center" }
+              { "id": "custom.width", "value": 90 },
+              { "id": "custom.align", "value": "left" }
             ]
           },
           {
             "matcher": { "id": "byName", "options": "Method" },
             "properties": [
-              { "id": "custom.width", "value": 65 },
+              { "id": "custom.width", "value": 75 },
               { "id": "custom.align", "value": "center" }
             ]
           },
           {
             "matcher": { "id": "byName", "options": "Success" },
             "properties": [
-              { "id": "custom.width", "value": 65 },
-              { "id": "custom.align", "value": "center" }
+              { "id": "custom.width", "value": 70 },
+              { "id": "custom.align", "value": "center" },
+              {
+                "id": "mappings",
+                "value": [
+                  { "options": { "false": { "color": "dark-red", "text": "No" }, "true": { "color": "green", "text": "Yes" } }, "type": "value" }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": { "mode": "basic", "type": "color-background" }
+              },
+              { "id": "color", "value": { "mode": "fixed" } }
             ]
           },
           {
             "matcher": { "id": "byName", "options": "Fast" },
             "properties": [
-              { "id": "custom.width", "value": 55 },
-              { "id": "custom.align", "value": "center" }
+              { "id": "custom.width", "value": 60 },
+              { "id": "custom.align", "value": "center" },
+              {
+                "id": "mappings",
+                "value": [
+                  { "options": { "false": { "text": "No" }, "true": { "color": "super-light-blue", "text": "Yes" } }, "type": "value" }
+                ]
+              }
             ]
           },
           {
             "matcher": { "id": "byName", "options": "Prev Window" },
             "properties": [
-              { "id": "custom.width", "value": 85 },
-              { "id": "custom.align", "value": "center" }
+              { "id": "custom.width", "value": 100 },
+              { "id": "custom.align", "value": "left" }
             ]
           },
           {
             "matcher": { "id": "byName", "options": "Load (s)" },
             "properties": [
-              { "id": "custom.width", "value": 70 },
+              { "id": "custom.width", "value": 80 },
               { "id": "custom.align", "value": "right" },
-              { "id": "decimals", "value": 2 }
+              { "id": "decimals", "value": 2 },
+              {
+                "id": "color",
+                "value": { "mode": "continuous-BlPu" }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": { "mode": "gradient", "type": "color-background" }
+              }
             ]
           }
         ]
       },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 43 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 42 },
       "id": 5,
       "options": {
         "cellHeight": "sm",
-        "footer": { "countRows": false, "enablePagination": false, "fields": "", "reducer": ["sum"], "show": false },
+        "footer": { "countRows": true, "enablePagination": true, "fields": "", "reducer": ["count"], "show": true },
+        "frameIndex": 0,
         "showHeader": true,
         "sortBy": [{ "desc": true, "displayName": "Window" }]
       },
@@ -722,7 +960,7 @@
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 52 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 50 },
       "id": 500,
       "title": "Network Stats",
       "type": "row"
@@ -737,27 +975,28 @@
             "cellOptions": { "type": "auto" },
             "filterable": false,
             "inspect": false
-          }
+          },
+          "noValue": "-"
         },
         "overrides": [
           {
             "matcher": { "id": "byName", "options": "Interval" },
-            "properties": [
-              { "id": "custom.width", "value": 65 },
-              { "id": "custom.align", "value": "center" }
-            ]
-          },
-          {
-            "matcher": { "id": "byName", "options": "Block" },
             "properties": [
               { "id": "custom.width", "value": 70 },
               { "id": "custom.align", "value": "center" }
             ]
           },
           {
-            "matcher": { "id": "byName", "options": "Registered" },
+            "matcher": { "id": "byName", "options": "Block" },
             "properties": [
               { "id": "custom.width", "value": 80 },
+              { "id": "custom.align", "value": "left" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Registered" },
+            "properties": [
+              { "id": "custom.width", "value": 85 },
               { "id": "custom.align", "value": "right" }
             ]
           },
@@ -779,14 +1018,14 @@
           {
             "matcher": { "id": "byName", "options": "Unique Rollouts" },
             "properties": [
-              { "id": "custom.width", "value": 110 },
+              { "id": "custom.width", "value": 115 },
               { "id": "custom.align", "value": "right" }
             ]
           },
           {
             "matcher": { "id": "byName", "options": "Avg Weight" },
             "properties": [
-              { "id": "custom.width", "value": 85 },
+              { "id": "custom.width", "value": 90 },
               { "id": "custom.align", "value": "right" },
               { "id": "decimals", "value": 6 }
             ]
@@ -794,7 +1033,7 @@
           {
             "matcher": { "id": "byName", "options": "Max Weight" },
             "properties": [
-              { "id": "custom.width", "value": 85 },
+              { "id": "custom.width", "value": 90 },
               { "id": "custom.align", "value": "right" },
               { "id": "decimals", "value": 6 }
             ]
@@ -802,7 +1041,7 @@
           {
             "matcher": { "id": "byName", "options": "Median Weight" },
             "properties": [
-              { "id": "custom.width", "value": 100 },
+              { "id": "custom.width", "value": 105 },
               { "id": "custom.align", "value": "right" },
               { "id": "decimals", "value": 6 }
             ]
@@ -810,7 +1049,7 @@
           {
             "matcher": { "id": "byName", "options": "Failures" },
             "properties": [
-              { "id": "custom.width", "value": 70 },
+              { "id": "custom.width", "value": 75 },
               { "id": "custom.align", "value": "center" },
               {
                 "id": "thresholds",
@@ -818,7 +1057,7 @@
                   "mode": "absolute",
                   "steps": [
                     { "color": "transparent", "value": null },
-                    { "color": "red", "value": 1 }
+                    { "color": "dark-red", "value": 1 }
                   ]
                 }
               },
@@ -832,18 +1071,42 @@
           {
             "matcher": { "id": "byName", "options": "Avg Success %" },
             "properties": [
-              { "id": "custom.width", "value": 100 },
+              { "id": "custom.width", "value": 110 },
               { "id": "custom.align", "value": "right" },
-              { "id": "decimals", "value": 1 }
+              { "id": "decimals", "value": 1 },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "gradient",
+                  "type": "gauge",
+                  "valueDisplayMode": "text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "red", "value": null },
+                    { "color": "orange", "value": 50 },
+                    { "color": "yellow", "value": 80 },
+                    { "color": "green", "value": 95 }
+                  ]
+                }
+              },
+              { "id": "color", "value": { "mode": "thresholds" } },
+              { "id": "min", "value": 0 },
+              { "id": "max", "value": 100 }
             ]
           }
         ]
       },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 53 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 51 },
       "id": 6,
       "options": {
         "cellHeight": "sm",
-        "footer": { "countRows": false, "enablePagination": false, "fields": "", "reducer": ["sum"], "show": false },
+        "footer": { "countRows": true, "enablePagination": true, "fields": "", "reducer": ["count"], "show": true },
+        "frameIndex": 0,
         "showHeader": true,
         "sortBy": [{ "desc": true, "displayName": "Interval" }]
       },
@@ -911,14 +1174,14 @@
       "type": "table"
     }
   ],
-  "refresh": "",
+  "refresh": "30s",
   "schemaVersion": 38,
   "style": "dark",
-  "tags": ["grail", "ops", "mining", "validation"],
+  "tags": ["grail", "ops"],
   "templating": { "list": [] },
   "time": { "from": "now-6h", "to": "now" },
   "timepicker": {},
-  "timezone": "",
+  "timezone": "utc",
   "title": "GRAIL Operations",
   "uid": "grail-ops",
   "version": 1,

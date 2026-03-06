@@ -12,11 +12,36 @@
       }
     ]
   },
+  "description": "Ranked miner leaderboard from the most recent weight submission.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
   "id": null,
   "links": [
+    {
+      "asDropdown": false,
+      "icon": "apps",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Home",
+      "tooltip": "Monitoring hub",
+      "type": "link",
+      "url": "/d/grail-home"
+    },
+    {
+      "asDropdown": false,
+      "icon": "dashboard",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Operations",
+      "tooltip": "Operations dashboard",
+      "type": "link",
+      "url": "/d/grail-ops"
+    },
     {
       "asDropdown": false,
       "icon": "doc",
@@ -25,31 +50,45 @@
       "tags": [],
       "targetBlank": false,
       "title": "Log Explorer",
-      "tooltip": "Go to log explorer dashboard",
+      "tooltip": "Raw log explorer",
       "type": "link",
-      "url": "/d/grail-public-log-explorer"
+      "url": "/d/grail-log-explorer"
     }
   ],
   "liveNow": false,
   "panels": [
     {
+      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 0 },
+      "id": 2,
+      "options": {
+        "code": { "language": "plaintext", "showLineNumbers": false, "showMiniMap": false },
+        "content": "Leaderboard refreshes at each weight submission (every ~20 minutes). If the table is empty, no weight submission has occurred in the selected time range. Try widening the range to **Last 2 hours** or more.\n\nThe default range is **75 minutes** to capture at least one full interval.",
+        "mode": "markdown"
+      },
+      "transparent": true,
+      "title": "",
+      "type": "text"
+    },
+    {
       "datasource": { "type": "loki", "uid": "loki" },
-      "description": "Ranked miner leaderboard at most recent weight submission. Shows all miners with non-zero weight, sorted by rank.",
+      "description": "Ranked miner leaderboard at the most recent weight submission. Shows all miners with non-zero weight, sorted by rank.",
       "fieldConfig": {
         "defaults": {
           "custom": {
             "align": "auto",
             "cellOptions": { "type": "auto" },
-            "filterable": false,
+            "filterable": true,
             "inspect": false
-          }
+          },
+          "noValue": "-"
         },
         "overrides": [
           {
             "matcher": { "id": "byName", "options": "Rank" },
             "properties": [
               { "id": "custom.width", "value": 55 },
-              { "id": "custom.align", "value": "center" }
+              { "id": "custom.align", "value": "center" },
+              { "id": "custom.filterable", "value": false }
             ]
           },
           {
@@ -62,49 +101,48 @@
           {
             "matcher": { "id": "byName", "options": "Weight" },
             "properties": [
-              { "id": "custom.width", "value": 100 },
+              { "id": "custom.width", "value": 105 },
               { "id": "custom.align", "value": "right" },
               { "id": "decimals", "value": 6 },
               {
                 "id": "color",
-                "value": {
-                  "mode": "continuous-greens"
-                }
+                "value": { "mode": "continuous-greens" }
               },
               {
                 "id": "custom.cellOptions",
-                "value": {
-                  "mode": "gradient",
-                  "type": "color-background"
-                }
+                "value": { "mode": "gradient", "type": "color-background" }
               }
             ]
           },
           {
             "matcher": { "id": "byName", "options": "Cap %" },
             "properties": [
-              { "id": "custom.width", "value": 70 },
+              { "id": "custom.width", "value": 100 },
               { "id": "custom.align", "value": "right" },
               { "id": "decimals", "value": 1 },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "gradient",
+                  "type": "gauge",
+                  "valueDisplayMode": "text"
+                }
+              },
               {
                 "id": "thresholds",
                 "value": {
                   "mode": "absolute",
                   "steps": [
                     { "color": "red", "value": null },
-                    { "color": "yellow", "value": 40 },
+                    { "color": "orange", "value": 30 },
+                    { "color": "yellow", "value": 60 },
                     { "color": "green", "value": 80 }
                   ]
                 }
               },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "basic",
-                  "type": "color-background"
-                }
-              },
-              { "id": "color", "value": { "mode": "thresholds" } }
+              { "id": "color", "value": { "mode": "thresholds" } },
+              { "id": "min", "value": 0 },
+              { "id": "max", "value": 100 }
             ]
           },
           {
@@ -118,7 +156,7 @@
           {
             "matcher": { "id": "byName", "options": "Unique/Win" },
             "properties": [
-              { "id": "custom.width", "value": 90 },
+              { "id": "custom.width", "value": 95 },
               { "id": "custom.align", "value": "right" },
               { "id": "decimals", "value": 1 }
             ]
@@ -126,7 +164,7 @@
           {
             "matcher": { "id": "byName", "options": "Total" },
             "properties": [
-              { "id": "custom.width", "value": 80 },
+              { "id": "custom.width", "value": 75 },
               { "id": "custom.align", "value": "right" },
               { "id": "decimals", "value": 0 }
             ]
@@ -134,34 +172,38 @@
           {
             "matcher": { "id": "byName", "options": "Success %" },
             "properties": [
-              { "id": "custom.width", "value": 85 },
+              { "id": "custom.width", "value": 100 },
               { "id": "custom.align", "value": "right" },
               { "id": "decimals", "value": 1 },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "gradient",
+                  "type": "gauge",
+                  "valueDisplayMode": "text"
+                }
+              },
               {
                 "id": "thresholds",
                 "value": {
                   "mode": "absolute",
                   "steps": [
                     { "color": "red", "value": null },
+                    { "color": "orange", "value": 50 },
                     { "color": "yellow", "value": 80 },
                     { "color": "green", "value": 95 }
                   ]
                 }
               },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "basic",
-                  "type": "color-background"
-                }
-              },
-              { "id": "color", "value": { "mode": "thresholds" } }
+              { "id": "color", "value": { "mode": "thresholds" } },
+              { "id": "min", "value": 0 },
+              { "id": "max", "value": 100 }
             ]
           },
           {
             "matcher": { "id": "byName", "options": "Active/12" },
             "properties": [
-              { "id": "custom.width", "value": 70 },
+              { "id": "custom.width", "value": 80 },
               { "id": "custom.align", "value": "center" },
               { "id": "decimals", "value": 0 },
               {
@@ -177,10 +219,7 @@
               },
               {
                 "id": "custom.cellOptions",
-                "value": {
-                  "mode": "basic",
-                  "type": "color-background"
-                }
+                "value": { "mode": "basic", "type": "color-background" }
               },
               { "id": "color", "value": { "mode": "thresholds" } }
             ]
@@ -188,7 +227,7 @@
           {
             "matcher": { "id": "byName", "options": "Checked" },
             "properties": [
-              { "id": "custom.width", "value": 70 },
+              { "id": "custom.width", "value": 75 },
               { "id": "custom.align", "value": "center" },
               { "id": "decimals", "value": 0 }
             ]
@@ -196,7 +235,7 @@
           {
             "matcher": { "id": "byName", "options": "Failures" },
             "properties": [
-              { "id": "custom.width", "value": 70 },
+              { "id": "custom.width", "value": 75 },
               { "id": "custom.align", "value": "center" },
               { "id": "decimals", "value": 0 },
               {
@@ -205,16 +244,13 @@
                   "mode": "absolute",
                   "steps": [
                     { "color": "transparent", "value": null },
-                    { "color": "red", "value": 1 }
+                    { "color": "dark-red", "value": 1 }
                   ]
                 }
               },
               {
                 "id": "custom.cellOptions",
-                "value": {
-                  "mode": "basic",
-                  "type": "color-background"
-                }
+                "value": { "mode": "basic", "type": "color-background" }
               },
               { "id": "color", "value": { "mode": "thresholds" } }
             ]
@@ -222,23 +258,24 @@
           {
             "matcher": { "id": "byName", "options": "Hotkey" },
             "properties": [
-              { "id": "custom.width", "value": 85 },
+              { "id": "custom.width", "value": 95 },
               { "id": "custom.align", "value": "left" }
             ]
           }
         ]
       },
-      "gridPos": { "h": 20, "w": 24, "x": 0, "y": 0 },
+      "gridPos": { "h": 22, "w": 24, "x": 0, "y": 3 },
       "id": 1,
       "options": {
         "cellHeight": "sm",
         "footer": {
-          "countRows": false,
-          "enablePagination": false,
+          "countRows": true,
+          "enablePagination": true,
           "fields": "",
-          "reducer": ["sum"],
-          "show": false
+          "reducer": ["count"],
+          "show": true
         },
+        "frameIndex": 0,
         "showHeader": true,
         "sortBy": [
           { "desc": false, "displayName": "Rank" }
@@ -338,14 +375,14 @@
       "type": "table"
     }
   ],
-  "refresh": "",
+  "refresh": "30s",
   "schemaVersion": 38,
   "style": "dark",
-  "tags": ["grail", "leaderboard", "weights"],
+  "tags": ["grail", "leaderboard"],
   "templating": { "list": [] },
   "time": { "from": "now-75m", "to": "now" },
   "timepicker": {},
-  "timezone": "",
+  "timezone": "utc",
   "title": "GRAIL Miner Leaderboard",
   "uid": "grail-leaderboard",
   "version": 1,
