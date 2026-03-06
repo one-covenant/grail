@@ -44,6 +44,7 @@ from grail.shared.constants import NETUID, TOTAL_TRAINING_WINDOWS, WINDOW_LENGTH
 from grail.trainer.algorithms import GRPOAlgorithm, TrainingAlgorithm
 from grail.trainer.algorithms.grpo import load_grpo_groups
 from grail.trainer.config import TrainingConfig
+from grail.trainer.dashboard_logger import state_logger
 from grail.trainer.ipc import IPCChannels
 from grail.trainer.replay_buffer import ReplayBuffer, create_replay_buffer
 from grail.trainer.snapshot_manager import SnapshotManager
@@ -1059,6 +1060,29 @@ class TrainingService:
 
             self.epoch_counter += 1
             self._epochs_this_window += 1
+
+            # Emit structured JSON for Grafana trainer dashboard
+            state_payload: dict[str, Any] = {
+                "event": "epoch_end",
+                "epoch": self.epoch_counter,
+                "window": current_window,
+                "epoch_duration_sec": epoch_duration,
+                "epochs_this_window": self._epochs_this_window,
+                "loss_total": metrics.get("loss_total", 0.0),
+                "reward_mean": metrics.get("reward_mean", 0.0),
+                "groups_sampled": len(groups),
+            }
+            if self.replay_buffer is not None:
+                rb_stats = self.replay_buffer.get_stats()
+                state_payload["replay_buffer_windows"] = rb_stats.get("num_windows", 0)
+                state_payload["replay_buffer_groups"] = rb_stats.get("total_groups", 0)
+            if torch.cuda.is_available():
+                state_payload["gpu_alloc_gb"] = round(torch.cuda.memory_allocated() / (1024**3), 2)
+                state_payload["gpu_reserved_gb"] = round(
+                    torch.cuda.memory_reserved() / (1024**3), 2
+                )
+            state_logger.emit(state_payload)
+
             return metrics
 
         except Exception as exc:

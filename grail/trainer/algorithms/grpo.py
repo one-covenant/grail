@@ -27,6 +27,7 @@ from grail.shared.constants import (
     ROLLOUTS_PER_PROBLEM,
     is_kl_enabled,
 )
+from grail.trainer.dashboard_logger import data_logger, step_logger
 from grail.trainer.metrics import (
     KMetricsAggregator,
     TaskReplicateResult,
@@ -530,6 +531,12 @@ def _compute_training_metrics(
             window,
             ", ".join(summary_bits),
         )
+
+    # Emit structured JSON for Grafana dashboard
+    if prefilter_metrics:
+        data_payload: dict[str, Any] = {"window": window}
+        data_payload.update(prefilter_metrics)
+        data_logger.emit(data_payload)
 
     # Return metrics with metadata for async logging by caller
     return prefilter_metrics
@@ -2304,6 +2311,22 @@ class GRPOAlgorithm(TrainingAlgorithm):
                     grad_norm_scalar,
                 )
                 await self._log_batch_metrics(monitor, batch_metrics)
+
+                # Emit structured JSON for Grafana trainer dashboard
+                step_payload: dict[str, Any] = {
+                    "optimizer_step": self.optimizer_step_count,
+                    "window": window,
+                }
+                if batch_metrics:
+                    step_payload.update(batch_metrics)
+                # Add learning rate and KL coefficient
+                try:
+                    step_payload["lr"] = optimizer.param_groups[0]["lr"]
+                except (IndexError, KeyError):
+                    pass
+                step_payload["kl_coef"] = current_kl_coef
+                step_logger.emit(step_payload)
+
                 reset_actual_batch_tracker()
 
             # Step 12: Collect batch metrics for epoch aggregation
@@ -2372,6 +2395,21 @@ class GRPOAlgorithm(TrainingAlgorithm):
                     final_grad_norm.item(),
                 )
                 await self._log_batch_metrics(monitor, batch_metrics)
+
+                # Emit structured JSON for Grafana trainer dashboard (epoch-end leftover)
+                epoch_end_payload: dict[str, Any] = {
+                    "optimizer_step": self.optimizer_step_count,
+                    "window": window,
+                }
+                if batch_metrics:
+                    epoch_end_payload.update(batch_metrics)
+                try:
+                    epoch_end_payload["lr"] = optimizer.param_groups[0]["lr"]
+                except (IndexError, KeyError):
+                    pass
+                epoch_end_payload["kl_coef"] = current_kl_coef
+                step_logger.emit(epoch_end_payload)
+
             reset_actual_batch_tracker()
             grad_accum_counter = 0
 

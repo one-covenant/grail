@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch.nn.functional as F
 
+from grail.trainer.dashboard_logger import sparse_logger
+
 if TYPE_CHECKING:
     from torch import nn
 
@@ -509,3 +511,16 @@ async def log_sparse_quality_metrics(
                     tm.top1_agreement_random * 100,
                 )
                 break
+
+    # Emit structured JSON for Grafana trainer dashboard
+    sparse_payload: dict[str, Any] = {"optimizer_step": step}
+    for tm in metrics.threshold_metrics:
+        t = f"{tm.threshold:.0e}"
+        sparse_payload[f"kl_div_{t}"] = tm.kl_divergence
+        sparse_payload[f"cosine_{t}"] = tm.cosine_similarity
+        sparse_payload[f"mse_{t}"] = tm.mse
+        sparse_payload[f"top1_agree_{t}"] = tm.top1_agreement
+        sparse_payload[f"kept_ratio_{t}"] = tm.kept_ratio
+        sparse_payload[f"kl_div_{t}_random"] = tm.kl_divergence_random
+        sparse_payload[f"top1_agree_{t}_random"] = tm.top1_agreement_random
+    sparse_logger.emit(sparse_payload)

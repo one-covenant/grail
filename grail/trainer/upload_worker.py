@@ -38,6 +38,7 @@ from grail.trainer.checkpoint_publisher import (
     UploadError,
     UploadResult,
 )
+from grail.trainer.dashboard_logger import upload_logger
 from grail.trainer.ipc import IPCChannels
 from grail.trainer.snapshot_manager import SnapshotManager
 
@@ -438,6 +439,33 @@ async def upload_worker_loop(
                 checkpoint_window,
                 ready_window,
             )
+
+            # Emit structured JSON for Grafana trainer dashboard
+            if upload_result is not None:
+                upload_payload: dict[str, Any] = {
+                    "window": checkpoint_window,
+                    "type": checkpoint_type,
+                    "duration_sec": upload_duration,
+                    "blocks_elapsed": blocks_elapsed,
+                    "total_mb": upload_result.total_mb or 0.0,
+                    "throughput_mbps": upload_result.throughput_mbps or 0.0,
+                }
+                timing = upload_result.timing
+                if timing:
+                    upload_payload["timing_load_s"] = timing.load_state_s
+                    upload_payload["timing_compute_s"] = timing.compute_delta_s
+                    upload_payload["timing_compress_s"] = timing.compression_s
+                    upload_payload["timing_network_s"] = timing.network_upload_s
+                    upload_payload["timing_cleanup_s"] = timing.cleanup_s
+                    upload_payload["timing_total_s"] = timing.total_s
+                if upload_result.is_delta:
+                    upload_payload["delta_sparsity_ratio"] = upload_result.sparsity_ratio
+                    upload_payload["delta_compression_ratio"] = upload_result.compression_ratio
+                    if upload_result.delta_compressed_bytes is not None:
+                        upload_payload["delta_compressed_mb"] = (
+                            upload_result.delta_compressed_bytes / (1024 * 1024)
+                        )
+                upload_logger.emit(upload_payload)
 
             if monitor and upload_result is not None:
                 monitor.set_block_context(current_block, checkpoint_window)

@@ -31,6 +31,7 @@ from grail.shared.constants import (
 )
 from grail.trainer.checkpoint_publisher import CheckpointPublisher
 from grail.trainer.config import EvalConfig, TrainingConfig
+from grail.trainer.dashboard_logger import eval_logger
 from grail.trainer.eval_planner import EvaluationPlanner
 from grail.trainer.evaluator import EvaluatorService
 from grail.trainer.inference_server import create_inference_server
@@ -1075,6 +1076,16 @@ class TrainerNeuron(BaseNeuron):
 
         logger.info("🧪 Total evaluation time: %.2fs (setup + run + cleanup)", duration)
         await self._context.monitor.log_gauge("profiling/eval_total_time", duration)
+
+        # Emit structured JSON for Grafana trainer dashboard
+        eval_payload: dict[str, float | int | str] = {
+            "duration_sec": duration,
+        }
+        tasks = metrics.get("tasks", 0)
+        if tasks and duration > 0:
+            eval_payload["tasks_per_sec"] = float(tasks) / duration
+        eval_payload.update(metrics)
+        eval_logger.emit(eval_payload)
 
     async def _log_evaluation_failure(self, duration: float) -> None:
         """Log evaluation failure metrics.

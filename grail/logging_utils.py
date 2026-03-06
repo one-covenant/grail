@@ -273,6 +273,8 @@ def configure_process_logging(
         level: Logging level (default: INFO, use DEBUG for troubleshooting)
         include_function: Include function name and line number in logs
     """
+    from logging.handlers import RotatingFileHandler
+
     # Quiet noisy libraries first (before creating handlers)
     for noisy in [
         "websockets",
@@ -327,6 +329,53 @@ def configure_process_logging(
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(level)
+
+    # Add a file handler using Promtail-compatible format so subprocess logs
+    # reach Loki via the same pipeline as the parent CLI process.
+    log_file = os.environ.get("GRAIL_LOG_FILE", "").strip()
+    if log_file:
+        try:
+
+            def _parse_size(text: str) -> int:
+                text = (text or "").strip().upper()
+                if not text:
+                    return 0
+                try:
+                    if text.endswith("GB"):
+                        return int(float(text[:-2]) * 1024 * 1024 * 1024)
+                    if text.endswith("MB"):
+                        return int(float(text[:-2]) * 1024 * 1024)
+                    if text.endswith("KB"):
+                        return int(float(text[:-2]) * 1024)
+                    if text.endswith("B"):
+                        return int(float(text[:-1]))
+                    return int(float(text))
+                except Exception:
+                    return 100 * 1024 * 1024
+
+            max_bytes = _parse_size(os.environ.get("GRAIL_LOG_MAX_SIZE", "100MB"))
+            try:
+                backup_count = int(os.environ.get("GRAIL_LOG_BACKUP_COUNT", "5"))
+            except Exception:
+                backup_count = 5
+
+            file_handler = RotatingFileHandler(
+                log_file,
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding="utf-8",
+            )
+            # Use CLI-compatible format that Promtail's regex can parse:
+            # ^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (?P<level>\w+)\s+\[(?P<logger>[^\]]+)\] (?P<message>.*)
+            file_formatter = logging.Formatter(
+                "%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+            file_handler.setFormatter(file_formatter)
+            root.addHandler(file_handler)
+        except Exception:
+            # Never let file handler setup break the process
+            pass
 
     # Conditionally suppress noisy but harmless errors from execution sandbox
     # Set GRAIL_SUPPRESS_SANDBOX_NOISE=1 to enable suppression

@@ -1,0 +1,3020 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Long-term post-training monitoring: loss, reward, evaluation, parameter dynamics, sparse quality, and upload metrics.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "apps",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Home",
+      "tooltip": "Monitoring hub",
+      "type": "link",
+      "url": "/d/grail-home"
+    },
+    {
+      "asDropdown": false,
+      "icon": "dashboard",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Operations",
+      "tooltip": "Validator operations dashboard",
+      "type": "link",
+      "url": "/d/grail-ops"
+    },
+    {
+      "asDropdown": false,
+      "icon": "table",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Leaderboard",
+      "tooltip": "Miner leaderboard",
+      "type": "link",
+      "url": "/d/grail-leaderboard"
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "code": {
+          "language": "plaintext",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        },
+        "content": "# GRAIL Trainer Dashboard\nTraining progress, evaluation results, parameter dynamics, and checkpoint uploads. Panels populate after the first training epoch completes.",
+        "mode": "markdown"
+      },
+      "transparent": true,
+      "title": "",
+      "type": "text"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 2
+      },
+      "id": 100,
+      "title": "Key Metrics",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Latest optimizer step count.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#F4F4F4",
+            "mode": "fixed"
+          },
+          "noValue": "--"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 0,
+        "y": 3
+      },
+      "id": 10,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "max(max_over_time({logger=\"grail.trainer.step\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json optimizer_step | __error__=`` | drop payload | unwrap optimizer_step [$__range]))",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Optimizer Step",
+      "transparent": true,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Latest training window number.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#F4F4F4",
+            "mode": "fixed"
+          },
+          "noValue": "--"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 3,
+        "y": 3
+      },
+      "id": 11,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "max(max_over_time({logger=\"grail.trainer.state\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json window | __error__=`` | drop payload | unwrap window [$__range]))",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Window",
+      "transparent": true,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Latest total loss value.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 4,
+          "noValue": "--",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#2ECC71",
+                "value": null
+              },
+              {
+                "color": "#FFD700",
+                "value": 1
+              },
+              {
+                "color": "#FF3A3A",
+                "value": 5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 6,
+        "y": 3
+      },
+      "id": 12,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time({logger=\"grail.trainer.step\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json loss_total | __error__=`` | drop payload | unwrap loss_total [$__range]))",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Loss",
+      "transparent": true,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Latest mean reward across the batch.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 4,
+          "noValue": "--",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#FF3A3A",
+                "value": null
+              },
+              {
+                "color": "#FFD700",
+                "value": 0.3
+              },
+              {
+                "color": "#2ECC71",
+                "value": 0.6
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 9,
+        "y": 3
+      },
+      "id": 13,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time({logger=\"grail.trainer.step\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json reward_mean | __error__=`` | drop payload | unwrap reward_mean [$__range]))",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Reward Mean",
+      "transparent": true,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Latest eval pass@5 (held-out tasks).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 3,
+          "noValue": "--",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#FF3A3A",
+                "value": null
+              },
+              {
+                "color": "#FFD700",
+                "value": 0.3
+              },
+              {
+                "color": "#2ECC71",
+                "value": 0.6
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 12,
+        "y": 3
+      },
+      "id": 14,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time({logger=\"grail.trainer.eval\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json pass_5 | __error__=`` | drop payload | unwrap pass_5 [$__range]))",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Eval pass@5",
+      "transparent": true,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Latest KL divergence from reference policy.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 4,
+          "noValue": "--",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#2ECC71",
+                "value": null
+              },
+              {
+                "color": "#FFD700",
+                "value": 0.1
+              },
+              {
+                "color": "#FF3A3A",
+                "value": 0.5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 15,
+        "y": 3
+      },
+      "id": 15,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time({logger=\"grail.trainer.step\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json kl_divergence | __error__=`` | drop payload | unwrap kl_divergence [$__range]))",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "KL Divergence",
+      "transparent": true,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Latest gradient norm after clipping.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 3,
+          "noValue": "--",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#2ECC71",
+                "value": null
+              },
+              {
+                "color": "#FFD700",
+                "value": 1
+              },
+              {
+                "color": "#FF3A3A",
+                "value": 5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 18,
+        "y": 3
+      },
+      "id": 16,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time({logger=\"grail.trainer.step\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json grad_norm | __error__=`` | drop payload | unwrap grad_norm [$__range]))",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Grad Norm",
+      "transparent": true,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Training epochs completed.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#F4F4F4",
+            "mode": "fixed"
+          },
+          "noValue": "--"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 21,
+        "y": 3
+      },
+      "id": 17,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "max(max_over_time({logger=\"grail.trainer.state\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json epoch | __error__=`` | drop payload | unwrap epoch [$__range]))",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Epochs",
+      "transparent": true,
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 7
+      },
+      "id": 200,
+      "title": "Training Dynamics",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Total training loss over optimizer steps.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#FF3A3A",
+            "mode": "fixed"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisLabel": "",
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "gradientMode": "scheme",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "showPoints": "auto",
+            "spanNulls": true
+          },
+          "decimals": 4,
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "id": 20,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "avg_over_time({logger=\"grail.trainer.step\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json loss_total | __error__=`` | drop payload | unwrap loss_total [$__auto])",
+          "legendFormat": "loss_total",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Total Loss",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Breakdown of policy gradient, KL, and entropy loss components.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisBorderShow": false,
+            "axisLabel": "",
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 3,
+            "showPoints": "auto",
+            "spanNulls": true
+          },
+          "decimals": 4,
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "loss_pg"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF3A3A",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "loss_kl"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#3498DB",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "loss_entropy"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#2ECC71",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 21,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "avg_over_time({logger=\"grail.trainer.step\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json loss_pg | __error__=`` | drop payload | unwrap loss_pg [$__auto])",
+          "legendFormat": "loss_pg",
+          "queryType": "range",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "avg_over_time({logger=\"grail.trainer.step\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json loss_kl | __error__=`` | drop payload | unwrap loss_kl [$__auto])",
+          "legendFormat": "loss_kl",
+          "queryType": "range",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "avg_over_time({logger=\"grail.trainer.step\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json loss_entropy | __error__=`` | drop payload | unwrap loss_entropy [$__auto])",
+          "legendFormat": "loss_entropy",
+          "queryType": "range",
+          "refId": "C"
+        }
+      ],
+      "title": "Loss Components",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Mean reward per batch over training.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#2ECC71",
+            "mode": "fixed"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "gradientMode": "scheme",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "showPoints": "auto",
+            "spanNulls": true
+          },
+          "decimals": 4,
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "id": 22,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "avg_over_time({logger=\"grail.trainer.step\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json reward_mean | __error__=`` | drop payload | unwrap reward_mean [$__auto])",
+          "legendFormat": "reward_mean",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Reward Curve",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Learning rate schedule over training.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#828282",
+            "mode": "fixed"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "line",
+            "fillOpacity": 5,
+            "gradientMode": "none",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "pointSize": 3,
+            "showPoints": "auto",
+            "spanNulls": true
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "id": 23,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "avg_over_time({logger=\"grail.trainer.step\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json lr | __error__=`` | drop payload | unwrap lr [$__auto])",
+          "legendFormat": "learning_rate",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Learning Rate",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
+      "id": 300,
+      "panels": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "KL divergence from reference policy over training.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "#FF3A3A",
+                "mode": "fixed"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 3,
+                "showPoints": "auto",
+                "spanNulls": true
+              },
+              "decimals": 4
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 8,
+            "x": 0,
+            "y": 25
+          },
+          "id": 30,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "mean",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.step\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json kl_divergence | __error__=`` | drop payload | unwrap kl_divergence [$__auto])",
+              "legendFormat": "kl_divergence",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "KL Divergence",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Adaptive KL penalty coefficient (adjusts to keep KL near target).",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "#E67E22",
+                "mode": "fixed"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 5,
+                "lineInterpolation": "stepAfter",
+                "lineWidth": 2,
+                "pointSize": 3,
+                "showPoints": "auto",
+                "spanNulls": true
+              },
+              "decimals": 4
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 8,
+            "x": 8,
+            "y": 25
+          },
+          "id": 31,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.step\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json kl_coef | __error__=`` | drop payload | unwrap kl_coef [$__auto])",
+              "legendFormat": "kl_coef",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Adaptive KL Coefficient",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Mean policy entropy and gradient norm over training.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 3,
+                "showPoints": "auto",
+                "spanNulls": true
+              },
+              "decimals": 3
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "entropy_mean"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#9B59B6",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "grad_norm"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#E67E22",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 8,
+            "x": 16,
+            "y": 25
+          },
+          "id": 32,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.step\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json entropy_mean | __error__=`` | drop payload | unwrap entropy_mean [$__auto])",
+              "legendFormat": "entropy_mean",
+              "queryType": "range",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.step\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json grad_norm | __error__=`` | drop payload | unwrap grad_norm [$__auto])",
+              "legendFormat": "grad_norm",
+              "queryType": "range",
+              "refId": "B"
+            }
+          ],
+          "title": "Entropy and Grad Norm",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Fraction of importance sampling ratios that were clipped (PPO) or hit the ceiling.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 3,
+                "showPoints": "auto",
+                "spanNulls": true
+              },
+              "decimals": 2,
+              "unit": "percentunit"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "clip_frac"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#FF3A3A",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "ceiling_frac"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#E67E22",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 8,
+            "x": 0,
+            "y": 32
+          },
+          "id": 33,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.step\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json ratio_clip_frac | __error__=`` | drop payload | unwrap ratio_clip_frac [$__auto])",
+              "legendFormat": "clip_frac",
+              "queryType": "range",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.step\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json ratio_ceiling_frac | __error__=`` | drop payload | unwrap ratio_ceiling_frac [$__auto])",
+              "legendFormat": "ceiling_frac",
+              "queryType": "range",
+              "refId": "B"
+            }
+          ],
+          "title": "IS Ratio Clipping",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Mean advantage value per batch (should be near zero by construction).",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "#3498DB",
+                "mode": "fixed"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 3,
+                "showPoints": "auto",
+                "spanNulls": true
+              },
+              "decimals": 4
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 8,
+            "x": 8,
+            "y": 32
+          },
+          "id": 34,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.step\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json advantage_mean | __error__=`` | drop payload | unwrap advantage_mean [$__auto])",
+              "legendFormat": "advantage_mean",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Advantage Mean",
+          "type": "timeseries"
+        }
+      ],
+      "title": "Policy Behavior",
+      "type": "row"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 25
+      },
+      "id": 400,
+      "panels": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Evaluation pass@k over time (held-out tasks).",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "showPoints": "always",
+                "spanNulls": true
+              },
+              "decimals": 3
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "pass@1"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#FF3A3A",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "pass@5"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#2ECC71",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "pass@10"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#3498DB",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 10,
+            "w": 12,
+            "x": 0,
+            "y": 26
+          },
+          "id": 40,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "min",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.eval\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json pass_1 | __error__=`` | drop payload | unwrap pass_1 [$__auto])",
+              "legendFormat": "pass@1",
+              "queryType": "range",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.eval\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json pass_5 | __error__=`` | drop payload | unwrap pass_5 [$__auto])",
+              "legendFormat": "pass@5",
+              "queryType": "range",
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.eval\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json pass_10 | __error__=`` | drop payload | unwrap pass_10 [$__auto])",
+              "legendFormat": "pass@10",
+              "queryType": "range",
+              "refId": "C"
+            }
+          ],
+          "title": "Eval pass@k",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Evaluation success rate and reward mean over time.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "showPoints": "always",
+                "spanNulls": true
+              },
+              "decimals": 3
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "success_rate"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#2ECC71",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "reward_mean"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#FF3A3A",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 10,
+            "w": 12,
+            "x": 12,
+            "y": 26
+          },
+          "id": 41,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.eval\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json success_rate_all | __error__=`` | drop payload | unwrap success_rate_all [$__auto])",
+              "legendFormat": "success_rate",
+              "queryType": "range",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.eval\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json reward_mean_all | __error__=`` | drop payload | unwrap reward_mean_all [$__auto])",
+              "legendFormat": "reward_mean",
+              "queryType": "range",
+              "refId": "B"
+            }
+          ],
+          "title": "Eval Success Rate and Reward",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Time spent on each evaluation cycle.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "#828282",
+                "mode": "fixed"
+              },
+              "custom": {
+                "drawStyle": "bars",
+                "fillOpacity": 50,
+                "lineWidth": 1,
+                "pointSize": 5,
+                "showPoints": "auto"
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 12,
+            "x": 0,
+            "y": 36
+          },
+          "id": 42,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.eval\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json duration_sec | __error__=`` | drop payload | unwrap duration_sec [$__auto])",
+              "legendFormat": "duration",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Eval Duration",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Evaluation throughput (tasks evaluated per second).",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "#2ECC71",
+                "mode": "fixed"
+              },
+              "custom": {
+                "drawStyle": "bars",
+                "fillOpacity": 50,
+                "lineWidth": 1,
+                "pointSize": 5,
+                "showPoints": "auto"
+              },
+              "unit": "ops"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 12,
+            "x": 12,
+            "y": 36
+          },
+          "id": 43,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.eval\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json tasks_per_sec | __error__=`` | drop payload | unwrap tasks_per_sec [$__auto])",
+              "legendFormat": "tasks/sec",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Eval Throughput",
+          "type": "timeseries"
+        }
+      ],
+      "title": "Evaluation",
+      "type": "row"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "id": 500,
+      "panels": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Fraction of parameters unchanged at the primary threshold (higher = more sparse = smaller delta uploads).",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "#FF3A3A",
+                "mode": "fixed"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": true
+              },
+              "decimals": 4,
+              "unit": "percentunit"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 8,
+            "x": 0,
+            "y": 27
+          },
+          "id": 50,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "min"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.params\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json sparsity_ratio | __error__=`` | drop payload | unwrap sparsity_ratio [$__auto])",
+              "legendFormat": "sparsity_ratio",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Sparsity Ratio",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Mean and max absolute parameter delta per optimizer step.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 3,
+                "showPoints": "auto",
+                "spanNulls": true
+              },
+              "decimals": 2
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "mean_abs_delta"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#3498DB",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "max_abs_delta"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#FF3A3A",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 8,
+            "x": 8,
+            "y": 27
+          },
+          "id": 51,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.params\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json mean_abs_delta | __error__=`` | drop payload | unwrap mean_abs_delta [$__auto])",
+              "legendFormat": "mean_abs_delta",
+              "queryType": "range",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.params\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json max_abs_delta | __error__=`` | drop payload | unwrap max_abs_delta [$__auto])",
+              "legendFormat": "max_abs_delta",
+              "queryType": "range",
+              "refId": "B"
+            }
+          ],
+          "title": "Parameter Deltas",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Fraction of parameters that changed sign between optimizer steps.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "#9B59B6",
+                "mode": "fixed"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 3,
+                "showPoints": "auto",
+                "spanNulls": true
+              },
+              "decimals": 4,
+              "unit": "percentunit"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 8,
+            "x": 16,
+            "y": 27
+          },
+          "id": 52,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.params\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json sign_flip_ratio | __error__=`` | drop payload | unwrap sign_flip_ratio [$__auto])",
+              "legendFormat": "sign_flip_ratio",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Sign Flip Ratio",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Number of parameters that changed above the primary threshold.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "#E67E22",
+                "mode": "fixed"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 3,
+                "showPoints": "auto",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 8,
+            "x": 0,
+            "y": 34
+          },
+          "id": 53,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.params\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json changed_count | __error__=`` | drop payload | unwrap changed_count [$__auto])",
+              "legendFormat": "changed_count",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Changed Parameter Count",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Relative parameter change (delta / |param|) over time.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "#2ECC71",
+                "mode": "fixed"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 3,
+                "showPoints": "auto",
+                "spanNulls": true
+              },
+              "decimals": 6
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 8,
+            "x": 8,
+            "y": 34
+          },
+          "id": 54,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.params\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json mean_relative_delta | __error__=`` | drop payload | unwrap mean_relative_delta [$__auto])",
+              "legendFormat": "mean_relative_delta",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Relative Delta",
+          "type": "timeseries"
+        }
+      ],
+      "title": "Parameter Dynamics",
+      "type": "row"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "id": 600,
+      "panels": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "KL divergence between sparse and full model outputs (lower = better sparse approximation). Random baseline shown for comparison.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 4,
+                "showPoints": "always",
+                "spanNulls": true
+              },
+              "decimals": 4
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "kl_sparse"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#FF3A3A",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "kl_random"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#828282",
+                      "mode": "fixed"
+                    }
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "dash": [
+                        10,
+                        10
+                      ],
+                      "fill": "dash"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 28
+          },
+          "id": 60,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.sparse\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json kl_div_1e_06 | __error__=`` | drop payload | unwrap kl_div_1e_06 [$__auto])",
+              "legendFormat": "kl_sparse",
+              "queryType": "range",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.sparse\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json kl_div_1e_06_random | __error__=`` | drop payload | unwrap kl_div_1e_06_random [$__auto])",
+              "legendFormat": "kl_random",
+              "queryType": "range",
+              "refId": "B"
+            }
+          ],
+          "title": "Sparse Quality: KL Divergence",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Top-1 token agreement between sparse and full models (higher = better). Random baseline for comparison.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 4,
+                "showPoints": "always",
+                "spanNulls": true
+              },
+              "decimals": 2,
+              "unit": "percentunit"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "top1_sparse"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#2ECC71",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "top1_random"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#828282",
+                      "mode": "fixed"
+                    }
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "dash": [
+                        10,
+                        10
+                      ],
+                      "fill": "dash"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 28
+          },
+          "id": 61,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.sparse\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json top1_agree_1e_06 | __error__=`` | drop payload | unwrap top1_agree_1e_06 [$__auto])",
+              "legendFormat": "top1_sparse",
+              "queryType": "range",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.sparse\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json top1_agree_1e_06_random | __error__=`` | drop payload | unwrap top1_agree_1e_06_random [$__auto])",
+              "legendFormat": "top1_random",
+              "queryType": "range",
+              "refId": "B"
+            }
+          ],
+          "title": "Sparse Quality: Top-1 Agreement",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Fraction of parameter update preserved in sparse delta (at 1e-6 threshold).",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "#3498DB",
+                "mode": "fixed"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 4,
+                "showPoints": "always",
+                "spanNulls": true
+              },
+              "decimals": 4,
+              "unit": "percentunit"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 36
+          },
+          "id": 62,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.sparse\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json kept_ratio_1e_06 | __error__=`` | drop payload | unwrap kept_ratio_1e_06 [$__auto])",
+              "legendFormat": "kept_ratio",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Sparse Kept Ratio",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Cosine similarity between sparse and full model outputs.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "#9B59B6",
+                "mode": "fixed"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 4,
+                "showPoints": "always",
+                "spanNulls": true
+              },
+              "decimals": 4
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 36
+          },
+          "id": 63,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.sparse\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json cosine_1e_06 | __error__=`` | drop payload | unwrap cosine_1e_06 [$__auto])",
+              "legendFormat": "cosine_similarity",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Sparse Cosine Similarity",
+          "type": "timeseries"
+        }
+      ],
+      "title": "Sparse Quality",
+      "type": "row"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      },
+      "id": 700,
+      "panels": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Checkpoint upload duration and type over time.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "bars",
+                "fillOpacity": 50,
+                "lineWidth": 1,
+                "pointSize": 5,
+                "showPoints": "auto"
+              },
+              "unit": "s"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "A"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#FF3A3A",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 29
+          },
+          "id": 70,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.upload\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json duration_sec | __error__=`` | drop payload | unwrap duration_sec [$__auto])",
+              "legendFormat": "upload_duration",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Upload Duration",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Upload size in MB per checkpoint.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "#3498DB",
+                "mode": "fixed"
+              },
+              "custom": {
+                "drawStyle": "bars",
+                "fillOpacity": 50,
+                "lineWidth": 1,
+                "pointSize": 5,
+                "showPoints": "auto"
+              },
+              "unit": "decmbytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 29
+          },
+          "id": 71,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.upload\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json total_mb | __error__=`` | drop payload | unwrap total_mb [$__auto])",
+              "legendFormat": "upload_size_mb",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Upload Size",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Delta checkpoint compression ratio (higher = better compression).",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "#2ECC71",
+                "mode": "fixed"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 4,
+                "showPoints": "always",
+                "spanNulls": true
+              },
+              "decimals": 1
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 37
+          },
+          "id": 72,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "mean"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.upload\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json delta_compression_ratio | __error__=`` | drop payload | unwrap delta_compression_ratio [$__auto])",
+              "legendFormat": "compression_ratio",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Delta Compression Ratio",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Epoch duration, GPU memory allocation, and replay buffer state.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 3,
+                "showPoints": "auto",
+                "spanNulls": true
+              },
+              "decimals": 1
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "epoch_duration_sec"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#FF3A3A",
+                      "mode": "fixed"
+                    }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "s"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "gpu_alloc_gb"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#E67E22",
+                      "mode": "fixed"
+                    }
+                  },
+                  {
+                    "id": "unit",
+                    "value": "decgbytes"
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "right"
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 37
+          },
+          "id": 73,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "mean",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.state\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json event epoch_duration_sec | event = `epoch_end` | __error__=`` | drop payload | unwrap epoch_duration_sec [$__auto])",
+              "legendFormat": "epoch_duration_sec",
+              "queryType": "range",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.state\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json event gpu_alloc_gb | event = `epoch_end` | __error__=`` | drop payload | unwrap gpu_alloc_gb [$__auto])",
+              "legendFormat": "gpu_alloc_gb",
+              "queryType": "range",
+              "refId": "B"
+            }
+          ],
+          "title": "Epoch Duration and GPU Memory",
+          "type": "timeseries"
+        }
+      ],
+      "title": "Infrastructure",
+      "type": "row"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
+      "id": 800,
+      "panels": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Pre-filter data quality: pass@k computed on raw miner rollouts before group filtering.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": true
+              },
+              "decimals": 3
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "pass@1"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#FF3A3A",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "pass@5"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#2ECC71",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 30
+          },
+          "id": 80,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.data\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json pass_1 | __error__=`` | drop payload | unwrap pass_1 [$__auto])",
+              "legendFormat": "pass@1",
+              "queryType": "range",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.data\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json pass_5 | __error__=`` | drop payload | unwrap pass_5 [$__auto])",
+              "legendFormat": "pass@5",
+              "queryType": "range",
+              "refId": "B"
+            }
+          ],
+          "title": "Pre-filter pass@k",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Pre-filter success rate and mean reward from miner rollouts.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": true
+              },
+              "decimals": 3
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "success_rate"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#2ECC71",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "reward_mean"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#FF3A3A",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 30
+          },
+          "id": 81,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.data\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json success_rate_all | __error__=`` | drop payload | unwrap success_rate_all [$__auto])",
+              "legendFormat": "success_rate",
+              "queryType": "range",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.data\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json reward_mean_all | __error__=`` | drop payload | unwrap reward_mean_all [$__auto])",
+              "legendFormat": "reward_mean",
+              "queryType": "range",
+              "refId": "B"
+            }
+          ],
+          "title": "Pre-filter Success Rate and Reward",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "description": "Mean completion length from miner rollouts (detects length explosion).",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "#828282",
+                "mode": "fixed"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 3,
+                "showPoints": "auto",
+                "spanNulls": true
+              },
+              "unit": "none"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 38
+          },
+          "id": 82,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "mean",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "avg_over_time({logger=\"grail.trainer.data\"} | pattern `<_>] <payload>` | line_format `{{ .payload }}` | json mean_length | __error__=`` | drop payload | unwrap mean_length [$__auto])",
+              "legendFormat": "mean_length",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Completion Lengths",
+          "type": "timeseries"
+        }
+      ],
+      "title": "Data Quality",
+      "type": "row"
+    }
+  ],
+  "preload": false,
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": [
+    "grail",
+    "trainer"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "GRAIL Trainer",
+  "uid": "grail-trainer",
+  "version": 1
+}

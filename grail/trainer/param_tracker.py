@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from grail.trainer.dashboard_logger import params_logger
+
 if TYPE_CHECKING:
     from torch import nn
 
@@ -512,3 +514,25 @@ async def log_param_change_metrics(
         metrics.sign_flip_count,
         metrics.sign_flip_ratio * 100,
     )
+
+    # Emit structured JSON for Grafana trainer dashboard
+    params_payload: dict[str, Any] = {
+        "optimizer_step": step,
+        "total_params": metrics.total_params,
+        "changed_count": metrics.changed_count,
+        "sparsity_ratio": metrics.sparsity_ratio,
+        "mean_abs_delta": metrics.mean_abs_delta,
+        "max_abs_delta": metrics.max_abs_delta,
+        "mean_relative_delta": metrics.mean_relative_delta,
+        "sign_flip_count": metrics.sign_flip_count,
+        "sign_flip_ratio": metrics.sign_flip_ratio,
+    }
+    # Add multi-threshold sparsity (flatten with readable keys)
+    for thresh, sparsity in metrics.sparsity_by_threshold.items():
+        params_payload[f"sparsity_at_{thresh:.0e}"] = sparsity
+    # Add per-component summary (keep flat for Loki JSON extraction)
+    for comp, sparsity in metrics.per_component_sparsity.items():
+        params_payload[f"comp_{comp}_sparsity"] = sparsity
+    for comp, mean_delta in metrics.per_component_mean_delta.items():
+        params_payload[f"comp_{comp}_mean_delta"] = mean_delta
+    params_logger.emit(params_payload)
