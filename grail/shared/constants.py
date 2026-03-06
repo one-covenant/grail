@@ -216,7 +216,7 @@ GRAIL_BURN_PERCENTAGE = 80.0
 # Maximum unique rollouts per miner PER WINDOW that count toward weight allocation.
 # The effective period cap = this value × rolling_windows (currently 12).
 # Miners are rewarded proportionally to how close they are to the period cap.
-UNIQUE_ROLLOUTS_CAP = 2500
+UNIQUE_ROLLOUTS_CAP = 1500
 UNIQUE_ROLLOUTS_CAP_ENABLED = True
 
 # ────────────────  MINER SAMPLING (VALIDATION COST CONTROL)  ────────────────
@@ -246,7 +246,7 @@ MIN_ROLLOUT_FILE_SIZE_BYTES = 200
 # Maximum file size for valid rollout window files (bytes).
 # Files above this threshold are rejected before download to prevent
 # resource exhaustion from oversized submissions.
-MAX_ROLLOUT_FILE_SIZE_BYTES = 500 * 1024 * 1024  # 500 MB
+MAX_ROLLOUT_FILE_SIZE_BYTES = 350 * 1024 * 1024  # 350 MB
 
 # ────────────────  TRUST LIST (VALIDATOR → TRAINER)  ────────────────
 TRUST_LIST_KEY_PREFIX = "grail/trust/trust_list_"
