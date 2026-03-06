@@ -49,7 +49,8 @@ from .gpu_kernel import (  # noqa: F401
     validate_gpu_config,
 )
 from .gsm8k_env import GSM8KEnv  # noqa: F401
-from .loop import AgentEnvLoop, GRPORollout  # noqa: F401
+from .episode import AgentEnvLoop  # noqa: F401
+from .rollout import GRPORollout  # noqa: F401
 from .math_hendrycks_env import MATHEnv  # noqa: F401
 from .providers import (  # noqa: F401
     GSM8KTaskSource,

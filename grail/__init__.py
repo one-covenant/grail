@@ -14,8 +14,8 @@ load_dotenv(override=True)
 
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     # Environments / rollouts
-    "AgentEnvLoop": ("grail.environments.loop", "AgentEnvLoop"),
-    "GRPORollout": ("grail.environments.loop", "GRPORollout"),
+    "AgentEnvLoop": ("grail.environments.episode", "AgentEnvLoop"),
+    "GRPORollout": ("grail.environments.rollout", "GRPORollout"),
     # Legacy reward system exports
     "Parser": ("grail.environments.base", "Parser"),
     "RewardVector": ("grail.environments.base", "RewardVector"),
