@@ -197,14 +197,10 @@ class TestProofCrossFramework:
         )
 
         for idx, commitment in enumerate(proof["commitments"]):
-            assert "sketch" in commitment, f"Position {idx} missing sketch"
-            assert "indices" in commitment, f"Position {idx} missing indices"
-            assert commitment["position"] == idx, f"Position mismatch at {idx}"
-
-            # Type and size checks
+            assert set(commitment.keys()) == {"sketch"}, (
+                f"Position {idx} unexpected keys: {commitment.keys()}"
+            )
             assert isinstance(commitment["sketch"], int)
-            # Indices length depends on actual topk used (min of hidden_dim and PROOF_TOPK)
-            assert len(commitment["indices"]) > 0
 
     @requires_gpu
     @pytest.mark.slow

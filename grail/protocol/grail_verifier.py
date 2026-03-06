@@ -217,18 +217,15 @@ class GRAILVerifier:
 
         return torch.from_numpy(coeffs.astype(np.int8))
 
-    def create_commitment(
-        self, hidden_state: torch.Tensor, r_vec: torch.Tensor, position: int
-    ) -> dict:
+    def create_commitment(self, hidden_state: torch.Tensor, r_vec: torch.Tensor) -> dict:
         """Create commitment for a single token position.
 
         Args:
             hidden_state: Hidden vector at position [hidden_dim]
             r_vec: Coefficient vector [topk]
-            position: Token position (for metadata)
 
         Returns:
-            Commitment dict with sketch, indices, and position
+            Commitment dict with sketch value
         """
         # Step 1: Select top-k activations by absolute magnitude
         abs_hidden = torch.abs(hidden_state)
@@ -248,8 +245,6 @@ class GRAILVerifier:
 
         return {
             "sketch": sketch_val,
-            "indices": indices.tolist(),
-            "position": position,
         }
 
     def create_commitments_batch(self, h_layer: torch.Tensor, r_vec: torch.Tensor) -> list[dict]:
@@ -291,11 +286,7 @@ class GRAILVerifier:
         sketch_vals = [s % PRIME_Q for s in sketches_list]
 
         # Step 4: Package as list of dicts
-        indices_list = topk_indices.tolist()
-        return [
-            {"sketch": sketch_vals[pos], "indices": indices_list[pos], "position": pos}
-            for pos in range(seq_len)
-        ]
+        return [{"sketch": sketch_vals[pos]} for pos in range(seq_len)]
 
     def verify_commitment(
         self,
@@ -303,6 +294,7 @@ class GRAILVerifier:
         miner_commitment: dict,
         r_vec: torch.Tensor,
         sequence_length: int,
+        position: int,
     ) -> tuple[bool, dict]:
         """Verify commitment using sketch check.
 
@@ -314,20 +306,19 @@ class GRAILVerifier:
             miner_commitment: Miner's claimed commitment
             r_vec: Coefficient vector (same for miner and validator)
             sequence_length: Total sequence length (for adaptive tolerance)
+            position: Token position in sequence (for adaptive tolerance)
 
         Returns:
             Tuple of (is_valid, diagnostics_dict)
         """
-        position = miner_commitment["position"]
 
         # Get position-adjusted tolerance
         tolerance = adaptive_sketch_tolerance(position, sequence_length)
 
-        # Extract miner's claimed top-k indices
-        miner_indices = torch.tensor(miner_commitment["indices"], dtype=torch.long)
-
-        # Extract validator's values at those same indices
-        validator_values = validator_hidden[miner_indices]
+        # Independently compute top-k on validator's own hidden state
+        abs_hidden = torch.abs(validator_hidden)
+        topk_result = torch.topk(abs_hidden, k=self.topk)
+        validator_values = validator_hidden[topk_result.indices]
 
         # Compute validator's buckets
         validator_buckets = torch.tensor(
@@ -356,7 +347,6 @@ class GRAILVerifier:
 
         if not is_valid:
             # Detailed logging for failed verification
-            # Sample first few bucket values for debugging
             sample_validator_values = (
                 validator_values[:5].tolist()
                 if len(validator_values) >= 5
@@ -367,14 +357,11 @@ class GRAILVerifier:
                 if len(validator_buckets) >= 5
                 else validator_buckets.tolist()
             )
-            sample_indices = (
-                miner_indices[:5].tolist() if len(miner_indices) >= 5 else miner_indices.tolist()
-            )
 
             logger.warning(
                 "[verify_commitment] SKETCH MISMATCH: position=%d | "
                 "validator_sketch=%d | miner_sketch=%d | diff=%d | tolerance=%d | "
-                "sample_indices=%s | sample_values=%s | sample_buckets=%s | "
+                "sample_values=%s | sample_buckets=%s | "
                 "hidden_norm=%.4f | hidden_dtype=%s | "
                 "This may indicate model weight differences between miner and validator",
                 position,
@@ -382,7 +369,6 @@ class GRAILVerifier:
                 miner_sketch_val,
                 mod_diff,
                 tolerance,
-                sample_indices,
                 [f"{v:.4f}" for v in sample_validator_values],
                 sample_validator_buckets,
                 float(validator_hidden.norm().item()),

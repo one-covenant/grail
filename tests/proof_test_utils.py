@@ -85,8 +85,7 @@ def verify_proof(
     randomness_hex = proof["randomness"]
 
     hidden_dim = resolve_hidden_size(model)
-    commit_topk = int(len(commitments[0]["indices"]))
-    verifier = GRAILVerifier(hidden_dim=hidden_dim, topk=commit_topk)
+    verifier = GRAILVerifier(hidden_dim=hidden_dim)
     r_vec = verifier.generate_r_vec(randomness_hex)
 
     # Early guard: ensure tokens exist in validator vocab
@@ -113,22 +112,9 @@ def verify_proof(
 
     all_valid = True
     diagnostics_list = []
-    validator_hidden_dim = int(h_layer.size(-1))
     for i in idxs:
-        miner_indices = commitments[i]["indices"]
-        if max(miner_indices) >= validator_hidden_dim:
-            diagnostics_list.append(
-                {
-                    "position": int(i),
-                    "error": "hidden_index_out_of_bounds",
-                    "validator_dim": validator_hidden_dim,
-                    "max_commit_index": int(max(miner_indices)),
-                }
-            )
-            all_valid = False
-            continue
         is_valid, diagnostics = verifier.verify_commitment(
-            h_layer[i], commitments[i], r_vec, len(tokens)
+            h_layer[i], commitments[i], r_vec, len(tokens), position=i
         )
         diagnostics_list.append({"position": i, **diagnostics})
         if not is_valid:

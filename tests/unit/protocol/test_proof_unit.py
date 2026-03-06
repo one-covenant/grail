@@ -114,28 +114,27 @@ class TestGRAILVerifier:
         """Commitment should have correct structure."""
         r_vec = verifier.generate_r_vec(randomness)
         hidden = torch.randn(4096)
-        commitment = verifier.create_commitment(hidden, r_vec, position=0)
+        commitment = verifier.create_commitment(hidden, r_vec)
 
-        assert "sketch" in commitment
-        assert "indices" in commitment
-        assert "position" in commitment
+        assert set(commitment.keys()) == {"sketch"}
+        assert isinstance(commitment["sketch"], int)
 
     def test_commitment_sizes(self, verifier: GRAILVerifier, randomness: str) -> None:
         """Commitment components should have correct sizes."""
         r_vec = verifier.generate_r_vec(randomness)
         hidden = torch.randn(4096)
-        commitment = verifier.create_commitment(hidden, r_vec, position=0)
+        commitment = verifier.create_commitment(hidden, r_vec)
 
-        assert len(commitment["indices"]) == 256
+        assert isinstance(commitment["sketch"], int)
 
     def test_self_verification(self, verifier: GRAILVerifier, randomness: str) -> None:
         """Commitment should verify against itself perfectly."""
         r_vec = verifier.generate_r_vec(randomness)
         hidden = torch.randn(4096)
-        commitment = verifier.create_commitment(hidden, r_vec, position=0)
+        commitment = verifier.create_commitment(hidden, r_vec)
 
         is_valid, diagnostics = verifier.verify_commitment(
-            hidden, commitment, r_vec, sequence_length=100
+            hidden, commitment, r_vec, sequence_length=100, position=0
         )
 
         assert is_valid
@@ -154,13 +153,13 @@ class TestGRAILVerifier:
         top_indices = [10, 20, 30, 40, 50]
         hidden[top_indices] = torch.tensor([5.0, 4.0, 3.0, 2.0, 1.0])
 
-        commitment = verifier.create_commitment(hidden, r_vec, position=0)
+        commitment = verifier.create_commitment(hidden, r_vec)
 
         # Add small drift (simulating cross-framework variance)
         hidden_drifted = hidden + torch.randn(4096) * 1e-5
 
         is_valid, diagnostics = verifier.verify_commitment(
-            hidden_drifted, commitment, r_vec, sequence_length=100
+            hidden_drifted, commitment, r_vec, sequence_length=100, position=0
         )
 
         assert is_valid, (
@@ -175,10 +174,10 @@ class TestGRAILVerifier:
         hidden1 = torch.randn(4096)
         hidden2 = torch.randn(4096)  # Completely different
 
-        commitment = verifier.create_commitment(hidden1, r_vec, position=0)
+        commitment = verifier.create_commitment(hidden1, r_vec)
 
         is_valid, diagnostics = verifier.verify_commitment(
-            hidden2, commitment, r_vec, sequence_length=100
+            hidden2, commitment, r_vec, sequence_length=100, position=0
         )
 
         assert not is_valid, "Different hidden state should be rejected"
@@ -248,19 +247,16 @@ class TestCreateCommitmentsBatch:
         torch.manual_seed(99)
         h_layer = torch.randn(500, 3584)
 
-        scalar_commitments = [
-            verifier.create_commitment(h_layer[pos], r_vec, pos) for pos in range(500)
-        ]
+        scalar_commitments = [verifier.create_commitment(h_layer[pos], r_vec) for pos in range(500)]
         batch_commitments = verifier.create_commitments_batch(h_layer, r_vec)
 
         assert len(batch_commitments) == len(scalar_commitments)
         for pos in range(500):
-            assert batch_commitments[pos]["position"] == pos
             assert batch_commitments[pos]["sketch"] == scalar_commitments[pos]["sketch"], (
                 f"Sketch mismatch at pos {pos}: "
                 f"batch={batch_commitments[pos]['sketch']}, scalar={scalar_commitments[pos]['sketch']}"
             )
-            assert batch_commitments[pos]["indices"] == scalar_commitments[pos]["indices"]
+            assert set(batch_commitments[pos].keys()) == {"sketch"}
 
     def test_edge_case_hidden_states(self, verifier: GRAILVerifier, randomness: str) -> None:
         r_vec = verifier.generate_r_vec(randomness)
@@ -270,9 +266,7 @@ class TestCreateCommitmentsBatch:
         h_layer[2, :] = float("-inf")
         h_layer[3, :100] = float("nan")
 
-        scalar_commitments = [
-            verifier.create_commitment(h_layer[pos], r_vec, pos) for pos in range(10)
-        ]
+        scalar_commitments = [verifier.create_commitment(h_layer[pos], r_vec) for pos in range(10)]
         batch_commitments = verifier.create_commitments_batch(h_layer, r_vec)
 
         for pos in range(10):
@@ -287,7 +281,7 @@ class TestCreateCommitmentsBatch:
 
         for pos in [0, 10, 25, 50, 75, 99]:
             is_valid, diagnostics = verifier.verify_commitment(
-                h_layer[pos], batch_commitments[pos], r_vec, sequence_length=100
+                h_layer[pos], batch_commitments[pos], r_vec, sequence_length=100, position=pos
             )
             assert is_valid, f"Self-verification failed at pos {pos}: {diagnostics}"
             assert diagnostics["sketch_diff"] == 0

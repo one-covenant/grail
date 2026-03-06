@@ -17,7 +17,7 @@ from ...model.forward import forward_single_layer
 from ...protocol.crypto import indices_from_root_in_range
 from ...protocol.grail_verifier import GRAILVerifier
 from ...protocol.signatures import verify_commit_signature
-from ...shared.constants import CHALLENGE_K, GRAIL_PROOF_VERSION, LAYER_INDEX
+from ...shared.constants import CHALLENGE_K, LAYER_INDEX
 from ...shared.hf_compat import resolve_hidden_size, resolve_vocab_size
 from ..base import Validator
 from ..context import ValidationContext
@@ -50,10 +50,10 @@ class GRAILProofValidator(Validator):
             # Check proof version
             proof_version = ctx.commit.get("proof_version")
 
-            if not proof_version or proof_version != GRAIL_PROOF_VERSION:
+            if not proof_version or proof_version not in ("v1", "v2"):
                 logger.debug(
                     f"[proof_valid] Proof version validation failed | "
-                    f"Expected: {GRAIL_PROOF_VERSION} | "
+                    f"Expected: v1 or v2 | "
                     f"Got: {proof_version}"
                 )
                 ctx.checks[self.check_name] = False
@@ -284,14 +284,11 @@ class GRAILProofValidator(Validator):
                 )
 
             is_valid, diagnostics = verifier.verify_commitment(
-                h_layer[i], commitments[i], r_vec, seq_len
+                h_layer[i], commitments[i], r_vec, seq_len, position=i
             )
 
             if not is_valid:
                 failed_checks.append((i, diagnostics))
-                # Get detailed miner commitment info
-                miner_commit = commitments[i]
-                miner_indices = miner_commit.get("indices", [])[:5]  # First 5
 
                 logger.warning(
                     f"[proof_valid] Commitment verification FAILED at position {i} | "
@@ -299,7 +296,6 @@ class GRAILProofValidator(Validator):
                     f"tolerance={diagnostics['sketch_tolerance']} | "
                     f"validator_sketch={diagnostics.get('validator_sketch')} | "
                     f"miner_sketch={diagnostics.get('miner_sketch')} | "
-                    f"miner_indices_sample={miner_indices} | "
                     f"validator_hidden_norm={float(h_layer[i].norm().item()):.4f} | "
                     f"token_id={tokens[i]} | "
                     f"uid={ctx.miner_uid}"
