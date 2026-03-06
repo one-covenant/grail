@@ -868,18 +868,18 @@ class ValidationService:
 
                 net_entry = {
                     "event": "network_stats",
-                    "interval": current_interval,
-                    "block": current_block,
-                    "total_miners": len(meta.uids),
-                    "active_miners": len(non_zero_weights),
-                    "total_unique_rollouts": total_unique,
-                    "avg_weight": round(sum(active_weights) / len(active_weights), 6)
+                    "interval": int(current_interval),
+                    "block": int(current_block),
+                    "total_miners": int(len(meta.uids)),
+                    "active_miners": int(len(non_zero_weights)),
+                    "total_unique_rollouts": int(total_unique),
+                    "avg_weight": round(float(sum(active_weights) / len(active_weights)), 6)
                     if active_weights
                     else 0.0,
-                    "max_weight": round(max(active_weights), 6) if active_weights else 0.0,
-                    "median_weight": round(median_w, 6),
-                    "total_failures": total_failures,
-                    "avg_success_rate": round(total_successful / total_inferences * 100, 1)
+                    "max_weight": round(float(max(active_weights)), 6) if active_weights else 0.0,
+                    "median_weight": round(float(median_w), 6),
+                    "total_failures": int(total_failures),
+                    "avg_success_rate": round(float(total_successful / total_inferences * 100), 1)
                     if total_inferences
                     else 0.0,
                 }
@@ -1080,18 +1080,18 @@ class ValidationService:
             entry = {
                 "event": "leaderboard",
                 "rank": rank,
-                "uid": uid,
+                "uid": int(uid) if uid is not None else None,
                 "weight": round(float(weight), 6),
-                "unique_rollouts": total_unique,
-                "unique_per_window": round(unique_per_window, 1),
-                "cap_pct": round(cap_pct, 1),
-                "total_rollouts": total_rollouts,
-                "success_rate": round(success_rate, 1),
-                "windows_active": self._availability_counts.get(hk, 0),
-                "windows_checked": self._selection_counts.get(hk, 0),
-                "failure_count": self._failure_counts.get(hk, 0),
-                "interval": current_interval,
-                "block": current_block,
+                "unique_rollouts": int(total_unique),
+                "unique_per_window": round(float(unique_per_window), 1),
+                "cap_pct": round(float(cap_pct), 1),
+                "total_rollouts": int(total_rollouts),
+                "success_rate": round(float(success_rate), 1),
+                "windows_active": int(self._availability_counts.get(hk, 0)),
+                "windows_checked": int(self._selection_counts.get(hk, 0)),
+                "failure_count": int(self._failure_counts.get(hk, 0)),
+                "interval": int(current_interval),
+                "block": int(current_block),
                 "hotkey_short": hk[:8],
             }
             leaderboard_logger.info(json.dumps(entry))
