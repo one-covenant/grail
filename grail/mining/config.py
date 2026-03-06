@@ -1,6 +1,8 @@
-"""Pipeline configuration for 3-GPU pipelined mining.
+"""Pipeline configuration for multi-GPU pipelined mining.
 
-GPU 0 = vLLM/SGLang generation, GPU 1 = HF proof computation, GPU 2 = Triton kernel eval.
+GPU layout is configurable via env vars. Default: GPU 0 = vLLM generation,
+GPU 1 = HF proof computation, GPU 2+ = Triton kernel eval.
+vLLM supports tensor parallelism across multiple GPUs for faster generation.
 """
 
 from __future__ import annotations
@@ -19,8 +21,12 @@ class PipelineConfig:
 
     enabled: bool = False  # GRAIL_PIPELINE_ENABLED
     backend: str = "vllm"  # GRAIL_PIPELINE_BACKEND (vllm|sglang)
-    vllm_gpu: int = 0  # GRAIL_PIPELINE_VLLM_GPU
+    vllm_gpu: int = 0  # GRAIL_PIPELINE_VLLM_GPU (first GPU for vLLM)
+    vllm_tp: int = (
+        1  # GRAIL_PIPELINE_VLLM_TP (tensor parallel size, uses consecutive GPUs from vllm_gpu)
+    )
     proof_gpu: int = 1  # GRAIL_PIPELINE_PROOF_GPU
+    proof_flash_attention: bool = False  # GRAIL_PIPELINE_PROOF_FLASH_ATTN
     # eval_gpu: already handled by KERNEL_EVAL_GPU_IDS
 
     # Generation server params
@@ -59,7 +65,11 @@ class PipelineConfig:
             enabled=_bool("GRAIL_PIPELINE_ENABLED", cls.enabled),
             backend=_str("GRAIL_PIPELINE_BACKEND", cls.backend),
             vllm_gpu=_int("GRAIL_PIPELINE_VLLM_GPU", cls.vllm_gpu),
+            vllm_tp=_int("GRAIL_PIPELINE_VLLM_TP", cls.vllm_tp),
             proof_gpu=_int("GRAIL_PIPELINE_PROOF_GPU", cls.proof_gpu),
+            proof_flash_attention=_bool(
+                "GRAIL_PIPELINE_PROOF_FLASH_ATTN", cls.proof_flash_attention
+            ),
             gpu_memory_utilization=_float(
                 "GRAIL_PIPELINE_GPU_MEM_UTIL", cls.gpu_memory_utilization
             ),
