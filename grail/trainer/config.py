@@ -133,16 +133,16 @@ class EvalConfig:
     # - Set max_num_seqs low enough to fit in available KV cache (target ~24 for safety)
     # - Client concurrency at 50–70% of server max_num_seqs (avoid burst deadlock)
     vllm_gpu_memory_utilization: float = (
-        0.80  # During eval, training model+optimizer are on CPU — full GPU available for vLLM
+        0.95  # During eval, training model+optimizer are on CPU — full GPU available for vLLM
     )
     # KV cache precision control (vLLM): valid values typically include: 'auto', 'fp16', 'bf16', 'fp8'
     # Note: 'fp32' is generally not supported for KV cache in vLLM V1 and will be rejected.
     vllm_kv_cache_dtype: str = "auto"
     vllm_max_model_len: int = 12288  # Supports ~4k-token prompts plus 8k-token completions
     vllm_max_num_seqs: int = (
-        32  # 12288 max_model_len × 32 seqs = 393K KV tokens, fits in ~56GB KV cache at 0.90 util
+        48  # 12288 max_model_len × 64 seqs = 786K KV tokens, fits in ~115GB KV cache at 0.95 util
     )
-    vllm_max_concurrent_requests: int = 24  # 75% of max_num_seqs=32
+    vllm_max_concurrent_requests: int = 32  # 75% of max_num_seqs=64
     # SGLang server memory and concurrency tuning
     sglang_mem_fraction_static: float = 0.75  # Fraction of GPU memory for SGLang
     sglang_context_length: int = 1024  # Maximum sequence length
