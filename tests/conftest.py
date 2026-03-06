@@ -312,7 +312,7 @@ def monkeypatch_trainer_constants(monkeypatch: pytest.MonkeyPatch) -> None:
     import grail.shared.constants as constants
 
     monkeypatch.setattr(constants, "TRAINER_MAX_LENGTH", 256)
-    monkeypatch.setattr(constants, "TRAINER_BATCH_SIZE", 4)
+    monkeypatch.setattr(constants, "TRAINER_MICRO_BATCH_SIZE", 4)
     monkeypatch.setattr(constants, "TRAINER_GRAD_ACCUM_STEPS", 2)
     monkeypatch.setattr(constants, "ROLLOUTS_PER_PROBLEM", 4)
 

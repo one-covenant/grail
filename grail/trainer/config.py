@@ -21,7 +21,7 @@ class TrainingConfig:
     # Basic training parameters
     lr: float = constants.TRAINER_LR
     epochs: int = constants.TRAINER_EPOCHS
-    batch_size: int = constants.TRAINER_BATCH_SIZE
+    micro_batch_size: int = constants.TRAINER_MICRO_BATCH_SIZE
     max_length: int = constants.TRAINER_MAX_LENGTH
     grad_clip: float = constants.TRAINER_GRAD_CLIP
     warmup_steps: int = constants.TRAINER_WARMUP_STEPS
@@ -73,10 +73,10 @@ class TrainingConfig:
 
     # Replay buffer configuration
     replay_buffer_enabled: bool = True
-    replay_buffer_max_windows: int = 6  # Store last 6 windows for sufficient grad accum
-    replay_buffer_recent_fraction: float = 0.5  # 50% samples from most recent window
-    replay_buffer_decay_factor: float = 0.7  # Exponential decay for older windows
-    replay_buffer_max_groups_per_epoch: int = 64  # Max groups to sample per epoch
+    replay_buffer_max_windows: int = 2
+    replay_buffer_recent_fraction: float = 0.5
+    replay_buffer_decay_factor: float = 0.7
+    replay_buffer_max_groups_per_epoch: int = 64
 
     # Parameter change tracking configuration
     param_change_measure_interval: int = constants.PARAM_CHANGE_MEASURE_INTERVAL

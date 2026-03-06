@@ -1871,7 +1871,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
         # Increment global epoch counter for continuous tracking
         self.global_epoch_counter += 1
 
-        micro_batch_size = max(1, int(config.batch_size))
+        micro_batch_size = max(1, int(config.micro_batch_size))
         grad_accum_steps = max(1, self.config.grad_accum_steps)
 
         model.train()
@@ -1888,7 +1888,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
 
         all_rollouts.sort(key=lambda item: (item[1], item[0].nonce))
 
-        # Use micro batch size parameter (defaults to TRAINER_BATCH_SIZE if not provided)
+        # Use micro batch size parameter
         num_micro_batches = math.ceil(len(all_rollouts) / micro_batch_size)
 
         epoch_metrics: dict[str, list[float]] = defaultdict(list)

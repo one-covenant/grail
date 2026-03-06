@@ -137,10 +137,10 @@ class Config:
     lr: float = field(default_factory=_get_lr_from_env)
     # Epochs per training iteration (GRAIL_TRAINER_EPOCHS, constants.py default: 1)
     epochs: int = 1
-    # Batch size per device (GRAIL_TRAINER_BATCH_SIZE, constants.py default: 16)
-    # For 7B models on 80GB GPU with gradient checkpointing: batch_size=2 is safe
-    # For 1.5B models: batch_size=4-8 is feasible
-    batch_size: int = 2
+    # Micro batch size per device (GRAIL_TRAINER_MICRO_BATCH_SIZE, constants.py default: 16)
+    # For 7B models on 80GB GPU with gradient checkpointing: micro_batch_size=2 is safe
+    # For 1.5B models: micro_batch_size=4-8 is feasible
+    micro_batch_size: int = 2
     # ────────────────────────────────────────────────────────────────────────
     # Memory Optimization
     # ────────────────────────────────────────────────────────────────────────
@@ -1599,7 +1599,7 @@ def print_memory_estimate(
         # Default assumption for unknown models
         model_size_b = 7.0
 
-    effective_batch_size = cfg.batch_size if batch_size is None else batch_size
+    effective_batch_size = cfg.micro_batch_size if batch_size is None else batch_size
     effective_seq_len = cfg.max_length if seq_len is None else seq_len
     effective_gradient_checkpointing = (
         cfg.gradient_checkpointing if gradient_checkpointing is None else gradient_checkpointing
@@ -1842,7 +1842,7 @@ def main() -> None:
     if args.model:
         cfg.model_id = args.model
     if args.batch_size is not None:
-        cfg.batch_size = args.batch_size
+        cfg.micro_batch_size = args.batch_size  # CLI --batch-size overrides micro_batch_size
     if args.grad_accum_steps is not None:
         cfg.grad_accum_steps = args.grad_accum_steps
     if args.no_gradient_checkpointing:
@@ -1868,7 +1868,7 @@ def main() -> None:
     logger.info(f"🚀 Starting TRL GRPO training with {args.dataset.upper()} dataset")
     logger.info(f"   Seed: {args.seed} | VLLM Port: {args.vllm_port} | Num Iterations: {args.num_iterations}")
     logger.info(f"   Model: {cfg.model_id}")
-    logger.info(f"   Batch size: {cfg.batch_size} | Grad accum: {cfg.grad_accum_steps} | Effective batch: {cfg.batch_size * cfg.grad_accum_steps}")
+    logger.info(f"   Micro batch: {cfg.micro_batch_size} | Grad accum: {cfg.grad_accum_steps} | Effective batch: {cfg.micro_batch_size * cfg.grad_accum_steps}")
     logger.info(f"   Gradient checkpointing: {cfg.gradient_checkpointing}")
     logger.info(f"   FP32 master weights: {args.fp32_master_weights}")
     if args.run_suffix:
@@ -1900,7 +1900,7 @@ def main() -> None:
     logger.info(f"  {'Training Dtype':<40} {cfg.dtype:<15} GRAIL_DTYPE")
     logger.info(f"  {'Learning Rate':<40} {cfg.lr:<15} GRAIL_TRAINER_LR")
     logger.info(f"  {'Epochs (per window)':<40} {cfg.epochs:<15} GRAIL_TRAINER_EPOCHS")
-    logger.info(f"  {'Batch Size':<40} {cfg.batch_size:<15} GRAIL_TRAINER_BATCH_SIZE")
+    logger.info(f"  {'Micro Batch Size':<40} {cfg.micro_batch_size:<15} GRAIL_TRAINER_MICRO_BATCH_SIZE")
     logger.info(
         f"  {'Gradient Accum Steps':<40} {cfg.grad_accum_steps:<15} GRAIL_TRAINER_GRAD_ACCUM_STEPS"
     )
@@ -2017,7 +2017,7 @@ def main() -> None:
     # Calculate training schedule
     # Each optimizer step = generation_batch_size = effective_batch = 512 samples
     # = 32 groups × 16 rollouts
-    effective_batch = cfg.batch_size * cfg.grad_accum_steps  # 4 × 128 = 512
+    effective_batch = cfg.micro_batch_size * cfg.grad_accum_steps  # 4 × 128 = 512
     groups_per_step = effective_batch // cfg.rollouts_per_problem  # 512 / 16 = 32
     total_optimizer_steps = cfg.total_steps  # Fixed: maintains original training duration
 
@@ -2049,7 +2049,7 @@ def main() -> None:
         # ─────────────────────────────────────────────────────────────────────
         # Batch Size & Gradient Accumulation (matching GRAIL trainer config)
         # ─────────────────────────────────────────────────────────────────────
-        per_device_train_batch_size=cfg.batch_size,  # GRAIL_TRAINER_BATCH_SIZE
+        per_device_train_batch_size=cfg.micro_batch_size,  # GRAIL_TRAINER_MICRO_BATCH_SIZE
         gradient_accumulation_steps=cfg.grad_accum_steps,  # GRAIL_TRAINER_GRAD_ACCUM_STEPS
         max_grad_norm=cfg.grad_clip,  # GRAIL_TRAINER_GRAD_CLIP
         # ─────────────────────────────────────────────────────────────────────
@@ -2087,7 +2087,7 @@ def main() -> None:
         # generation_batch_size must equal effective_batch to ensure:
         # - One generation per optimizer step (no stale advantages)
         # - 32 groups × 16 rollouts = 512 samples per optimizer update
-        generation_batch_size=cfg.batch_size * cfg.grad_accum_steps,  # 4 × 128 = 512
+        generation_batch_size=cfg.micro_batch_size * cfg.grad_accum_steps,  # 4 × 128 = 512
         # ─────────────────────────────────────────────────────────────────────
         # Logging & Checkpointing
         # ─────────────────────────────────────────────────────────────────────
@@ -2221,9 +2221,9 @@ def main() -> None:
             "grail/model_id": cfg.model_id,
             "grail/dtype": cfg.dtype,
             "grail/learning_rate": cfg.lr,
-            "grail/batch_size": cfg.batch_size,
+            "grail/micro_batch_size": cfg.micro_batch_size,
             "grail/grad_accum_steps": cfg.grad_accum_steps,
-            "grail/effective_batch_size": cfg.batch_size * cfg.grad_accum_steps,
+            "grail/effective_batch_size": cfg.micro_batch_size * cfg.grad_accum_steps,
             "grail/max_length": cfg.max_length,
             "grail/max_new_tokens": cfg.max_new_tokens,
             "grail/grad_clip": cfg.grad_clip,

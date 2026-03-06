@@ -1196,7 +1196,7 @@ class TrainingService:
                 # Training config
                 "training_config": {
                     "lr": self.config.lr,
-                    "batch_size": self.config.batch_size,
+                    "micro_batch_size": self.config.micro_batch_size,
                     "grad_accum_steps": self.config.grad_accum_steps,
                     "grad_clip": self.config.grad_clip,
                     "use_gradient_checkpointing": self.config.use_gradient_checkpointing,
