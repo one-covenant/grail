@@ -18,7 +18,7 @@ import typer
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..environments.factory import create_env
-from ..environments.loop import AgentEnvLoop
+from ..environments.episode import AgentEnvLoop
 from ..grail import derive_env_seed
 from ..infrastructure.comms import sink_window_inferences
 from ..infrastructure.drand import get_drand_beacon

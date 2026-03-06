@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from grail.environments.core import MultiTurnEnv
-from grail.environments.loop import AgentEnvLoop
+from grail.environments.episode import AgentEnvLoop
 from grail.trainer.config import EvalConfig
 from grail.trainer.eval_planner import EvaluationPlan
 from grail.trainer.evaluator import EvaluatorService

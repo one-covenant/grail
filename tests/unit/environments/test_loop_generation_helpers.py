@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from grail.environments.loop import AgentEnvLoop
+from grail.environments.episode import AgentEnvLoop
 from tests.fixtures.fakes import DummyModel, DummyTokenizer, FakeBackend
 
 

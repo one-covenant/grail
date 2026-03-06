@@ -69,7 +69,7 @@ class SGLangWeightSync(WeightSyncStrategy):
         self._backend: Any | None = None
 
     async def start(self, checkpoint_path: str) -> None:
-        from ..environments.loop import SGLangServerBackend
+        from ..environments.backends import SGLangServerBackend
         from ..trainer.config import EvalConfig
         from ..trainer.inference_server import ServerConfig, SGLangServerManager
 
@@ -212,7 +212,7 @@ class VLLMWeightSync(WeightSyncStrategy):
     # ------------------------------------------------------------------
 
     async def start(self, checkpoint_path: str) -> None:
-        from ..environments.loop import VLLMServerBackend
+        from ..environments.backends import VLLMServerBackend
         from ..trainer.config import EvalConfig
         from ..trainer.inference_server import ServerConfig, VLLMServerManager
 
@@ -230,13 +230,19 @@ class VLLMWeightSync(WeightSyncStrategy):
 
         tokenizer_name = self._resolve_tokenizer_name(checkpoint_path)
 
+        # Build CUDA_VISIBLE_DEVICES for tensor parallelism:
+        # e.g., vllm_gpu=4, vllm_tp=2 -> "4,5"
+        tp = self._config.vllm_tp
+        vllm_gpu_ids = ",".join(str(self._config.vllm_gpu + i) for i in range(tp))
+
         server_config = ServerConfig(
             model_path=self._symlink_path,
             timeout_s=self._config.server_timeout,
             tokenizer_name=tokenizer_name,
             enable_sleep_mode=True,
+            tensor_parallel_size=tp,
             env={
-                "CUDA_VISIBLE_DEVICES": str(self._config.vllm_gpu),
+                "CUDA_VISIBLE_DEVICES": vllm_gpu_ids,
                 "PYTORCH_CUDA_ALLOC_CONF": "",
                 "VLLM_SERVER_DEV_MODE": "1",
             },
@@ -333,7 +339,7 @@ class VLLMWeightSync(WeightSyncStrategy):
         self._manager._config.tokenizer_name = self._resolve_tokenizer_name(checkpoint_path)
         await self._manager.reload_with_new_checkpoint(self._symlink_path)
 
-        from ..environments.loop import VLLMServerBackend
+        from ..environments.backends import VLLMServerBackend
 
         self._backend = VLLMServerBackend(
             base_url=self._manager.base_url,

@@ -15,12 +15,9 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 from ..environments.core import ChatMessage, MultiTurnEnv
-from ..environments.loop import (
-    GenerationParams,
-    GRPORollout,
-    assemble_rollouts,
-    compute_advantages,
-)
+from ..environments.advantages import compute_advantages
+from ..environments.backends import GenerationParams
+from ..environments.rollout import GRPORollout, assemble_rollouts
 from .config import PipelineConfig
 from .proof_worker import ProofWorker
 from .weight_sync import WeightSyncStrategy

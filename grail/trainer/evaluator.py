@@ -22,7 +22,7 @@ from tenacity import before_sleep_log, retry, stop_after_attempt, wait_exponenti
 
 from grail.environments.core import ChatMessage, MultiTurnEnv
 from grail.environments.execution import CodeExecutionPool, set_global_execution_pool
-from grail.environments.loop import AgentEnvLoop
+from grail.environments.episode import AgentEnvLoop
 from grail.environments.vector import EnvVector
 from grail.trainer.config import EvalConfig
 from grail.trainer.eval_planner import EvaluationPlan
@@ -164,7 +164,7 @@ class EvaluatorService:
     def _create_sglang_backend(self, base_url: str, model_name: str | None) -> Any | None:
         """Create SGLang server backend with fallback handling."""
         try:
-            from grail.environments.loop import SGLangServerBackend
+            from grail.environments.backends import SGLangServerBackend
 
             model_id = model_name or getattr(self._model, "name_or_path", "model")
             backend = SGLangServerBackend(
@@ -191,7 +191,7 @@ class EvaluatorService:
     def _create_vllm_backend(self, base_url: str, model_name: str | None) -> Any | None:
         """Create vLLM server backend with fallback handling."""
         try:
-            from grail.environments.loop import VLLMServerBackend
+            from grail.environments.backends import VLLMServerBackend
 
             model_id = model_name or getattr(self._model, "name_or_path", "model")
             return_chosen_lp = bool(getattr(self._cfg, "vllm_return_chosen_logprobs", False))

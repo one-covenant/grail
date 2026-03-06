@@ -11,7 +11,8 @@ import torch
 
 from grail.environments.core import ChatMessage, MultiTurnEnv
 from grail.environments.gsm8k_env import GSM8KEnv
-from grail.environments.loop import AgentEnvLoop, SGLangServerBackend, VLLMServerBackend
+from grail.environments.backends import SGLangServerBackend, VLLMServerBackend
+from grail.environments.episode import AgentEnvLoop
 from grail.environments.sat_env import SATEnv
 from grail.shared.constants import ROLLOUTS_PER_PROBLEM, TRAINER_MAX_LENGTH
 from grail.trainer.algorithms.grpo import GRPOGroup, GRPORollout

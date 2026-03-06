@@ -55,7 +55,12 @@ class ProofWorker:
             self._model, self._tokenizer = clear_model_and_tokenizer(self._model, self._tokenizer)
 
         logger.info("ProofWorker: loading model from %s to %s", checkpoint_path, self._device)
-        self._model = get_model(str(checkpoint_path), device=self._device, eval_mode=True)
+        self._model = get_model(
+            str(checkpoint_path),
+            device=self._device,
+            eval_mode=True,
+            use_flash_attention=self._config.proof_flash_attention,
+        )
         self._tokenizer = get_tokenizer(str(checkpoint_path))
         assert self._model is not None, "get_model() returned None"
         self._hidden_dim = resolve_hidden_size(self._model)
@@ -119,7 +124,7 @@ class ProofWorker:
         if self._model is None or self._hidden_dim is None:
             raise RuntimeError("ProofWorker model not loaded — call load_model() first")
 
-        from ..environments.loop import compute_proofs
+        from ..environments.proofs import compute_proofs
 
         return compute_proofs(
             self._model,

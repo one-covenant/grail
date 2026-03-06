@@ -20,7 +20,7 @@ if _SRC_DIR.exists() and str(_SRC_DIR) not in os.sys.path:
 
 import torch  # noqa: E402, I001
 from grail.environments.core import MultiTurnEnv  # noqa: E402
-from grail.environments.loop import AgentEnvLoop  # noqa: E402
+from grail.environments.episode import AgentEnvLoop  # noqa: E402
 from grail.environments.sat_env import SATEnv  # noqa: E402
 from grail.trainer.algorithms.grpo import GRPOAlgorithm  # noqa: E402
 from grail.trainer.config import EvalConfig, TrainingConfig  # noqa: E402
