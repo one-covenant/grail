@@ -299,7 +299,7 @@ class MinerNeuron(BaseNeuron):
                                         str(checkpoint_path),
                                         device=model_device,
                                         eval_mode=True,
-                                        use_flash_attention=True,
+                                        use_flash_attention=False,
                                     )
                                     tokenizer = get_tokenizer(str(checkpoint_path))
 
