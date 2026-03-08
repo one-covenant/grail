@@ -63,4 +63,5 @@ def assemble_rollouts(
         )
         logger.debug("Prompt length: %d", rollout.prompt_length)
         rollouts.append(rollout)
+
     return rollouts

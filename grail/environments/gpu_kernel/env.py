@@ -321,6 +321,9 @@ class TritonKernelEnv(SingleTurnEnv):
             task_meta={"task_id": self._task.id, **self._task.metadata},
         )
 
+        # Detect infrastructure eval errors (worker crash, connection lost, etc.)
+        eval_infra_error = bool(exec_result is not None and exec_result.get("infra_error", False))
+
         info: dict[str, Any] = {
             "reward_components": components,
             "termination_cause": "final",
@@ -332,6 +335,7 @@ class TritonKernelEnv(SingleTurnEnv):
             "has_triton_jit": parsed.get("has_triton_jit", False),
             "gpu_eval": self._gpu_eval,
             "exec_result": exec_result,
+            "eval_infra_error": eval_infra_error,
             "hacking_signals": hacking_signals,
         }
 
