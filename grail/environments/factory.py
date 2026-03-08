@@ -273,10 +273,10 @@ def create_env(
 
         level = env_params.get("level") if env_params else None
         # gpu_eval from env_params (checkpoint metadata) or GRAIL_GPU_EVAL env var
+        import os
+
         gpu_eval = env_params.get("gpu_eval", False) if env_params else False
         if not gpu_eval:
-            import os
-
             gpu_eval = os.environ.get("GRAIL_GPU_EVAL", "false").lower() in ("1", "true", "yes")
         eval_backend = env_params.get("eval_backend") if env_params else None
 
@@ -291,7 +291,9 @@ def create_env(
 
             if get_global_backend() is None:
                 gpu_ids = parse_gpu_ids()
-                if gpu_ids:
+                backend_name = os.environ.get("KERNEL_EVAL_BACKEND", "persistent")
+                # Basilica uses remote GPUs, no local gpu_ids needed
+                if gpu_ids or backend_name == "basilica":
                     backend = create_backend(gpu_ids=gpu_ids)
                     backend.start()
                     # Warmup JIT cache on eval GPUs to avoid cold compilation latency
