@@ -550,9 +550,8 @@ async def _pipelined_generation_loop(
 
         try:
             gen_start = time.time()
-            problem_count += 1
 
-            problem_index = max(0, problem_count - 1)
+            problem_index = problem_count
             seed_int = derive_env_seed(wallet.hotkey.ss58_address, window_block_hash, problem_index)
             base_nonce = problem_index
 
@@ -567,16 +566,25 @@ async def _pipelined_generation_loop(
                 seed=seed_int,
             )
 
-            if grpo_rollouts:
-                text_logs_emitted = await maybe_log_debug_sample(
-                    tokenizer,
-                    grpo_rollouts[0],
-                    window_start,
-                    base_nonce,
-                    monitor,
-                    text_logs_emitted,
-                    DEBUG_TEXT_LOG_LIMIT_PER_WINDOW,
+            # Discarded group (e.g. infra eval errors) — retry same
+            # problem_index so uploaded groups stay consecutive from 0,
+            # matching the validator's file-order seed derivation.
+            if not grpo_rollouts:
+                logger.info(
+                    "Pipeline: group %d returned empty, will retry same index", problem_index
                 )
+                timers.update_gen_time_ema(time.time() - gen_start)
+                continue
+
+            text_logs_emitted = await maybe_log_debug_sample(
+                tokenizer,
+                grpo_rollouts[0],
+                window_start,
+                base_nonce,
+                monitor,
+                text_logs_emitted,
+                DEBUG_TEXT_LOG_LIMIT_PER_WINDOW,
+            )
 
             # Completion length gate
             short_rollouts = [
@@ -610,6 +618,11 @@ async def _pipelined_generation_loop(
                     checkpoint_window,
                 )
                 inferences.append(rollout_data)
+
+            # Only advance to next problem_index after successful packaging,
+            # so uploaded groups have consecutive indices matching validator's
+            # file-order seed derivation.
+            problem_count += 1
 
             gen_duration = time.time() - gen_start
             # Cap outliers: don't let a single slow group poison the EMA
@@ -757,7 +770,6 @@ async def generate_rollouts_for_window(
 
         try:
             gen_start = time.time()
-            problem_count += 1
             inference_count += 1
 
             logger.info(
@@ -776,7 +788,7 @@ async def generate_rollouts_for_window(
                 )
 
             # Deterministically derive environment seed from miner+window+index
-            problem_index = max(0, problem_count - 1)
+            problem_index = problem_count
             seed_int = derive_env_seed(wallet.hotkey.ss58_address, window_block_hash, problem_index)
             # Use deterministic problem index as rollout_group identifier
             base_nonce = problem_index
@@ -920,6 +932,11 @@ async def generate_rollouts_for_window(
                     failed_rollouts += 1
                     if monitor:
                         await monitor.log_counter("mining/failed_rollouts")
+
+            # Only advance to next problem_index after successful packaging,
+            # so uploaded groups have consecutive indices matching validator's
+            # file-order seed derivation.
+            problem_count += 1
 
             timers.update_gen_time_ema(time.time() - gen_start)
             await asyncio.sleep(0.01)
