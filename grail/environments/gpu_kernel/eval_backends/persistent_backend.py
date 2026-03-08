@@ -337,24 +337,30 @@ class PersistentWorkerPool:
                 try:
                     handle.pipe.send((test_code, triton_code))
                 except (EOFError, OSError, BrokenPipeError):
-                    return EvalResult(correct=False, compiled=False, error="worker_send_failed")
+                    return EvalResult(
+                        correct=False, compiled=False, error="worker_send_failed", infra_error=True
+                    )
 
             # Wait for result with timeout
             if not handle.pipe.poll(timeout=self._timeout):
                 logger.warning("Worker GPU %d timed out after %.1fs", handle.gpu_id, self._timeout)
                 handle = self._respawn_worker(handle)
-                return EvalResult(correct=False, compiled=False, error="timeout")
+                return EvalResult(correct=False, compiled=False, error="timeout", infra_error=True)
 
             try:
                 result_dict = handle.pipe.recv()
             except (EOFError, OSError):
                 handle = self._respawn_worker(handle)
-                return EvalResult(correct=False, compiled=False, error="worker_recv_failed")
+                return EvalResult(
+                    correct=False, compiled=False, error="worker_recv_failed", infra_error=True
+                )
 
             # Worker init failure
             if result_dict is None:
                 handle = self._respawn_worker(handle)
-                return EvalResult(correct=False, compiled=False, error="worker_init_failed")
+                return EvalResult(
+                    correct=False, compiled=False, error="worker_init_failed", infra_error=True
+                )
 
             handle.eval_count += 1
 
