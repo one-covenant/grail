@@ -4,7 +4,7 @@ Provides a protocol-based abstraction for kernel evaluation with four backends:
 - SubprocessBackend: Per-eval subprocess isolation, GPU-pinned (default)
 - PersistentWorkerPool: Long-lived workers with CUDA context reuse
 - AffinetesBackend: Docker container pool via vendored Affinetes
-- BasilicaBackend: Cloud GPU workers via Basilica (not yet implemented)
+- BasilicaBackend: Cloud GPU workers via Basilica kernel-bench service (remote eval)
 
 Configuration via environment variables:
     KERNEL_EVAL_BACKEND=subprocess|persistent|affinetes|basilica
@@ -31,12 +31,16 @@ class EvalResult:
         compiled: Whether kernel code compiled and ran without crashing.
         error: Error message if evaluation failed, None on success.
         max_diff: Maximum absolute difference between outputs, None if not computed.
+        infra_error: True if result is unreliable due to infrastructure failure
+            (worker crash, timeout, connection lost). The miner should discard
+            rollouts with infra_error=True rather than uploading unreliable rewards.
     """
 
     correct: bool
     compiled: bool
     error: str | None = None
     max_diff: float | None = None
+    infra_error: bool = False
 
 
 @runtime_checkable
@@ -116,17 +120,26 @@ def parse_gpu_ids(gpu_ids_str: str | None = None) -> list[int]:
         return []
 
 
-def validate_gpu_config(gpu_ids: list[int], gpu_eval: bool) -> None:
+def validate_gpu_config(
+    gpu_ids: list[int], gpu_eval: bool, backend_name: str | None = None
+) -> None:
     """Validate GPU configuration at startup. Raises RuntimeError with actionable message.
 
     Args:
         gpu_ids: List of GPU device indices to use for evaluation.
         gpu_eval: Whether GPU evaluation is enabled.
+        backend_name: Backend name. Skips local GPU checks for 'basilica'.
 
     Raises:
         RuntimeError: If gpu_eval=True but GPU configuration is invalid.
     """
     if not gpu_eval:
+        return
+
+    # Basilica uses remote GPUs — no local GPU needed
+    name = backend_name or os.environ.get("KERNEL_EVAL_BACKEND", "persistent")
+    if name == "basilica":
+        logger.info("Basilica backend selected — skipping local GPU validation")
         return
 
     try:
