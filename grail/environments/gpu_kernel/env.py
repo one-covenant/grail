@@ -156,8 +156,8 @@ class TritonKernelEnv(SingleTurnEnv):
     Reward components:
         - Compilation (5%): Valid Python syntax
         - Structure (10%): ModelNew class, @triton.jit, imports
-        - GPU Compilation (15%): Code compiles and runs on GPU
-        - Correctness (50%): GPU execution matches reference
+        - GPU Compilation (0%): Disabled (non-deterministic across CUDA contexts)
+        - Correctness (65%): GPU execution matches reference
         - Format (10%): Proper <SOLUTION> tags
         - Thinking (10%): Reasoning block present
 
