@@ -255,7 +255,8 @@ class TestNullGroupVulnerabilityProof:
 
         validator = MinerValidator.__new__(MinerValidator)
         validator._hard_check_keys = []
-        validator._soft_check_key = None
+        validator._soft_check_keys = ()
+        validator._soft_thresholds = {}
 
         class MockWallet:
             class hotkey:
@@ -354,7 +355,8 @@ class TestNullGroupRejection:
 
         validator = MinerValidator.__new__(MinerValidator)
         validator._hard_check_keys = []
-        validator._soft_check_key = None
+        validator._soft_check_keys = ()
+        validator._soft_thresholds = {}
 
         result = validator._validate_file_structure(
             file_data=file_data,
@@ -374,7 +376,8 @@ class TestNullGroupRejection:
 
         validator = MinerValidator.__new__(MinerValidator)
         validator._hard_check_keys = []
-        validator._soft_check_key = None
+        validator._soft_check_keys = ()
+        validator._soft_thresholds = {}
 
         result = validator._validate_file_structure(
             file_data=window_data,
