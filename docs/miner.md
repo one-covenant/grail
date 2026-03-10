@@ -12,6 +12,9 @@ This guide explains how to run a Grail miner. Miners generate GRPO rollouts with
   - [Wallets](#wallets)
   - [Storage (R2/S3)](#storage-r2s3)
   - [Monitoring](#monitoring)
+- [Supported Environments](#supported-environments)
+  - [Basilica Kernel Evaluation Setup](#basilica-kernel-evaluation-setup)
+  - [Triton Kernel Setup](#triton-kernel-setup)
 - [Running the Miner](#running-the-miner)
 - [Operations](#operations)
 - [Troubleshooting](#troubleshooting)
@@ -35,6 +38,7 @@ The active environment is set network-wide (currently **Triton Kernel**). The en
 
 - Linux with NVIDIA GPU drivers installed (required for Triton Kernel environment; macOS/Windows may work for text-only environments but is untested)
 - Python (via `uv venv`) and Git
+- [Basilica CLI](https://cli.basilica.ai) installed and funded — required to deploy the kernel-bench evaluation service
 - Bittensor wallet (cold/hot) registered on the target subnet (all neurons verify registration at startup and exit with a helpful error if not registered)
 - Cloudflare R2 (or S3-compatible) bucket and credentials
   - **Create a Bucket: Name it the same as your account ID and set the region to ENAM.**
@@ -44,11 +48,10 @@ For detailed hardware specifications, see [`compute.min.yaml`](../compute.min.ya
 
 Hardware requirements:
 - **Text-only environments** (SAT, GSM8K, MATH, MBPP, HumanEval): 1 GPU with 24GB+ VRAM
-- **Triton Kernel environment** (current default): 2-3 GPUs recommended with pipeline mode:
+- **Triton Kernel environment** (current production): 2 GPUs + Basilica:
   - **GPU 0** — Model inference / decoding (vLLM/SGLang backend)
   - **GPU 1** — Proof computation / logprob verification (HuggingFace model)
-  - **Separate physical GPU** — Kernel evaluation (Triton JIT compilation and GPU correctness checks). Set via `KERNEL_EVAL_GPU_IDS` using **physical** GPU index.
-  - The kernel evaluation GPU should be **A100 80GB, H100, or equivalent** to support Triton JIT compilation
+  - **Kernel evaluation** — Basilica cloud A100 GPUs. Set `KERNEL_EVAL_BACKEND=basilica` and `BASILICA_EVAL_URL`.
 - At least 64GB RAM recommended
 - Network bandwidth needs are modest; uploads are Parquet rollout files
 
@@ -70,6 +73,9 @@ uv sync
 # Configure environment
 cp .env.example .env
 # Edit .env with your wallet names, network, and R2 credentials
+
+# Deploy kernel-bench on Basilica (required for Triton Kernel environment)
+# See "Basilica Kernel Evaluation Setup" below
 
 # Run miner
 grail mine
@@ -102,10 +108,10 @@ Set these in `.env` (see `.env.example` for full list and guidance):
   - No manual model configuration required - checkpoints are loaded automatically
 - Performance tuning
   - `GRAIL_GENERATION_BATCH_SIZE` (default: 1): Number of rollouts to generate in parallel per batch. Higher values increase throughput but require more VRAM. Must be ≤ 16 and must divide evenly into `ROLLOUTS_PER_PROBLEM`. Valid options: 1, 2, 4, 8, 16. Start with 1 and gradually increase while monitoring GPU memory with `nvidia-smi`. Example: `export GRAIL_GENERATION_BATCH_SIZE=4` for ~3-4x throughput on A100.
-- Kernel evaluation (Triton Kernel environment only)
-  - `GRAIL_GPU_EVAL` (true|false, default: false): Enable GPU-based kernel correctness evaluation. Must be `true` for the `triton_kernel` environment to verify generated kernels on-GPU.
-  - `KERNEL_EVAL_GPU_IDS` (comma-separated, e.g. `2` or `2,3`): **Physical** GPU device indices for kernel evaluation (as shown by `nvidia-smi`, not relative to `CUDA_VISIBLE_DEVICES`). These GPUs must be separate from decoding and proof GPUs.
-  - `KERNEL_EVAL_BACKEND` (persistent|subprocess|basilica, default: persistent): Evaluation backend. `persistent` uses a long-lived worker per GPU that reuses the CUDA context (~40x faster than subprocess, auto-recovers from CUDA sticky errors). `subprocess` runs each kernel in an isolated subprocess with its own CUDA context. `basilica` uses Basilica cloud GPU workers (no local GPU needed; not yet implemented).
+- Kernel evaluation (Triton Kernel environment)
+  - `GRAIL_GPU_EVAL=true`: Required. Enables GPU-based kernel correctness evaluation.
+  - `KERNEL_EVAL_BACKEND=basilica`: Required. Uses Basilica cloud A100 GPUs for kernel eval.
+  - `BASILICA_EVAL_URL`: URL of the Basilica kernel-bench service.
   - `KERNEL_EVAL_TIMEOUT` (default: 60): Per-kernel evaluation timeout in seconds.
 - Object storage (R2/S3)
   - `R2_BUCKET_ID`, `R2_ACCOUNT_ID`
@@ -154,7 +160,7 @@ The active environment is configured network-wide and determines the problem typ
 
 | Environment | ID | Description | GPU Requirement |
 |---|---|---|---|
-| **Triton Kernel** | `triton_kernel` | Generate GPU kernels in Triton; evaluated for correctness on-GPU | 3 GPUs (decoding + proof + kernel eval) |
+| **Triton Kernel** | `triton_kernel` | Generate GPU kernels in Triton; evaluated for correctness on-GPU | 2 GPUs + Basilica |
 | **3-SAT** | `sat` | Deterministic 3-SAT constraint satisfaction problems | 1 GPU |
 | **GSM8K** | `gsm8k` | Math word problems with step-by-step reasoning | 1 GPU |
 | **MATH** | `math` | Competition-level mathematics (Hendrycks MATH) | 1 GPU |
@@ -163,40 +169,90 @@ The active environment is configured network-wide and determines the problem typ
 | **Affine Trace** | `affine_trace` | Affine type system trace reasoning | 1 GPU |
 | **Affine Logic** | `affine_logic` | Affine type system logic reasoning | 1 GPU |
 
-The current default environment is **Triton Kernel**. Pipeline mode is the **recommended** way to run miners with 2+ GPUs. The miner pipeline uses GPUs in parallel:
+The current production environment is **Triton Kernel**. Pipeline mode is the **recommended** way to run miners. The miner pipeline uses GPUs in parallel:
 
 1. **GPU 0 — Decoding**: vLLM/SGLang generates Triton kernel code from problem prompts.
 2. **GPU 1 — Proof computation**: A HuggingFace model computes logprobs and GRAIL commitments for verification.
-3. **GPU 2 — Kernel evaluation**: Each generated kernel runs in an isolated subprocess with its own CUDA context, checking correctness against a reference implementation.
+3. **Kernel evaluation**: Basilica cloud A100 GPUs check correctness against reference implementations.
 
-Proof computation (GPU 1) and kernel evaluation (GPU 2) run **in parallel** after decoding completes, since proofs only need token IDs and do not depend on evaluation results.
+Proof computation (GPU 1) and kernel evaluation (Basilica) run **in parallel** after decoding completes, since proofs only need token IDs and do not depend on evaluation results.
 
 **Weight sync between windows:** When a new checkpoint is available, the pipeline reloads vLLM weights using the sleep/wake/reload API (~3-30 seconds) instead of a full server restart (~5 minutes). This is automatic and requires no configuration. If the fast path fails, it falls back to a full restart.
 
 If checkpoints live on a different volume (e.g. ephemeral/tmpfs), set `GRAIL_PIPELINE_SYMLINK_DIR` to a writable directory on the same filesystem or any accessible path — the symlink used for weight reload will be placed there instead of next to the checkpoint.
 
-### Triton Kernel GPU Setup Example
+### Basilica Kernel Evaluation Setup
+
+The Triton Kernel environment requires a running **kernel-bench** service on Basilica for GPU-based kernel correctness evaluation. You must deploy this service **before** starting your miner.
+
+**1. Install the Basilica CLI and log in:**
 
 ```bash
-# .env configuration for triton_kernel mining with pipeline mode
-GRAIL_GPU_EVAL=true
-KERNEL_EVAL_GPU_IDS=2          # Physical GPU index for kernel eval (not relative to CUDA_VISIBLE_DEVICES)
-KERNEL_EVAL_BACKEND=persistent  # Long-lived worker, ~40x faster (default)
-KERNEL_EVAL_TIMEOUT=60          # Seconds per kernel (default)
+curl -fsSL https://cli.basilica.ai/install.sh | sh
+basilica login
+```
 
-# Pipeline mode (recommended for 2+ GPUs)
+**2. Deploy kernel-bench:**
+
+```bash
+basilica deploy ghcr.io/erfanmhi/kernel-bench:latest \
+  --gpu 2 --gpu-model A100 \
+  --cpu 12 --memory 48Gi \
+  --health-path /health \
+  --startup-failure-threshold 60
+```
+
+The number of GPUs affects how many kernels can be evaluated in parallel. Recommendations:
+- **1 GPU** — sufficient for validators and low-throughput miners
+- **2 GPUs** — recommended starting point for miners
+- **More GPUs** — useful if you generate many rollouts per window and want to overlap proof computation with kernel evaluation. Scale up based on your throughput needs.
+
+**3. Wait for the service to be ready:**
+
+The deploy command will stream progress. Once it shows a URL like `https://<id>.deployments.basilica.ai`, verify it's healthy:
+
+```bash
+curl https://<your-instance>.deployments.basilica.ai/health
+```
+
+You should see `"status": "healthy"` with `workers_alive` matching your GPU count.
+
+**4. Set `BASILICA_EVAL_URL` in your `.env`:**
+
+```bash
+BASILICA_EVAL_URL=https://<your-instance>.deployments.basilica.ai
+```
+
+**Managing your deployment:**
+
+```bash
+basilica deploy ls                    # list all deployments
+basilica deploy status <deployment-id> # check status
+basilica deploy logs <deployment-id>   # view logs
+basilica deploy restart <deployment-id> # restart if needed
+basilica deploy delete <deployment-id>  # tear down when done
+```
+
+### Triton Kernel Setup
+
+Once your Basilica kernel-bench service is running, configure your `.env`:
+
+```bash
+# Kernel evaluation (Basilica)
+GRAIL_GPU_EVAL=true
+KERNEL_EVAL_BACKEND=basilica
+BASILICA_EVAL_URL=https://<your-instance>.deployments.basilica.ai
+
+# Pipeline mode (GPU 0 = decoding, GPU 1 = proofs)
 GRAIL_PIPELINE_ENABLED=true
 GRAIL_PIPELINE_BACKEND=vllm
-GRAIL_PIPELINE_VLLM_GPU=0      # Relative to CUDA_VISIBLE_DEVICES
-GRAIL_PIPELINE_PROOF_GPU=1     # Relative to CUDA_VISIBLE_DEVICES
+GRAIL_PIPELINE_VLLM_GPU=0
+GRAIL_PIPELINE_PROOF_GPU=1
 
-# Run with GPU 0 for decoding, GPU 1 for proofs, GPU 2 for kernel eval
 CUDA_VISIBLE_DEVICES=0,1 grail -vv mine
 ```
 
-> **Note on GPU indices:** `GRAIL_PIPELINE_VLLM_GPU` and `GRAIL_PIPELINE_PROOF_GPU` are **relative** to `CUDA_VISIBLE_DEVICES`. `KERNEL_EVAL_GPU_IDS` is a **physical** GPU index (the eval subprocess overrides `CUDA_VISIBLE_DEVICES` internally).
-
-For miners without 3 GPUs or without A100/H100-class hardware, set `GRAIL_GPU_EVAL=false`. This disables on-GPU kernel evaluation (max reward capped at 0.35 based on compilation checks only).
+`GRAIL_GPU_EVAL` must be `true` for production. This is required for full kernel correctness evaluation via Basilica.
 
 ---
 
@@ -240,8 +296,8 @@ Artifacts uploaded per window (as a Parquet file) include per-rollout:
 ### Quick Fixes
 
 - CUDA OOM or driver errors: Ensure you have adequate GPU VRAM (40GB+ recommended per GPU); verify drivers match CUDA runtime; periodically clear cache.
-- GPU not detected: Check `nvidia-smi` output. For `triton_kernel`, ensure `KERNEL_EVAL_GPU_IDS` points to a valid **physical** device index (as shown by `nvidia-smi`).
-- Kernel eval failures: CUDA sticky errors (illegal memory access, device-side assert) are automatically recovered via subprocess isolation and retry. Check logs for `CUDA sticky error` warnings.
+- GPU not detected: Check `nvidia-smi` output.
+- Kernel eval failures: Run `curl $BASILICA_EVAL_URL/health` — check that `workers_alive` > 0 and `status` is `healthy`. If workers are dead, run `basilica deploy restart <deployment-id>`. If the deployment doesn't exist yet, see [Basilica Kernel Evaluation Setup](#basilica-kernel-evaluation-setup).
 - No uploads: check `R2_*` variables and bucket permissions; verify network/firewall.
 - Not receiving weights: ensure uploads succeed; validator will score the previous complete window.
 - Drand failures: miner automatically falls back to block-hash; you can use `--no-drand`.
@@ -264,7 +320,7 @@ Key points:
 
 ## Best Practices
 
-- **GPU-intensive environments** (Triton Kernel): Use 3 GPUs with A100/H100 class for kernel eval. Ensure `GRAIL_GPU_EVAL=true` and `KERNEL_EVAL_GPU_IDS` are set correctly.
+- **Triton Kernel** (current production): Set `KERNEL_EVAL_BACKEND=basilica` and `BASILICA_EVAL_URL`. Only 2 local GPUs needed.
 - **Text-only environments** (SAT, GSM8K, MATH, etc.): 1 GPU is sufficient; any CUDA-capable accelerator works.
 - Models evolve through training: the initial base model is loaded from R2 and automatically updated with new checkpoints each window. Fixed at 8192 max new tokens and 16 rollouts per problem.
 - Reserve the final 2 blocks of each window for uploads; the miner does this automatically but avoid heavy generation near the end.

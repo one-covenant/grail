@@ -95,20 +95,30 @@ Run trainer + validator + miner locally for end-to-end testing.
    CUDA_VISIBLE_DEVICES=2 grail -vv validate --test-mode > validate.log 2>&1 &
    ```
 
-   For **Triton Kernel environment** (miner needs 2+ GPUs for pipeline mode):
+   For **Triton Kernel environment** (2 local GPUs + Basilica):
+
+   First, deploy the kernel-bench service on Basilica (if not already running):
    ```bash
-   # Miner: GPU 0 decoding, GPU 1 proofs (pipeline), GPU 2 kernel eval (physical index)
-   CUDA_VISIBLE_DEVICES=0,1 GRAIL_GPU_EVAL=true KERNEL_EVAL_GPU_IDS=2 \
+   basilica deploy ghcr.io/erfanmhi/kernel-bench:latest \
+     --gpu 1 --gpu-model A100 --cpu 12 --memory 48Gi \
+     --health-path /health --startup-failure-threshold 60
+   # Wait for URL, then verify: curl https://<your-instance>.deployments.basilica.ai/health
+   ```
+
+   Then run miner + validator:
+   ```bash
+   # Miner: GPU 0 decoding, GPU 1 proofs, kernel eval on Basilica
+   CUDA_VISIBLE_DEVICES=0,1 GRAIL_GPU_EVAL=true KERNEL_EVAL_BACKEND=basilica \
+     BASILICA_EVAL_URL=https://<your-instance>.deployments.basilica.ai \
      GRAIL_PIPELINE_ENABLED=true GRAIL_PIPELINE_BACKEND=vllm \
      GRAIL_PIPELINE_VLLM_GPU=0 GRAIL_PIPELINE_PROOF_GPU=1 \
      grail -vv mine > mine.log 2>&1 &
 
-   # Validator on a separate GPU, with its own kernel eval GPU
-   CUDA_VISIBLE_DEVICES=3 KERNEL_EVAL_GPU_IDS=4 \
+   # Validator on a separate GPU, kernel eval on Basilica
+   CUDA_VISIBLE_DEVICES=2 GRAIL_GPU_EVAL=true KERNEL_EVAL_BACKEND=basilica \
+     BASILICA_EVAL_URL=https://<your-instance>.deployments.basilica.ai \
      grail -vv validate --test-mode > validate.log 2>&1 &
    ```
-   > **Note:** `KERNEL_EVAL_GPU_IDS` uses **physical** GPU indices (as shown by `nvidia-smi`).
-   > `GRAIL_PIPELINE_VLLM_GPU` and `GRAIL_PIPELINE_PROOF_GPU` are **relative** to `CUDA_VISIBLE_DEVICES`.
 
 **Why this is harder:**
 - Requires multiple GPUs

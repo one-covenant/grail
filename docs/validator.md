@@ -40,9 +40,10 @@ Grail validators:
 - Linux with NVIDIA GPU drivers installed
 - Docker and Docker Compose installed
 - [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed (required for GPU passthrough to Docker containers)
-- **2x NVIDIA GPUs** (A100 or H100 recommended) for Triton kernel evaluation
+- [Basilica CLI](https://cli.basilica.ai) installed and funded — required to deploy the kernel-bench evaluation service
+- **1x NVIDIA GPU** (A100 or H100 recommended)
   - GPU 0: Model inference / proof verification
-  - GPU 1: Triton kernel compilation + correctness evaluation
+  - Kernel evaluation: Basilica cloud A100 GPUs (no local eval GPU needed)
 - At least 40GB RAM recommended for optimal performance
 - Bittensor wallet (cold/hot) registered on the target subnet
 - Cloudflare R2 (or S3-compatible) bucket and credentials
@@ -55,7 +56,45 @@ For detailed hardware specifications, see [`compute.min.yaml`](../compute.min.ya
 
 ## Quick Start
 
-### Docker (recommended)
+### 1. Deploy Basilica Kernel Evaluation Service
+
+The Triton Kernel environment (current production) requires a **kernel-bench** service on Basilica. Deploy this **before** starting your validator.
+
+```bash
+# Install Basilica CLI and log in
+curl -fsSL https://cli.basilica.ai/install.sh | sh
+basilica login
+
+# Deploy kernel-bench (1 GPU is sufficient for validators)
+basilica deploy ghcr.io/erfanmhi/kernel-bench:latest \
+  --gpu 1 --gpu-model A100 \
+  --cpu 12 --memory 48Gi \
+  --health-path /health \
+  --startup-failure-threshold 60
+```
+
+Wait for the deployment URL, then verify it's healthy:
+
+```bash
+curl https://<your-instance>.deployments.basilica.ai/health
+# Should show "status": "healthy" with workers_alive: 1
+```
+
+Set `BASILICA_EVAL_URL=https://<your-instance>.deployments.basilica.ai` in your `.env`.
+
+Manage your deployment with:
+
+```bash
+basilica deploy ls                    # list all deployments
+basilica deploy status <deployment-id> # check status
+basilica deploy logs <deployment-id>   # view logs
+basilica deploy restart <deployment-id> # restart if needed
+basilica deploy delete <deployment-id>  # tear down when done
+```
+
+### 2. Run the Validator
+
+#### Docker (recommended)
 
 ```bash
 # Clone and enter
@@ -64,7 +103,7 @@ cd grail
 
 # Configure environment
 cp .env.example .env
-# Edit .env with your wallet names, network, and R2 credentials
+# Edit .env with your wallet names, network, R2 credentials, and BASILICA_EVAL_URL
 
 # If you have a large storage mount (e.g., /ephemeral, /mnt/data), set it in .env:
 #   GRAIL_HOST_STORAGE_PATH=/ephemeral
@@ -75,7 +114,7 @@ cp .env.example .env
 docker compose --env-file .env -f docker/docker-compose.validator.yml up -d
 ```
 
-### Native (without Docker)
+#### Native (without Docker)
 
 ```bash
 # Clone and enter
@@ -88,7 +127,7 @@ uv sync
 
 # Configure environment
 cp .env.example .env
-# Edit .env with your wallet names, network, and R2 credentials
+# Edit .env with your wallet names, network, R2 credentials, and BASILICA_EVAL_URL
 
 # Run validator
 grail validate
@@ -131,9 +170,9 @@ Set these in `.env` (see `.env.example`). This file will be used with Docker Com
   - `GRAIL_MONITORING_BACKEND` (wandb|null)
   - `WANDB_API_KEY`, `WANDB_PROJECT`, `WANDB_ENTITY`, `WANDB_MODE`
 - Kernel evaluation (triton_kernel environment)
-  - `GRAIL_GPU_EVAL` (true|false, default: true) — enable GPU-based kernel correctness evaluation
-  - `KERNEL_EVAL_GPU_IDS` (default: 1) — physical GPU index for kernel eval (GPU 0 runs the model)
-  - `KERNEL_EVAL_BACKEND` (persistent|subprocess|basilica, default: persistent) — evaluation backend. `persistent` reuses the CUDA context (~40x faster), `subprocess` isolates each eval, `basilica` uses Basilica cloud GPU workers (not yet implemented)
+  - `GRAIL_GPU_EVAL=true` — required, enables GPU-based kernel correctness evaluation
+  - `KERNEL_EVAL_BACKEND=basilica` — required, uses Basilica cloud A100 GPUs
+  - `BASILICA_EVAL_URL` — URL of the Basilica kernel-bench service
   - `KERNEL_EVAL_TIMEOUT` (default: 60) — per-kernel evaluation timeout in seconds
 - Optional
   - `HF_TOKEN`, `HF_USERNAME` (for Hugging Face dataset publishing)
@@ -276,7 +315,7 @@ For each downloaded inference:
 - Seed is reconstructed as `{wallet_addr}-{target_window_hash}-{rollout_group}`. GRPO group size is fixed at 16 (`ROLLOUTS_PER_PROBLEM`).
 - Challenge randomness for GRAIL proof: mix drand randomness (current round) with `target_window_hash`; fallback to hash-only on failures.
 - Verifier (`grail/grail.py`) checks token validity, sketch proof, and model identity.
-- For Triton Kernel environment: kernel correctness is verified by re-executing the generated kernel on-GPU against reference implementations.
+- For Triton Kernel environment: kernel correctness is verified by re-executing the generated kernel on Basilica cloud A100 GPUs against reference implementations.
 
 Sampling and batching:
 - If total rollouts ≤ MAX_SAMPLES_PER_MINER → verify all.

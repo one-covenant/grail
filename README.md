@@ -66,7 +66,7 @@ Prover/Verifier implementation with:
 #### 2. Mining Engine (`grail/mining/engine.py`, `grail/environments/loop.py`)
 GRPO-style rollout system with:
 - Multiple rollouts per problem (16 per group), token-level logprob tracking
-- 3-GPU pipeline mode: vLLM generation, HuggingFace proof computation, and kernel evaluation in parallel
+- Pipelined mining: vLLM generation (GPU 0), HuggingFace proof computation (GPU 1), and Basilica cloud kernel evaluation in parallel
 - Shared `forward_single_layer` function ensuring bit-identical results between miner and validator
 
 #### 3. Environment System (`grail/environments/`)
@@ -134,7 +134,7 @@ The GRAIL protocol ensures:
 ### Model Requirements
 - Hugging Face Transformers compatible, exposes token ids/logprobs
 - **Text-only environments** (SAT, GSM8K, MATH, MBPP, HumanEval): 1 GPU minimum; any CUDA-capable accelerator
-- **Triton Kernel environment**: 3 GPUs recommended — one for model inference (decoding), one for proof/logprob computation, and one for kernel evaluation. The kernel evaluation GPU should be A100 or H100 class to support Triton JIT compilation
+- **Triton Kernel environment**: 2 local GPUs (decoding + proof computation) + Basilica cloud A100 GPUs for kernel evaluation. Deploy the kernel-bench service on Basilica before starting your miner or validator.
 
 For detailed hardware specifications, see [`compute.min.yaml`](compute.min.yaml).
 
@@ -147,7 +147,7 @@ See [Miner Documentation](docs/miner.md) for comprehensive setup instructions in
 - Hardware and environment requirements
 - Wallet and network configuration
 - R2/S3 credentials setup
-- Pipeline mode configuration (3-GPU)
+- Pipeline mode configuration (2 local GPUs + Basilica)
 - Running the miner
 
 ### Validation Setup

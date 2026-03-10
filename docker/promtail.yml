@@ -24,6 +24,7 @@ scrape_configs:
           job: ${PROMTAIL_JOB}
           env: ${GRAIL_ENV}
           service: grail
+          role: ${GRAIL_ROLE:-validator}
           network: ${BT_NETWORK}
           netuid: ${NETUID}
           wallet: ${BT_WALLET_COLD}

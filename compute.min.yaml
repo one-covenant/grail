@@ -27,13 +27,12 @@ compute_spec:
       recommended_compute_capability: 9.0  # Recommended CUDA compute capability (H100 = 9.0)
       min_cuda_version: 12.1               # Minimum CUDA toolkit version
       recommended_gpu: "NVIDIA A100 80GB (or H100)"  # Recommended GPU to purchase/rent
-      min_amount: 1                        # Minimum GPUs (1 for text-only envs like SAT, GSM8K)
-      recommended_amount: 3                # 3 GPUs for triton_kernel env: decoding + proof + kernel eval
+      min_amount: 2                        # 2 GPUs for triton_kernel env (kernel eval offloaded to Basilica)
+      recommended_amount: 2                # 2 GPUs: decoding + proof. Kernel eval via Basilica cloud A100s.
       # GPU roles for triton_kernel environment:
       #   GPU 0: Model inference / decoding (vLLM/SGLang)
       #   GPU 1: Proof computation / logprob verification (HuggingFace model)
-      #   GPU 2: Kernel evaluation (requires A100/H100 class for Triton JIT)
-      # Text-only environments (sat, gsm8k, math, mbpp, humaneval) need only 1 GPU.
+      #   Kernel evaluation: Basilica cloud A100 GPUs (KERNEL_EVAL_BACKEND=basilica)
 
     memory:
       min_ram: 64             # Minimum RAM (GB)
@@ -69,8 +68,8 @@ compute_spec:
       recommended_compute_capability: 9.0  # Recommended CUDA compute capability (H100 = 9.0)
       min_cuda_version: 12.1               # Minimum CUDA toolkit version
       recommended_gpu: "NVIDIA A100 80GB (or H100)"  # Recommended GPU to purchase/rent
-      min_amount: 2                        # 2 GPUs: GPU 0 = model inference / proof verification, GPU 1 = Triton kernel eval (A100/H100 for Triton JIT)
-      recommended_amount: 2                # Recommended amount of GPUs
+      min_amount: 1                        # 1 GPU: model inference / proof verification. Kernel eval via Basilica.
+      recommended_amount: 1                # 1 GPU. Kernel eval offloaded to Basilica cloud A100s.
 
     memory:
       min_ram: 64             # Minimum RAM (GB)
