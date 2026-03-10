@@ -870,7 +870,7 @@ class TritonKernelAdapter(DatasetAdapter):
             validate_gpu_config,
         )
 
-        validate_gpu_config(self._eval_gpu_ids, self._gpu_eval)
+        validate_gpu_config(self._eval_gpu_ids, self._gpu_eval, self._eval_backend_name)
 
         self._backend = create_backend(
             self._eval_backend_name,
