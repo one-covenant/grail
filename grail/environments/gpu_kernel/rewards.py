@@ -3,13 +3,13 @@
 Multi-component reward vector for GRPO training (6 components):
 - Compilation (5%): code is valid Python syntax (prerequisite for Triton)
 - Structure (10%): has ModelNew class, @triton.jit, proper imports
-- GPU Compilation (15%): code compiles and runs on GPU without crashing
-- Correctness (50%): passes GPU execution tests (when available)
+- GPU Compilation (0%): disabled, was non-deterministic across CUDA contexts
+- Correctness (65%): passes GPU execution tests (when available)
 - Format (10%): proper <SOLUTION> tags with minimal trailing text
 - Thinking (10%): presence of reasoning block
 
 Reward hierarchy (natural curriculum):
-  Format -> Compilation -> Structure -> GPU Compilation -> Correctness
+  Format -> Compilation -> Structure -> Correctness
 
 Without GPU (gpu_eval=False): max reward = 0.35 (compilation + structure + format + thinking)
 With GPU (gpu_eval=True): max reward = 1.0
@@ -75,18 +75,12 @@ def _structure_reward(parsed: dict[str, Any], context: Any) -> float:
 
 
 def _gpu_compilation_reward(parsed: dict[str, Any], context: Any) -> float:
-    """Reward for successful GPU compilation (code runs without crashing).
+    """Reward for successful GPU compilation (disabled).
 
-    Returns 1.0 if code compiled and executed on GPU, 0.0 otherwise.
-    Returns 0.0 when GPU execution is unavailable.
+    Always returns 0.0. Kept for backward compatibility with logged component
+    names. The gpu_compilation signal was non-deterministic across CUDA contexts,
+    causing reward_valid mismatches between miner and validator.
     """
-    if not isinstance(parsed, dict):
-        return 0.0
-
-    exec_result = parsed.get("exec_result")
-    if exec_result is not None and isinstance(exec_result, dict):
-        return 1.0 if exec_result.get("compiled", False) else 0.0
-
     return 0.0
 
 
@@ -146,8 +140,8 @@ def create_triton_kernel_reward_vector() -> RewardVector:
     Components (all bounded [0.0, 1.0]):
         1. Compilation (0.05): Valid Python syntax
         2. Structure (0.10): Proper Triton kernel structure
-        3. GPU Compilation (0.15): Code compiles and runs on GPU
-        4. Correctness (0.50): GPU execution correctness
+        3. GPU Compilation (0.00): Disabled (non-deterministic)
+        4. Correctness (0.65): GPU execution correctness
         5. Format (0.10): Proper <SOLUTION> tags
         6. Thinking (0.10): Presence of reasoning block
 
@@ -168,7 +162,7 @@ def create_triton_kernel_reward_vector() -> RewardVector:
             _thinking_format_reward,
         ],
     )
-    weights = [0.05, 0.10, 0.15, 0.50, 0.10, 0.10]
+    weights = [0.05, 0.10, 0.00, 0.65, 0.10, 0.10]
 
     return RewardVector(
         reward_functions,
