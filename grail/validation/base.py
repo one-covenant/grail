@@ -30,6 +30,9 @@ class Validator(ABC):
     severity: str = "hard"
     """Severity: 'hard' (immediate rejection) or 'soft' (threshold-based)."""
 
+    soft_threshold: float = 0.51
+    """Fraction of checked rollouts that must fail to trigger rejection (soft checks only)."""
+
     @abstractmethod
     def validate(self, ctx: ValidationContext) -> bool:
         """Run validation check.

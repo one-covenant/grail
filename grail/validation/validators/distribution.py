@@ -36,6 +36,7 @@ class DistributionValidator(Validator):
 
     check_name = "token_distribution_valid"
     severity = "soft"  # Soft check - doesn't cause immediate rejection
+    soft_threshold = 0.51
 
     def validate(self, ctx: ValidationContext) -> bool:
         """Check token distribution for suspicious patterns."""

@@ -40,7 +40,6 @@ logger = logging.getLogger(__name__)
 MAX_SAMPLES_PER_MINER_THRESHOLD = 20  # If <= this many rollouts, check all
 MAX_SAMPLES_PER_MINER = 64  # If > this many rollouts, sample GRPO groups
 SAMPLE_RATE = 0.10  # Fraction of GRPO groups to spot-check
-STOCHASTIC_CHECK_FAILURE_THRESHOLD = 0.51  # Soft-failure fraction to gate wallet
 GRPO_ADV_SUM_TOLERANCE = 0.01  # Sum of advantages should be ~0
 REWARD_REL_TOL = 0.02  # Relative tolerance on reward bounds
 REWARD_ABS_TOL = 1e-6  # Absolute tolerance on reward bounds
@@ -117,12 +116,15 @@ class MinerValidator:
 
         # Derive check keys from pipeline validators (single source of truth)
         self._hard_check_keys = get_hard_check_keys(pipeline)
-        soft_check_keys = get_soft_check_keys(pipeline)
-        self._soft_check_key = soft_check_keys[0] if soft_check_keys else None
+        self._soft_check_keys = get_soft_check_keys(pipeline)
+        # Per-key thresholds read from validator class attributes
+        self._soft_thresholds: dict[str, float] = {
+            v.check_name: v.soft_threshold for v in pipeline.validators if v.severity == "soft"
+        }
 
         logger.debug(
             f"MinerValidator initialized with {len(self._hard_check_keys)} hard checks "
-            f"and {len(soft_check_keys)} soft checks"
+            f"and {len(self._soft_check_keys)} soft checks (thresholds={self._soft_thresholds})"
         )
 
     async def validate_miner(
@@ -791,7 +793,7 @@ class MinerValidator:
             "nonces_seen": set(),
             "rollout_groups": defaultdict(list),
             "wallet_rollouts_buffer": [],
-            "soft_failures": 0,
+            "soft_failures": defaultdict(int),
             "hard_failure": False,
             "soft_gate_triggered": False,
             "failure_reason": None,
@@ -806,9 +808,10 @@ class MinerValidator:
         }
 
         total_planned_checks = len(indices_to_check)
-        soft_fail_cutoff = max(
-            1, math.ceil(STOCHASTIC_CHECK_FAILURE_THRESHOLD * max(1, total_planned_checks))
-        )
+        soft_fail_cutoffs = {
+            key: max(1, math.ceil(thresh * max(1, total_planned_checks)))
+            for key, thresh in self._soft_thresholds.items()
+        }
 
         uid_str = str(uid) if uid is not None else f"{miner_hotkey[:12]}..."
 
@@ -980,7 +983,7 @@ class MinerValidator:
 
                 # Check hard and soft validation results
                 if not self._process_validation_results(
-                    checks, state, soft_fail_cutoff, total_planned_checks, uid_str, monitor
+                    checks, state, soft_fail_cutoffs, total_planned_checks, uid_str, monitor
                 ):
                     break
 
@@ -1098,7 +1101,7 @@ class MinerValidator:
         self,
         checks: dict[str, bool],
         state: dict,
-        soft_fail_cutoff: int,
+        soft_fail_cutoffs: dict[str, int],
         total_planned_checks: int,
         uid_str: str,
         monitor: Any | None,
@@ -1109,7 +1112,6 @@ class MinerValidator:
             False if hard failure or soft gate triggered
         """
         hard_valid = all(checks.get(k, False) for k in self._hard_check_keys)
-        soft_valid = checks.get(self._soft_check_key, True) if self._soft_check_key else True
 
         # Log failures
         if not hard_valid:
@@ -1118,9 +1120,6 @@ class MinerValidator:
             )
             if failed_check:
                 logger.debug(f"CHECK_FAILURE type=hard failed_check={failed_check}")
-
-        if not soft_valid and self._soft_check_key:
-            logger.debug(f"CHECK_FAILURE type=soft failed_check={self._soft_check_key}")
 
         # Handle hard failure
         if not hard_valid:
@@ -1138,27 +1137,26 @@ class MinerValidator:
                 logger.warning("Hard verification failed; invalidating uid")
             return False
 
-        # Handle soft failure
-        if not soft_valid:
-            state["soft_failures"] += 1
-
-            if logger.isEnabledFor(logging.DEBUG):
+        # Handle soft failures (check each soft key independently)
+        for key in self._soft_check_keys:
+            if not checks.get(key, True):
+                state["soft_failures"][key] += 1
                 logger.debug(
-                    f"soft_failures={state['soft_failures']}/{total_planned_checks}; "
-                    f"threshold={soft_fail_cutoff}"
+                    f"CHECK_FAILURE type=soft failed_check={key} "
+                    f"count={state['soft_failures'][key]}/{total_planned_checks} "
+                    f"threshold={soft_fail_cutoffs.get(key, 'N/A')}"
                 )
 
-            # Soft failure observed; threshold gating handled below
-
-            if state["soft_failures"] >= soft_fail_cutoff:
-                state["soft_gate_triggered"] = True
-                soft_name = self._soft_check_key or "soft_check"
-                state["failure_reason"] = f"soft:{soft_name}"
-                logger.warning(
-                    f"Soft-check threshold reached for '{soft_name}' "
-                    f"({state['soft_failures']}/{total_planned_checks}); invalidating uid"
-                )
-                return False
+                cutoff = soft_fail_cutoffs.get(key)
+                if cutoff is not None and state["soft_failures"][key] >= cutoff:
+                    state["soft_gate_triggered"] = True
+                    state["failure_reason"] = f"soft:{key}"
+                    logger.warning(
+                        f"Soft-check threshold reached for '{key}' "
+                        f"({state['soft_failures'][key]}/{total_planned_checks}); "
+                        f"invalidating uid"
+                    )
+                    return False
 
         return True
 
@@ -1487,11 +1485,12 @@ class MinerValidator:
             failure_reason=state.get("failure_reason"),
         )
 
+        total_soft_failures = sum(state["soft_failures"].values())
         logger.warning(
             "🚫 Rejected uid=%s hard=%s soft=%s/%s — miner banned for %d windows",
             uid_str,
             state["hard_failure"],
-            state["soft_failures"],
+            dict(state["soft_failures"]),
             state["checked_count"],
             FAILURE_LOOKBACK_WINDOWS,
         )
@@ -1506,10 +1505,10 @@ class MinerValidator:
                 )
                 # Log soft failure metrics
                 await monitor.log_gauge(
-                    f"{uid_str}/soft_failures_count", float(state["soft_failures"])
+                    f"{uid_str}/soft_failures_count", float(total_soft_failures)
                 )
                 soft_failure_ratio = (
-                    state["soft_failures"] / state["checked_count"]
+                    total_soft_failures / state["checked_count"]
                     if state["checked_count"] > 0
                     else 0.0
                 )
@@ -1603,11 +1602,10 @@ class MinerValidator:
                     f"{uid_str}/prompt_mismatch", float(validation_state["prompt_mismatch_count"])
                 )
                 # Log soft failure metrics (even for successful miners)
-                await monitor.log_gauge(
-                    f"{uid_str}/soft_failures_count", float(validation_state["soft_failures"])
-                )
+                total_soft = sum(validation_state["soft_failures"].values())
+                await monitor.log_gauge(f"{uid_str}/soft_failures_count", float(total_soft))
                 soft_failure_ratio = (
-                    validation_state["soft_failures"] / validation_state["checked_count"]
+                    total_soft / validation_state["checked_count"]
                     if validation_state["checked_count"] > 0
                     else 0.0
                 )

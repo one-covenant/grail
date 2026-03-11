@@ -177,6 +177,8 @@ class EnvironmentEvaluationValidator(Validator):
 
 class RewardValidator(Validator):
     check_name = "reward_valid"
+    severity = "soft"
+    soft_threshold = 0.20
 
     def validate(self, ctx: ValidationContext) -> bool:
         try:
