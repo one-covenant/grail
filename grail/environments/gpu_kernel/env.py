@@ -156,8 +156,8 @@ class TritonKernelEnv(SingleTurnEnv):
     Reward components:
         - Compilation (5%): Valid Python syntax
         - Structure (10%): ModelNew class, @triton.jit, imports
-        - GPU Compilation (15%): Code compiles and runs on GPU
-        - Correctness (50%): GPU execution matches reference
+        - GPU Compilation (0%): Disabled (non-deterministic across CUDA contexts)
+        - Correctness (65%): GPU execution matches reference
         - Format (10%): Proper <SOLUTION> tags
         - Thinking (10%): Reasoning block present
 
@@ -321,6 +321,9 @@ class TritonKernelEnv(SingleTurnEnv):
             task_meta={"task_id": self._task.id, **self._task.metadata},
         )
 
+        # Detect infrastructure eval errors (worker crash, connection lost, etc.)
+        eval_infra_error = bool(exec_result is not None and exec_result.get("infra_error", False))
+
         info: dict[str, Any] = {
             "reward_components": components,
             "termination_cause": "final",
@@ -332,6 +335,7 @@ class TritonKernelEnv(SingleTurnEnv):
             "has_triton_jit": parsed.get("has_triton_jit", False),
             "gpu_eval": self._gpu_eval,
             "exec_result": exec_result,
+            "eval_infra_error": eval_infra_error,
             "hacking_signals": hacking_signals,
         }
 

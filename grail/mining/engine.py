@@ -241,6 +241,20 @@ class PipelinedMiningEngine:
                 # Remove the batch data for failed proofs
                 all_batch_data = all_batch_data[: -len(batch_data)]
 
+        # Check for infrastructure eval errors — if ANY rollout in the group
+        # has an infra error, discard the ENTIRE group. Reducing group size
+        # would cause validator group_size mismatch and hard failure.
+        infra_errors = sum(
+            1 for _, _, _, info in all_batch_data if info.get("eval_infra_error", False)
+        )
+        if infra_errors:
+            logger.warning(
+                "Discarding entire group: %d/%d rollouts had eval infrastructure errors",
+                infra_errors,
+                len(all_batch_data),
+            )
+            return []
+
         # Assemble rollouts
         t0 = time.time()
         rollouts = assemble_rollouts(all_batch_data, all_proof_results)
