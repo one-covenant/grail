@@ -167,7 +167,7 @@ class TestRewardComponents:
 
     def test_gpu_compilation_reward_compiled(self) -> None:
         parsed: dict[str, Any] = {"exec_result": {"compiled": True, "correct": False}}
-        assert _gpu_compilation_reward(parsed, {}) == 1.0
+        assert _gpu_compilation_reward(parsed, {}) == 0.0  # disabled, always 0
 
     def test_gpu_compilation_reward_not_compiled(self) -> None:
         parsed: dict[str, Any] = {"exec_result": {"compiled": False, "correct": False}}
@@ -226,7 +226,7 @@ class TestTritonKernelRubric:
         reward, components = rubric.step_reward(parsed=parsed, context={}, turn_index=1)
         assert reward == pytest.approx(1.0)
         assert components["correctness"] == 1.0
-        assert components["gpu_compilation"] == 1.0
+        assert components["gpu_compilation"] == 0.0  # disabled
 
     def test_rubric_structural_only(self, rubric: TritonKernelRubric) -> None:
         """No GPU eval -> max 0.35."""
