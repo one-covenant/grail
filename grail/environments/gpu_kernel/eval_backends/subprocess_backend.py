@@ -381,6 +381,11 @@ def run_kernel_eval(test_code: str, triton_code: str, device: Any = None) -> dic
         # Phase 3a — preferred: use check_correctness() from the test harness
         if check_correctness is not None:
             try:
+                # Seed random state so check_correctness() gets deterministic
+                # inputs regardless of worker history.  Many test harnesses call
+                # torch.randn() without seeding.
+                torch.manual_seed(42)
+                torch.cuda.manual_seed(42)
                 result = check_correctness(model_new_class)
                 if isinstance(result, dict):
                     return result
