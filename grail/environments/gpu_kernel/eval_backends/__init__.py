@@ -31,12 +31,16 @@ class EvalResult:
         compiled: Whether kernel code compiled and ran without crashing.
         error: Error message if evaluation failed, None on success.
         max_diff: Maximum absolute difference between outputs, None if not computed.
+        infra_error: True if result is unreliable due to infrastructure failure
+            (worker crash, timeout, connection lost). The miner should discard
+            rollouts with infra_error=True rather than uploading unreliable rewards.
     """
 
     correct: bool
     compiled: bool
     error: str | None = None
     max_diff: float | None = None
+    infra_error: bool = False
 
 
 @runtime_checkable
