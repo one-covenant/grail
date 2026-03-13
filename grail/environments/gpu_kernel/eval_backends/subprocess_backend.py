@@ -282,6 +282,9 @@ def _run_eval_in_subprocess(
             compiled=result_dict.get("compiled", False),
             error=result_dict.get("error"),
             max_diff=result_dict.get("max_diff"),
+            speedup_ratio=result_dict.get("speedup_ratio"),
+            kernel_median_ms=result_dict.get("kernel_median_ms"),
+            reference_median_ms=result_dict.get("reference_median_ms"),
         )
 
     parent_conn.close()
@@ -327,6 +330,65 @@ def _cleanup_temp_file(path: str | None) -> None:
 # ---------------------------------------------------------------------------
 # Subprocess entry point
 # ---------------------------------------------------------------------------
+
+
+def _benchmark_models(
+    model_class: type,
+    model_new_class: type,
+    get_inputs: Any,
+    get_init_inputs: Any,
+    device: Any,
+) -> tuple[float | None, float | None, float | None]:
+    """Benchmark reference and generated models, return (speedup_ratio, kernel_ms, ref_ms).
+
+    Returns (None, None, None) if benchmarking fails (e.g. OOM).
+    """
+    import torch
+
+    from ..task_sources import KERNEL_EVAL_SEED
+    from .benchmark import benchmark_fn
+
+    try:
+        torch.manual_seed(KERNEL_EVAL_SEED)
+        torch.cuda.manual_seed(KERNEL_EVAL_SEED)
+        init_inputs = get_init_inputs() if get_init_inputs else []
+        ref_model = model_class(*init_inputs).to(device).eval()
+        new_model = model_new_class(*init_inputs).to(device).eval()
+
+        torch.manual_seed(KERNEL_EVAL_SEED)
+        base_inputs = get_inputs()
+        base_inputs = [inp.to(device) if hasattr(inp, "to") else inp for inp in base_inputs]
+
+        def make_inputs() -> dict:
+            return {
+                "inputs": [inp.clone() if hasattr(inp, "clone") else inp for inp in base_inputs]
+            }
+
+        def kernel_call(inputs: list) -> None:
+            new_model(*inputs)
+
+        def ref_call(inputs: list) -> None:
+            ref_model(*inputs)
+
+        with torch.no_grad():
+            kernel_stats = benchmark_fn(
+                kernel_call, kwargs_fn=make_inputs, device=device, skip_compilation=True
+            )
+            ref_stats = benchmark_fn(
+                ref_call, kwargs_fn=make_inputs, device=device, skip_compilation=True
+            )
+
+        speedup = ref_stats.median_ms / max(kernel_stats.median_ms, 1e-6)
+        logger.info(
+            "Benchmark: kernel=%.4fms ref=%.4fms speedup=%.3fx",
+            kernel_stats.median_ms,
+            ref_stats.median_ms,
+            speedup,
+        )
+        return speedup, kernel_stats.median_ms, ref_stats.median_ms
+    except Exception as e:
+        logger.warning("Benchmarking failed (kernel still correct): %s", e)
+        return None, None, None
 
 
 def run_kernel_eval(test_code: str, triton_code: str, device: Any = None) -> dict:
@@ -388,14 +450,29 @@ def run_kernel_eval(test_code: str, triton_code: str, device: Any = None) -> dic
                 torch.cuda.manual_seed(42)
                 result = check_correctness(model_new_class)
                 if isinstance(result, dict):
-                    return result
-                if isinstance(result, bool):
-                    return {
-                        "correct": result,
+                    correct = result.get("correct", False)
+                elif isinstance(result, bool):
+                    correct = result
+                    result = {
+                        "correct": correct,
                         "compiled": True,
-                        "error": None if result else "check_correctness_failed",
+                        "error": None if correct else "check_correctness_failed",
                     }
-                return {"correct": bool(result), "compiled": True, "error": None}
+                else:
+                    correct = bool(result)
+                    result = {"correct": correct, "compiled": True, "error": None}
+
+                if not correct:
+                    return result
+
+                # Phase 4 — benchmark (only when correct)
+                speedup_ratio, kernel_median_ms, reference_median_ms = _benchmark_models(
+                    model_class, model_new_class, get_inputs, get_init_inputs, device
+                )
+                result["speedup_ratio"] = speedup_ratio
+                result["kernel_median_ms"] = kernel_median_ms
+                result["reference_median_ms"] = reference_median_ms
+                return result
             except Exception as e:
                 return {
                     "correct": False,
@@ -450,11 +527,27 @@ def run_kernel_eval(test_code: str, triton_code: str, device: Any = None) -> dic
             max_diff = max(max_diff, diff)
 
         correct = max_diff <= KERNEL_EVAL_TOLERANCE
+        if not correct:
+            return {
+                "correct": False,
+                "compiled": True,
+                "error": f"max_diff={max_diff:.6f}",
+                "max_diff": max_diff,
+            }
+
+        # Phase 4 — benchmark (only when correct)
+        speedup_ratio, kernel_median_ms, reference_median_ms = _benchmark_models(
+            model_class, model_new_class, get_inputs, get_init_inputs, device
+        )
+
         return {
-            "correct": correct,
+            "correct": True,
             "compiled": True,
-            "error": None if correct else f"max_diff={max_diff:.6f}",
+            "error": None,
             "max_diff": max_diff,
+            "speedup_ratio": speedup_ratio,
+            "kernel_median_ms": kernel_median_ms,
+            "reference_median_ms": reference_median_ms,
         }
 
     except Exception as e:

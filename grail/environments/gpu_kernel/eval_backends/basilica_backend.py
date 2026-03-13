@@ -166,14 +166,20 @@ class BasilicaBackend:
         max_diff = last_data.get("max_diff")
         infra_error = self._is_infra_error(error)
 
-        # Log timing for observability (not used in EvalResult)
+        # Extract timing data
         timing = last_data.get("timing")
-        if timing:
+        speedup_ratio = None
+        kernel_median_ms = None
+        reference_median_ms = None
+        if timing and correct:
+            speedup_ratio = timing.get("speedup_ratio")
+            kernel_median_ms = timing.get("kernel_median_ms")
+            reference_median_ms = timing.get("reference_median_ms")
             logger.info(
-                "Basilica timing: kernel=%.4fms ref=%.4fms speedup=%s device=%s",
-                timing.get("kernel_median_ms", 0),
-                timing.get("reference_median_ms", 0),
-                timing.get("speedup", "N/A"),
+                "Basilica timing: kernel=%.4fms ref=%.4fms speedup=%.3fx device=%s",
+                kernel_median_ms or 0,
+                reference_median_ms or 0,
+                speedup_ratio or 0,
                 last_data.get("device", "unknown"),
             )
 
@@ -183,6 +189,9 @@ class BasilicaBackend:
             error=error,
             max_diff=max_diff,
             infra_error=infra_error,
+            speedup_ratio=speedup_ratio,
+            kernel_median_ms=kernel_median_ms,
+            reference_median_ms=reference_median_ms,
         )
 
     def evaluate_batch(self, items: list[tuple[str, str]]) -> list[EvalResult]:
