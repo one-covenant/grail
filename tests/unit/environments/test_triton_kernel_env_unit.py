@@ -16,13 +16,9 @@ from grail.environments.gpu_kernel.eval_backends import EvalResult
 from grail.environments.gpu_kernel.parser import TritonKernelParser
 from grail.environments.gpu_kernel.rewards import (
     TritonKernelRubric,
-    _compilation_reward,
-    _correctness_reward,
-    _gpu_compilation_reward,
+    _kernel_quality_reward,
     _solution_format_reward,
-    _structure_reward,
     _thinking_format_reward,
-    create_triton_kernel_reward_vector,
 )
 from grail.environments.providers import TaskSpec
 from tests.fixtures.fakes import FakeEvalBackend
@@ -130,60 +126,31 @@ class TestTritonKernelParser:
 class TestRewardComponents:
     """Individual reward functions."""
 
-    def test_compilation_reward_valid_syntax(self) -> None:
-        parsed: dict[str, Any] = {"syntax_valid": True}
-        assert _compilation_reward(parsed, {}) == 1.0
-
-    def test_compilation_reward_invalid_syntax(self) -> None:
-        parsed: dict[str, Any] = {"syntax_valid": False}
-        assert _compilation_reward(parsed, {}) == 0.0
-
-    def test_structure_reward_all_present(self) -> None:
-        parsed: dict[str, Any] = {
-            "has_model_new": True,
-            "has_triton_jit": True,
-            "has_triton_import": True,
-            "has_torch_import": True,
-        }
-        assert _structure_reward(parsed, {}) == pytest.approx(1.0)
-
-    def test_structure_reward_partial(self) -> None:
-        parsed: dict[str, Any] = {
-            "has_model_new": True,
-            "has_triton_jit": True,
-            "has_triton_import": False,
-            "has_torch_import": False,
-        }
-        assert _structure_reward(parsed, {}) == pytest.approx(0.5)
-
-    def test_structure_reward_none_present(self) -> None:
-        parsed: dict[str, Any] = {
-            "has_model_new": False,
-            "has_triton_jit": False,
-            "has_triton_import": False,
-            "has_torch_import": False,
-        }
-        assert _structure_reward(parsed, {}) == pytest.approx(0.0)
-
-    def test_gpu_compilation_reward_compiled(self) -> None:
-        parsed: dict[str, Any] = {"exec_result": {"compiled": True, "correct": False}}
-        assert _gpu_compilation_reward(parsed, {}) == 0.0  # disabled, always 0
-
-    def test_gpu_compilation_reward_not_compiled(self) -> None:
-        parsed: dict[str, Any] = {"exec_result": {"compiled": False, "correct": False}}
-        assert _gpu_compilation_reward(parsed, {}) == 0.0
-
-    def test_correctness_reward_correct(self) -> None:
-        parsed: dict[str, Any] = {"exec_result": {"correct": True}}
-        assert _correctness_reward(parsed, {}) == 1.0
-
-    def test_correctness_reward_incorrect(self) -> None:
+    def test_kernel_quality_incorrect(self) -> None:
         parsed: dict[str, Any] = {"exec_result": {"correct": False}}
-        assert _correctness_reward(parsed, {}) == 0.0
+        assert _kernel_quality_reward(parsed, {}) == 0.0
 
-    def test_correctness_reward_no_exec(self) -> None:
+    def test_kernel_quality_correct_no_speedup(self) -> None:
+        parsed: dict[str, Any] = {"exec_result": {"correct": True}}
+        reward = _kernel_quality_reward(parsed, {})
+        assert reward == pytest.approx(0.310, abs=0.01)
+
+    def test_kernel_quality_correct_with_speedup(self) -> None:
+        parsed: dict[str, Any] = {"exec_result": {"correct": True, "speedup_ratio": 2.0}}
+        reward = _kernel_quality_reward(parsed, {})
+        assert reward == pytest.approx(0.769, abs=0.01)
+
+    def test_kernel_quality_speedup_clipped(self) -> None:
+        parsed: dict[str, Any] = {"exec_result": {"correct": True, "speedup_ratio": 10.0}}
+        reward = _kernel_quality_reward(parsed, {})
+        # Clipped to 3.0, same as speedup_ratio=3.0
+        expected: dict[str, Any] = {"exec_result": {"correct": True, "speedup_ratio": 3.0}}
+        assert reward == pytest.approx(_kernel_quality_reward(expected, {}))
+        assert reward == pytest.approx(0.900, abs=0.01)
+
+    def test_kernel_quality_no_exec(self) -> None:
         parsed: dict[str, Any] = {}
-        assert _correctness_reward(parsed, {}) == 0.0
+        assert _kernel_quality_reward(parsed, {}) == 0.0
 
     def test_format_reward_proper_tags(self) -> None:
         parsed: dict[str, Any] = {"has_solution": True, "trailing_after_solution": 0}
@@ -210,50 +177,46 @@ class TestRewardComponents:
 class TestTritonKernelRubric:
     """Rubric integration tests."""
 
-    def test_rubric_full_reward_gpu_eval(self, rubric: TritonKernelRubric) -> None:
-        """All components satisfied -> total near 1.0."""
+    def test_rubric_correct_no_speedup(self, rubric: TritonKernelRubric) -> None:
+        """Correct kernel, no timing data -> ~0.448."""
         parsed: dict[str, Any] = {
-            "syntax_valid": True,
-            "has_model_new": True,
-            "has_triton_jit": True,
-            "has_triton_import": True,
-            "has_torch_import": True,
             "has_solution": True,
             "trailing_after_solution": 0,
             "has_thinking": True,
             "exec_result": {"compiled": True, "correct": True},
         }
         reward, components = rubric.step_reward(parsed=parsed, context={}, turn_index=1)
-        assert reward == pytest.approx(1.0)
-        assert components["correctness"] == 1.0
-        assert components["gpu_compilation"] == 0.0  # disabled
+        # 0.80 * sigmoid(-0.8) + 0.10 * 1.0 + 0.10 * 1.0
+        assert reward == pytest.approx(0.448, abs=0.01)
+        assert components["kernel_quality"] == pytest.approx(0.310, abs=0.01)
 
-    def test_rubric_structural_only(self, rubric: TritonKernelRubric) -> None:
-        """No GPU eval -> max 0.35."""
+    def test_rubric_correct_with_speedup(self, rubric: TritonKernelRubric) -> None:
+        """Correct kernel with 3x speedup -> ~0.920."""
         parsed: dict[str, Any] = {
-            "syntax_valid": True,
-            "has_model_new": True,
-            "has_triton_jit": True,
-            "has_triton_import": True,
-            "has_torch_import": True,
+            "has_solution": True,
+            "trailing_after_solution": 0,
+            "has_thinking": True,
+            "exec_result": {"compiled": True, "correct": True, "speedup_ratio": 3.0},
+        }
+        reward, components = rubric.step_reward(parsed=parsed, context={}, turn_index=1)
+        assert reward == pytest.approx(0.920, abs=0.01)
+        assert components["kernel_quality"] == pytest.approx(0.900, abs=0.01)
+
+    def test_rubric_no_gpu_eval(self, rubric: TritonKernelRubric) -> None:
+        """No exec_result -> 0.20 (format + thinking only)."""
+        parsed: dict[str, Any] = {
             "has_solution": True,
             "trailing_after_solution": 0,
             "has_thinking": True,
             "exec_result": None,
         }
         reward, components = rubric.step_reward(parsed=parsed, context={}, turn_index=1)
-        assert reward == pytest.approx(0.35)
-        assert components["correctness"] == 0.0
-        assert components["gpu_compilation"] == 0.0
+        assert reward == pytest.approx(0.20)
+        assert components["kernel_quality"] == 0.0
 
     def test_rubric_zero_reward(self, rubric: TritonKernelRubric) -> None:
         """Empty completion -> 0.0."""
         parsed: dict[str, Any] = {
-            "syntax_valid": False,
-            "has_model_new": False,
-            "has_triton_jit": False,
-            "has_triton_import": False,
-            "has_torch_import": False,
             "has_solution": False,
             "trailing_after_solution": 0,
             "has_thinking": False,
@@ -262,11 +225,19 @@ class TestTritonKernelRubric:
         reward, _ = rubric.step_reward(parsed=parsed, context={}, turn_index=1)
         assert reward == pytest.approx(0.0)
 
-    def test_rubric_weights_sum_to_one(self) -> None:
-        rv = create_triton_kernel_reward_vector()
-        assert sum(rv.weights) == pytest.approx(1.0)
-        assert len(rv.reward_functions) == 6
-        assert len(rv.weights) == 6
+    def test_rubric_incorrect_with_format(self, rubric: TritonKernelRubric) -> None:
+        """Incorrect kernel + format + thinking -> 0.20."""
+        parsed: dict[str, Any] = {
+            "has_solution": True,
+            "trailing_after_solution": 0,
+            "has_thinking": True,
+            "exec_result": {"compiled": True, "correct": False},
+        }
+        reward, components = rubric.step_reward(parsed=parsed, context={}, turn_index=1)
+        assert reward == pytest.approx(0.20)
+        assert components["kernel_quality"] == 0.0
+        assert components["format"] == 1.0
+        assert components["thinking"] == 1.0
 
 
 # =============================================================================
@@ -305,7 +276,7 @@ class TestTritonKernelEnv:
         assert "Model" in obs.messages[0].content
 
     def test_step_structural_reward(self) -> None:
-        """gpu_eval=False -> structural rewards only."""
+        """gpu_eval=False -> format + thinking rewards only."""
         env = TritonKernelEnv(task_source=_FakeTaskSource(), gpu_eval=False)
         env.reset(seed=42)
 
@@ -313,12 +284,12 @@ class TestTritonKernelEnv:
         _, reward, terminated, _, info = env.step(ChatMessage(role="assistant", content=completion))
 
         assert terminated is True
-        assert reward == pytest.approx(0.35)
+        assert reward == pytest.approx(0.20)
         assert info["structure_valid"] is True
         assert info["exec_result"] is None
 
     def test_step_with_fake_backend(self) -> None:
-        """gpu_eval=True + FakeEvalBackend -> uses backend."""
+        """gpu_eval=True + FakeEvalBackend correct=True -> sigmoid reward."""
         backend = FakeEvalBackend(default_result=EvalResult(correct=True, compiled=True))
         env = TritonKernelEnv(
             task_source=_FakeTaskSource(),
@@ -330,9 +301,35 @@ class TestTritonKernelEnv:
         completion = build_kernel_completion("thinking", VALID_TRITON_CODE)
         _, reward, _, _, info = env.step(ChatMessage(role="assistant", content=completion))
 
-        assert reward == pytest.approx(1.0)
+        # correct=True, no speedup_ratio -> 0.80 * 0.310 + 0.10 + 0.10 = 0.448
+        assert reward == pytest.approx(0.448, abs=0.01)
         assert info["exec_result"]["correct"] is True
         assert len(backend.call_log) == 1
+
+    def test_step_with_fake_backend_speedup(self) -> None:
+        """gpu_eval=True + FakeEvalBackend with speedup -> higher reward."""
+        backend = FakeEvalBackend(
+            default_result=EvalResult(
+                correct=True,
+                compiled=True,
+                speedup_ratio=2.0,
+                kernel_median_ms=0.5,
+                reference_median_ms=1.0,
+            )
+        )
+        env = TritonKernelEnv(
+            task_source=_FakeTaskSource(),
+            gpu_eval=True,
+            eval_backend=backend,
+        )
+        env.reset(seed=42)
+
+        completion = build_kernel_completion("thinking", VALID_TRITON_CODE)
+        _, reward, _, _, info = env.step(ChatMessage(role="assistant", content=completion))
+
+        # correct=True, speedup=2.0 -> 0.80 * 0.769 + 0.10 + 0.10 = 0.815
+        assert reward == pytest.approx(0.815, abs=0.01)
+        assert info["exec_result"]["speedup_ratio"] == 2.0
 
     def test_step_backend_not_configured(self) -> None:
         """gpu_eval=True + no backend -> RuntimeError."""

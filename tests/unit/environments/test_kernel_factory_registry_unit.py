@@ -176,7 +176,7 @@ class TestRegistryAdapters:
             assert "reward" in result
             assert "success" in result
             assert isinstance(result["reward"], float)
-            assert result["reward"] == pytest.approx(0.35)
+            assert result["reward"] == pytest.approx(0.20)
 
     def test_evaluate_completion_deterministic(self) -> None:
         """Same inputs -> same reward."""
