@@ -13,7 +13,7 @@ Key features:
 - Structural validation works without GPU (provides training signal)
 - GPU correctness checking via pluggable backends (subprocess, persistent, affinetes, basilica)
 - Anti-reward-hacking detection signals
-- Decomposed reward: compilation, structure, gpu_compilation, correctness, format, thinking
+- Sigmoid reward: kernel_quality (correctness + speedup), format, thinking
 
 Expected completion format (tags depend on thinking mode):
     <thinking_open>
@@ -153,11 +153,8 @@ class TritonKernelEnv(SingleTurnEnv):
         - Level 3: Complete architectures (50 problems) - MobileNet, VGG, etc.
         - Level 4: HuggingFace models (20 problems)
 
-    Reward components:
-        - Compilation (5%): Valid Python syntax
-        - Structure (10%): ModelNew class, @triton.jit, imports
-        - GPU Compilation (0%): Disabled (non-deterministic across CUDA contexts)
-        - Correctness (65%): GPU execution matches reference
+    Reward components (sigmoid formulation):
+        - Kernel quality (80%): sigmoid(1{correct} + min(speedup, 3.0) - 1.8)
         - Format (10%): Proper <SOLUTION> tags
         - Thinking (10%): Reasoning block present
 
@@ -303,9 +300,11 @@ class TritonKernelEnv(SingleTurnEnv):
         if code:
             hacking_signals = extract_anti_hacking_signals(code)
 
-        # Determine success
+        # Determine success: kernel must be correct AND faster than reference
         if exec_result is not None:
-            success = bool(exec_result.get("correct", False))
+            correct = bool(exec_result.get("correct", False))
+            speedup = exec_result.get("speedup_ratio")
+            success = correct and speedup is not None and float(speedup) > 1.0
         else:
             # Without GPU, success = structure is valid
             success = bool(parsed.get("structure_valid", False))

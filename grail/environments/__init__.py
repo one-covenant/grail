@@ -44,7 +44,6 @@ from .gpu_kernel import (  # noqa: F401
     TritonKernelRubric,
     UnifiedKernelTaskSource,
     create_backend,
-    create_triton_kernel_reward_vector,
     get_global_backend,
     set_global_backend,
     validate_gpu_config,
@@ -125,7 +124,6 @@ __all__ = [
     "UnifiedKernelTaskSource",
     "TritonKernelParser",
     "TritonKernelRubric",
-    "create_triton_kernel_reward_vector",
     # GPU Kernel eval backends
     "EvalResult",
     "KernelEvalBackend",

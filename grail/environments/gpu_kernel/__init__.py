@@ -25,7 +25,7 @@ from .eval_backends import (
     validate_gpu_config,
 )
 from .parser import TritonKernelParser
-from .rewards import TritonKernelRubric, create_triton_kernel_reward_vector
+from .rewards import TritonKernelRubric
 from .task_sources import KernelBenchTaskSource, UnifiedKernelTaskSource
 
 __all__ = [
@@ -34,7 +34,6 @@ __all__ = [
     "UnifiedKernelTaskSource",
     "TritonKernelParser",
     "TritonKernelRubric",
-    "create_triton_kernel_reward_vector",
     "EvalResult",
     "KernelEvalBackend",
     "create_backend",

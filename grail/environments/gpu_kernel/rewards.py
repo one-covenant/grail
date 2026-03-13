@@ -1,106 +1,67 @@
 """Reward functions for Triton kernel generation environment.
 
-Multi-component reward vector for GRPO training (6 components):
-- Compilation (5%): code is valid Python syntax (prerequisite for Triton)
-- Structure (10%): has ModelNew class, @triton.jit, proper imports
-- GPU Compilation (0%): disabled, was non-deterministic across CUDA contexts
-- Correctness (65%): passes GPU execution tests (when available)
-- Format (10%): proper <SOLUTION> tags with minimal trailing text
-- Thinking (10%): presence of reasoning block
+Sigmoid reward formulation (GPT-5 style):
+  R = 0.80 * kernel_quality + 0.10 * format + 0.10 * thinking
 
-Reward hierarchy (natural curriculum):
-  Format -> Compilation -> Structure -> Correctness
+Where kernel_quality = sigmoid(1{correct} + min(speedup, 3.0) - 1.8):
+  - Incorrect kernel: 0.0 (gated)
+  - Correct, no timing: sigmoid(1 - 1.8) = 0.310
+  - Correct, 1x speedup: sigmoid(1 + 1 - 1.8) = 0.550
+  - Correct, 2x speedup: sigmoid(1 + 2 - 1.8) = 0.769
+  - Correct, 3x+ speedup: sigmoid(1 + 3 - 1.8) = 0.900
 
-Without GPU (gpu_eval=False): max reward = 0.35 (compilation + structure + format + thinking)
-With GPU (gpu_eval=True): max reward = 1.0
+Without GPU (gpu_eval=False): max reward = 0.20 (format + thinking only)
+With GPU (gpu_eval=True, correct, 3x speedup): max reward = 0.92
 
 GRPO Design:
-- All component bounds are [0.0, 1.0] for clean normalization
-- Correctness uses pre-computed test results (no double execution)
+- Continuous speedup signal prevents reward collapse once correctness is learned
+- Sigmoid diminishing returns avoid reward hacking via trivial speedups
+- Format/thinking bonuses are independent of correctness gate
 - Rewards are deterministic given (completion, context)
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
-from typing import Any, cast
+import math
+from typing import Any
 
-from ..base import RewardVector
+from ...shared.constants import SIGMOID_DELTA, SIGMOID_KERNEL_WEIGHT, SPEEDUP_CLIP
 from ..core import Rubric
 
 logger = logging.getLogger(__name__)
 
 _warned_no_gpu = False
 
+
 # =============================================================================
 # Individual reward functions
 # =============================================================================
 
 
-def _compilation_reward(parsed: dict[str, Any], context: Any) -> float:
-    """Reward for syntactically valid Python code (prerequisite for Triton).
+def _kernel_quality_reward(parsed: dict[str, Any], context: Any) -> float:
+    """Sigmoid reward gated on correctness, incorporating speedup.
 
-    Returns 1.0 if code compiles, 0.0 otherwise.
-    """
-    if not isinstance(parsed, dict):
-        return 0.0
-    return 1.0 if parsed.get("syntax_valid", False) else 0.0
-
-
-def _structure_reward(parsed: dict[str, Any], context: Any) -> float:
-    """Reward for proper Triton kernel structure.
-
-    Checks four structural requirements (0.25 each):
-    - ModelNew class defined
-    - @triton.jit decorator present
-    - triton imported
-    - torch imported
-
-    Returns value in [0.0, 1.0].
-    """
-    if not isinstance(parsed, dict):
-        return 0.0
-
-    score = 0.0
-    if parsed.get("has_model_new", False):
-        score += 0.25
-    if parsed.get("has_triton_jit", False):
-        score += 0.25
-    if parsed.get("has_triton_import", False):
-        score += 0.25
-    if parsed.get("has_torch_import", False):
-        score += 0.25
-    return score
-
-
-def _gpu_compilation_reward(parsed: dict[str, Any], context: Any) -> float:
-    """Reward for successful GPU compilation (disabled).
-
-    Always returns 0.0. Kept for backward compatibility with logged component
-    names. The gpu_compilation signal was non-deterministic across CUDA contexts,
-    causing reward_valid mismatches between miner and validator.
-    """
-    return 0.0
-
-
-def _correctness_reward(parsed: dict[str, Any], context: Any) -> float:
-    """Reward for GPU execution correctness (pre-computed).
-
-    Uses cached execution results from parsed dict.
-    Returns 1.0 if kernel produces correct outputs, 0.0 otherwise.
-
-    When GPU execution is not available, this returns 0.0
-    (the environment skips execution and doesn't populate exec_result).
+    Returns sigmoid(1 + min(speedup, SPEEDUP_CLIP) - SIGMOID_DELTA) when correct,
+    0.0 when incorrect. If correct but no timing data, speedup is treated as 0.
     """
     if not isinstance(parsed, dict):
         return 0.0
 
     exec_result = parsed.get("exec_result")
-    if exec_result is not None and isinstance(exec_result, dict):
-        return 1.0 if exec_result.get("correct", False) else 0.0
+    if exec_result is None or not isinstance(exec_result, dict):
+        return 0.0
+    if not exec_result.get("correct", False):
+        return 0.0
 
-    return 0.0
+    speedup = exec_result.get("speedup_ratio")
+    if speedup is None:
+        speedup = 0.0
+    else:
+        speedup = min(float(speedup), SPEEDUP_CLIP)
+
+    x = 1.0 + speedup - SIGMOID_DELTA
+    return 1.0 / (1.0 + math.exp(-x))
 
 
 def _solution_format_reward(parsed: dict[str, Any], context: Any) -> float:
@@ -130,68 +91,15 @@ def _thinking_format_reward(parsed: dict[str, Any], context: Any) -> float:
 
 
 # =============================================================================
-# Reward vector factory
-# =============================================================================
-
-
-def create_triton_kernel_reward_vector() -> RewardVector:
-    """Create Triton kernel reward vector with 6 decomposed components.
-
-    Components (all bounded [0.0, 1.0]):
-        1. Compilation (0.05): Valid Python syntax
-        2. Structure (0.10): Proper Triton kernel structure
-        3. GPU Compilation (0.00): Disabled (non-deterministic)
-        4. Correctness (0.65): GPU execution correctness
-        5. Format (0.10): Proper <SOLUTION> tags
-        6. Thinking (0.10): Presence of reasoning block
-
-    Total weight: 1.0
-    Max achievable reward: 1.0
-
-    Without GPU: max reward is 0.35 (compilation + structure + format + thinking).
-    With GPU: max reward is 1.0.
-    """
-    reward_functions = cast(
-        list[Callable[[Any, Any], float]],
-        [
-            _compilation_reward,
-            _structure_reward,
-            _gpu_compilation_reward,
-            _correctness_reward,
-            _solution_format_reward,
-            _thinking_format_reward,
-        ],
-    )
-    weights = [0.05, 0.10, 0.00, 0.65, 0.10, 0.10]
-
-    return RewardVector(
-        reward_functions,
-        weights,
-        parser=None,
-        bounds=[
-            (0.0, 1.0),  # compilation
-            (0.0, 1.0),  # structure
-            (0.0, 1.0),  # gpu_compilation
-            (0.0, 1.0),  # correctness
-            (0.0, 1.0),  # format
-            (0.0, 1.0),  # thinking
-        ],
-    )
-
-
-# =============================================================================
-# Rubric adapter
+# Rubric
 # =============================================================================
 
 
 class TritonKernelRubric(Rubric):
-    """Rubric that computes reward from pre-parsed dict with execution results.
+    """Sigmoid-based rubric with speedup reward for Triton kernel generation.
 
-    Avoids double-execution by using cached exec_result from parsed dict.
+    R = 0.80 * kernel_quality + 0.10 * format + 0.10 * thinking
     """
-
-    def __init__(self) -> None:
-        self._reward_vector = create_triton_kernel_reward_vector()
 
     def step_reward(
         self, *, parsed: Any, context: Any, turn_index: int
@@ -200,28 +108,25 @@ class TritonKernelRubric(Rubric):
             return 0.0, {}
 
         try:
-            rewards = []
-            for fn in self._reward_vector.reward_functions:
-                rewards.append(fn(parsed, context))
+            kernel_q = _kernel_quality_reward(parsed, context)
+            fmt = _solution_format_reward(parsed, context)
+            think = _thinking_format_reward(parsed, context)
 
-            total = sum(r * w for r, w in zip(rewards, self._reward_vector.weights, strict=False))
+            total = SIGMOID_KERNEL_WEIGHT * kernel_q + 0.10 * fmt + 0.10 * think
 
             components = {
-                "compilation": rewards[0],
-                "structure": rewards[1],
-                "gpu_compilation": rewards[2],
-                "correctness": rewards[3],
-                "format": rewards[4],
-                "thinking": rewards[5],
+                "kernel_quality": kernel_q,
+                "format": fmt,
+                "thinking": think,
             }
 
-            # Log warning if no GPU eval on first call
             global _warned_no_gpu
             if not _warned_no_gpu and parsed.get("exec_result") is None:
                 _warned_no_gpu = True
                 logger.info(
-                    "Kernel rewards: gpu_eval not active, max reward = 0.35 "
-                    "(compilation + structure + format + thinking)"
+                    "Kernel rewards: first kernel has no exec_result "
+                    "(no valid code or gpu_eval disabled), reward = 0.20 "
+                    "for this rollout (format + thinking only)"
                 )
 
             return float(total), components
