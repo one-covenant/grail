@@ -197,6 +197,12 @@ SUPERLINEAR_EXPONENT = 4.0
 REWARD_REL_TOL = 0.02
 REWARD_ABS_TOL = 1e-6
 
+# ────────────────  SIGMOID REWARD PARAMETERS  ────────────────
+# GPT-5 sigmoid formulation: R = sigmoid(1{correct} + min(speedup, clip) - delta)
+SIGMOID_DELTA = 1.8
+SPEEDUP_CLIP = 3.0
+SIGMOID_KERNEL_WEIGHT = 0.80
+
 # ────────────────  ROLLOUTS PER PROBLEM  ────────────────
 
 ROLLOUTS_PER_PROBLEM = 16

@@ -34,6 +34,10 @@ class EvalResult:
         infra_error: True if result is unreliable due to infrastructure failure
             (worker crash, timeout, connection lost). The miner should discard
             rollouts with infra_error=True rather than uploading unreliable rewards.
+        speedup_ratio: T_ref / T_kernel. None when kernel is incorrect or
+            benchmarking failed. Used by sigmoid reward.
+        kernel_median_ms: Median kernel execution time in milliseconds.
+        reference_median_ms: Median reference model execution time in milliseconds.
     """
 
     correct: bool
@@ -41,6 +45,9 @@ class EvalResult:
     error: str | None = None
     max_diff: float | None = None
     infra_error: bool = False
+    speedup_ratio: float | None = None
+    kernel_median_ms: float | None = None
+    reference_median_ms: float | None = None
 
 
 @runtime_checkable
