@@ -38,6 +38,7 @@ The active environment is set network-wide (currently **Triton Kernel**). The en
 
 - Linux with NVIDIA GPU drivers installed (required for Triton Kernel environment; macOS/Windows may work for text-only environments but is untested)
 - Python (via `uv venv`) and Git
+- `flash-attn` package: `uv pip install flash-attn --no-build-isolation` (requires CUDA toolkit; included in Docker image)
 - [Basilica CLI](https://cli.basilica.ai) installed and funded — required to deploy the kernel-bench evaluation service
 - Bittensor wallet (cold/hot) registered on the target subnet (all neurons verify registration at startup and exit with a helpful error if not registered)
 - Cloudflare R2 (or S3-compatible) bucket and credentials
@@ -245,8 +246,8 @@ BASILICA_EVAL_URL=https://<your-instance>.deployments.basilica.ai
 
 # Pipeline mode (GPU 0 = decoding, GPU 1 = proofs)
 GRAIL_PIPELINE_ENABLED=true
-GRAIL_PIPELINE_BACKEND=vllm
-GRAIL_PIPELINE_VLLM_GPU=0
+GRAIL_PIPELINE_BACKEND=sglang
+GRAIL_PIPELINE_GEN_GPU=0
 GRAIL_PIPELINE_PROOF_GPU=1
 
 CUDA_VISIBLE_DEVICES=0,1 grail -vv mine

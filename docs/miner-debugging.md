@@ -110,8 +110,8 @@ Run trainer + validator + miner locally for end-to-end testing.
    # Miner: GPU 0 decoding, GPU 1 proofs, kernel eval on Basilica
    CUDA_VISIBLE_DEVICES=0,1 GRAIL_GPU_EVAL=true KERNEL_EVAL_BACKEND=basilica \
      BASILICA_EVAL_URL=https://<your-instance>.deployments.basilica.ai \
-     GRAIL_PIPELINE_ENABLED=true GRAIL_PIPELINE_BACKEND=vllm \
-     GRAIL_PIPELINE_VLLM_GPU=0 GRAIL_PIPELINE_PROOF_GPU=1 \
+     GRAIL_PIPELINE_ENABLED=true GRAIL_PIPELINE_BACKEND=sglang \
+     GRAIL_PIPELINE_GEN_GPU=0 GRAIL_PIPELINE_PROOF_GPU=1 \
      grail -vv mine > mine.log 2>&1 &
 
    # Validator on a separate GPU, kernel eval on Basilica
