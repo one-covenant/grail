@@ -48,6 +48,13 @@ RUN uv sync --no-install-project && \
     rm -rf /root/.cache/pip /root/.cache/uv && \
     find /root/.local -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
+# Flash Attention 2: required for consistent proof verification across
+# miner and validator. Built from source using nvcc from the devel base image.
+# Targets A100 (sm_80), L40S/4090 (sm_89), H100 (sm_90).
+RUN TORCH_CUDA_ARCH_LIST="8.0;8.9;9.0" MAX_JOBS=4 \
+    uv pip install "flash-attn>=2.7.0" --no-build-isolation && \
+    uv cache clean
+
 # Copy application code then install the project (fast, deps already cached)
 COPY grail /app/grail
 COPY README.md /app/README.md

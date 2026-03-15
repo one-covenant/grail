@@ -78,8 +78,11 @@ experiments = [
     "seaborn>=0.11.0",
 ]
 
+flash = [
+    "flash-attn>=2.7.0",
+]
 all = [
-    "grail[dev,experiments,quantization]",
+    "grail[dev,experiments,quantization,flash]",
 ]
 
 [project.scripts]

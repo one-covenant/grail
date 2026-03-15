@@ -860,6 +860,15 @@ wheels = [
 ]
 
 [[package]]
+name = "einops"
+version = "0.8.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/2c/77/850bef8d72ffb9219f0b1aac23fbc1bf7d038ee6ea666f331fa273031aa2/einops-0.8.2.tar.gz", hash = "sha256:609da665570e5e265e27283aab09e7f279ade90c4f01bcfca111f3d3e13f2827", size = 56261, upload-time = "2026-01-26T04:13:17.638Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2a/09/f8d8f8f31e4483c10a906437b4ce31bdf3d6d417b73fe33f1a8b59e34228/einops-0.8.2-py3-none-any.whl", hash = "sha256:54058201ac7087911181bfec4af6091bb59380360f069276601256a76af08193", size = 65638, upload-time = "2026-01-26T04:13:18.546Z" },
+]
+
+[[package]]
 name = "exceptiongroup"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -925,6 +934,16 @@ sdist = { url = "https://files.pythonhosted.org/packages/9b/af/fbfe3c4b5a657d79e
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9f/56/13ab06b4f93ca7cac71078fbe37fcea175d3216f31f85c3168a6bbd0bb9a/flake8-7.3.0-py2.py3-none-any.whl", hash = "sha256:b9696257b9ce8beb888cdbe31cf885c90d31928fe202be0889a7cdafad32f01e", size = 57922, upload-time = "2025-06-20T19:31:34.425Z" },
 ]
+
+[[package]]
+name = "flash-attn"
+version = "2.8.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "einops" },
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3b/b2/8d76c41ad7974ee264754709c22963447f7f8134613fd9ce80984ed0dab7/flash_attn-2.8.3.tar.gz", hash = "sha256:1e71dd64a9e0280e0447b8a0c2541bad4bf6ac65bdeaa2f90e51a9e57de0370d", size = 8447812, upload-time = "2025-08-15T08:28:12.911Z" }
 
 [[package]]
 name = "fonttools"
@@ -1093,6 +1112,7 @@ all = [
     { name = "bittensor-cli" },
     { name = "black" },
     { name = "flake8" },
+    { name = "flash-attn" },
     { name = "jupyter" },
     { name = "mypy" },
     { name = "notebook" },
@@ -1114,6 +1134,9 @@ experiments = [
     { name = "jupyter" },
     { name = "notebook" },
     { name = "seaborn" },
+]
+flash = [
+    { name = "flash-attn" },
 ]
 quantization = [
     { name = "auto-gptq" },
@@ -1144,6 +1167,8 @@ requires-dist = [
     { name = "datasets", specifier = ">=2.14.0" },
     { name = "flake8", marker = "extra == 'all'", specifier = ">=5.0.0" },
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=5.0.0" },
+    { name = "flash-attn", marker = "extra == 'all'", specifier = ">=2.7.0" },
+    { name = "flash-attn", marker = "extra == 'flash'", specifier = ">=2.7.0" },
     { name = "huggingface-hub", specifier = ">=0.20.0" },
     { name = "ipykernel", specifier = ">=7.1.0" },
     { name = "jupyter", marker = "extra == 'all'", specifier = ">=1.0.0" },
@@ -1180,7 +1205,7 @@ requires-dist = [
     { name = "wandb", specifier = ">=0.21.3" },
     { name = "zstandard", specifier = ">=0.21.0" },
 ]
-provides-extras = ["all", "dev", "experiments", "quantization"]
+provides-extras = ["all", "dev", "experiments", "flash", "quantization"]
 
 [package.metadata.requires-dev]
 dev = [
