@@ -25,7 +25,6 @@ from grail.shared.constants import (
     CURRENT_ENV_ID,
     NETUID,
     SNAPSHOT_POLL_INTERVAL_SECONDS,
-    TRAINER_USE_FLASH_ATTENTION,
     TRAINING_HEARTBEAT_TIMEOUT_SECONDS,
     WINDOW_LENGTH,
 )
@@ -724,7 +723,6 @@ class TrainerNeuron(BaseNeuron):
                 str(snapshot_path),
                 device="cuda",
                 eval_mode=True,
-                use_flash_attention=TRAINER_USE_FLASH_ATTENTION,
             )
             logger.info(f"   ✓ Model loaded in {time.time() - model_start:.2f}s")
 

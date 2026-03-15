@@ -74,8 +74,11 @@ TRAINER_KL_ADAPT_RATE = float(os.getenv("GRAIL_TRAINER_KL_ADAPT_RATE", "1.5"))
 TRAINER_KL_MIN = float(os.getenv("GRAIL_TRAINER_KL_MIN", "0.001"))
 TRAINER_KL_MAX = float(os.getenv("GRAIL_TRAINER_KL_MAX", "0.2"))
 
-# Flash Attention for training optimization
-TRAINER_USE_FLASH_ATTENTION = os.getenv("GRAIL_TRAINER_USE_FLASH_ATTENTION", "1") == "1"
+# Attention implementation forced across all model loading paths (miner, validator, trainer).
+# FA2 is padding-invariant (uses flash_attn_varlen_func with unpadding), preventing sketch
+# divergence when batch sizes vary between miner and validator during proof verification.
+# No env var override: this is a protocol-level constant that must match across all nodes.
+ATTN_IMPLEMENTATION = "flash_attention_2"
 
 # Gradient checkpointing for training memory efficiency
 # Reduces activation memory by recomputing on backward pass (~20-30% memory reduction)
@@ -211,6 +214,11 @@ ROLLOUTS_PER_PROBLEM = 16
 
 # Current environment ID (validators use this constant, never trust miner data)
 CURRENT_ENV_ID = "triton_kernel"
+
+# ────────────────  INFERENCE BACKEND  ────────────────
+# Default generation backend for both mining pipeline and trainer evaluation.
+# Options: "sglang", "vllm"
+INFERENCE_BACKEND = os.getenv("GRAIL_INFERENCE_BACKEND", "sglang")
 
 # ────────────────  EMISSION BURN MECHANISM  ────────────────
 

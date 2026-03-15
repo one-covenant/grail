@@ -58,7 +58,6 @@ def get_model(
     device: str | None = None,
     use_safetensors: bool = True,
     eval_mode: bool = True,
-    use_flash_attention: bool = False,
     checkpoint_window: int | None = None,
 ) -> Any:
     """Load model with consistent configuration.
@@ -68,8 +67,6 @@ def get_model(
         device: Target device (e.g., "cuda", "cuda:0", "cpu", or None for auto-detect)
         use_safetensors: Whether to prefer safetensors format
         eval_mode: Whether to set model to eval() mode
-        use_flash_attention: Whether to use Flash Attention 2 (requires flash-attn package).
-                            Only enabled for training, not for evaluation/inference.
         checkpoint_window: Optional checkpoint window number. If not provided, will be
                           extracted from metadata.json or parsed from the path.
 
@@ -113,19 +110,24 @@ def get_model(
             except (ValueError, IndexError):
                 pass
 
-    # Configure attention implementation
-    attn_implementation = None
-    if use_flash_attention and device_is_cuda:
-        try:
-            import flash_attn  # type: ignore[import-not-found]  # noqa: F401
+    # Configure attention implementation from protocol constant.
+    # On CUDA: use ATTN_IMPLEMENTATION (FA2), fail loudly if flash-attn is missing.
+    # On CPU (tests, dev): use default SDPA (no proof computation happens on CPU).
+    from ..shared.constants import ATTN_IMPLEMENTATION
 
-            attn_implementation = "flash_attention_2"
-            logger.info("Using Flash Attention 2 for model loading")
-        except ImportError:
-            logger.warning(
-                "flash-attn not installed; falling back to default attention. "
-                "Install with: uv pip install flash-attn"
-            )
+    attn_implementation = None
+    if device_is_cuda and ATTN_IMPLEMENTATION:
+        attn_implementation = ATTN_IMPLEMENTATION
+        if ATTN_IMPLEMENTATION == "flash_attention_2":
+            try:
+                import flash_attn  # type: ignore[import-not-found]  # noqa: F401
+            except ImportError as err:
+                raise RuntimeError(
+                    "flash-attn is required but not installed. "
+                    "GRAIL requires Flash Attention 2 for consistent proof verification. "
+                    "Install with: uv pip install flash-attn --no-build-isolation"
+                ) from err
+        logger.info("Using attention implementation: %s", attn_implementation)
 
     # Load model with optimized attention if available
     model = AutoModelForCausalLM.from_pretrained(

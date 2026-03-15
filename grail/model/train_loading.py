@@ -20,7 +20,6 @@ from typing import Any, Literal
 
 from grail.model.provider import get_model, get_tokenizer
 from grail.shared.chat_templates import configure_tokenizer
-from grail.shared.constants import TRAINER_USE_FLASH_ATTENTION
 
 ModelLoadMode = Literal["latest", "hf", "window"]
 
@@ -155,22 +154,18 @@ async def load_training_artifacts(
     """Load (train_model, ref_model, tokenizer) per provided specs.
 
     - Trainer tokenizer is configured based on thinking mode.
-    - Train model loads with eval_mode=False and Flash Attention enabled; Ref model with eval_mode=True.
-    - Flash Attention 2 is enabled for training to optimize performance.
+    - Train model loads with eval_mode=False; Ref model with eval_mode=True.
+    - Both use the attention backend set by ATTN_IMPLEMENTATION constant (FA2 on CUDA).
     - Reference model loading can be skipped by setting load_ref_model=False (e.g., when KL is disabled).
     """
-    # Resolve train source - enable Flash Attention for training if configured
+    # Resolve train source
     if train_spec.mode == "hf":
         train_model_id = train_spec.hf_id or ""
-        train_model = get_model(
-            train_model_id, eval_mode=False, use_flash_attention=TRAINER_USE_FLASH_ATTENTION
-        )
+        train_model = get_model(train_model_id, eval_mode=False)
         tokenizer = get_tokenizer(train_model_id)
     else:
         train_ckpt = await _resolve_checkpoint(train_spec, checkpoint_manager)
-        train_model = get_model(
-            str(train_ckpt), eval_mode=False, use_flash_attention=TRAINER_USE_FLASH_ATTENTION
-        )
+        train_model = get_model(str(train_ckpt), eval_mode=False)
         tokenizer = get_tokenizer(str(train_ckpt))
 
     # Configure tokenizer template based on thinking mode
@@ -178,7 +173,7 @@ async def load_training_artifacts(
 
     ref_model: Any | None = None
     if load_ref_model:
-        # Resolve ref source (independent) - no Flash Attention for reference model
+        # Resolve ref source (independent)
         if ref_spec.mode == "hf":
             ref_model_id = ref_spec.hf_id or ""
             ref_model = get_model(ref_model_id, eval_mode=True)
