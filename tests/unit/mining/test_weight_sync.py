@@ -16,7 +16,7 @@ def config() -> PipelineConfig:
     return PipelineConfig(
         enabled=True,
         backend="vllm",
-        vllm_gpu=0,
+        gen_gpu=0,
         proof_gpu=1,
         server_timeout=10.0,
         max_concurrent_requests=4,

@@ -9,11 +9,11 @@ from grail.mining.config import PipelineConfig
 
 
 def test_defaults() -> None:
-    """Default config has pipeline disabled."""
+    """Default config has pipeline disabled with sglang backend."""
     cfg = PipelineConfig()
     assert cfg.enabled is False
-    assert cfg.backend == "vllm"
-    assert cfg.vllm_gpu == 0
+    assert cfg.backend == "sglang"
+    assert cfg.gen_gpu == 0
     assert cfg.proof_gpu == 1
     assert cfg.gpu_memory_utilization == 0.90
 
@@ -26,24 +26,47 @@ def test_from_env_enabled() -> None:
     assert cfg.enabled is True
 
 
-def test_from_env_backend_sglang() -> None:
-    """GRAIL_PIPELINE_BACKEND=sglang selects SGLang backend."""
-    env = {"GRAIL_PIPELINE_BACKEND": "sglang"}
+def test_from_env_backend_vllm() -> None:
+    """GRAIL_PIPELINE_BACKEND=vllm selects vLLM backend."""
+    env = {"GRAIL_PIPELINE_BACKEND": "vllm"}
     with patch.dict(os.environ, env, clear=False):
         cfg = PipelineConfig.from_env()
-    assert cfg.backend == "sglang"
+    assert cfg.backend == "vllm"
 
 
 def test_from_env_gpu_ids() -> None:
     """GPU IDs parsed from environment."""
     env = {
-        "GRAIL_PIPELINE_VLLM_GPU": "2",
+        "GRAIL_PIPELINE_GEN_GPU": "2",
         "GRAIL_PIPELINE_PROOF_GPU": "3",
     }
     with patch.dict(os.environ, env, clear=False):
         cfg = PipelineConfig.from_env()
-    assert cfg.vllm_gpu == 2
+    assert cfg.gen_gpu == 2
     assert cfg.proof_gpu == 3
+
+
+def test_from_env_legacy_gpu_ids() -> None:
+    """Old GRAIL_PIPELINE_VLLM_GPU env var still works as fallback."""
+    env = {
+        "GRAIL_PIPELINE_VLLM_GPU": "4",
+        "GRAIL_PIPELINE_VLLM_TP": "2",
+    }
+    with patch.dict(os.environ, env, clear=False):
+        cfg = PipelineConfig.from_env()
+    assert cfg.gen_gpu == 4
+    assert cfg.gen_tp == 2
+
+
+def test_from_env_new_gpu_overrides_legacy() -> None:
+    """New GRAIL_PIPELINE_GEN_GPU takes precedence over legacy."""
+    env = {
+        "GRAIL_PIPELINE_GEN_GPU": "5",
+        "GRAIL_PIPELINE_VLLM_GPU": "3",
+    }
+    with patch.dict(os.environ, env, clear=False):
+        cfg = PipelineConfig.from_env()
+    assert cfg.gen_gpu == 5
 
 
 def test_from_env_float_params() -> None:
@@ -67,7 +90,7 @@ def test_from_env_empty_values_use_defaults() -> None:
     with patch.dict(os.environ, env, clear=False):
         cfg = PipelineConfig.from_env()
     assert cfg.enabled is False
-    assert cfg.backend == "vllm"
+    assert cfg.backend == "sglang"
 
 
 def test_from_env_bool_variants() -> None:
