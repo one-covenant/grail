@@ -166,7 +166,7 @@ class MinerNeuron(BaseNeuron):
                 logger.info(
                     "Pipeline mode ENABLED: backend=%s, gen_gpu=%d, proof_gpu=%d",
                     pipeline_config.backend,
-                    pipeline_config.vllm_gpu,
+                    pipeline_config.gen_gpu,
                     pipeline_config.proof_gpu,
                 )
 
@@ -299,7 +299,6 @@ class MinerNeuron(BaseNeuron):
                                         str(checkpoint_path),
                                         device=model_device,
                                         eval_mode=True,
-                                        use_flash_attention=False,
                                     )
                                     tokenizer = get_tokenizer(str(checkpoint_path))
 
