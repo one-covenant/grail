@@ -21,8 +21,9 @@ from ..providers import TaskSpec
 
 logger = logging.getLogger(__name__)
 
-# KernelBench problem levels
-KERNELBENCH_LEVELS = (1, 2, 3, 4)
+# KernelBench problem levels (L4 excluded: HuggingFace pretrained model
+# dependencies in test harnesses require internet access at eval time)
+KERNELBENCH_LEVELS = (1, 2, 3)
 
 # Split configuration: deterministic validation holdout per level
 _VAL_FRACTION = 0.2
