@@ -82,10 +82,22 @@ class SGLangWeightSync(WeightSyncStrategy):
             stream_server_logs=True,
         )
 
+        tp = self._config.gen_tp
+        gpu_start = self._config.gen_gpu
+        cuda_devices = ",".join(str(gpu_start + i) for i in range(tp))
+
+        # Build a clean env without inheriting the parent's CUDA_VISIBLE_DEVICES.
+        # The parent process may have a restricted device list (e.g. "0,1,2,3,4")
+        # which causes NCCL custom_all_reduce IPC handle failures when the child
+        # re-maps devices. Starting fresh with absolute GPU IDs avoids this.
+        child_env = {k: v for k, v in os.environ.items() if k != "CUDA_VISIBLE_DEVICES"}
+        child_env["CUDA_VISIBLE_DEVICES"] = cuda_devices
+
         server_config = ServerConfig(
             model_path=checkpoint_path,
             timeout_s=self._config.server_timeout,
-            env={"CUDA_VISIBLE_DEVICES": str(self._config.vllm_gpu)},
+            tensor_parallel_size=tp,
+            env=child_env,
         )
 
         self._manager = SGLangServerManager(config=server_config, eval_config=eval_config)
@@ -230,10 +242,15 @@ class VLLMWeightSync(WeightSyncStrategy):
 
         tokenizer_name = self._resolve_tokenizer_name(checkpoint_path)
 
-        # Build CUDA_VISIBLE_DEVICES for tensor parallelism:
-        # e.g., vllm_gpu=4, vllm_tp=2 -> "4,5"
-        tp = self._config.vllm_tp
-        vllm_gpu_ids = ",".join(str(self._config.vllm_gpu + i) for i in range(tp))
+        # Build a clean env with absolute GPU IDs to avoid NCCL IPC failures
+        # from nested CUDA_VISIBLE_DEVICES remapping.
+        # e.g., gen_gpu=4, gen_tp=2 -> "4,5"
+        tp = self._config.gen_tp
+        vllm_gpu_ids = ",".join(str(self._config.gen_gpu + i) for i in range(tp))
+        child_env = {k: v for k, v in os.environ.items() if k != "CUDA_VISIBLE_DEVICES"}
+        child_env["CUDA_VISIBLE_DEVICES"] = vllm_gpu_ids
+        child_env["PYTORCH_CUDA_ALLOC_CONF"] = ""
+        child_env["VLLM_SERVER_DEV_MODE"] = "1"
 
         server_config = ServerConfig(
             model_path=self._symlink_path,
@@ -241,11 +258,7 @@ class VLLMWeightSync(WeightSyncStrategy):
             tokenizer_name=tokenizer_name,
             enable_sleep_mode=True,
             tensor_parallel_size=tp,
-            env={
-                "CUDA_VISIBLE_DEVICES": vllm_gpu_ids,
-                "PYTORCH_CUDA_ALLOC_CONF": "",
-                "VLLM_SERVER_DEV_MODE": "1",
-            },
+            env=child_env,
         )
 
         self._manager = VLLMServerManager(

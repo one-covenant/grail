@@ -111,7 +111,7 @@ class EvalConfig:
     top_p: float = 0.95
     do_sample: bool = True
     # Backend control: "hf" | "vllm" | "sglang"
-    backend: str = "vllm"  # Server mode with async API avoids Gloo socket issues
+    backend: str = constants.INFERENCE_BACKEND
     # sgLang server options (used when backend == "sglang")
     server_host: str = "127.0.0.1"
     server_port: int = 30000
@@ -143,11 +143,14 @@ class EvalConfig:
         48  # 12288 max_model_len × 64 seqs = 786K KV tokens, fits in ~115GB KV cache at 0.95 util
     )
     vllm_max_concurrent_requests: int = 32  # 75% of max_num_seqs=64
-    # SGLang server memory and concurrency tuning
-    sglang_mem_fraction_static: float = 0.75  # Fraction of GPU memory for SGLang
-    sglang_context_length: int = 1024  # Maximum sequence length
-    sglang_max_running_requests: int = 4  # Server-side: max concurrent requests
-    sglang_max_concurrent_requests: int = 4  # Client-side: max parallel HTTP requests
+    # SGLang server memory and concurrency tuning (optimized for single A100)
+    sglang_python_executable: str = field(
+        default_factory=lambda: os.getenv("GRAIL_SGLANG_PYTHON", "")
+    )
+    sglang_mem_fraction_static: float = 0.90  # Fraction of GPU memory for SGLang
+    sglang_context_length: int = 12288  # Maximum sequence length
+    sglang_max_running_requests: int = 48  # Server-side: max concurrent requests
+    sglang_max_concurrent_requests: int = 32  # Client-side: max parallel HTTP requests
     use_num_return_sequences: bool = False  # HF-only optimization
     # Metrics aggregation: which k to report (subset of 1..replicates)
     report_ks: tuple[int, ...] = (1, 5, 10)
