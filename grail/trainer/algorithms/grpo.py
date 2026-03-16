@@ -2003,7 +2003,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
 
             if torch.cuda.is_available():
                 logger.debug(
-                    "MEMORY after_logprobs alloc_gb=%.2f reserved_gb=%.2f seq_len=%d batch=%d",
+                    "MEMORY after_logprobs alloc_gb=%.2f reserved_gb=%.2f seq_len=%d micro_batch=%d",
                     torch.cuda.memory_allocated() / (1024**3),
                     torch.cuda.memory_reserved() / (1024**3),
                     input_ids_tensor.shape[1],
@@ -2014,7 +2014,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 cur_min = torch.nan_to_num(logprobs_current_sum).min().item()
                 cur_max = torch.nan_to_num(logprobs_current_sum).max().item()
                 logger.warning(
-                    "Non-finite current logprobs; skipping batch",
+                    "Non-finite current logprobs; skipping micro-batch",
                     extra={"min": float(cur_min), "max": float(cur_max)},
                 )
                 continue
@@ -2045,7 +2045,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 old_min = torch.nan_to_num(logprobs_old_sum).min().item()
                 old_max = torch.nan_to_num(logprobs_old_sum).max().item()
                 logger.warning(
-                    "Non-finite old/behavior logprobs; skipping batch",
+                    "Non-finite old/behavior logprobs; skipping micro-batch",
                     extra={"min": float(old_min), "max": float(old_max)},
                 )
                 continue
@@ -2071,7 +2071,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
                         ref_min = torch.nan_to_num(logprobs_ref_sum).min().item()
                         ref_max = torch.nan_to_num(logprobs_ref_sum).max().item()
                         logger.warning(
-                            "Non-finite reference logprobs; skipping batch",
+                            "Non-finite reference logprobs; skipping micro-batch",
                             extra={"min": float(ref_min), "max": float(ref_max)},
                         )
                         # Free tensors before continuing
@@ -2126,7 +2126,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
             # Step 9: Entropy regularization (already computed in Step 2's forward pass)
             if entropies is not None:
                 if not _is_finite_tensor(entropies):
-                    logger.warning("Non-finite entropies; skipping batch")
+                    logger.warning("Non-finite entropies; skipping micro-batch")
                     continue
                 loss_entropy = -self.config.entropy_coef * entropies.mean()
             else:
@@ -2142,7 +2142,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 loss_kl_v = torch.nan_to_num(loss_kl).item()
                 loss_ent_v = torch.nan_to_num(loss_entropy).item()
                 logger.warning(
-                    "Non-finite total loss; skipping batch",
+                    "Non-finite total loss; skipping micro-batch",
                     extra={
                         "loss_pg": float(loss_pg_v),
                         "loss_kl": float(loss_kl_v),
@@ -2215,7 +2215,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
                     adv_mean = advantages_tensor.mean().item()
                     adv_std = advantages_tensor.std().item()
                     logger.warning(
-                        "NaN/Inf gradient norm detected; skipping batch",
+                        "NaN/Inf gradient norm detected; skipping optimizer step",
                         extra={
                             "loss_total": float(loss_tot_v),
                             "log_ratio_mean": float(lr_mean),
