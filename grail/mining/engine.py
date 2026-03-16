@@ -52,6 +52,10 @@ class PipelinedMiningEngine:
         self._proof_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="proof")
         self._eval_executor = ThreadPoolExecutor(max_workers=32, thread_name_prefix="eval")
 
+    def update_gen_params(self, params: GenerationParams) -> None:
+        """Replace generation parameters (called each window with checkpoint metadata)."""
+        self._gen_params = params
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------

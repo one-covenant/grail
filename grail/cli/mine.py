@@ -513,6 +513,7 @@ async def _pipelined_generation_loop(
     checkpoint_window: int | None,
     env_id: str | None = None,
     env_params: dict[str, Any] | None = None,
+    generation_params: dict[str, Any] | None = None,
 ) -> list[dict]:
     """Generate rollouts using the 3-GPU pipeline engine.
 
@@ -522,9 +523,21 @@ async def _pipelined_generation_loop(
     Mirrors the time-budgeting and packaging logic of
     ``generate_rollouts_for_window`` but delegates generation to the pipeline.
     """
+    from ..environments.backends import GenerationParams
     from ..environments.factory import create_env
     from ..grail import derive_env_seed
     from ..shared.constants import CHALLENGE_K, ROLLOUTS_PER_PROBLEM
+
+    # Update pipeline engine with checkpoint metadata's generation params.
+    # Raises ValueError if required fields are missing.
+    if generation_params:
+        gen_params = GenerationParams.from_checkpoint_metadata(generation_params)
+        pipeline_engine.update_gen_params(gen_params)
+    else:
+        raise ValueError(
+            "generation_params is required for pipeline generation. "
+            "Checkpoint metadata must provide generation parameters."
+        )
 
     inferences: list[dict] = []
     start_time = time.time()
@@ -717,29 +730,27 @@ async def generate_rollouts_for_window(
             ROLLOUTS_PER_PROBLEM,
         )
         batch_size = ROLLOUTS_PER_PROBLEM
-    # Create AgentEnvLoop with generation parameters from checkpoint metadata (if available)
-    # Validate and clamp generation params to safe ranges
-    generation_params = generation_params or {}
+    # Build generation params from checkpoint metadata. Raises ValueError if
+    # required fields are missing so we fail fast instead of generating with
+    # wrong parameters that would be rejected by the validator.
+    from ..environments.backends import GenerationParams
 
-    def clamp(value: float | int, min_val: float | int, max_val: float | int) -> float | int:
-        """Clamp value to [min_val, max_val] range."""
-        return max(min_val, min(value, max_val))
-
-    max_tokens = clamp(generation_params["max_tokens"], 1, 16384)
-    temperature = clamp(generation_params.get("temperature", 0.7), 0.01, 2.0)
-    top_p = clamp(generation_params.get("top_p", 0.95), 0.0, 1.0)
-    top_k = clamp(generation_params.get("top_k", 50), 0, 1000)
-    repetition_penalty = clamp(generation_params.get("repetition_penalty", 1.1), 1.0, 2.0)
+    if not generation_params:
+        raise ValueError(
+            "generation_params is required for rollout generation. "
+            "Checkpoint metadata must provide generation parameters."
+        )
+    gen_params = GenerationParams.from_checkpoint_metadata(generation_params)
 
     loop = AgentEnvLoop(
         model,
         tokenizer,
         device,
-        max_new_tokens=int(max_tokens),
-        temperature=float(temperature),
-        top_p=float(top_p),
-        top_k=int(top_k) if top_k > 0 else None,
-        repetition_penalty=float(repetition_penalty),
+        max_new_tokens=gen_params.max_new_tokens,
+        temperature=gen_params.temperature,
+        top_p=gen_params.top_p,
+        top_k=gen_params.top_k,
+        repetition_penalty=gen_params.repetition_penalty,
     )
     if batch_size > 1:
         logger.info("Using batch_size=%d for parallel rollout generation", batch_size)

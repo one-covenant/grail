@@ -473,6 +473,7 @@ class MinerNeuron(BaseNeuron):
                             current_checkpoint_window,
                             env_id=env_id,
                             env_params=env_params,
+                            generation_params=generation_params,
                         )
                     else:
                         inferences = await generate_rollouts_for_window(

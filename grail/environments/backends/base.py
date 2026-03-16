@@ -51,6 +51,15 @@ def _tokenize_completion(tokenizer: Any, completion_text: str, fallback: list[in
         return fallback
 
 
+def _clamp(value: float | int, min_val: float | int, max_val: float | int) -> float | int:
+    """Clamp *value* to [min_val, max_val]."""
+    return max(min_val, min(value, max_val))
+
+
+# Fields that MUST be present in checkpoint metadata's generation_params dict.
+_REQUIRED_GENERATION_FIELDS = ("max_tokens", "temperature", "top_p", "top_k", "repetition_penalty")
+
+
 @dataclass
 class GenerationParams:
     """Text generation parameters passed to backends.
@@ -67,6 +76,33 @@ class GenerationParams:
     repetition_penalty: float | None = 1.1
     trim_right_padding: bool = False
 
+    @classmethod
+    def from_checkpoint_metadata(cls, meta: dict[str, Any]) -> GenerationParams:
+        """Build GenerationParams from checkpoint metadata dict.
+
+        All generation fields must be present in *meta*. Raises ValueError if
+        any required field is missing so the miner fails fast rather than
+        silently generating with wrong parameters.
+
+        Values are clamped to safe ranges to prevent obviously broken configs
+        from reaching the backend.
+        """
+        missing = [f for f in _REQUIRED_GENERATION_FIELDS if f not in meta]
+        if missing:
+            raise ValueError(
+                f"Checkpoint metadata missing required generation params: {', '.join(missing)}. "
+                f"Available keys: {list(meta.keys())}. "
+                f"The trainer must include all of: {list(_REQUIRED_GENERATION_FIELDS)}."
+            )
+
+        return cls(
+            max_new_tokens=int(_clamp(meta["max_tokens"], 1, 16384)),
+            temperature=float(_clamp(meta["temperature"], 0.01, 2.0)),
+            top_p=float(_clamp(meta["top_p"], 0.0, 1.0)),
+            top_k=int(_clamp(meta["top_k"], 0, 1000)) or None,
+            repetition_penalty=float(_clamp(meta["repetition_penalty"], 1.0, 2.0)),
+        )
+
 
 class TextGenBackend(ABC):
     """Abstract interface for batched text generation backends.
@@ -74,6 +110,42 @@ class TextGenBackend(ABC):
     All backends must return tuples: (tokens, chosen_logprobs_or_none).
     The second element may be None when logprobs are not requested or unsupported.
     """
+
+    _max_model_len: int | None = None
+
+    def _cap_max_tokens(self, prompt_len: int, requested: int) -> int:
+        """Cap *requested* max_new_tokens so prompt + completion fits in context.
+
+        Returns the effective max_new_tokens. Logs a warning when capping occurs
+        because the capped completion may fail validator checks (termination,
+        token distribution) that expect the full max_tokens from checkpoint
+        metadata.
+        """
+        if self._max_model_len is None:
+            return requested
+        headroom = self._max_model_len - prompt_len
+        if headroom <= 0:
+            logger.warning(
+                "Prompt length (%d) exceeds max_model_len (%d), no room for "
+                "completion. This request will produce 0 tokens and likely "
+                "fail validation. Increase GRAIL_PIPELINE_MAX_MODEL_LEN.",
+                prompt_len,
+                self._max_model_len,
+            )
+            return 0
+        if requested > headroom:
+            logger.warning(
+                "Capping max_new_tokens %d -> %d (prompt_len=%d, "
+                "max_model_len=%d). The shorter completion may fail validator "
+                "checks. Increase GRAIL_PIPELINE_MAX_MODEL_LEN to at least %d.",
+                requested,
+                headroom,
+                prompt_len,
+                self._max_model_len,
+                prompt_len + requested,
+            )
+            return headroom
+        return requested
 
     @abstractmethod
     async def generate(
