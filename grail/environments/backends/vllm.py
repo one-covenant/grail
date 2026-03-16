@@ -28,6 +28,7 @@ class VLLMServerBackend(TextGenBackend):
         return_chosen_logprobs: bool = False,
         warn_on_missing_token_ids: bool = True,
         strict_token_ids: bool = False,
+        max_model_len: int | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model_name = model_name
@@ -37,6 +38,7 @@ class VLLMServerBackend(TextGenBackend):
         self._return_chosen_logprobs = bool(return_chosen_logprobs)
         self._warn_on_missing_token_ids = bool(warn_on_missing_token_ids)
         self._strict_token_ids = bool(strict_token_ids)
+        self._max_model_len = max_model_len
 
         # Lazy client creation -- defer to first use within the running event loop
         self._client: Any | None = None
@@ -80,12 +82,28 @@ class VLLMServerBackend(TextGenBackend):
 
         prompts = _decode_prompts(self._tokenizer, prompt_ids_batch)
 
-        # Use configurable semaphore to control client-side concurrency
+        # Pre-compute effective max_tokens per prompt to stay within context window.
+        effective_max_per_prompt = [
+            self._cap_max_tokens(len(p_ids), params.max_new_tokens) for p_ids in prompt_ids_batch
+        ]
+
         sem = asyncio.Semaphore(self._max_concurrent_requests)
 
         async def _call_one_async(
-            idx: int, prompt: str, rnd_seed: int | None
+            idx: int,
+            prompt: str,
+            max_tokens: int,
+            rnd_seed: int | None,
         ) -> tuple[int, str, list[float] | None, list[int] | None]:
+            if max_tokens <= 0:
+                logger.warning(
+                    "  vLLMServer req %d: skipping, prompt exceeds "
+                    "max_model_len (%s). Will produce 0 tokens.",
+                    idx + 1,
+                    self._max_model_len,
+                )
+                return (idx, "", None, None)
+
             max_retries = 3
             base_backoff = 1.0
             async with sem:
@@ -100,7 +118,7 @@ class VLLMServerBackend(TextGenBackend):
                         completion_kwargs: dict[str, Any] = {
                             "model": self._model_name,
                             "prompt": prompt_value,
-                            "max_tokens": int(params.max_new_tokens),
+                            "max_tokens": max_tokens,
                             "temperature": float(params.temperature),
                             "top_p": float(params.top_p),
                             # Ensure single completion per request
@@ -196,10 +214,15 @@ class VLLMServerBackend(TextGenBackend):
                             return (idx, "", None, None)
             return (idx, "", None, None)
 
-        tasks = []
-        for idx, prompt in enumerate(prompts):
-            seed_val = seeds[idx] if seeds and idx < len(seeds) else None
-            tasks.append(_call_one_async(idx, prompt, seed_val))
+        tasks = [
+            _call_one_async(
+                idx,
+                prompt,
+                effective_max_per_prompt[idx],
+                seeds[idx] if seeds and idx < len(seeds) else None,
+            )
+            for idx, prompt in enumerate(prompts)
+        ]
 
         results_tuples = await asyncio.gather(*tasks, return_exceptions=False)
         completions: dict[int, str] = {}

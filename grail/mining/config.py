@@ -32,7 +32,7 @@ class PipelineConfig:
 
     # Generation server params
     gpu_memory_utilization: float = 0.90  # Higher than trainer (dedicated GPU)
-    max_model_len: int = 12288
+    max_model_len: int = 18432  # Must be >= MAX_NEW_TOKENS (8192) + longest prompt (~8600)
     max_num_seqs: int = 64
     max_concurrent_requests: int = 48
     server_timeout: float = 300.0

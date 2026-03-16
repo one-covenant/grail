@@ -36,6 +36,7 @@ class SGLangServerBackend(TextGenBackend):
         timeout: float = 300.0,
         max_concurrent_requests: int = 4,
         return_chosen_logprobs: bool = False,
+        max_model_len: int | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model_name = model_name
@@ -43,6 +44,7 @@ class SGLangServerBackend(TextGenBackend):
         self._timeout = float(timeout)
         self._max_concurrent_requests = max_concurrent_requests
         self._return_chosen_logprobs = bool(return_chosen_logprobs)
+        self._max_model_len = max_model_len
 
         # Lazy client creation -- defer to first use within the running event loop
         self._client: Any | None = None
@@ -84,21 +86,37 @@ class SGLangServerBackend(TextGenBackend):
         batch_size = len(prompt_ids_batch)
         logger.info("SGLangServer: Starting ASYNC batch of %d prompts", batch_size)
 
+        # Pre-compute effective max_new_tokens per prompt so the closure stays clean.
+        effective_max_per_prompt = [
+            self._cap_max_tokens(len(p_ids), params.max_new_tokens) for p_ids in prompt_ids_batch
+        ]
+
         sem = asyncio.Semaphore(self._max_concurrent_requests)
 
-        async def _call_one_async(
-            idx: int, prompt_ids: list[int], random_seed: int | None
+        async def _call_one(
+            idx: int,
+            prompt_ids: list[int],
+            max_new_tokens: int,
+            random_seed: int | None,
         ) -> tuple[int, list[int]]:
             """POST to /generate with retries and backoff."""
-            max_retries: int = 3
-            base_backoff: float = 1.0
+            if max_new_tokens <= 0:
+                logger.warning(
+                    "  Request %d/%d: skipping, prompt (%d tokens) exceeds "
+                    "max_model_len (%s). Will produce 0 tokens.",
+                    idx + 1,
+                    batch_size,
+                    len(prompt_ids),
+                    self._max_model_len,
+                )
+                return (idx, [])
 
             async with sem:
-                for attempt in range(max_retries):
+                for attempt in range(3):
                     req_start = time.time()
                     try:
                         sampling_params: dict[str, Any] = {
-                            "max_new_tokens": int(params.max_new_tokens),
+                            "max_new_tokens": max_new_tokens,
                             "temperature": float(params.temperature),
                             "top_p": float(params.top_p),
                         }
@@ -107,7 +125,7 @@ class SGLangServerBackend(TextGenBackend):
                         if params.repetition_penalty is not None:
                             sampling_params["repetition_penalty"] = float(params.repetition_penalty)
                         if random_seed is not None:
-                            sampling_params["seed"] = int(random_seed)
+                            sampling_params["sampling_seed"] = int(random_seed)
 
                         body: dict[str, Any] = {
                             "input_ids": prompt_ids,
@@ -128,47 +146,48 @@ class SGLangServerBackend(TextGenBackend):
                             )
                             output_ids = []
 
-                        req_time = time.time() - req_start
                         logger.debug(
                             "  Request %d/%d took %.2fs, output_tokens=%d",
                             idx + 1,
                             batch_size,
-                            req_time,
+                            time.time() - req_start,
                             len(output_ids),
                         )
                         return (idx, output_ids)
 
                     except Exception as e:
-                        req_time = time.time() - req_start
-                        if attempt < max_retries - 1:
-                            backoff = base_backoff * (2**attempt)
+                        if attempt < 2:
+                            backoff = 1.0 * (2**attempt)
                             logger.warning(
-                                "  Request %d/%d failed (attempt %d/%d), retrying in %.1fs: %s",
+                                "  Request %d/%d failed (attempt %d/3), retrying in %.1fs: %s",
                                 idx + 1,
                                 batch_size,
                                 attempt + 1,
-                                max_retries,
                                 backoff,
                                 type(e).__name__,
                             )
                             await asyncio.sleep(backoff)
                         else:
                             logger.warning(
-                                "  Request %d/%d failed after %d attempts (%.2fs): %s",
+                                "  Request %d/%d failed after 3 attempts (%.2fs): %s",
                                 idx + 1,
                                 batch_size,
-                                max_retries,
-                                req_time,
+                                time.time() - req_start,
                                 type(e).__name__,
                             )
                             return (idx, [])
 
-                return (idx, [])
+                return (idx, [])  # unreachable, satisfies type checker
 
-        tasks = []
-        for idx, p_ids in enumerate(prompt_ids_batch):
-            seed_val = seeds[idx] if seeds and idx < len(seeds) else None
-            tasks.append(_call_one_async(idx, p_ids, seed_val))
+        tasks = [
+            _call_one(
+                idx,
+                p_ids,
+                effective_max_per_prompt[idx],
+                seeds[idx] if seeds and idx < len(seeds) else None,
+            )
+            for idx, p_ids in enumerate(prompt_ids_batch)
+        ]
 
         results_tuples = await asyncio.gather(*tasks, return_exceptions=False)
 

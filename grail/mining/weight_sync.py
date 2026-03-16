@@ -110,6 +110,7 @@ class SGLangWeightSync(WeightSyncStrategy):
             tokenizer=self._tokenizer,
             timeout=self._config.server_timeout,
             max_concurrent_requests=self._config.max_concurrent_requests,
+            max_model_len=self._config.max_model_len,
         )
 
         logger.info("SGLang generation server started at %s", self._manager.base_url)
@@ -275,6 +276,7 @@ class VLLMWeightSync(WeightSyncStrategy):
             timeout=self._config.server_timeout,
             max_concurrent_requests=self._config.max_concurrent_requests,
             strict_token_ids=True,
+            max_model_len=self._config.max_model_len,
         )
 
         logger.info(
@@ -361,6 +363,7 @@ class VLLMWeightSync(WeightSyncStrategy):
             timeout=self._config.server_timeout,
             max_concurrent_requests=self._config.max_concurrent_requests,
             strict_token_ids=True,
+            max_model_len=self._config.max_model_len,
         )
         logger.info("vLLM fallback restart complete at %s", self._manager.base_url)
 
