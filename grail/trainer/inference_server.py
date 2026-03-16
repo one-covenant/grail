@@ -788,6 +788,10 @@ class SGLangServerManager(InferenceServerManager):
             "--trust-remote-code",
             "--load-balance-method",
             "total_tokens",
+            # Disable custom all-reduce to avoid NCCL IPC handle conflicts when
+            # the parent process already has a CUDA context (e.g. miner's proof
+            # model). Negligible perf impact on NVLink-connected GPUs.
+            "--disable-custom-all-reduce",
         ]
 
         # Explicitly provide chat template to ensure SGLang uses the correct formatting
