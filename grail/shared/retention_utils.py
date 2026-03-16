@@ -104,3 +104,42 @@ def is_anchor_window(window: int) -> bool:
         True if this window is an anchor window
     """
     return window % _anchor_stride() == 0
+
+
+def compute_chain_windows(
+    retained_deltas: set[int] | list[int],
+    chain_map: dict[int, int],
+    anchor_map: dict[int, int],
+) -> set[int]:
+    """Walk delta chains and return all intermediate windows needed for reconstruction.
+
+    For each retained delta, follows prev_window links back to anchor_window,
+    collecting every intermediate window. This ensures the retention policy never
+    breaks a chain by deleting an intermediate link.
+
+    Args:
+        retained_deltas: Delta windows that are being retained.
+        chain_map: {delta_window: prev_window} from metadata.
+        anchor_map: {delta_window: anchor_window} from metadata.
+
+    Returns:
+        Set of all windows needed to keep chains intact (intermediates + anchors).
+    """
+    keep: set[int] = set()
+    for delta in retained_deltas:
+        anchor = anchor_map.get(delta)
+        if anchor is None:
+            continue
+        keep.add(anchor)
+
+        current = delta
+        visited: set[int] = {delta}
+        while current in chain_map:
+            prev = chain_map[current]
+            if prev in visited or prev == anchor:
+                keep.add(prev)
+                break
+            visited.add(prev)
+            keep.add(prev)
+            current = prev
+    return keep
