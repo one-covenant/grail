@@ -290,6 +290,28 @@ class TrainingService:
             logger.info(
                 "Gradient checkpointing disabled (via GRAIL_TRAINER_USE_GRADIENT_CHECKPOINTING=0)"
             )
+
+        # Apply torch.compile to the base transformer (not the full CausalLM) so both
+        # chunked-logits (calls base_model directly) and non-chunked paths benefit.
+        if self.config.use_torch_compile:
+            prefix = getattr(self.train_model, "base_model_prefix", "")
+            base = getattr(self.train_model, prefix, None) if prefix else None
+            if base is not None:
+                try:
+                    compiled = torch.compile(base, mode="default")
+                    setattr(self.train_model, prefix, compiled)
+                    logger.info(
+                        "torch.compile applied to %s.%s (mode=default, fixed shapes via max_length padding)",
+                        type(self.train_model).__name__,
+                        prefix,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to apply torch.compile: %s", exc)
+            else:
+                logger.warning(
+                    "torch.compile requested but base model not found (prefix=%r)", prefix
+                )
+
         logger.info(
             "Training artifacts loaded (train=%s, ref=%s, ref_enabled=%s)",
             getattr(self.train_model, "name_or_path", "unknown"),
@@ -351,14 +373,32 @@ class TrainingService:
     def _create_optimizer(self) -> torch.optim.Optimizer:
         """Create AdamW optimizer with configured hyperparameters.
 
+        Uses fused implementation when available (PyTorch 2.x CUDA) for
+        single-kernel-per-parameter updates instead of multiple kernels.
+
         Returns:
             Configured optimizer instance
         """
+        use_fused = False
+        if torch.cuda.is_available():
+            try:
+                _probe = torch.optim.AdamW([torch.zeros(1, device="cuda")], fused=True)
+                del _probe
+                use_fused = True
+            except (RuntimeError, TypeError):
+                pass
+
+        if use_fused:
+            logger.info("Using fused AdamW optimizer")
+        else:
+            logger.info("Using standard AdamW optimizer (fused not available)")
+
         return torch.optim.AdamW(
             self.train_model.parameters(),
             lr=self.config.lr,
             betas=OPTIMIZER_BETAS,
             weight_decay=OPTIMIZER_WEIGHT_DECAY,
+            fused=use_fused,
         )
 
     def _create_scheduler(self) -> torch.optim.lr_scheduler.LRScheduler:

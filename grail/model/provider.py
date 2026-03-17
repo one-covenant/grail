@@ -9,6 +9,7 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -113,10 +114,15 @@ def get_model(
     # Configure attention implementation from protocol constant.
     # On CUDA: use ATTN_IMPLEMENTATION (FA2), fail loudly if flash-attn is missing.
     # On CPU (tests, dev): use default SDPA (no proof computation happens on CPU).
+    # GRAIL_TRAINER_ATTN_IMPL overrides for training only (e.g., "sdpa" for torch.compile).
     from ..shared.constants import ATTN_IMPLEMENTATION
 
     attn_implementation = None
-    if device_is_cuda and ATTN_IMPLEMENTATION:
+    trainer_attn_override = os.getenv("GRAIL_TRAINER_ATTN_IMPL")
+    if trainer_attn_override:
+        attn_implementation = trainer_attn_override
+        logger.info("Using attention implementation: %s (trainer override)", attn_implementation)
+    elif device_is_cuda and ATTN_IMPLEMENTATION:
         attn_implementation = ATTN_IMPLEMENTATION
         if ATTN_IMPLEMENTATION == "flash_attention_2":
             try:

@@ -1401,7 +1401,14 @@ class GRPOAlgorithm(TrainingAlgorithm):
                     },
                 )
 
-        max_len = max(len(tokens) for tokens in batch_tokens)
+        # Pad to fixed max_length so tensor shapes are constant across micro-batches.
+        # This enables torch.compile to reuse compiled graphs and avoids recompilation
+        # per unique seq_len. The attention mask ensures padding tokens are ignored.
+        max_len = (
+            self.config.max_length
+            if self.config.use_torch_compile
+            else max(len(tokens) for tokens in batch_tokens)
+        )
         # Ensure pad_token_id is set (fallback to eos_token_id if needed)
         pad_id = tokenizer.pad_token_id
         if pad_id is None:
