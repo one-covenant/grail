@@ -53,6 +53,9 @@ class TrainingConfig:
     # Gradient checkpointing for memory efficiency
     use_gradient_checkpointing: bool = constants.TRAINER_USE_GRADIENT_CHECKPOINTING
 
+    # torch.compile for training (fuses ops, reduces kernel launch overhead)
+    use_torch_compile: bool = constants.TRAINER_USE_TORCH_COMPILE
+
     # Chunked logit computation (avoids materializing full vocab-sized tensors)
     chunked_logits: bool = constants.TRAINER_CHUNKED_LOGITS
     logit_chunk_size: int = constants.TRAINER_LOGIT_CHUNK_SIZE
@@ -97,7 +100,7 @@ class EvalConfig:
     Defaults chosen to be safe and reasonably fast for initial integration.
     """
 
-    enabled: bool = True
+    enabled: bool = os.getenv("GRAIL_EVAL_ENABLED", "1").lower() in ("1", "true", "yes")
     window_interval: int = 20
     env_id: str | None = None  # If None, uses CURRENT_ENV_ID from constants
     split: str = "val"  # dataset-backed envs (e.g., GSM8K, MBPP)

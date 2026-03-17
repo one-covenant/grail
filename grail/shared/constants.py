@@ -87,6 +87,11 @@ TRAINER_USE_GRADIENT_CHECKPOINTING = (
     os.getenv("GRAIL_TRAINER_USE_GRADIENT_CHECKPOINTING", "1") == "1"
 )
 
+# torch.compile for training model (fuses ops, reduces kernel launch overhead).
+# Compiles the base transformer model with dynamic=True for varying seq_len.
+# Default off; enable after verifying on target hardware.
+TRAINER_USE_TORCH_COMPILE = os.getenv("GRAIL_TRAINER_USE_TORCH_COMPILE", "0") == "1"
+
 # Chunked logit computation: apply lm_head in sequence-dimension chunks to avoid
 # materializing the full [batch, seq_len, vocab_size] logits tensor (~5.4 GB for
 # Qwen3-8B at seq_len=10K). Saves ~10 GB peak memory on single-GPU training.
