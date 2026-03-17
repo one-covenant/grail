@@ -982,49 +982,84 @@ def _compute_logprobs_chunked(
     )
     hidden_states = base_out.last_hidden_state  # [batch, seq_len, hidden_dim]
 
-    # Shift for next-token prediction: logits[t] predicts token[t+1]
-    shift_hidden = hidden_states[:, :-1, :]
-    shift_labels = input_ids[:, 1:]
+    # Skip prompt tokens for LM head: we only need logprobs for completion tokens.
+    # Due to the shift-by-1 (logits[t] predicts token[t+1]), we need hidden states
+    # starting at position (min_prompt_len - 1) to predict the first completion token.
+    # This avoids running the expensive LM head ([hidden_dim, vocab_size] matmul)
+    # on prompt tokens whose logprobs are never used.
+    min_prompt_len = min(prompt_lengths)
+    keep_from = max(0, min_prompt_len - 1)
+
+    shift_hidden = hidden_states[:, keep_from:-1, :]
+    shift_labels = input_ids[:, keep_from + 1 :]
 
     batch_size, shifted_seq_len = shift_labels.shape
     device = shift_labels.device
 
-    # Pre-allocate output tensors (no vocab dimension — small)
+    # Pre-allocate output tensors (no vocab dimension, small)
     token_log_probs = torch.zeros(batch_size, shifted_seq_len, device=device)
     entropy_per_token: torch.Tensor | None = None
     if return_entropy:
         entropy_per_token = torch.zeros(batch_size, shifted_seq_len, device=device)
 
-    # Process lm_head in chunks to avoid materializing full vocab-sized tensors
+    # Two logprob computation paths:
+    #
+    # 1. Triton fused CE (entropy_coef=0): Uses flash-attn's Triton cross-entropy
+    #    kernel. 4.5x faster, never materializes the [B*chunk, V] log_softmax
+    #    tensor. Available when entropy is not needed (entropy_coef=0).
+    #
+    # 2. Standard log_softmax (entropy_coef>0): Materializes [B, chunk, V]
+    #    log_softmax in fp32, then gathers logprobs and computes entropy from
+    #    the same tensor in a single pass.
+    #
+    # The path selection is driven by return_entropy, which is set by the caller
+    # based on config.entropy_coef > 0. Both paths produce identical logprobs.
+    _triton_ce = None
+    try:
+        from flash_attn.ops.triton.cross_entropy import cross_entropy_loss as _triton_ce
+    except ImportError:
+        pass
+
     for chunk_start in range(0, shifted_seq_len, chunk_size):
         chunk_end = min(chunk_start + chunk_size, shifted_seq_len)
 
         chunk_hidden = shift_hidden[:, chunk_start:chunk_end, :]
         chunk_logits = lm_head(chunk_hidden)  # [batch, chunk_len, vocab_size]
-
-        # fp32 log_softmax for numerical precision (same as non-chunked path)
-        chunk_log_probs = F.log_softmax(chunk_logits.float(), dim=-1)
-
-        # Gather logprobs for the actual target tokens
         chunk_labels = shift_labels[:, chunk_start:chunk_end]
-        token_log_probs[:, chunk_start:chunk_end] = chunk_log_probs.gather(
-            2, chunk_labels.unsqueeze(-1)
-        ).squeeze(-1)
 
-        # Entropy: -sum(p * log(p)) per position
-        if return_entropy and entropy_per_token is not None:
-            entropy_per_token[:, chunk_start:chunk_end] = -(
-                chunk_log_probs.exp() * chunk_log_probs
-            ).sum(dim=-1)
+        if _triton_ce is not None and not return_entropy:
+            # Triton path: logprob = -cross_entropy(logits, label)
+            B_c, T_c, V_c = chunk_logits.shape
+            ce_loss, _ = _triton_ce(
+                chunk_logits.reshape(B_c * T_c, V_c),
+                chunk_labels.reshape(B_c * T_c),
+            )
+            token_log_probs[:, chunk_start:chunk_end] = (-ce_loss).reshape(B_c, T_c)
+            del ce_loss
+        else:
+            # Standard path: log_softmax reused for both logprobs and entropy
+            chunk_log_probs = F.log_softmax(chunk_logits.float(), dim=-1)
 
-        # Free the chunk's vocab-sized tensors immediately
-        del chunk_logits, chunk_log_probs
+            token_log_probs[:, chunk_start:chunk_end] = chunk_log_probs.gather(
+                2, chunk_labels.unsqueeze(-1)
+            ).squeeze(-1)
 
-    # --- Extract completion-token results (identical logic to non-chunked path) ---
+            if return_entropy and entropy_per_token is not None:
+                entropy_per_token[:, chunk_start:chunk_end] = -(
+                    chunk_log_probs.exp() * chunk_log_probs
+                ).sum(dim=-1)
+
+            del chunk_log_probs
+
+        del chunk_logits
+
+    # Extract completion-token results. Adjust prompt_lengths to account for
+    # the keep_from offset applied above.
+    adjusted_prompt_lengths = [p - keep_from for p in prompt_lengths]
     return _extract_completion_logprobs(
         token_log_probs,
         entropy_per_token,
-        prompt_lengths,
+        adjusted_prompt_lengths,
         completion_lengths,
         return_per_token,
         return_entropy,
