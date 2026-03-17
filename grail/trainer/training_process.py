@@ -276,7 +276,36 @@ class TrainingService:
 
         # Enable gradient checkpointing on the raw model before accelerator wrapping (if configured)
         if self.config.use_gradient_checkpointing:
-            if hasattr(self.train_model, "gradient_checkpointing_enable"):
+            gc_freq = int(os.getenv("GRAIL_TRAINER_GC_EVERY_N_LAYERS", "1"))
+            if (
+                gc_freq > 1
+                and hasattr(self.train_model, "model")
+                and hasattr(self.train_model.model, "layers")
+            ):
+                # Selective checkpointing: only wrap every Nth layer
+                from torch.utils.checkpoint import checkpoint
+
+                num_layers = len(self.train_model.model.layers)
+                checkpointed = 0
+                for i, layer in enumerate(self.train_model.model.layers):
+                    if i % gc_freq == 0:
+                        original_forward = layer.forward
+
+                        def make_ckpt_forward(orig_fn):
+                            def ckpt_forward(*args, **kwargs):
+                                return checkpoint(orig_fn, *args, use_reentrant=False, **kwargs)
+
+                            return ckpt_forward
+
+                        layer.forward = make_ckpt_forward(original_forward)
+                        checkpointed += 1
+                logger.info(
+                    "Selective gradient checkpointing: %d/%d layers checkpointed (every %d)",
+                    checkpointed,
+                    num_layers,
+                    gc_freq,
+                )
+            elif hasattr(self.train_model, "gradient_checkpointing_enable"):
                 try:
                     self.train_model.gradient_checkpointing_enable()
                     logger.info(

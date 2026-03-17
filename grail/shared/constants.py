@@ -86,6 +86,11 @@ ATTN_IMPLEMENTATION = "flash_attention_2"
 TRAINER_USE_GRADIENT_CHECKPOINTING = (
     os.getenv("GRAIL_TRAINER_USE_GRADIENT_CHECKPOINTING", "1") == "1"
 )
+# Selective gradient checkpointing: only checkpoint every Nth layer.
+# N=1 = full checkpointing (default, every layer recomputed).
+# N=2 = every other layer checkpointed (~16% overhead vs ~33%).
+# N=0 or unset = full checkpointing (same as N=1).
+TRAINER_GC_EVERY_N_LAYERS = int(os.getenv("GRAIL_TRAINER_GC_EVERY_N_LAYERS", "1"))
 
 # torch.compile for training model (fuses ops, reduces kernel launch overhead).
 # Compiles the base transformer model with dynamic=True for varying seq_len.
