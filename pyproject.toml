@@ -82,8 +82,11 @@ experiments = [
 flash = [
     "flash-attn>=2.7.0",
 ]
+liger = [
+    "liger-kernel>=0.3.0",
+]
 all = [
-    "grail[dev,experiments,quantization,flash]",
+    "grail[dev,experiments,quantization,flash,liger]",
 ]
 
 [project.scripts]

@@ -135,6 +135,25 @@ def get_model(
                 ) from err
         logger.info("Using attention implementation: %s", attn_implementation)
 
+    # Apply Liger kernel optimizations (fused RMSNorm, RoPE, SwiGLU, CrossEntropy)
+    # Must be called BEFORE model loading as it monkey-patches the model class.
+    if os.getenv("GRAIL_TRAINER_USE_LIGER_KERNEL", "0") == "1":
+        try:
+            from liger_kernel.transformers import apply_liger_kernel_to_qwen3
+
+            apply_liger_kernel_to_qwen3(
+                rope=True,
+                rms_norm=True,
+                swiglu=True,
+                cross_entropy=False,
+                fused_linear_cross_entropy=False,
+            )
+            logger.info("Liger kernel applied to Qwen3 (rope, rms_norm, swiglu)")
+        except ImportError:
+            logger.warning("GRAIL_TRAINER_USE_LIGER_KERNEL=1 but liger-kernel not installed")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to apply Liger kernel: %s", exc)
+
     # Load model with optimized attention if available
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
