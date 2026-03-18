@@ -22,6 +22,7 @@ class TrainingConfig:
     lr: float = constants.TRAINER_LR
     epochs: int = constants.TRAINER_EPOCHS
     micro_batch_size: int = constants.TRAINER_MICRO_BATCH_SIZE
+    max_tokens_per_micro_batch: int = constants.TRAINER_MAX_TOKENS_PER_MICRO_BATCH
     max_length: int = constants.TRAINER_MAX_LENGTH
     grad_clip: float = constants.TRAINER_GRAD_CLIP
     warmup_steps: int = constants.TRAINER_WARMUP_STEPS
@@ -36,6 +37,7 @@ class TrainingConfig:
 
     # Gradient accumulation and clipping
     grad_accum_steps: int = constants.TRAINER_GRAD_ACCUM_STEPS
+    effective_batch_size: int = constants.TRAINER_EFFECTIVE_BATCH_SIZE
 
     # Advantage normalization and PPO clipping
     adv_clip_percentile: float = constants.TRAINER_ADV_CLIP_PERCENTILE
@@ -52,6 +54,9 @@ class TrainingConfig:
 
     # Gradient checkpointing for memory efficiency
     use_gradient_checkpointing: bool = constants.TRAINER_USE_GRADIENT_CHECKPOINTING
+
+    # Sequence packing (eliminates padding waste, requires FA2)
+    use_sequence_packing: bool = constants.TRAINER_USE_SEQUENCE_PACKING
 
     # torch.compile for training (fuses ops, reduces kernel launch overhead)
     use_torch_compile: bool = constants.TRAINER_USE_TORCH_COMPILE

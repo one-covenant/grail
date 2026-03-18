@@ -47,6 +47,10 @@ READY_MARKER_UPLOAD_BLOCKS = 1  # ~12 seconds at 12s/block
 TRAINER_LR = float(os.getenv("GRAIL_TRAINER_LR", "1e-6"))
 TRAINER_EPOCHS = int(os.getenv("GRAIL_TRAINER_EPOCHS", "1"))
 TRAINER_MICRO_BATCH_SIZE = int(os.getenv("GRAIL_TRAINER_MICRO_BATCH_SIZE", "16"))
+# Token-budget dynamic batching: when set (>0), replaces micro_batch_size.
+# Each micro-batch gets a variable number of sequences targeting this token count.
+# Mutually exclusive with micro_batch_size (follows veRL/OpenRLHF pattern).
+TRAINER_MAX_TOKENS_PER_MICRO_BATCH = int(os.getenv("GRAIL_TRAINER_MAX_TOKENS_PER_MICRO_BATCH", "0"))
 TRAINER_MAX_LENGTH = int(os.getenv("GRAIL_TRAINER_MAX_LENGTH", "12288"))
 TRAINER_GRAD_CLIP = float(os.getenv("GRAIL_TRAINER_GRAD_CLIP", "0.5"))
 TRAINER_WARMUP_STEPS = int(os.getenv("GRAIL_TRAINER_WARMUP_STEPS", "10"))
@@ -55,6 +59,9 @@ TRAINER_ENTROPY_COEF = float(os.getenv("GRAIL_TRAINER_ENTROPY_COEF", "0.001"))
 TRAINER_ADV_CLIP_PERCENTILE = float(os.getenv("GRAIL_TRAINER_ADV_CLIP_PERCENTILE", "99.0"))
 TRAINER_GROUP_ADV_SUM_TOL = float(os.getenv("GRAIL_TRAINER_GROUP_ADV_SUM_TOL", "0.01"))
 TRAINER_GRAD_ACCUM_STEPS = int(os.getenv("GRAIL_TRAINER_GRAD_ACCUM_STEPS", "8"))
+# Effective batch size: number of rollouts per optimizer step. Used with token-budget
+# batching to compute grad_accum_steps dynamically. When 0, uses grad_accum_steps directly.
+TRAINER_EFFECTIVE_BATCH_SIZE = int(os.getenv("GRAIL_TRAINER_EFFECTIVE_BATCH_SIZE", "0"))
 
 # Importance sampling and PPO-style clipping
 TRAINER_USE_IS = os.getenv("GRAIL_TRAINER_USE_IS", "1") == "1"
@@ -91,6 +98,11 @@ TRAINER_USE_GRADIENT_CHECKPOINTING = (
 # N=2 = every other layer checkpointed (~16% overhead vs ~33%).
 # N=0 or unset = full checkpointing (same as N=1).
 TRAINER_GC_EVERY_N_LAYERS = int(os.getenv("GRAIL_TRAINER_GC_EVERY_N_LAYERS", "1"))
+
+# Sequence packing: concatenate micro-batch sequences into a single [1, total_tokens]
+# tensor with position_ids resets at boundaries. HF Transformers auto-detects this and
+# uses flash_attn_varlen_func, eliminating all padding compute. Requires FA2.
+TRAINER_USE_SEQUENCE_PACKING = os.getenv("GRAIL_TRAINER_USE_SEQUENCE_PACKING", "0") == "1"
 
 # torch.compile for training model (fuses ops, reduces kernel launch overhead).
 # Compiles the base transformer model with dynamic=True for varying seq_len.
