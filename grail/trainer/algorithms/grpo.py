@@ -10,7 +10,6 @@ This module consolidates:
 from __future__ import annotations
 
 import logging
-import math
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -269,6 +268,56 @@ class GRPOGroup:
             return False
         advantage_sum = sum(r.advantage for r in self.rollouts)
         return abs(advantage_sum) < advantage_tolerance
+
+
+def _partition_by_token_budget(
+    rollouts: list[tuple],
+    max_tokens: int,
+    max_length: int,
+) -> list[list[tuple]]:
+    """Partition rollouts into micro-batches targeting a token budget per batch.
+
+    Uses Greedy LPT (Longest Processing Time first): sort rollouts by length
+    descending, assign each to the micro-batch with the fewest total tokens.
+    This achieves <0.1% imbalance across micro-batches.
+
+    When a rollout would cause a micro-batch to exceed max_tokens, a new
+    micro-batch is created instead (bin-packing constraint).
+
+    Args:
+        rollouts: List of (GRPORollout, group_id) tuples.
+        max_tokens: Token budget per micro-batch.
+        max_length: Maximum sequence length (for truncation accounting).
+
+    Returns:
+        List of micro-batches, each a list of (rollout, group_id) tuples.
+    """
+    import heapq
+
+    if not rollouts:
+        return []
+
+    # Sort longest-first for Greedy LPT
+    indexed = [(min(len(r[0].tokens), max_length), i, r) for i, r in enumerate(rollouts)]
+    indexed.sort(key=lambda x: x[0], reverse=True)
+
+    # Min-heap: (total_tokens, batch_index, rollout_list)
+    batches: list[tuple[int, int, list[tuple]]] = []
+    batch_counter = 0
+
+    for seq_len, _, rollout in indexed:
+        # Try to fit in the lightest existing batch
+        if batches and batches[0][0] + seq_len <= max_tokens:
+            total, idx, batch_list = heapq.heappop(batches)
+            batch_list.append(rollout)
+            heapq.heappush(batches, (total + seq_len, idx, batch_list))
+        else:
+            # Start a new batch
+            heapq.heappush(batches, (seq_len, batch_counter, [rollout]))
+            batch_counter += 1
+
+    # Return in creation order for deterministic training
+    return [batch_list for _, _, batch_list in sorted(batches, key=lambda x: x[1])]
 
 
 def _has_advantage_variance(group: GRPOGroup) -> bool:
@@ -1016,7 +1065,7 @@ def _compute_logprobs_chunked(
     # based on config.entropy_coef > 0. Both paths produce identical logprobs.
     _triton_ce = None
     try:
-        from flash_attn.ops.triton.cross_entropy import cross_entropy_loss as _triton_ce
+        from flash_attn.ops.triton.cross_entropy import cross_entropy_loss as _triton_ce  # type: ignore[import-not-found]
     except ImportError:
         pass
 
@@ -1133,6 +1182,245 @@ def _extract_completion_logprobs(
         return seq_log_probs_tensor, per_token_padded, mean_entropies
 
     return seq_log_probs_tensor, per_token_padded
+
+
+def _extract_completion_logprobs_packed(
+    token_log_probs: torch.Tensor,
+    entropy_per_token: torch.Tensor | None,
+    seq_lengths: list[int],
+    prompt_lengths: list[int],
+    completion_lengths: list[int],
+    return_per_token: bool,
+    return_entropy: bool,
+) -> (
+    torch.Tensor
+    | tuple[torch.Tensor, torch.Tensor]
+    | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+):
+    """Extract per-sequence completion logprobs from packed (flat) token_log_probs.
+
+    The input tensor is [1, total_tokens-1] from a packed forward pass where all
+    sequences are concatenated. This function uses seq_lengths offsets to locate
+    each sequence's completion tokens and re-pads to [B, max_comp_len] for
+    compatibility with all downstream loss computation code.
+
+    The shift-by-1 indexing: logits[t] predicts token[t+1]. For sequence i's
+    k-th completion token at absolute position (offset + prompt_len + k),
+    the logprob is at position (offset + prompt_len + k - 1) in the shifted tensor.
+
+    Cross-boundary positions (last token of seq_i predicting first token of seq_{i+1})
+    are never accessed because extraction starts at offset + prompt_len - 1, which is
+    within the sequence.
+    """
+    device = token_log_probs.device
+    total_shifted = token_log_probs.shape[1]
+    num_seqs = len(seq_lengths)
+
+    if not return_per_token:
+        seq_log_probs: list[torch.Tensor] = []
+        offset = 0
+        for idx in range(num_seqs):
+            start_idx = offset + max(0, prompt_lengths[idx] - 1)
+            end_idx = min(offset + seq_lengths[idx] - 1, start_idx + completion_lengths[idx])
+            end_idx = min(end_idx, total_shifted)
+            if end_idx > start_idx:
+                seq_log_probs.append(token_log_probs[0, start_idx:end_idx].sum())
+            else:
+                seq_log_probs.append(torch.tensor(0.0, device=device))
+            offset += seq_lengths[idx]
+        return torch.stack(seq_log_probs)
+
+    max_comp_len = max(completion_lengths) if completion_lengths else 1
+    per_token_padded = torch.zeros(num_seqs, max_comp_len, device=device)
+    seq_log_probs_tensor = torch.zeros(num_seqs, device=device)
+    entropies_list: list[torch.Tensor] = []
+
+    offset = 0
+    for idx in range(num_seqs):
+        start_idx = offset + max(0, prompt_lengths[idx] - 1)
+        end_idx = min(offset + seq_lengths[idx] - 1, start_idx + completion_lengths[idx])
+        end_idx = min(end_idx, total_shifted)
+        if end_idx > start_idx:
+            comp_logps = token_log_probs[0, start_idx:end_idx]
+            per_token_padded[idx, : len(comp_logps)] = comp_logps
+            seq_log_probs_tensor[idx] = comp_logps.sum()
+            if return_entropy and entropy_per_token is not None:
+                entropies_list.append(entropy_per_token[0, start_idx:end_idx].mean())
+        else:
+            if return_entropy and entropy_per_token is not None:
+                entropies_list.append(torch.tensor(0.0, device=device))
+        offset += seq_lengths[idx]
+
+    if return_entropy and entropy_per_token is not None:
+        mean_entropies = torch.stack(entropies_list)
+        return seq_log_probs_tensor, per_token_padded, mean_entropies
+
+    return seq_log_probs_tensor, per_token_padded
+
+
+def _compute_logprobs_chunked_packed(
+    base_model: Any,
+    lm_head: torch.nn.Module,
+    input_ids: torch.Tensor,
+    position_ids: torch.Tensor,
+    seq_lengths: list[int],
+    prompt_lengths: list[int],
+    completion_lengths: list[int],
+    chunk_size: int,
+    return_per_token: bool = False,
+    return_entropy: bool = False,
+) -> (
+    torch.Tensor
+    | tuple[torch.Tensor, torch.Tensor]
+    | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+):
+    """Compute logprobs from packed sequences using chunked LM head.
+
+    Like _compute_logprobs_chunked but for packed [1, total_tokens] inputs.
+    Passes position_ids (with resets) and attention_mask=None so HF auto-detects
+    packing and uses flash_attn_varlen_func.
+    """
+    # Model forward on packed input (attention_mask=None triggers packing detection)
+    base_out = base_model(
+        input_ids,
+        position_ids=position_ids,
+        attention_mask=None,
+        use_cache=False,
+    )
+    hidden_states = base_out.last_hidden_state  # [1, total_tokens, hidden_dim]
+
+    # Shift for next-token prediction
+    shift_hidden = hidden_states[:, :-1, :]
+    shift_labels = input_ids[:, 1:]
+
+    _, shifted_seq_len = shift_labels.shape
+    device = shift_labels.device
+
+    token_log_probs = torch.zeros(1, shifted_seq_len, device=device)
+    entropy_per_token: torch.Tensor | None = None
+    if return_entropy:
+        entropy_per_token = torch.zeros(1, shifted_seq_len, device=device)
+
+    # Two logprob computation paths (same as padded chunked path):
+    # 1. Triton fused CE (entropy_coef=0): 4.5x faster, no log_softmax materialization
+    # 2. Standard log_softmax (entropy_coef>0): computes both logprobs and entropy
+    _triton_ce = None
+    try:
+        from flash_attn.ops.triton.cross_entropy import cross_entropy_loss as _triton_ce  # type: ignore[import-not-found]
+    except ImportError:
+        pass
+
+    for chunk_start in range(0, shifted_seq_len, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, shifted_seq_len)
+
+        chunk_hidden = shift_hidden[:, chunk_start:chunk_end, :]
+        chunk_logits = lm_head(chunk_hidden)
+        chunk_labels = shift_labels[:, chunk_start:chunk_end]
+
+        if _triton_ce is not None and not return_entropy:
+            B_c, T_c, V_c = chunk_logits.shape
+            ce_loss, _ = _triton_ce(
+                chunk_logits.reshape(B_c * T_c, V_c),
+                chunk_labels.reshape(B_c * T_c),
+            )
+            token_log_probs[:, chunk_start:chunk_end] = (-ce_loss).reshape(B_c, T_c)
+            del ce_loss
+        else:
+            chunk_log_probs = F.log_softmax(chunk_logits.float(), dim=-1)
+            token_log_probs[:, chunk_start:chunk_end] = chunk_log_probs.gather(
+                2, chunk_labels.unsqueeze(-1)
+            ).squeeze(-1)
+            if return_entropy and entropy_per_token is not None:
+                entropy_per_token[:, chunk_start:chunk_end] = -(
+                    chunk_log_probs.exp() * chunk_log_probs
+                ).sum(dim=-1)
+            del chunk_log_probs
+
+        del chunk_logits
+
+    return _extract_completion_logprobs_packed(
+        token_log_probs,
+        entropy_per_token,
+        seq_lengths,
+        prompt_lengths,
+        completion_lengths,
+        return_per_token,
+        return_entropy,
+    )
+
+
+def compute_logprobs_packed(
+    model: Any,
+    input_ids: torch.Tensor,
+    position_ids: torch.Tensor,
+    seq_lengths: list[int],
+    prompt_lengths: list[int],
+    completion_lengths: list[int],
+    return_per_token: bool = False,
+    return_entropy: bool = False,
+    *,
+    chunked: bool = False,
+    chunk_size: int = 256,
+) -> (
+    torch.Tensor
+    | tuple[torch.Tensor, torch.Tensor]
+    | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+):
+    """Compute logprobs from packed [1, total_tokens] inputs.
+
+    Mirrors compute_logprobs() but for packed sequences. Dispatches to chunked
+    or standard path. Output format is identical: [B, max_comp_len] padded tensors.
+    """
+    if chunked:
+        parts = _unwrap_for_chunked_logits(model)
+        if parts is not None:
+            base_model, lm_head = parts
+            return _compute_logprobs_chunked_packed(
+                base_model,
+                lm_head,
+                input_ids,
+                position_ids,
+                seq_lengths,
+                prompt_lengths,
+                completion_lengths,
+                chunk_size,
+                return_per_token=return_per_token,
+                return_entropy=return_entropy,
+            )
+        logger.warning(
+            "Chunked logits requested but model structure incompatible; "
+            "falling back to standard packed forward"
+        )
+
+    # Standard (non-chunked) packed path
+    outputs = model(
+        input_ids=input_ids,
+        position_ids=position_ids,
+        attention_mask=None,
+    )
+    logits = outputs.logits  # [1, total_tokens, vocab_size]
+
+    shift_logits = logits[:, :-1, :].contiguous()
+    shift_labels = input_ids[:, 1:].contiguous()
+
+    log_probs = F.log_softmax(shift_logits.float(), dim=-1)
+    token_log_probs = log_probs.gather(2, shift_labels.unsqueeze(-1)).squeeze(-1)
+
+    entropy_per_token = None
+    if return_entropy:
+        entropy_per_token = -(log_probs.exp() * log_probs).sum(dim=-1)
+
+    del log_probs
+
+    return _extract_completion_logprobs_packed(
+        token_log_probs,
+        entropy_per_token,
+        seq_lengths,
+        prompt_lengths,
+        completion_lengths,
+        return_per_token,
+        return_entropy,
+    )
 
 
 def compute_logprobs(
@@ -1476,6 +1764,90 @@ class GRPOAlgorithm(TrainingAlgorithm):
             batch_advantages,
             batch_behavior_per_token_logprobs,
             batch_rewards,
+        )
+
+    def _prepare_packed_batch_tensors(
+        self,
+        batch_rollouts: list[GRPORollout],
+        tokenizer: Any,
+        accelerator: Accelerator,
+    ) -> tuple[
+        torch.Tensor,  # input_ids [1, total_tokens]
+        torch.Tensor,  # position_ids [1, total_tokens]
+        list[int],  # prompt_lengths
+        list[int],  # completion_lengths
+        list[float],  # advantages
+        list[list[float]],  # behavior_per_token_logprobs
+        list[float],  # rewards
+        list[int],  # seq_lengths (per-sequence token counts for unpacking)
+    ]:
+        """Pack batch sequences into a single flat tensor for flash_attn_varlen_func.
+
+        Instead of padding all sequences to the longest, concatenates them into
+        [1, total_tokens] with position_ids that reset at each boundary. HF
+        Transformers auto-detects this and uses flash_attn_varlen_func, which
+        processes each sequence independently without cross-boundary attention.
+
+        Output metadata (prompt_lengths, completion_lengths, advantages, etc.)
+        is identical to _prepare_batch_tensors. The seq_lengths list enables
+        downstream code to locate each sequence within the flat tensor.
+        """
+        all_tokens: list[int] = []
+        all_position_ids: list[int] = []
+        seq_lengths: list[int] = []
+        batch_prompt_lens: list[int] = []
+        batch_comp_lens: list[int] = []
+        batch_advantages: list[float] = []
+        batch_behavior_per_token_logprobs: list[list[float]] = []
+        batch_rewards: list[float] = []
+
+        for rollout in batch_rollouts:
+            tokens = rollout.tokens[: self.config.max_length]
+            seq_len = len(tokens)
+
+            # Recalculate prompt/completion after truncation (same as padded path)
+            actual_prompt_len = min(rollout.prompt_length, self.config.max_length)
+            actual_comp_len = max(
+                0,
+                min(
+                    rollout.completion_length,
+                    self.config.max_length - rollout.prompt_length,
+                ),
+            )
+
+            # Concatenate tokens and position_ids
+            all_tokens.extend(tokens)
+            all_position_ids.extend(range(seq_len))
+            seq_lengths.append(seq_len)
+
+            batch_prompt_lens.append(actual_prompt_len)
+            batch_comp_lens.append(actual_comp_len)
+            batch_advantages.append(rollout.advantage)
+            batch_rewards.append(rollout.reward)
+
+            # Extract completion behavior logprobs (same logic as padded path)
+            tlp: list[float] = list((rollout.token_logprobs or [])[: self.config.max_length])
+            expected_len = actual_prompt_len + actual_comp_len
+            if len(tlp) >= expected_len:
+                completion_logprobs = tlp[actual_prompt_len : actual_prompt_len + actual_comp_len]
+            else:
+                completion_logprobs = tlp[:actual_comp_len]
+            batch_behavior_per_token_logprobs.append(completion_logprobs)
+
+        input_ids_tensor = torch.tensor([all_tokens], dtype=torch.long, device=accelerator.device)
+        position_ids_tensor = torch.tensor(
+            [all_position_ids], dtype=torch.long, device=accelerator.device
+        )
+
+        return (
+            input_ids_tensor,
+            position_ids_tensor,
+            batch_prompt_lens,
+            batch_comp_lens,
+            batch_advantages,
+            batch_behavior_per_token_logprobs,
+            batch_rewards,
+            seq_lengths,
         )
 
     def _normalize_advantages(self, advantages_tensor: torch.Tensor) -> torch.Tensor:
@@ -1937,8 +2309,68 @@ class GRPOAlgorithm(TrainingAlgorithm):
 
         all_rollouts.sort(key=lambda item: (item[1], item[0].nonce))
 
-        # Use micro batch size parameter
-        num_micro_batches = math.ceil(len(all_rollouts) / micro_batch_size)
+        # Split rollouts into mini-batches (one optimizer step each), then each
+        # mini-batch into micro-batches (forward/backward passes).
+        #
+        # With token-budget mode (max_tokens_per_micro_batch > 0):
+        #   - Mini-batch size = grad_accum_steps * avg_seqs_per_micro_batch ≈ effective batch
+        #   - Micro-batches are variable-sized, targeting a token budget
+        #   - Loss scaled by len(micro) / len(mini_batch) (veRL pattern)
+        #
+        # With fixed mode:
+        #   - Mini-batch size = micro_batch_size * grad_accum_steps
+        #   - Micro-batches are fixed-sized
+        #   - Loss scaled by 1 / grad_accum_steps (equivalent)
+        total_rollouts_count = len(all_rollouts)
+        use_token_budget = config.max_tokens_per_micro_batch > 0
+
+        if use_token_budget:
+            # Token-budget: partition ALL rollouts by token budget first,
+            # then group micro-batches into mini-batches of grad_accum_steps each.
+            all_micro_partitions = _partition_by_token_budget(
+                all_rollouts,
+                max_tokens=config.max_tokens_per_micro_batch,
+                max_length=config.max_length,
+            )
+            num_micro_batches = len(all_micro_partitions)
+
+            # Group micro-batches into mini-batches (each gets one optimizer step).
+            # With token-budget batching, compute from effective_batch_size (rollouts
+            # per optimizer step) rather than fixed grad_accum_steps, since the number
+            # of micro-batches varies per epoch.
+            if config.effective_batch_size > 0:
+                target_steps = max(1, total_rollouts_count // config.effective_batch_size)
+            else:
+                target_steps = max(1, num_micro_batches // grad_accum_steps)
+            # Ceiling division ensures all micro-batches fit in exactly target_steps
+            # groups, preventing tiny remainders with noisy gradients.
+            grad_accum_steps = max(1, -(-num_micro_batches // target_steps))
+
+            mini_batches: list[list[list[tuple]]] = []
+            for i in range(0, num_micro_batches, grad_accum_steps):
+                mini_batches.append(all_micro_partitions[i : i + grad_accum_steps])
+
+            logger.info(
+                "Token-budget batching: %d micro-batches in %d mini-batches "
+                "(budget=%d tokens, accum=%d, %d rollouts)",
+                num_micro_batches,
+                len(mini_batches),
+                config.max_tokens_per_micro_batch,
+                grad_accum_steps,
+                total_rollouts_count,
+            )
+        else:
+            # Fixed mode: chunk rollouts into micro-batches of micro_batch_size,
+            # then group into mini-batches of grad_accum_steps each.
+            all_micro_partitions = []
+            for i in range(0, total_rollouts_count, micro_batch_size):
+                chunk = all_rollouts[i : i + micro_batch_size]
+                all_micro_partitions.append(chunk)
+            num_micro_batches = len(all_micro_partitions)
+
+            mini_batches = []
+            for i in range(0, num_micro_batches, grad_accum_steps):
+                mini_batches.append(all_micro_partitions[i : i + grad_accum_steps])
 
         epoch_metrics: dict[str, list[float]] = defaultdict(list)
         grad_accum_counter = 0
@@ -1995,23 +2427,48 @@ class GRPOAlgorithm(TrainingAlgorithm):
         input_ids_tensor: torch.Tensor | None = None
         attention_mask_tensor: torch.Tensor | None = None
 
-        for micro_idx in range(num_micro_batches):
-            start_idx = micro_idx * micro_batch_size
-            end_idx = min(start_idx + micro_batch_size, len(all_rollouts))
-            if start_idx >= len(all_rollouts):
-                break
-            batch_rollouts = [all_rollouts[i][0] for i in range(start_idx, end_idx)]
+        # Flatten mini-batches back to a flat micro-batch list for the training loop,
+        # but track which mini-batch each micro-batch belongs to for loss scaling.
+        flat_micro_batches: list[list[tuple]] = []
+        micro_to_mini_rollout_count: list[int] = []
+        for mini_batch_micros in mini_batches:
+            mini_rollout_count = sum(len(mb) for mb in mini_batch_micros)
+            for micro in mini_batch_micros:
+                flat_micro_batches.append(micro)
+                micro_to_mini_rollout_count.append(mini_rollout_count)
+        num_micro_batches = len(flat_micro_batches)
 
-            # Step 1: Prepare batch tensors from rollouts
-            (
-                input_ids_tensor,
-                attention_mask_tensor,
-                batch_prompt_lens,
-                batch_comp_lens,
-                batch_advantages,
-                batch_behavior_per_token_logprobs,
-                batch_rewards,
-            ) = self._prepare_batch_tensors(batch_rollouts, tokenizer, accelerator)
+        for micro_idx in range(num_micro_batches):
+            micro_partition = flat_micro_batches[micro_idx]
+            batch_rollouts = [r[0] for r in micro_partition]
+
+            # Step 1: Prepare batch tensors (packed or padded)
+            _use_packing = config.use_sequence_packing
+            seq_lengths: list[int] = []
+            position_ids_tensor: torch.Tensor | None = None
+            attention_mask_tensor: torch.Tensor | None = None
+
+            if _use_packing:
+                (
+                    input_ids_tensor,
+                    position_ids_tensor,
+                    batch_prompt_lens,
+                    batch_comp_lens,
+                    batch_advantages,
+                    batch_behavior_per_token_logprobs,
+                    batch_rewards,
+                    seq_lengths,
+                ) = self._prepare_packed_batch_tensors(batch_rollouts, tokenizer, accelerator)
+            else:
+                (
+                    input_ids_tensor,
+                    attention_mask_tensor,
+                    batch_prompt_lens,
+                    batch_comp_lens,
+                    batch_advantages,
+                    batch_behavior_per_token_logprobs,
+                    batch_rewards,
+                ) = self._prepare_batch_tensors(batch_rollouts, tokenizer, accelerator)
 
             advantages_tensor = torch.tensor(
                 batch_advantages,
@@ -2020,21 +2477,35 @@ class GRPOAlgorithm(TrainingAlgorithm):
             )
 
             # Step 2: Compute current policy logprobs and entropy in a single forward pass.
-            # Fusing entropy here avoids a redundant forward that would double peak
-            # GPU memory from vocab-sized tensors (~6 GB each at seq_len=10K).
             _want_entropy = self.config.entropy_coef > 0.0
             with accelerator.autocast():
-                _logprob_result = compute_logprobs(
-                    model,
-                    input_ids_tensor,
-                    attention_mask_tensor,
-                    batch_prompt_lens,
-                    batch_comp_lens,
-                    return_per_token=True,
-                    return_entropy=_want_entropy,
-                    chunked=config.chunked_logits,
-                    chunk_size=config.logit_chunk_size,
-                )
+                if _use_packing:
+                    assert position_ids_tensor is not None
+                    _logprob_result = compute_logprobs_packed(
+                        model,
+                        input_ids_tensor,
+                        position_ids_tensor,
+                        seq_lengths,
+                        batch_prompt_lens,
+                        batch_comp_lens,
+                        return_per_token=True,
+                        return_entropy=_want_entropy,
+                        chunked=config.chunked_logits,
+                        chunk_size=config.logit_chunk_size,
+                    )
+                else:
+                    assert attention_mask_tensor is not None
+                    _logprob_result = compute_logprobs(
+                        model,
+                        input_ids_tensor,
+                        attention_mask_tensor,
+                        batch_prompt_lens,
+                        batch_comp_lens,
+                        return_per_token=True,
+                        return_entropy=_want_entropy,
+                        chunked=config.chunked_logits,
+                        chunk_size=config.logit_chunk_size,
+                    )
             if _want_entropy:
                 assert isinstance(_logprob_result, tuple) and len(_logprob_result) == 3
                 logprobs_current_sum, logprobs_current_per_token, entropies = _logprob_result
@@ -2044,12 +2515,17 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 entropies = None
 
             if torch.cuda.is_available():
+                _log_batch = len(batch_rollouts)
+                _log_seqlen = (
+                    sum(seq_lengths) // _log_batch if _use_packing else input_ids_tensor.shape[1]
+                )
                 logger.debug(
-                    "MEMORY after_logprobs alloc_gb=%.2f reserved_gb=%.2f seq_len=%d micro_batch=%d",
+                    "MEMORY after_logprobs alloc_gb=%.2f reserved_gb=%.2f seq_len=%d micro_batch=%d packed=%s",
                     torch.cuda.memory_allocated() / (1024**3),
                     torch.cuda.memory_reserved() / (1024**3),
-                    input_ids_tensor.shape[1],
-                    input_ids_tensor.shape[0],
+                    _log_seqlen,
+                    _log_batch,
+                    _use_packing,
                 )
 
             if not _is_finite_tensor(logprobs_current_sum):
@@ -2097,16 +2573,31 @@ class GRPOAlgorithm(TrainingAlgorithm):
             if kl_enabled:
                 if ref_model is not None:
                     with torch.no_grad(), accelerator.autocast():
-                        _ref_result = compute_logprobs(
-                            ref_model,
-                            input_ids_tensor,
-                            attention_mask_tensor,
-                            batch_prompt_lens,
-                            batch_comp_lens,
-                            return_per_token=True,
-                            chunked=config.chunked_logits,
-                            chunk_size=config.logit_chunk_size,
-                        )
+                        if _use_packing:
+                            assert position_ids_tensor is not None
+                            _ref_result = compute_logprobs_packed(
+                                ref_model,
+                                input_ids_tensor,
+                                position_ids_tensor,
+                                seq_lengths,
+                                batch_prompt_lens,
+                                batch_comp_lens,
+                                return_per_token=True,
+                                chunked=config.chunked_logits,
+                                chunk_size=config.logit_chunk_size,
+                            )
+                        else:
+                            assert attention_mask_tensor is not None
+                            _ref_result = compute_logprobs(
+                                ref_model,
+                                input_ids_tensor,
+                                attention_mask_tensor,
+                                batch_prompt_lens,
+                                batch_comp_lens,
+                                return_per_token=True,
+                                chunked=config.chunked_logits,
+                                chunk_size=config.logit_chunk_size,
+                            )
                         assert isinstance(_ref_result, tuple) and len(_ref_result) == 2
                         logprobs_ref_sum, logprobs_ref_per_token = _ref_result
                     if not _is_finite_tensor(logprobs_ref_sum):
@@ -2219,13 +2710,14 @@ class GRPOAlgorithm(TrainingAlgorithm):
             actual_batch_tracker["ratio_clip_sum"] += ratio_clip_frac_val * ratio_weight
             actual_batch_tracker["ratio_ceiling_sum"] += ratio_ceiling_frac_val * ratio_weight
 
-            # Step 11: Perform gradient accumulation and optimization
-            # Zero gradients before backward pass (only at start of accumulation)
-            if grad_accum_counter == 0:
-                optimizer.zero_grad(set_to_none=True)
-
-            # Scale loss by accumulation steps to keep effective LR stable
-            scaled_loss = loss_total / float(grad_accum_steps)
+            # Step 11: Gradient accumulation with veRL-style loss scaling.
+            # Each micro-batch's loss is scaled by its rollout count relative to
+            # the mini-batch total. This ensures each sequence contributes equally
+            # regardless of micro-batch sizes (critical for token-budget batching).
+            # With fixed batching this is equivalent to 1/grad_accum_steps.
+            mini_rollout_count = micro_to_mini_rollout_count[micro_idx]
+            loss_scale = len(batch_rollouts) / max(1, mini_rollout_count)
+            scaled_loss = loss_total * loss_scale
             accelerator.backward(scaled_loss)
             grad_accum_counter += 1
 
@@ -2237,7 +2729,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 )
 
             grad_norm_scalar = None
-            # Only step optimizer and clip gradients every N accumulation steps
+            # Step optimizer at mini-batch boundaries (every grad_accum_steps micro-batches)
             if grad_accum_counter >= grad_accum_steps:
                 # Clip gradients in fp32 (no mixed precision)
                 grad_norm = torch.nn.utils.clip_grad_norm_(
