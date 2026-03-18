@@ -120,8 +120,19 @@ def get_model(
     attn_implementation = None
     trainer_attn_override = os.getenv("GRAIL_TRAINER_ATTN_IMPL")
     if trainer_attn_override:
-        attn_implementation = trainer_attn_override
-        logger.info("Using attention implementation: %s (trainer override)", attn_implementation)
+        if trainer_attn_override == "flash_attention_4":
+            # Load with FA2 (HF's import validation requires it), then swap the
+            # attention handler to FA4 via AttentionInterface after model creation.
+            attn_implementation = "flash_attention_2"
+            try:
+                from .fa4_attention import register_fa4_attention
+
+                register_fa4_attention()
+            except ImportError:
+                logger.warning("flash-attn-4 not installed, FA4 will not be used")
+        else:
+            attn_implementation = trainer_attn_override
+        logger.info("Using attention implementation: %s (trainer override)", trainer_attn_override)
     elif device_is_cuda and ATTN_IMPLEMENTATION:
         attn_implementation = ATTN_IMPLEMENTATION
         if ATTN_IMPLEMENTATION == "flash_attention_2":
@@ -139,7 +150,7 @@ def get_model(
     # Must be called BEFORE model loading as it monkey-patches the model class.
     if os.getenv("GRAIL_TRAINER_USE_LIGER_KERNEL", "0") == "1":
         try:
-            from liger_kernel.transformers import apply_liger_kernel_to_qwen3
+            from liger_kernel.transformers import apply_liger_kernel_to_qwen3  # type: ignore[import-not-found]
 
             apply_liger_kernel_to_qwen3(
                 rope=True,
@@ -161,6 +172,15 @@ def get_model(
         attn_implementation=attn_implementation,
         torch_dtype=torch.bfloat16 if device_is_cuda else torch.float32,
     )
+
+    # Swap attention dispatch to FA4 after loading (must be after from_pretrained
+    # because HF validates attn_implementation during loading).
+    if trainer_attn_override == "flash_attention_4":
+        try:
+            model.config._attn_implementation = "flash_attention_4"  # type: ignore[reportPrivateUsage]
+            logger.info("Model attention dispatch set to flash_attention_4 (FA4 native)")
+        except Exception:  # noqa: BLE001
+            pass
 
     # Preserve original model name for GRAIL proof validation
     model.name_or_path = original_model_name  # type: ignore[attr-defined]
