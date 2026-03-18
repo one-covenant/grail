@@ -1078,6 +1078,7 @@ dependencies = [
     { name = "accelerate" },
     { name = "aiobotocore" },
     { name = "bittensor" },
+    { name = "bittensor-wallet" },
     { name = "botocore" },
     { name = "datasets" },
     { name = "huggingface-hub" },
@@ -1114,6 +1115,7 @@ all = [
     { name = "flake8" },
     { name = "flash-attn" },
     { name = "jupyter" },
+    { name = "liger-kernel" },
     { name = "mypy" },
     { name = "notebook" },
     { name = "pre-commit" },
@@ -1138,6 +1140,9 @@ experiments = [
 flash = [
     { name = "flash-attn" },
 ]
+liger = [
+    { name = "liger-kernel" },
+]
 quantization = [
     { name = "auto-gptq" },
     { name = "autoawq" },
@@ -1161,6 +1166,7 @@ requires-dist = [
     { name = "bittensor", specifier = "==9.12.1" },
     { name = "bittensor-cli", marker = "extra == 'all'", specifier = ">=9.12.0" },
     { name = "bittensor-cli", marker = "extra == 'dev'", specifier = ">=9.12.0" },
+    { name = "bittensor-wallet", specifier = ">=4.0.0,!=4.0.2" },
     { name = "black", marker = "extra == 'all'", specifier = ">=22.0.0" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=22.0.0" },
     { name = "botocore", specifier = ">=1.24.0" },
@@ -1173,6 +1179,8 @@ requires-dist = [
     { name = "ipykernel", specifier = ">=7.1.0" },
     { name = "jupyter", marker = "extra == 'all'", specifier = ">=1.0.0" },
     { name = "jupyter", marker = "extra == 'experiments'", specifier = ">=1.0.0" },
+    { name = "liger-kernel", marker = "extra == 'all'", specifier = ">=0.3.0" },
+    { name = "liger-kernel", marker = "extra == 'liger'", specifier = ">=0.3.0" },
     { name = "matplotlib", specifier = ">=3.5.0" },
     { name = "mypy", marker = "extra == 'all'", specifier = ">=1.0.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
@@ -1205,7 +1213,7 @@ requires-dist = [
     { name = "wandb", specifier = ">=0.21.3" },
     { name = "zstandard", specifier = ">=0.21.0" },
 ]
-provides-extras = ["all", "dev", "experiments", "flash", "quantization"]
+provides-extras = ["all", "dev", "experiments", "flash", "liger", "quantization"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1810,6 +1818,20 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/da/34/28fff3ab31ccff1fd4f6c7c7b0ceb2b6968d8ea4950663eadcb5720591a0/lark-1.3.1.tar.gz", hash = "sha256:b426a7a6d6d53189d318f2b6236ab5d6429eaf09259f1ca33eb716eed10d2905", size = 382732, upload-time = "2025-10-27T18:25:56.653Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/82/3d/14ce75ef66813643812f3093ab17e46d3a206942ce7376d31ec2d36229e7/lark-1.3.1-py3-none-any.whl", hash = "sha256:c629b661023a014c37da873b4ff58a817398d12635d3bbb2c5a03be7fe5d1e12", size = 113151, upload-time = "2025-10-27T18:25:54.882Z" },
+]
+
+[[package]]
+name = "liger-kernel"
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "torch" },
+    { name = "triton", version = "3.5.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux'" },
+    { name = "triton", version = "3.5.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/73/f8/a25ab6549dd80c5055e84f0ee9be6ecf4a7c85ade448110607f4807ab2ef/liger_kernel-0.7.0.tar.gz", hash = "sha256:48c25648974c7d07d47591117b94188d1059999b7fb652e89e8ba50b21183cb3", size = 3780796, upload-time = "2026-02-12T22:01:00.101Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f7/c6/66c6a3c59b53f4cfbfa0c9e8c573c8843fb1d83cf3c2eb79e39109b76c17/liger_kernel-0.7.0-py3-none-any.whl", hash = "sha256:d2185d94362c069f508eb8aff5e7016c6669613265d5702733d674af4c616a56", size = 276512, upload-time = "2026-02-12T22:00:58.565Z" },
 ]
 
 [[package]]
