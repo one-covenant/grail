@@ -270,6 +270,78 @@ class GRPOGroup:
         return abs(advantage_sum) < advantage_tolerance
 
 
+def _chunked_lm_head_logprobs(
+    lm_head: torch.nn.Module,
+    shift_hidden: torch.Tensor,
+    shift_labels: torch.Tensor,
+    chunk_size: int,
+    return_entropy: bool,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Apply LM head in chunks and extract per-token logprobs (and optionally entropy).
+
+    Processes the vocabulary projection in sequence-dimension chunks to avoid
+    materializing the full [batch, seq_len, vocab_size] logits tensor. Uses
+    flash-attn's Triton cross-entropy kernel when entropy is not needed (4.5x
+    faster), falling back to fp32 log_softmax + gather otherwise.
+
+    Args:
+        lm_head: The model's language model head (linear projection to vocab).
+        shift_hidden: Hidden states shifted for next-token prediction [B, S-1, D].
+        shift_labels: Token IDs shifted for next-token prediction [B, S-1].
+        chunk_size: Number of sequence positions per LM head chunk.
+        return_entropy: Whether to compute per-token entropy alongside logprobs.
+
+    Returns:
+        token_log_probs: [B, S-1] per-token log-probabilities.
+        entropy_per_token: [B, S-1] per-token entropy, or None if not requested.
+    """
+    batch_size, shifted_seq_len = shift_labels.shape
+    device = shift_labels.device
+
+    token_log_probs = torch.zeros(batch_size, shifted_seq_len, device=device)
+    entropy_per_token: torch.Tensor | None = None
+    if return_entropy:
+        entropy_per_token = torch.zeros(batch_size, shifted_seq_len, device=device)
+
+    _triton_ce = None
+    try:
+        from flash_attn.ops.triton.cross_entropy import (  # type: ignore[import-not-found]
+            cross_entropy_loss as _triton_ce,
+        )
+    except ImportError:
+        pass
+
+    for chunk_start in range(0, shifted_seq_len, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, shifted_seq_len)
+
+        chunk_hidden = shift_hidden[:, chunk_start:chunk_end, :]
+        chunk_logits = lm_head(chunk_hidden)
+        chunk_labels = shift_labels[:, chunk_start:chunk_end]
+
+        if _triton_ce is not None and not return_entropy:
+            B_c, T_c, V_c = chunk_logits.shape
+            ce_loss, _ = _triton_ce(
+                chunk_logits.reshape(B_c * T_c, V_c),
+                chunk_labels.reshape(B_c * T_c),
+            )
+            token_log_probs[:, chunk_start:chunk_end] = (-ce_loss).reshape(B_c, T_c)
+            del ce_loss
+        else:
+            chunk_log_probs = F.log_softmax(chunk_logits.float(), dim=-1)
+            token_log_probs[:, chunk_start:chunk_end] = chunk_log_probs.gather(
+                2, chunk_labels.unsqueeze(-1)
+            ).squeeze(-1)
+            if return_entropy and entropy_per_token is not None:
+                entropy_per_token[:, chunk_start:chunk_end] = -(
+                    chunk_log_probs.exp() * chunk_log_probs
+                ).sum(dim=-1)
+            del chunk_log_probs
+
+        del chunk_logits
+
+    return token_log_probs, entropy_per_token
+
+
 def _partition_by_token_budget(
     rollouts: list[tuple],
     max_tokens: int,
@@ -1042,65 +1114,9 @@ def _compute_logprobs_chunked(
     shift_hidden = hidden_states[:, keep_from:-1, :]
     shift_labels = input_ids[:, keep_from + 1 :]
 
-    batch_size, shifted_seq_len = shift_labels.shape
-    device = shift_labels.device
-
-    # Pre-allocate output tensors (no vocab dimension, small)
-    token_log_probs = torch.zeros(batch_size, shifted_seq_len, device=device)
-    entropy_per_token: torch.Tensor | None = None
-    if return_entropy:
-        entropy_per_token = torch.zeros(batch_size, shifted_seq_len, device=device)
-
-    # Two logprob computation paths:
-    #
-    # 1. Triton fused CE (entropy_coef=0): Uses flash-attn's Triton cross-entropy
-    #    kernel. 4.5x faster, never materializes the [B*chunk, V] log_softmax
-    #    tensor. Available when entropy is not needed (entropy_coef=0).
-    #
-    # 2. Standard log_softmax (entropy_coef>0): Materializes [B, chunk, V]
-    #    log_softmax in fp32, then gathers logprobs and computes entropy from
-    #    the same tensor in a single pass.
-    #
-    # The path selection is driven by return_entropy, which is set by the caller
-    # based on config.entropy_coef > 0. Both paths produce identical logprobs.
-    _triton_ce = None
-    try:
-        from flash_attn.ops.triton.cross_entropy import cross_entropy_loss as _triton_ce  # type: ignore[import-not-found]
-    except ImportError:
-        pass
-
-    for chunk_start in range(0, shifted_seq_len, chunk_size):
-        chunk_end = min(chunk_start + chunk_size, shifted_seq_len)
-
-        chunk_hidden = shift_hidden[:, chunk_start:chunk_end, :]
-        chunk_logits = lm_head(chunk_hidden)  # [batch, chunk_len, vocab_size]
-        chunk_labels = shift_labels[:, chunk_start:chunk_end]
-
-        if _triton_ce is not None and not return_entropy:
-            # Triton path: logprob = -cross_entropy(logits, label)
-            B_c, T_c, V_c = chunk_logits.shape
-            ce_loss, _ = _triton_ce(
-                chunk_logits.reshape(B_c * T_c, V_c),
-                chunk_labels.reshape(B_c * T_c),
-            )
-            token_log_probs[:, chunk_start:chunk_end] = (-ce_loss).reshape(B_c, T_c)
-            del ce_loss
-        else:
-            # Standard path: log_softmax reused for both logprobs and entropy
-            chunk_log_probs = F.log_softmax(chunk_logits.float(), dim=-1)
-
-            token_log_probs[:, chunk_start:chunk_end] = chunk_log_probs.gather(
-                2, chunk_labels.unsqueeze(-1)
-            ).squeeze(-1)
-
-            if return_entropy and entropy_per_token is not None:
-                entropy_per_token[:, chunk_start:chunk_end] = -(
-                    chunk_log_probs.exp() * chunk_log_probs
-                ).sum(dim=-1)
-
-            del chunk_log_probs
-
-        del chunk_logits
+    token_log_probs, entropy_per_token = _chunked_lm_head_logprobs(
+        lm_head, shift_hidden, shift_labels, chunk_size, return_entropy
+    )
 
     # Extract completion-token results. Adjust prompt_lengths to account for
     # the keep_from offset applied above.
@@ -1293,50 +1309,9 @@ def _compute_logprobs_chunked_packed(
     shift_hidden = hidden_states[:, :-1, :]
     shift_labels = input_ids[:, 1:]
 
-    _, shifted_seq_len = shift_labels.shape
-    device = shift_labels.device
-
-    token_log_probs = torch.zeros(1, shifted_seq_len, device=device)
-    entropy_per_token: torch.Tensor | None = None
-    if return_entropy:
-        entropy_per_token = torch.zeros(1, shifted_seq_len, device=device)
-
-    # Two logprob computation paths (same as padded chunked path):
-    # 1. Triton fused CE (entropy_coef=0): 4.5x faster, no log_softmax materialization
-    # 2. Standard log_softmax (entropy_coef>0): computes both logprobs and entropy
-    _triton_ce = None
-    try:
-        from flash_attn.ops.triton.cross_entropy import cross_entropy_loss as _triton_ce  # type: ignore[import-not-found]
-    except ImportError:
-        pass
-
-    for chunk_start in range(0, shifted_seq_len, chunk_size):
-        chunk_end = min(chunk_start + chunk_size, shifted_seq_len)
-
-        chunk_hidden = shift_hidden[:, chunk_start:chunk_end, :]
-        chunk_logits = lm_head(chunk_hidden)
-        chunk_labels = shift_labels[:, chunk_start:chunk_end]
-
-        if _triton_ce is not None and not return_entropy:
-            B_c, T_c, V_c = chunk_logits.shape
-            ce_loss, _ = _triton_ce(
-                chunk_logits.reshape(B_c * T_c, V_c),
-                chunk_labels.reshape(B_c * T_c),
-            )
-            token_log_probs[:, chunk_start:chunk_end] = (-ce_loss).reshape(B_c, T_c)
-            del ce_loss
-        else:
-            chunk_log_probs = F.log_softmax(chunk_logits.float(), dim=-1)
-            token_log_probs[:, chunk_start:chunk_end] = chunk_log_probs.gather(
-                2, chunk_labels.unsqueeze(-1)
-            ).squeeze(-1)
-            if return_entropy and entropy_per_token is not None:
-                entropy_per_token[:, chunk_start:chunk_end] = -(
-                    chunk_log_probs.exp() * chunk_log_probs
-                ).sum(dim=-1)
-            del chunk_log_probs
-
-        del chunk_logits
+    token_log_probs, entropy_per_token = _chunked_lm_head_logprobs(
+        lm_head, shift_hidden, shift_labels, chunk_size, return_entropy
+    )
 
     return _extract_completion_logprobs_packed(
         token_log_probs,
@@ -2715,6 +2690,8 @@ class GRPOAlgorithm(TrainingAlgorithm):
             # the mini-batch total. This ensures each sequence contributes equally
             # regardless of micro-batch sizes (critical for token-budget batching).
             # With fixed batching this is equivalent to 1/grad_accum_steps.
+            if grad_accum_counter == 0:
+                optimizer.zero_grad(set_to_none=True)
             mini_rollout_count = micro_to_mini_rollout_count[micro_idx]
             loss_scale = len(batch_rollouts) / max(1, mini_rollout_count)
             scaled_loss = loss_total * loss_scale
