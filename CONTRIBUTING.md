@@ -17,7 +17,7 @@ Thanks for helping make this project better. Please keep changes focused, well-t
 - General bug fixes
 
 ### Getting started
-- **Environment**: Python 3.9–3.11. We use `uv` for dependency management.
+- **Environment**: Python 3.12. We use `uv` for dependency management.
   - Install deps: `uv sync --all-extras`
   - Add deps: `uv add package==X.Y.Z` (pin exact versions) and then `uv lock`
   - Run tasks: `uv run <command>` (e.g., `uv run pytest -q`)

@@ -20,11 +20,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git lfs install && \
     rm -rf /var/lib/apt/lists/*
 
-# Install uv, then let uv install Python 3.11 (Ubuntu 22.04 only ships 3.10).
+# Install uv, then let uv install Python 3.12.
 # This matches the CI workflow and avoids needing the deadsnakes PPA.
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh && /root/.local/bin/uv --version
 ENV PATH="/root/.local/bin:${PATH}"
-RUN uv python install 3.11
+RUN uv python install 3.12
 
 WORKDIR /app
 

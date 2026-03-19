@@ -2,7 +2,7 @@
 name = "grail-vllm-server"
 version = "0.1.0"
 description = "Isolated vLLM server environment for GRAIL evaluation"
-requires-python = ">=3.10,<3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     # Latest stable vLLM with CUDA support
     "vllm==0.10.2",
@@ -18,7 +18,7 @@ dependencies = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "C4", "UP"]
