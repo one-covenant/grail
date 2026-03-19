@@ -117,7 +117,7 @@ class ResilientSubtensor:
                 await asyncio.wait_for(subtensor.close(), timeout=timeout)
             else:
                 subtensor.close()
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("⏱️ Timeout closing subtensor after %.0fs", timeout)
         except asyncio.CancelledError:
             raise
@@ -135,7 +135,7 @@ class ResilientSubtensor:
         new_subtensor = bt.async_subtensor(network=network)
         try:
             await asyncio.wait_for(new_subtensor.initialize(), timeout=INIT_TIMEOUT)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+        except (TimeoutError, asyncio.CancelledError):
             logger.error("❌ Subtensor init failed, cleaning up")
             await self._close_subtensor_safe(new_subtensor, timeout=5.0)
             raise
@@ -266,7 +266,7 @@ class ResilientSubtensor:
                 result = await self._attempt_call(method, args, kwargs, timeout)
                 self._handle_success(method_name, args, result, retry)
                 return result
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 await self._handle_retry_backoff(
                     "Timeout",
                     method_name,
@@ -407,7 +407,7 @@ async def create_subtensor(*, resilient: bool = True) -> bt.subtensor | Resilien
             ),
             timeout=INIT_TIMEOUT,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.error("❌ Subtensor init timed out after %.0fs", INIT_TIMEOUT)
         if hasattr(subtensor, "close"):
             try:

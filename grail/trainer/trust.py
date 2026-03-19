@@ -110,7 +110,7 @@ async def get_trusted_miner_hotkeys(
             _select_top_miners_by_incentive(metagraph, min_trusted_miners),
             timeout=timeout,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.error(
             "Timeout selecting trusted miners after %.1fs; skipping training",
             timeout,

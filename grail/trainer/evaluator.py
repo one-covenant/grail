@@ -13,7 +13,7 @@ import os
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import torch
@@ -50,7 +50,7 @@ class EvalSample:
     success: bool
     reward_components: dict[str, float] | None = None
     window: int | None = None
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 class EvaluatorService:
@@ -664,7 +664,7 @@ class EvaluatorService:
             window_suffix = (
                 f"_w{self._current_window_number}" if self._current_window_number else ""
             )
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
             filename = f"eval_samples{window_suffix}_{timestamp}.jsonl"
             filepath = os.path.join(self._cfg.store_predictions_path, filename)
 

@@ -58,13 +58,11 @@ async def _wait_for_snapshot(
     Returns:
         Snapshot message dict if available, None if timeout
     """
-    loop = asyncio.get_event_loop()
-
     try:
-        # Use run_in_executor to avoid blocking the event loop
-        msg = await loop.run_in_executor(
-            None,
-            lambda: ipc.snapshot_queue.get(timeout=poll_interval),
+        # Use to_thread to avoid blocking the event loop
+        msg = await asyncio.to_thread(
+            ipc.snapshot_queue.get,
+            timeout=poll_interval,
         )
         if msg and msg.get("type") == "snapshot_ready":
             logger.debug("Received snapshot message from queue: window=%s", msg.get("window"))

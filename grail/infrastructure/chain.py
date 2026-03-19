@@ -170,7 +170,7 @@ class GrailChainManager:
 
     async def _wait_for_initial_commitments(self, timeout: float = 30.0) -> None:
         """Wait for first commitment payload from worker with timeout."""
-        start_time = asyncio.get_event_loop().time()
+        start_time = asyncio.get_running_loop().time()
 
         while True:
             if self._worker_queue is not None:
@@ -185,7 +185,7 @@ class GrailChainManager:
                     pass
 
             # Check timeout
-            elapsed = asyncio.get_event_loop().time() - start_time
+            elapsed = asyncio.get_running_loop().time() - start_time
             if elapsed > timeout:
                 logger.warning(
                     f"Timeout waiting for initial commitments after "
@@ -251,7 +251,7 @@ class GrailChainManager:
     @retry(
         stop=stop_after_attempt(SUBSTRATE_QUERY_RETRIES),
         wait=wait_exponential(multiplier=1, min=1, max=4),
-        retry=retry_if_exception_type(asyncio.TimeoutError),
+        retry=retry_if_exception_type(TimeoutError),
         reraise=True,
     )
     async def _query_timestamp_pallet(self, substrate: Any, block_hash: str) -> float | None:
@@ -265,7 +265,7 @@ class GrailChainManager:
             Timestamp in seconds if found, None otherwise
 
         Raises:
-            asyncio.TimeoutError: If query times out after retries
+            TimeoutError: If query times out after retries
         """
         res = await asyncio.wait_for(
             substrate.query(
@@ -284,7 +284,7 @@ class GrailChainManager:
     @retry(
         stop=stop_after_attempt(SUBSTRATE_QUERY_RETRIES),
         wait=wait_exponential(multiplier=1, min=1, max=4),
-        retry=retry_if_exception_type(asyncio.TimeoutError),
+        retry=retry_if_exception_type(TimeoutError),
         reraise=True,
     )
     async def _query_timestamp_extrinsics(self, substrate: Any, block_hash: str) -> float | None:
@@ -298,7 +298,7 @@ class GrailChainManager:
             Timestamp in seconds if found, None otherwise
 
         Raises:
-            asyncio.TimeoutError: If query times out after retries
+            TimeoutError: If query times out after retries
         """
         block = await asyncio.wait_for(
             substrate.get_block(block_hash=block_hash),
@@ -356,7 +356,7 @@ class GrailChainManager:
             if timestamp is not None:
                 logger.debug("Got timestamp for block %d: %.2f", block_number, timestamp)
                 return timestamp
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "Timeout querying Timestamp.Now for block %d after %d attempts",
                 block_number,
@@ -373,7 +373,7 @@ class GrailChainManager:
                     "Got timestamp from extrinsics for block %d: %.2f", block_number, timestamp
                 )
                 return timestamp
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "Timeout parsing extrinsics for block %d after %d attempts",
                 block_number,

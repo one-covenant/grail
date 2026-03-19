@@ -95,7 +95,7 @@ class MonitoringManager:
                 await asyncio.wait_for(self._shutdown_event.wait(), timeout=self._flush_interval)
                 # If we get here, shutdown was requested
                 break
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Timeout is expected - time to flush
                 await self.flush_metrics()
             except Exception as e:

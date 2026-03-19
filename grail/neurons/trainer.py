@@ -455,7 +455,7 @@ class TrainerNeuron(BaseNeuron):
         timeout = PAUSE_CONFIRMATION_TIMEOUT_SECONDS
 
         # Use Event.wait() with timeout in thread pool to avoid blocking event loop
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         while True:
             # Check for shutdown request

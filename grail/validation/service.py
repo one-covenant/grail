@@ -13,7 +13,7 @@ import json
 import logging
 import time
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -540,7 +540,7 @@ class ValidationService:
                 if deadline_ts is not None:
                     deadline_ts += DEADLINE_SLACK_SECONDS
             readable_ts: str = (
-                datetime.fromtimestamp(deadline_ts, tz=timezone.utc).isoformat()
+                datetime.fromtimestamp(deadline_ts, tz=UTC).isoformat()
                 if deadline_ts is not None
                 else "None"
             )

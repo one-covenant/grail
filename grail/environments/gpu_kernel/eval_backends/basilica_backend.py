@@ -120,15 +120,29 @@ class BasilicaBackend:
             return False
         return any(pattern in error for pattern in _INFRA_ERROR_PATTERNS)
 
-    def evaluate(self, test_code: str, triton_code: str) -> EvalResult:
+    def _make_session(self) -> requests.Session:
+        """Create a new HTTP session with standard headers."""
+        session = requests.Session()
+        session.headers["Content-Type"] = "application/json"
+        return session
+
+    def evaluate(self, test_code: str, triton_code: str, _session: requests.Session | None = None) -> EvalResult:
         """Evaluate a single kernel via Basilica's /evaluate_raw endpoint.
 
         Retries on infrastructure errors (worker crashes, pool exhaustion).
         If all retries fail, returns EvalResult with infra_error=True so the
         miner can discard the rollout rather than uploading an unreliable reward.
+
+        Args:
+            _session: Optional per-thread session for batch evaluation.
+                Falls back to self._session for single-call usage.
         """
-        if not self._started or self._session is None:
+        if not self._started:
             raise RuntimeError("BasilicaBackend not started. Call start() first.")
+
+        session = _session or self._session
+        if session is None:
+            raise RuntimeError("No HTTP session available.")
 
         payload = {
             "test_code": test_code,
@@ -137,7 +151,7 @@ class BasilicaBackend:
 
         last_data: dict | None = None
         for attempt in range(1 + self._max_retries):
-            data = self._post_with_retry("/evaluate_raw", payload)
+            data = self._post_with_retry("/evaluate_raw", payload, session=session)
             last_data = data
 
             error = data.get("error")
@@ -203,8 +217,20 @@ class BasilicaBackend:
         max_workers = min(len(items), _MAX_BATCH_WORKERS)
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            # Each thread gets its own Session to avoid thread-safety issues
+            # with requests.Session while preserving full parallelism.
+            thread_sessions: dict[int, requests.Session] = {}
+
+            def _eval_with_session(tc: str, tr: str) -> EvalResult:
+                import threading
+
+                tid = threading.current_thread().ident or 0
+                if tid not in thread_sessions:
+                    thread_sessions[tid] = self._make_session()
+                return self.evaluate(tc, tr, _session=thread_sessions[tid])
+
             future_to_idx = {
-                pool.submit(self.evaluate, tc, tr): i for i, (tc, tr) in enumerate(items)
+                pool.submit(_eval_with_session, tc, tr): i for i, (tc, tr) in enumerate(items)
             }
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]
@@ -217,6 +243,9 @@ class BasilicaBackend:
                         compiled=False,
                         error=f"BasilicaBackend error: {e}",
                     )
+
+        for session in thread_sessions.values():
+            session.close()
 
         return results  # type: ignore[return-value]
 
@@ -232,15 +261,16 @@ class BasilicaBackend:
         self._started = False
         logger.info("BasilicaBackend shut down")
 
-    def _post_with_retry(self, path: str, payload: dict) -> dict:
+    def _post_with_retry(self, path: str, payload: dict, session: requests.Session | None = None) -> dict:
         """POST with retry on transient HTTP errors."""
-        assert self._session is not None
+        s = session or self._session
+        assert s is not None
         url = f"{self._url}{path}"
         last_exc: Exception | None = None
 
         for attempt in range(1 + self._max_retries):
             try:
-                resp = self._session.post(
+                resp = s.post(
                     url,
                     json=payload,
                     timeout=self._timeout + 5,

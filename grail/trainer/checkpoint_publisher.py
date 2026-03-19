@@ -803,7 +803,7 @@ class CheckpointPublisher:
                             use_write=True,
                             upload_timeout=upload_timeout,
                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         logger.error(
                             "Upload TIMEOUT for %s (exceeds %s seconds)",
                             rel_path,
@@ -1003,7 +1003,7 @@ class CheckpointPublisher:
                             use_write=True,
                             upload_timeout=upload_timeout,
                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         logger.error(
                             "Upload TIMEOUT for %s (exceeds %s seconds)",
                             rel_path,
@@ -1294,7 +1294,7 @@ class CheckpointPublisher:
                             use_write=True,
                             upload_timeout=upload_timeout,
                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         logger.error(
                             "Delta upload TIMEOUT for %s (exceeds %s seconds)",
                             rel_path,
