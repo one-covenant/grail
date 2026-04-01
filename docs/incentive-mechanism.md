@@ -14,11 +14,11 @@ The only metric that matters for your weight is **unique rollouts**. A rollout i
 
 ## Two Scoring Modes
 
-The subnet switches between two scoring modes depending on network conditions. The active mode is hardcoded in `grail/shared/constants.py` and applies to all validators identically.
+The subnet switches between two scoring modes depending on network conditions. The active mode is hardcoded in `grail/protocol/constants.py` and applies to all validators identically.
 
 ### Capped Mode (current default)
 
-Each miner's unique rollouts are capped at `UNIQUE_ROLLOUTS_CAP` (2,500) per window, with a period cap of 2,500 x 12 = 30,000 over the rolling submission interval.
+Each miner's unique rollouts are capped at `UNIQUE_ROLLOUTS_CAP` (1,500) per window, with a period cap of 1,500 x 12 = 18,000 over the rolling submission interval.
 
 Scoring:
 
@@ -44,7 +44,7 @@ Producing more rollouts yields proportionally more weight. Burn is fixed at 80% 
 
 ### What This Means for Miners
 
-- **Capped mode**: Target 2,500 unique rollouts per window. Going above yields nothing, going below costs you proportionally. Optimize for consistency across windows, not peak throughput.
+- **Capped mode**: Target 1,500 unique rollouts per window. Going above yields nothing, going below costs you proportionally. Optimize for consistency across windows, not peak throughput.
 - **Uncapped mode**: Maximize throughput. More unique rollouts = more weight, no ceiling.
 - **Both modes**: The superlinear exponent (4.0) heavily amplifies differences. A miner with 2x the unique rollouts of another gets 2^4 = 16x the weight. This also makes sybil splitting unprofitable: splitting into k identities yields k^(1-4) of the total reward.
 
@@ -140,7 +140,7 @@ This means a single bad window can zero your weight for ~1.4 hours. Consistent, 
 | `WINDOW_LENGTH` | 30 blocks | ~6 minutes per window |
 | `ROLLOUTS_PER_PROBLEM` | 16 | GRPO group size |
 | `MAX_NEW_TOKENS` | 8192 | Maximum completion length |
-| `UNIQUE_ROLLOUTS_CAP` | 2,500 | Per-window cap (capped mode) |
+| `UNIQUE_ROLLOUTS_CAP` | 1,500 | Per-window cap (capped mode) |
 | `SUPERLINEAR_EXPONENT` | 4.0 | Weight amplification exponent |
 | `GRAIL_BURN_PERCENTAGE` | 80% | Base emissions to burn UID |
 | `GRAIL_BURN_UID` | 0 | Burn destination |

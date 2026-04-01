@@ -16,7 +16,7 @@ This guide explains how to efficiently debug and optimize your miner implementat
 ## Why Not Debug on Mainnet First?
 
 **The Problem:**
-When your submission fails on mainnet, validators exclude you from sampling for ~14 windows (see grail/shared/constants.py:223). At 30 blocks/window × 12 seconds/block, that's **~84 minutes** before you can test again.
+When your submission fails on mainnet, validators exclude you from sampling for ~14 windows (see grail/protocol/constants.py:223). At 30 blocks/window × 12 seconds/block, that's **~84 minutes** before you can test again.
 
 This creates a slow feedback loop:
 1. Submit to mainnet → Rejected
@@ -37,7 +37,7 @@ Run a local validator where you control the ban period and get instant feedback.
 
 **Setup:**
 
-⚠️ **Important:** Don't use `--test-mode` for the validator. That flag only validates the trainer UID (grail/shared/constants.py:132), not miner UIDs.
+⚠️ **Important:** Don't use `--test-mode` for the validator. That flag only validates the trainer UID (grail/protocol/constants.py:132), not miner UIDs.
 
 **Recommended: Run with nohup and log files** (see run_all.sh:1):
 
@@ -76,7 +76,7 @@ Run trainer + validator + miner locally for end-to-end testing.
 
 **Setup:**
 
-1. **Update constants** (grail/shared/constants.py):
+1. **Update constants** (grail/protocol/constants.py):
    ```python
    TRAINER_UID = <your-trainer-uid>  # Set to your UID on the subnet
    ```
@@ -165,7 +165,7 @@ grail -v validate   # Verbose (recommended)
 grail -vv validate  # Very verbose (debug trace)
 ```
 
-See grail/shared/constants.py:136 for trace logging constants.
+See grail/protocol/constants.py:136 for trace logging constants.
 
 ---
 
@@ -173,7 +173,7 @@ See grail/shared/constants.py:136 for trace logging constants.
 
 ### The Ban Mechanism
 
-Validators exclude miners with failures from sampling for `FAILURE_LOOKBACK_WINDOWS` (grail/shared/constants.py:223):
+Validators exclude miners with failures from sampling for `FAILURE_LOOKBACK_WINDOWS` (grail/protocol/constants.py:223):
 
 ```python
 # Default: 14 windows ≈ 84 minutes
@@ -184,7 +184,7 @@ FAILURE_LOOKBACK_WINDOWS = 14
 
 When running a local validator, reduce the lookback window for faster iteration:
 
-**Edit grail/shared/constants.py:223:**
+**Edit grail/protocol/constants.py:223:**
 ```python
 # Temporary: reduce to 1-2 windows for local testing
 FAILURE_LOOKBACK_WINDOWS = 1  # ~6 minutes instead of 84
@@ -216,7 +216,7 @@ This way, you avoid multiple mainnet bans and iterate 10-20x faster.
 
 ```bash
 # 1. Reduce ban time for testing
-# Edit grail/shared/constants.py:223
+# Edit grail/protocol/constants.py:223
 FAILURE_LOOKBACK_WINDOWS = 1
 
 # 2. Run miner
@@ -235,8 +235,8 @@ tail -f validate.log | grep "uid=<your-uid>"
 ### For Advanced Testing (Method 2)
 
 ```bash
-# 1. Update TRAINER_UID in grail/shared/constants.py to your UID
-# 2. Reduce FAILURE_LOOKBACK_WINDOWS in grail/shared/constants.py
+# 1. Update TRAINER_UID in grail/protocol/constants.py to your UID
+# 2. Reduce FAILURE_LOOKBACK_WINDOWS in grail/protocol/constants.py
 
 # 3. Run trainer with --test-mode
 CUDA_VISIBLE_DEVICES=0 grail -vv train --test-mode > train.log 2>&1 &
