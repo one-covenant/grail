@@ -39,6 +39,7 @@ import shutil
 import time
 import uuid
 from collections.abc import Iterable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,11 @@ from grail.infrastructure.sparse_codec import (
 )
 from grail.shared.safetensors_utils import load_model_state_dict
 
+from ..protocol.constants import (
+    CHECKPOINT_PREFIX,
+    CHECKPOINT_TYPE_DELTA,
+    CHECKPOINT_TYPE_FULL,
+)
 from ..shared.checkpoint_paths import (
     checkpoint_delta_metadata_key,
     checkpoint_delta_prefix,
@@ -58,17 +64,245 @@ from ..shared.checkpoint_paths import (
     checkpoint_window_prefix,
     parse_window_from_prefix,
 )
-from ..shared.constants import (
+from ..shared.config import (
     BASE_CHECKPOINT_RETENTION_LIMIT,
-    CHECKPOINT_PREFIX,
-    CHECKPOINT_TYPE_DELTA,
-    CHECKPOINT_TYPE_FULL,
     GRAIL_CHECKPOINT_MOD10,
 )
 from . import comms
-from .delta_checkpoint import apply_sparse_delta, compute_weights_hash
+from .delta_checkpoint import (
+    apply_sparse_delta,
+    compute_delta_aware_hash,
+    compute_weights_hash,
+    compute_weights_hash_concurrent,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------------------------- #
+#                       Background Hash Verification                           #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class HashVerificationResult:
+    """Result of a background hash verification."""
+
+    verified: bool
+    window: int
+    expected_hash: str
+    actual_hash: str = ""
+    elapsed_sec: float = 0.0
+    method: str = "full"  # "full", "concurrent", "delta_aware"
+
+
+class BackgroundHashVerifier:
+    """Non-blocking hash verification that runs in a background thread.
+
+    The miner continues generating rollouts while hash verification proceeds.
+    Verification results are checked before the NEXT checkpoint update. If a
+    verification fails, the miner triggers a full model reload.
+
+    Usage::
+
+        verifier = BackgroundHashVerifier()
+
+        # After applying delta (non-blocking):
+        handle = verifier.submit(
+            state_dict=reconstructed,
+            expected_hash=metadata.weights_hash,
+            window=target_window,
+        )
+
+        # ... miner generates rollouts here ...
+
+        # Before next checkpoint update, check result:
+        result = verifier.get_result()
+        if result is not None and not result.verified:
+            # Trigger full model reload
+            ...
+
+    Thread safety: Only one verification runs at a time. Submitting a new
+    verification cancels any pending one (the newest checkpoint is the only
+    one that matters).
+    """
+
+    def __init__(self, max_workers: int = 1) -> None:
+        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="hash-vfy")
+        self._pending_future: Future[HashVerificationResult] | None = None
+        self._last_result: HashVerificationResult | None = None
+
+    def submit(
+        self,
+        state_dict: dict[str, Any],
+        expected_hash: str,
+        window: int,
+        *,
+        changed_param_names: set[str] | None = None,
+        base_hash: str | None = None,
+    ) -> None:
+        """Submit a hash verification job to the background thread.
+
+        If a previous verification is still running, it is effectively abandoned
+        (its result will be discarded when the next submit overwrites _pending_future).
+
+        Args:
+            state_dict: Model state dict to verify (must remain valid until
+                verification completes; caller should not mutate it).
+            expected_hash: Expected SHA256 hex digest from trainer metadata.
+            window: Checkpoint window number (for logging).
+            changed_param_names: If provided, use delta-aware hashing (fast path).
+                Only the changed parameters are hashed; unchanged params are covered
+                by base_hash.
+            base_hash: Required when changed_param_names is provided. The hash of
+                the base state before the delta was applied.
+        """
+        # Discard any previous pending result
+        self._pending_future = None
+        self._last_result = None
+
+        self._pending_future = self._executor.submit(
+            self._verify_worker,
+            state_dict,
+            expected_hash,
+            window,
+            changed_param_names,
+            base_hash,
+        )
+
+        logger.info(
+            "[BackgroundHashVerifier] Submitted verification for window %d "
+            "(delta_aware=%s, changed_params=%s)",
+            window,
+            changed_param_names is not None,
+            len(changed_param_names) if changed_param_names else "N/A",
+        )
+
+    def get_result(self, timeout: float = 0.0) -> HashVerificationResult | None:
+        """Check if the background verification has completed.
+
+        Args:
+            timeout: Seconds to wait. 0.0 = non-blocking poll. Use a positive
+                value to block (e.g. before applying the next checkpoint).
+
+        Returns:
+            HashVerificationResult if verification completed, None if still running
+            or no verification was submitted.
+        """
+        if self._last_result is not None:
+            return self._last_result
+
+        if self._pending_future is None:
+            return None
+
+        if not self._pending_future.done() and timeout <= 0:
+            return None
+
+        try:
+            result = self._pending_future.result(timeout=max(timeout, 0.1))
+            self._last_result = result
+            self._pending_future = None
+            return result
+        except TimeoutError:
+            return None
+        except Exception as exc:
+            logger.warning("[BackgroundHashVerifier] Verification raised exception: %s", exc)
+            # Treat exceptions as verification failure (conservative)
+            result = HashVerificationResult(
+                verified=False,
+                window=-1,
+                expected_hash="",
+                actual_hash=f"ERROR: {exc}",
+            )
+            self._last_result = result
+            self._pending_future = None
+            return result
+
+    def wait_for_pending(self, timeout: float = 120.0) -> HashVerificationResult | None:
+        """Block until the pending verification completes.
+
+        Called before applying the next checkpoint to ensure the current
+        weights are verified. Returns None if no verification was pending.
+
+        Args:
+            timeout: Maximum seconds to wait.
+
+        Returns:
+            HashVerificationResult or None
+        """
+        return self.get_result(timeout=timeout)
+
+    def shutdown(self) -> None:
+        """Release the background thread pool."""
+        self._executor.shutdown(wait=False)
+
+    @staticmethod
+    def _verify_worker(
+        state_dict: dict[str, Any],
+        expected_hash: str,
+        window: int,
+        changed_param_names: set[str] | None,
+        base_hash: str | None,
+    ) -> HashVerificationResult:
+        """Run hash verification in a background thread."""
+        t0 = time.monotonic()
+
+        try:
+            if changed_param_names is not None and base_hash is not None:
+                # Delta-aware fast path: only hash changed params
+                actual_hash = compute_delta_aware_hash(base_hash, state_dict, changed_param_names)
+                method = "delta_aware"
+            else:
+                # Full concurrent hash
+                actual_hash = compute_weights_hash_concurrent(state_dict)
+                method = "concurrent"
+
+            elapsed = time.monotonic() - t0
+            verified = actual_hash == expected_hash
+
+            if verified:
+                logger.info(
+                    "[BackgroundHashVerifier] window %d VERIFIED (%s, %.1fs)",
+                    window,
+                    method,
+                    elapsed,
+                )
+            else:
+                logger.error(
+                    "[BackgroundHashVerifier] window %d HASH MISMATCH: "
+                    "expected=%s, got=%s (%s, %.1fs)",
+                    window,
+                    expected_hash[:16],
+                    actual_hash[:16],
+                    method,
+                    elapsed,
+                )
+
+            return HashVerificationResult(
+                verified=verified,
+                window=window,
+                expected_hash=expected_hash,
+                actual_hash=actual_hash,
+                elapsed_sec=elapsed,
+                method=method,
+            )
+
+        except Exception as exc:
+            elapsed = time.monotonic() - t0
+            logger.error(
+                "[BackgroundHashVerifier] window %d verification FAILED: %s (%.1fs)",
+                window,
+                exc,
+                elapsed,
+            )
+            return HashVerificationResult(
+                verified=False,
+                window=window,
+                expected_hash=expected_hash,
+                actual_hash=f"ERROR: {exc}",
+                elapsed_sec=elapsed,
+                method="error",
+            )
 
 
 # --------------------------------------------------------------------------- #
@@ -181,6 +415,14 @@ class CheckpointManager:
         self._fallback_attempted: set[int] = set()
         self._last_cache_task: asyncio.Task[None] | None = None
         self._last_cache_window: int | None = None
+        # Background hash verifier: runs verification in a separate thread
+        # so the miner can continue generating rollouts while hashing proceeds.
+        self._hash_verifier = BackgroundHashVerifier()
+        # Track the last verified base hash for delta-aware hashing.
+        # When a full hash is verified, we store it so subsequent delta
+        # verifications can use compute_delta_aware_hash() instead of
+        # rehashing all 16GB of weights.
+        self._last_verified_hash: str | None = None
 
     # ----------------------------- High-level API --------------------------- #
 
@@ -339,6 +581,10 @@ class CheckpointManager:
         to the model's state_dict in GPU/CPU memory. Much faster than the full
         get_checkpoint + load_model path for continuously running miners/validators.
 
+        Hash verification runs in a background thread so the miner can
+        immediately start generating rollouts. If a previous background
+        verification failed, this method returns False to force a full reload.
+
         Requirements:
         - Model must already be loaded with weights from current_window
         - target_window must be a DELTA checkpoint with prev_window == current_window
@@ -359,6 +605,22 @@ class CheckpointManager:
                 current_window,
             )
             return False
+
+        # Check if a previous background hash verification failed.
+        # If so, the model weights are suspect and we must force a full reload.
+        prev_result = self._hash_verifier.get_result()
+        if prev_result is not None and not prev_result.verified:
+            logger.error(
+                "Previous hash verification FAILED for window %d (%s). Forcing full model reload.",
+                prev_result.window,
+                prev_result.actual_hash[:32],
+            )
+            self._last_verified_hash = None
+            return False
+
+        # If previous verification succeeded, cache the hash for delta-aware fast path
+        if prev_result is not None and prev_result.verified:
+            self._last_verified_hash = prev_result.actual_hash
 
         # Fetch metadata for target window
         metadata = await self._fetch_metadata(target_window)
@@ -387,7 +649,7 @@ class CheckpointManager:
 
         try:
             logger.info(
-                "⚡ Fast path: applying delta in-place from window %s → %s",
+                "Fast path: applying delta in-place from window %s to %s",
                 current_window,
                 target_window,
             )
@@ -417,27 +679,46 @@ class CheckpointManager:
                 target_dtype=None,  # Infer from current_state
             )
 
-            # Verify hash if available
-            if metadata.weights_hash:
-                actual_hash = compute_weights_hash(reconstructed)
-                if actual_hash != metadata.weights_hash:
-                    logger.error(
-                        "Hash mismatch after in-place delta: expected %s..., got %s...",
-                        metadata.weights_hash[:16],
-                        actual_hash[:16],
-                    )
-                    return False
-                logger.debug("✅ Hash verified for window %s", target_window)
-
-            # Load reconstructed weights back into model
+            # Load reconstructed weights back into model IMMEDIATELY (non-blocking).
+            # Hash verification proceeds in the background while the miner generates.
             model.load_state_dict(reconstructed, strict=True)
-
-            # Update the checkpoint window attribute for validation
-            # (This attribute is normally set by get_model() during slow path)
             model.grail_checkpoint_window = target_window
 
+            # Submit background hash verification (non-blocking).
+            # The miner continues generating rollouts. If verification fails,
+            # the NEXT call to apply_delta_in_place will detect it and force
+            # a full reload.
+            skip_hash = os.environ.get("GRAIL_SKIP_HASH_VERIFY", "0").lower() in (
+                "1",
+                "true",
+                "yes",
+            )
+            if metadata.weights_hash and not skip_hash:
+                # Determine which parameters changed for delta-aware hashing.
+                # sparse_tensors keys are like "model.layers.0.weight.indices",
+                # "model.layers.0.weight.values". Extract the base param names.
+                changed_param_names: set[str] = set()
+                for key in sparse_tensors:
+                    if key.endswith(".indices"):
+                        param_name = key[: -len(".indices")]
+                        changed_param_names.add(param_name)
+                    elif key.endswith(".values"):
+                        param_name = key[: -len(".values")]
+                        changed_param_names.add(param_name)
+
+                self._hash_verifier.submit(
+                    state_dict=reconstructed,
+                    expected_hash=metadata.weights_hash,
+                    window=target_window,
+                    changed_param_names=changed_param_names if self._last_verified_hash else None,
+                    base_hash=self._last_verified_hash,
+                )
+            elif skip_hash:
+                logger.info("Hash verification skipped for window %s", target_window)
+
             logger.info(
-                "✅ Fast path complete: model updated to window %s in-place",
+                "Fast path complete: model updated to window %s in-place "
+                "(hash verification running in background)",
                 target_window,
             )
 
