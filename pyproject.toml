@@ -60,6 +60,7 @@ dependencies = [
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
+    "pytest-xdist>=3.5.0",
     "black>=22.0.0",
     "flake8>=5.0.0",
     "mypy>=1.0.0",
@@ -180,15 +181,17 @@ markers = [
     "gpu_real_data: marks tests as GPU real-data tests (long-running, requires GPU) - include with: pytest -m gpu_real_data",
     "long: marks tests as long-running (typically 10-15min, opt-in) - include with: pytest -m long",
     "benchmark: marks tests as performance benchmarks (requires GPU) - include with: pytest -m benchmark",
+    "serial: marks tests that must not run in parallel (global singletons, shared state)",
 ]
 # Test suite selection:
-# - pytest                                    = Run all tests EXCEPT GPU, long, and benchmark (default, ~2 min)
+# - pytest                                    = Run all tests EXCEPT GPU, long, and benchmark (default, ~5 min)
+# - pytest -n auto                            = Run default tests in parallel (one worker per core)
+# - pytest -n auto -m "not serial"            = Parallel, skipping tests that need serial execution
 # - pytest -m long                            = Run ONLY long-running tests
-# - pytest -m gpu_real_data                  = Run ONLY GPU real-data tests
-# - pytest -m benchmark                      = Run ONLY benchmark tests
-# - pytest -m "gpu_real_data or long"        = Run both GPU and long-running tests
-# - pytest --override-ini="addopts=" tests/  = Run ALL tests including GPU and long-running
-# - pytest -m "not gpu_real_data and not long" tests/ = Explicitly exclude both
+# - pytest -m gpu_real_data                   = Run ONLY GPU real-data tests
+# - pytest -m benchmark                       = Run ONLY benchmark tests
+# - pytest -m "gpu_real_data or long"         = Run both GPU and long-running tests
+# - pytest --override-ini="addopts=" tests/   = Run ALL tests including GPU and long-running
 
 [tool.coverage.run]
 source = ["grail"]
