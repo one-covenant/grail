@@ -7,6 +7,7 @@ import logging
 import time as _time_mod
 import traceback
 from types import SimpleNamespace
+from typing import Any
 
 import bittensor as bt
 import torch
@@ -30,11 +31,15 @@ from grail.infrastructure.checkpoint_consumer import (
     default_checkpoint_cache_root,
 )
 from grail.infrastructure.credentials import load_r2_credentials
+from grail.infrastructure.io_pipeline import (
+    CheckpointPrefetcher,
+    UploadPipeline,
+)
 from grail.mining.config import PipelineConfig
 from grail.model.provider import clear_model_and_tokenizer, get_model, get_tokenizer
 from grail.monitoring import get_monitoring_manager
 from grail.monitoring.config import MonitoringConfig
-from grail.shared.constants import TRAINER_UID, WINDOW_LENGTH
+from grail.protocol.constants import TRAINER_UID, WINDOW_LENGTH
 from grail.shared.window_utils import (
     WindowWaitTracker,
     calculate_next_window,
@@ -155,6 +160,19 @@ class MinerNeuron(BaseNeuron):
                 credentials=checkpoint_credentials,
                 keep_limit=2,  # Keep only current + previous window
             )
+
+            # I/O pipeline: prefetch next checkpoint and upload in background
+            ckpt_prefetcher = CheckpointPrefetcher(checkpoint_manager)
+            upload_pipeline = UploadPipeline()
+
+            async def _cleanup_io_pipeline() -> None:
+                await ckpt_prefetcher.cancel_all()
+                await upload_pipeline.cancel()
+
+            def _schedule_io_cleanup() -> None:
+                asyncio.create_task(_cleanup_io_pipeline())
+
+            self.register_shutdown_callback(_schedule_io_cleanup)
 
             # Pipeline state (initialized on first checkpoint load if enabled)
             pipeline_config = PipelineConfig.from_env()
@@ -494,33 +512,55 @@ class MinerNeuron(BaseNeuron):
                         )
 
                     if inferences:
-                        logger.info(
-                            f"📤 Uploading {len(inferences)} rollouts to R2 "
-                            f"for window {window_start}..."
-                        )
-                        try:
-                            upload_duration = await upload_inferences_with_metrics(
-                                wallet, window_start, inferences, credentials, monitor
-                            )
-                            timers.update_upload_time_ema(upload_duration)
-                            logger.info(
-                                f"✅ Successfully uploaded window {window_start} "
-                                f"with {len(inferences)} rollouts"
-                            )
-                            self.heartbeat()
-                            if monitor:
-                                await monitor.log_counter("mining/successful_uploads")
-                                await monitor.log_gauge("mining/uploaded_rollouts", len(inferences))
+                        # Await any previous background upload before starting new one
+                        prev_upload = await upload_pipeline.await_previous()
+                        if prev_upload is not None:
+                            if prev_upload.success:
+                                timers.update_upload_time_ema(prev_upload.elapsed_sec)
+                                logger.info(
+                                    "Previous background upload completed: window=%d elapsed=%.2fs",
+                                    prev_upload.window,
+                                    prev_upload.elapsed_sec,
+                                )
+                            else:
+                                logger.error(
+                                    "Previous background upload failed: window=%d error=%s",
+                                    prev_upload.window,
+                                    prev_upload.error,
+                                )
+                                if monitor:
+                                    await monitor.log_counter("mining/failed_uploads")
 
-                        except Exception as e:
-                            logger.error(f"❌ Failed to upload window {window_start}: {e}")
-                            logger.error(traceback.format_exc())
-                            if monitor:
-                                await monitor.log_counter("mining/failed_uploads")
+                        # Start background upload (overlaps with next window's checkpoint load)
+                        logger.info(
+                            "Submitting background upload: %d rollouts for window %d",
+                            len(inferences),
+                            window_start,
+                        )
+
+                        async def _do_upload(
+                            _wallet: Any = wallet,
+                            _ws: int = window_start,
+                            _inf: list[Any] = inferences,  # noqa: B006
+                            _creds: Any = credentials,
+                            _mon: Any = monitor,
+                        ) -> None:
+                            await upload_inferences_with_metrics(_wallet, _ws, _inf, _creds, _mon)
+
+                        upload_pipeline.submit(window_start, _do_upload)
+
+                        self.heartbeat()
+                        if monitor:
+                            await monitor.log_counter("mining/successful_uploads")
+                            await monitor.log_gauge("mining/uploaded_rollouts", len(inferences))
                     else:
                         logger.warning(f"No inferences generated for window {window_start}")
                         if monitor:
                             await monitor.log_counter("mining/empty_windows")
+
+                    # Prefetch NEXT window's checkpoint while upload runs in background
+                    next_window = window_start + WINDOW_LENGTH
+                    ckpt_prefetcher.prefetch(next_window)
 
                     last_window_start = window_start
                     await checkpoint_manager.cleanup_local(window_start)
@@ -532,6 +572,15 @@ class MinerNeuron(BaseNeuron):
                     self.reset_subtensor()  # Force reconnect on next iteration
                     await asyncio.sleep(10)
                     continue
+
+            # Drain final background upload before exiting
+            final_upload = await upload_pipeline.await_previous(timeout=60.0)
+            if final_upload is not None and not final_upload.success:
+                logger.error(
+                    "Final background upload failed: window=%d error=%s",
+                    final_upload.window,
+                    final_upload.error,
+                )
 
         # Start process-level watchdog (handled by BaseNeuron)
         self.start_watchdog(timeout_seconds=(60 * 30))
