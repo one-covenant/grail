@@ -34,7 +34,7 @@ def _create_sample_inference() -> dict:
             "beacon": {"round": 1234, "randomness": "0xbeacon"},
             "rollout": {
                 "total_reward": 0.75,
-                "advantage": 0.25,
+                "advantage": 0.0,
                 "success": True,
                 "token_logprobs": [-0.1, -0.2, -0.3, -0.4, -0.5],
                 "prompt_length": 3,

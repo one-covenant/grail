@@ -1,6 +1,6 @@
 """Tests for the refactored environments modules.
 
-Covers: backends imports, GenerationParams defaults, compute_advantages,
+Covers: backends imports, GenerationParams defaults,
 assemble_rollouts, AgentEnvLoop with FakeBackend.
 """
 
@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 
-from grail.environments.advantages import compute_advantages
 from grail.environments.backends import (
     GenerationParams,
     HFBackend,
@@ -25,7 +24,7 @@ from tests.fixtures.fakes import DummyModel, DummyTokenizer, FakeBackend
 
 def test_generation_params_defaults():
     """Verify dataclass defaults match expected constants."""
-    from grail.shared.constants import MAX_NEW_TOKENS
+    from grail.protocol.constants import MAX_NEW_TOKENS
 
     p = GenerationParams()
     assert p.max_new_tokens == MAX_NEW_TOKENS
@@ -35,29 +34,6 @@ def test_generation_params_defaults():
     assert p.top_k == 20
     assert p.repetition_penalty == 1.1
     assert p.trim_right_padding is False
-
-
-# ── compute_advantages ────────────────────────────────────────────────
-
-
-def test_compute_advantages_zero_mean():
-    """Advantages should sum to approximately zero."""
-    rewards = [1.0, 2.0, 3.0, 4.0, 5.0]
-    advs = compute_advantages(rewards)
-    assert len(advs) == 5
-    assert abs(sum(advs)) < 1e-6
-
-
-def test_compute_advantages_uniform_rewards():
-    """All-same rewards should produce all-zero advantages."""
-    rewards = [3.0, 3.0, 3.0]
-    advs = compute_advantages(rewards)
-    assert all(abs(a) < 1e-6 for a in advs)
-
-
-def test_compute_advantages_empty():
-    """Empty reward list returns empty."""
-    assert compute_advantages([]) == []
 
 
 # ── assemble_rollouts ─────────────────────────────────────────────────

@@ -333,7 +333,8 @@ class TestRetentionPolicy:
 
     def test_compute_keep_windows_includes_base(self, temp_cache: Path) -> None:
         """Test that _compute_keep_windows includes base checkpoints."""
-        from grail.shared.constants import DELTA_BASE_INTERVAL, WINDOW_LENGTH
+        from grail.protocol.constants import WINDOW_LENGTH
+        from grail.shared.config import DELTA_BASE_INTERVAL
 
         manager = CheckpointManager(
             cache_root=temp_cache,

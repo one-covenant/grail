@@ -12,7 +12,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.modeling_utils import PreTrainedModel
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
-from grail.shared.constants import (
+from grail.protocol.constants import (
     CHALLENGE_K,
     GRAIL_PROOF_VERSION,
 )

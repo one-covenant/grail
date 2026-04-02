@@ -129,21 +129,6 @@ def sample_window_data() -> dict[str, str | int]:
 
 
 @pytest.fixture
-def sample_miner_rollouts() -> list[dict[str, str | int | float]]:
-    """Sample rollouts for a miner."""
-    return [
-        {
-            "completion_digest": f"digest_{i}",
-            "hotkey": "miner_1",
-            "problem_id": i // 4,  # 4 rollouts per problem
-            "advantage": 0.1 * (i % 4 - 1.5),  # Sum to ~0 per group
-            "reward": 0.5 + 0.1 * i,
-        }
-        for i in range(20)
-    ]
-
-
-@pytest.fixture
 def sample_validation_metrics() -> dict[str, dict[str, int]]:
     """Sample validation metrics for multiple miners."""
     return {
@@ -309,12 +294,13 @@ def monkeypatch_trainer_constants(monkeypatch: pytest.MonkeyPatch) -> None:
     Shrinks batch size, max length, and gradient accumulation steps
     to speed up test execution while maintaining correctness.
     """
-    import grail.shared.constants as constants
+    import grail.protocol.constants as protocol_constants
+    import grail.shared.config as config
 
-    monkeypatch.setattr(constants, "TRAINER_MAX_LENGTH", 256)
-    monkeypatch.setattr(constants, "TRAINER_MICRO_BATCH_SIZE", 4)
-    monkeypatch.setattr(constants, "TRAINER_GRAD_ACCUM_STEPS", 2)
-    monkeypatch.setattr(constants, "ROLLOUTS_PER_PROBLEM", 4)
+    monkeypatch.setattr(config, "TRAINER_MAX_LENGTH", 256)
+    monkeypatch.setattr(config, "TRAINER_MICRO_BATCH_SIZE", 4)
+    monkeypatch.setattr(config, "TRAINER_GRAD_ACCUM_STEPS", 2)
+    monkeypatch.setattr(protocol_constants, "ROLLOUTS_PER_PROBLEM", 4)
 
 
 @pytest.fixture

@@ -23,50 +23,47 @@ from grail.trainer.algorithms.grpo import (
 )
 
 
+def _build_groups(with_logprobs: bool = False) -> list[GRPOGroup]:
+    """Build 2 GRPO groups with 4 rollouts each, advantages computed from rewards."""
+    from grail.trainer.advantages import compute_advantages
+
+    groups: list[GRPOGroup] = []
+
+    for group_idx in range(2):
+        rewards = [0.5 + 0.1 * (i % 2) + 0.05 * group_idx for i in range(4)]
+        advantages = compute_advantages(rewards, estimator="grpo")
+        rollouts = []
+
+        for rollout_idx in range(4):
+            tokens = list(range(1, 12))  # 11 tokens total
+            token_logprobs = None
+            if with_logprobs and rollout_idx % 2 == 0:
+                token_logprobs = [-0.5] * len(tokens)
+
+            rollout = GRPORollout(
+                tokens=tokens,
+                prompt_length=3,
+                completion_length=5,
+                advantage=advantages[rollout_idx],
+                reward=rewards[rollout_idx],
+                success=bool(rewards[rollout_idx] > 0.4),
+                nonce=rollout_idx,
+                rollout_group=f"g{group_idx}",
+                token_logprobs=token_logprobs,
+            )
+            rollouts.append(rollout)
+
+        groups.append(GRPOGroup(group_id=f"g{group_idx}", rollouts=rollouts))
+
+    return groups
+
+
 @pytest.fixture
 def synthetic_grpo_groups(
     monkeypatch_trainer_constants: None, seeded_torch_env: None
 ) -> list[GRPOGroup]:
-    """Create synthetic GRPO groups for testing.
-
-    Creates 2 groups with 4 rollouts each (respects monkeypatched ROLLOUTS_PER_PROBLEM).
-    """
-    groups: list[GRPOGroup] = []
-
-    for group_idx in range(2):
-        rollouts = []
-
-        for rollout_idx in range(4):
-            # Create rollout with varying tokens and lengths
-            tokens = list(range(1, 12))  # 11 tokens total
-            prompt_length = 3
-            completion_length = 5
-            advantage = 0.5 - 0.25 * rollout_idx  # Distributes around zero
-            reward = 0.5 + 0.1 * (rollout_idx % 2)
-
-            rollout = GRPORollout(
-                tokens=tokens,
-                prompt_length=prompt_length,
-                completion_length=completion_length,
-                advantage=float(advantage),
-                reward=float(reward),
-                success=bool(reward > 0.4),
-                nonce=rollout_idx,
-                rollout_group=f"g{group_idx}",
-                token_logprobs=None,  # Test without behavior logprobs first
-            )
-
-            rollouts.append(rollout)
-
-        # Adjust last rollout to ensure sum is near zero
-        if rollouts:
-            current_sum = sum(r.advantage for r in rollouts[:-1])
-            rollouts[-1].advantage = -current_sum
-
-        group = GRPOGroup(group_id=f"g{group_idx}", rollouts=rollouts)
-        groups.append(group)
-
-    return groups
+    """Create synthetic GRPO groups with advantages computed from rewards."""
+    return _build_groups(with_logprobs=False)
 
 
 @pytest.fixture
@@ -74,45 +71,7 @@ def synthetic_grpo_groups_with_behavior(
     monkeypatch_trainer_constants: None, seeded_torch_env: None
 ) -> list[GRPOGroup]:
     """Create GRPO groups with partial behavior logprobs."""
-    groups: list[GRPOGroup] = []
-
-    for group_idx in range(2):
-        rollouts = []
-
-        for rollout_idx in range(4):
-            tokens = list(range(1, 12))
-            prompt_length = 3
-            completion_length = 5
-            advantage = 0.5 - 0.25 * rollout_idx
-            reward = 0.5 + 0.1 * (rollout_idx % 2)
-
-            # Provide token_logprobs for even rollouts
-            token_logprobs = None
-            if rollout_idx % 2 == 0:
-                token_logprobs = [-0.5] * len(tokens)
-
-            rollout = GRPORollout(
-                tokens=tokens,
-                prompt_length=prompt_length,
-                completion_length=completion_length,
-                advantage=float(advantage),
-                reward=float(reward),
-                success=bool(reward > 0.4),
-                nonce=rollout_idx,
-                rollout_group=f"g{group_idx}",
-                token_logprobs=token_logprobs,
-            )
-
-            rollouts.append(rollout)
-
-        if rollouts:
-            current_sum = sum(r.advantage for r in rollouts[:-1])
-            rollouts[-1].advantage = -current_sum
-
-        group = GRPOGroup(group_id=f"g{group_idx}", rollouts=rollouts)
-        groups.append(group)
-
-    return groups
+    return _build_groups(with_logprobs=True)
 
 
 class TestGRPOEpochMetricsStructure:
@@ -260,7 +219,8 @@ class TestGRPOGroupValidation:
         self, synthetic_grpo_groups: list[GRPOGroup], monkeypatch_trainer_constants: None
     ) -> None:
         """Test synthetic groups are valid."""
-        from grail.shared.constants import ROLLOUTS_PER_PROBLEM, TRAINER_GROUP_ADV_SUM_TOL
+        from grail.protocol.constants import ROLLOUTS_PER_PROBLEM
+        from grail.shared.config import TRAINER_GROUP_ADV_SUM_TOL
 
         for group in synthetic_grpo_groups:
             assert group.is_valid(
@@ -268,25 +228,24 @@ class TestGRPOGroupValidation:
                 rollouts_per_problem=ROLLOUTS_PER_PROBLEM,
             )
 
-    def test_invalid_group_rejected(self) -> None:
-        """Test invalid group fails validation."""
+    def test_invalid_group_wrong_size_rejected(self) -> None:
+        """Test group with wrong rollout count fails validation."""
         rollouts = [
             GRPORollout(
                 tokens=[1, 2, 3],
                 prompt_length=1,
                 completion_length=2,
-                advantage=1.0,  # All positive
+                advantage=0.0,
                 reward=0.5,
                 success=True,
                 nonce=i,
                 rollout_group="bad",
             )
-            for i in range(4)
+            for i in range(3)  # Wrong count (expects 4)
         ]
 
         group = GRPOGroup(group_id="bad", rollouts=rollouts)
-        # Sum is 4.0, definitely invalid
-        assert not group.is_valid(advantage_tolerance=0.01)
+        assert not group.is_valid(advantage_tolerance=0.01, rollouts_per_problem=4)
 
 
 class TestTokenTruncation:
@@ -303,33 +262,32 @@ class TestTokenTruncation:
         run_grpo_epoch: Any,
     ) -> None:
         """Test training with sequences exceeding TRAINER_MAX_LENGTH."""
-        from grail.shared.constants import TRAINER_MAX_LENGTH
+        from grail.shared.config import TRAINER_MAX_LENGTH
 
         model, tokenizer = tiny_qwen_model_and_tokenizer
         ref_model = model
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
 
+        from grail.trainer.advantages import compute_advantages
+
         # Create rollout longer than TRAINER_MAX_LENGTH (256)
         long_tokens = list(range(1, TRAINER_MAX_LENGTH + 50))  # 305 tokens
+        rewards = [0.3, 0.5, 0.7, 0.4]
+        advantages = compute_advantages(rewards, estimator="grpo")
 
         rollouts = [
             GRPORollout(
                 tokens=long_tokens,
                 prompt_length=50,
                 completion_length=100,
-                advantage=float(0.5 - 0.25 * i),
-                reward=0.5,
+                advantage=advantages[i],
+                reward=rewards[i],
                 success=True,
                 nonce=i,
                 rollout_group="long",
             )
             for i in range(4)
         ]
-
-        # Balance advantages
-        if rollouts:
-            advantage_sum = sum(r.advantage for r in rollouts)
-            rollouts[-1].advantage -= advantage_sum
 
         group = GRPOGroup(group_id="long", rollouts=rollouts)
         groups = [group]
@@ -366,26 +324,26 @@ class TestBatchPadding:
         ref_model = model
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
 
+        from grail.trainer.advantages import compute_advantages
+
         # Create rollouts with different lengths
         lengths = [8, 12, 10, 9]  # Variable lengths
+        rewards = [0.3, 0.6, 0.5, 0.4]
+        advantages = compute_advantages(rewards, estimator="grpo")
+
         rollouts = [
             GRPORollout(
                 tokens=list(range(1, lengths[i] + 1)),
                 prompt_length=3,
                 completion_length=lengths[i] - 3,
-                advantage=float(0.5 - 0.25 * i),
-                reward=0.5,
+                advantage=advantages[i],
+                reward=rewards[i],
                 success=True,
                 nonce=i,
                 rollout_group="var",
             )
             for i in range(4)
         ]
-
-        # Balance advantages
-        if rollouts:
-            advantage_sum = sum(r.advantage for r in rollouts)
-            rollouts[-1].advantage -= advantage_sum
 
         group = GRPOGroup(group_id="var", rollouts=rollouts)
         groups = [group]

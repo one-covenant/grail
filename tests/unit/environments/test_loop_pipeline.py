@@ -1,15 +1,13 @@
 """Tests for loop.py pipeline-related changes.
 
 Covers: _hidden_dim bug fix, lazy client, strict_token_ids,
-generate_and_eval(), assemble_rollouts(), compute_advantages().
+generate_and_eval().
 """
 
 from __future__ import annotations
 
-from grail.environments.advantages import compute_advantages
 from grail.environments.backends import VLLMServerBackend
 from grail.environments.episode import AgentEnvLoop
-from grail.environments.rollout import GRPORollout, assemble_rollouts
 from tests.fixtures.fakes import DummyModel, DummyTokenizer, FakeBackend
 
 # ──────────────────────────────────────────────────────────────────────
@@ -118,62 +116,3 @@ def test_generate_and_eval_returns_batch_data() -> None:
         assert prompt_len > 0
         assert isinstance(reward, float)
         assert isinstance(info, dict)
-
-
-# ──────────────────────────────────────────────────────────────────────
-# 6.2 assemble_rollouts()
-# ──────────────────────────────────────────────────────────────────────
-
-
-def test_assemble_rollouts_basic() -> None:
-    """assemble_rollouts produces correct GRPORollout objects."""
-    batch_data = [
-        ([10, 20, 30, 40, 50], 2, 0.8, {"success": True, "assignment": [True, False]}),
-        ([10, 20, 30, 40], 2, 0.2, {"success": False}),
-    ]
-    proof_results = [
-        ([{"h": "a"}] * 5, [0.1, 0.2, 0.3], b"sig1", {"randomness": "abc"}, "v1"),
-        ([{"h": "b"}] * 4, [0.4, 0.5], b"sig2", {"randomness": "abc"}, "v1"),
-    ]
-
-    rollouts = assemble_rollouts(batch_data, proof_results)
-
-    assert len(rollouts) == 2
-
-    r0 = rollouts[0]
-    assert isinstance(r0, GRPORollout)
-    assert r0.tokens == [10, 20, 30, 40, 50]
-    assert r0.prompt_length == 2
-    assert r0.completion_length == 3
-    assert r0.reward == 0.8
-    assert r0.success is True
-    assert r0.advantage == 0.0  # Not yet computed
-
-    r1 = rollouts[1]
-    assert r1.prompt_length == 2
-    assert r1.completion_length == 2
-    assert r1.success is False
-
-
-# ──────────────────────────────────────────────────────────────────────
-# compute_advantages()
-# ──────────────────────────────────────────────────────────────────────
-
-
-def test_compute_advantages_zero_mean() -> None:
-    """Advantages should be zero-mean."""
-    advantages = compute_advantages([1.0, 2.0, 3.0, 4.0])
-    total = sum(advantages)
-    assert abs(total) < 1e-6
-
-
-def test_compute_advantages_empty() -> None:
-    """Empty rewards should return empty advantages."""
-    assert compute_advantages([]) == []
-
-
-def test_compute_advantages_single() -> None:
-    """Single reward should give advantage of 0."""
-    advantages = compute_advantages([5.0])
-    assert len(advantages) == 1
-    assert advantages[0] == 0.0
