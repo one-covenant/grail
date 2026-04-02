@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, cast
 
-from ...shared.constants import MAX_NEW_TOKENS
+from ...protocol.constants import MAX_NEW_TOKENS
 
 logger = logging.getLogger(__name__)
 

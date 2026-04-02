@@ -18,7 +18,7 @@ import math
 
 import torch
 
-from ..shared.constants import (
+from .constants import (
     PRIME_Q,
     PROOF_COEFF_RANGE,
     PROOF_NUM_BUCKETS,

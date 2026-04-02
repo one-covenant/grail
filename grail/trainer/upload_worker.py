@@ -25,12 +25,12 @@ import bittensor as bt
 import torch
 
 from grail.infrastructure.network import create_subtensor
-from grail.shared.constants import (
+from grail.protocol.constants import WINDOW_LENGTH
+from grail.shared.config import (
     DELTA_BASE_INTERVAL,
     DELTA_CHECKPOINT_ENABLED,
     UPLOAD_RETRY_BACKOFF_BASE,
     UPLOAD_RETRY_MAX_ATTEMPTS,
-    WINDOW_LENGTH,
 )
 from grail.shared.safetensors_utils import load_model_state_dict
 from grail.trainer.checkpoint_publisher import (

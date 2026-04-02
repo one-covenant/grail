@@ -46,19 +46,22 @@ from grail.infrastructure.sparse_codec import (
     encode_sparse_delta_v3,
     encode_sparse_delta_v3_1,
 )
+from grail.protocol.constants import (
+    CHECKPOINT_PREFIX,
+    CHECKPOINT_TYPE_DELTA,
+    CHECKPOINT_TYPE_FULL,
+    CURRENT_ENV_ID,
+    WINDOW_LENGTH,
+)
 from grail.shared.checkpoint_paths import (
     checkpoint_delta_prefix,
     checkpoint_full_prefix,
     checkpoint_ready_marker_key,
     checkpoint_window_prefix,
 )
-from grail.shared.constants import (
+from grail.shared.config import (
     BASE_CHECKPOINT_RETENTION_LIMIT,
-    CHECKPOINT_PREFIX,
-    CHECKPOINT_TYPE_DELTA,
-    CHECKPOINT_TYPE_FULL,
     CLEANUP_INTERVAL_UPLOADS,
-    CURRENT_ENV_ID,
     DELTA_CHECKPOINT_RETENTION_LIMIT,
     DELTA_CODEC_FORMAT,
     DELTA_THRESHOLD,
@@ -71,7 +74,6 @@ from grail.shared.constants import (
     TRAINER_MICRO_BATCH_SIZE,
     TRAINER_WARMUP_STEPS,
     UPLOAD_TIMEOUT,
-    WINDOW_LENGTH,
 )
 from grail.shared.safetensors_utils import load_model_state_dict
 

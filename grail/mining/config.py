@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from grail.shared.constants import INFERENCE_BACKEND
+from grail.shared.config import INFERENCE_BACKEND
 
 
 @dataclass

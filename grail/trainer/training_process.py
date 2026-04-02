@@ -40,7 +40,8 @@ from grail.infrastructure.checkpoint_consumer import (
 from grail.infrastructure.network import create_subtensor
 from grail.model.train_loading import ModelLoadSpec, load_training_artifacts
 from grail.monitoring import initialize_subprocess_monitoring
-from grail.shared.constants import NETUID, TOTAL_TRAINING_WINDOWS, WINDOW_LENGTH, is_kl_enabled
+from grail.protocol.constants import WINDOW_LENGTH
+from grail.shared.config import NETUID, TOTAL_TRAINING_WINDOWS, is_kl_enabled
 from grail.trainer.algorithms import GRPOAlgorithm, TrainingAlgorithm
 from grail.trainer.algorithms.grpo import load_grpo_groups
 from grail.trainer.config import TrainingConfig
@@ -906,7 +907,7 @@ class TrainingService:
 
             # Test mode: only use TRAINER_UID
             if self.test_mode:
-                from grail.shared.constants import TRAINER_UID
+                from grail.protocol.constants import TRAINER_UID
 
                 if TRAINER_UID < len(metagraph.hotkeys):
                     trainer_hotkey = metagraph.hotkeys[TRAINER_UID]
@@ -1326,7 +1327,7 @@ class TrainingService:
         Args:
             checkpoint_path: Path to the saved checkpoint directory
         """
-        from grail.shared.constants import HF_TOKEN, HF_USERNAME
+        from grail.shared.config import HF_TOKEN, HF_USERNAME
 
         if not HF_TOKEN or not HF_USERNAME:
             logger.warning(

@@ -74,13 +74,13 @@ from typing import Any
 import numpy as np
 
 from ..infrastructure.comms import get_file
-from ..shared.constants import (
+from ..protocol.constants import (
     GRAIL_BURN_UID,
     TRUST_LIST_KEY_PREFIX,
-    TRUST_LIST_MAX_STALENESS_WINDOWS,
     TRUST_LIST_VERSION,
     WINDOW_LENGTH,
 )
+from ..shared.config import TRUST_LIST_MAX_STALENESS_WINDOWS
 
 logger = logging.getLogger(__name__)
 

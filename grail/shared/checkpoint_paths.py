@@ -22,7 +22,7 @@ Directory Structure:
 
 from __future__ import annotations
 
-from grail.shared.constants import (
+from grail.protocol.constants import (
     CHECKPOINT_PREFIX,
     CHECKPOINT_SUBDIR_DELTA,
     CHECKPOINT_SUBDIR_FULL,

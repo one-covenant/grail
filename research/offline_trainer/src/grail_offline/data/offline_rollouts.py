@@ -14,7 +14,8 @@ from grail.environments.gsm8k_env import GSM8KEnv
 from grail.environments.backends import SGLangServerBackend, VLLMServerBackend
 from grail.environments.episode import AgentEnvLoop
 from grail.environments.sat_env import SATEnv
-from grail.shared.constants import ROLLOUTS_PER_PROBLEM, TRAINER_MAX_LENGTH
+from grail.protocol.constants import ROLLOUTS_PER_PROBLEM
+from grail.shared.config import TRAINER_MAX_LENGTH
 from grail.trainer.algorithms.grpo import GRPOGroup, GRPORollout
 
 if TYPE_CHECKING:

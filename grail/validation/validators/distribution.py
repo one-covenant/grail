@@ -6,7 +6,7 @@ import logging
 
 import torch
 
-from ...shared.constants import (
+from ...protocol.constants import (
     SAMPLING_HIGH_P,
     SAMPLING_INITIAL_WINDOW_STEPS,
     SAMPLING_LOW_P,

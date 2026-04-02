@@ -8,10 +8,10 @@ For chained deltas, retention must keep entire chains from anchor (FULL) to tip.
 
 from __future__ import annotations
 
-from grail.shared.constants import (
+from grail.protocol.constants import WINDOW_LENGTH
+from grail.shared.config import (
     CHECKPOINT_MILESTONE_INTERVAL,
     DELTA_BASE_INTERVAL,
-    WINDOW_LENGTH,
 )
 
 SAFETY_MARGIN_WINDOWS = 5

@@ -22,7 +22,7 @@ from ..environments.factory import create_env
 from ..grail import derive_env_seed
 from ..infrastructure.comms import sink_window_inferences
 from ..infrastructure.drand import get_drand_beacon
-from ..shared.constants import (
+from ..protocol.constants import (
     BLOCK_TIME_SECONDS,
     CHALLENGE_K,
     LAYER_INDEX,
@@ -526,7 +526,7 @@ async def _pipelined_generation_loop(
     from ..environments.backends import GenerationParams
     from ..environments.factory import create_env
     from ..grail import derive_env_seed
-    from ..shared.constants import CHALLENGE_K, ROLLOUTS_PER_PROBLEM
+    from ..protocol.constants import CHALLENGE_K, ROLLOUTS_PER_PROBLEM
 
     # Update pipeline engine with checkpoint metadata's generation params.
     # Raises ValueError if required fields are missing.

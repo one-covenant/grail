@@ -115,7 +115,7 @@ def get_model(
     # On CUDA: use ATTN_IMPLEMENTATION (FA2), fail loudly if flash-attn is missing.
     # On CPU (tests, dev): use default SDPA (no proof computation happens on CPU).
     # GRAIL_TRAINER_ATTN_IMPL overrides for training only (e.g., "sdpa" for torch.compile).
-    from ..shared.constants import ATTN_IMPLEMENTATION
+    from ..protocol.constants import ATTN_IMPLEMENTATION
 
     attn_implementation = None
     trainer_attn_override = os.getenv("GRAIL_TRAINER_ATTN_IMPL")

@@ -25,7 +25,7 @@ import bittensor as bt
 
 from ..infrastructure.network import create_subtensor
 from ..logging_utils import dump_asyncio_stacks
-from ..shared.constants import WINDOW_LENGTH
+from ..protocol.constants import WINDOW_LENGTH
 from ..shared.subnet import get_own_uid_on_subnet
 
 logger = logging.getLogger(__name__)

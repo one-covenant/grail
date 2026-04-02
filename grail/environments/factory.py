@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ..shared.constants import CURRENT_ENV_ID
+from ..protocol.constants import CURRENT_ENV_ID
 from .core import MultiTurnEnv
 
 logger = logging.getLogger(__name__)

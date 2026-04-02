@@ -26,7 +26,7 @@ import logging
 import math
 from typing import Any
 
-from ...shared.constants import SIGMOID_DELTA, SIGMOID_KERNEL_WEIGHT, SPEEDUP_CLIP
+from ...protocol.constants import SIGMOID_DELTA, SIGMOID_KERNEL_WEIGHT, SPEEDUP_CLIP
 from ..core import Rubric
 
 logger = logging.getLogger(__name__)
