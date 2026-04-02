@@ -112,6 +112,46 @@ def save_full_checkpoint(
 
 
 # ---------------------------------------------------------------------------
+# 1b. DDP checkpoint (rank-0 only, no collective gather)
+# ---------------------------------------------------------------------------
+
+
+def save_ddp_checkpoint(
+    model: nn.Module,
+    tokenizer: Any,
+    path: str | Path,
+    rank: int,
+) -> None:
+    """Save checkpoint from a DDP-wrapped or bare model. Only rank 0 writes.
+
+    Unlike ``save_full_checkpoint``, this is NOT a collective operation.
+    Only rank 0 writes to disk. Callers are responsible for synchronization
+    (e.g., placing a ``dist.barrier()`` after this call if needed).
+
+    Args:
+        model: DDP-wrapped or bare model.
+        tokenizer: HuggingFace tokenizer (must support ``save_pretrained``).
+        path: Directory where the checkpoint will be written (rank 0 only).
+        rank: Current process rank.
+    """
+    if rank != 0:
+        return
+
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+
+    # DDP wraps the model; .module is the original model. Bare models
+    # (e.g., DILOCO) don't have .module.
+    unwrapped = model.module if hasattr(model, "module") else model
+    unwrapped.save_pretrained(  # type: ignore[attr-defined]
+        str(path),
+        safe_serialization=True,
+    )
+    tokenizer.save_pretrained(str(path))
+    logger.info("DDP/DILOCO checkpoint saved to %s", path)
+
+
+# ---------------------------------------------------------------------------
 # 2a. Async sharded DCP save
 # ---------------------------------------------------------------------------
 

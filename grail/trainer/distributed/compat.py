@@ -5,19 +5,25 @@
 unwrap_model) without pulling in Accelerate as a dependency.  When running
 under FSDP2, mixed-precision is handled by ``MixedPrecisionPolicy`` rather
 than autocast, so :meth:`autocast` returns a no-op context manager.
+
+Supports all distributed strategies (FSDP2, DDP, DILOCO) with minimal
+behavioral differences (only ``unwrap_model`` varies).
 """
 
 from __future__ import annotations
 
 import contextlib
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.distributed as dist
 
+if TYPE_CHECKING:
+    from grail.trainer.distributed.config import StrategyType
+
 
 class DistributedContext:
-    """Lightweight Accelerator-compatible context for FSDP2 training."""
+    """Lightweight Accelerator-compatible context for distributed training."""
 
     def __init__(
         self,
@@ -26,6 +32,7 @@ class DistributedContext:
         world_size: int = 1,
         dp_group: dist.ProcessGroup | None = None,
         dp_size: int = 1,
+        strategy: StrategyType = "fsdp2",
     ) -> None:
         if device is not None:
             self.device = device
@@ -39,6 +46,7 @@ class DistributedContext:
         self.world_size = world_size
         self._dp_group = dp_group
         self._dp_size = dp_size
+        self._strategy = strategy
 
     # ------------------------------------------------------------------
     # Accelerator-compatible API
@@ -80,7 +88,10 @@ class DistributedContext:
     def unwrap_model(self, model: Any) -> Any:
         """Return the underlying model, unwrapping any distributed wrapper.
 
-        FSDP2 does not require manual unwrapping for state-dict access, so
-        the model is returned as-is.
+        DDP wraps the model in ``DistributedDataParallel``, so the original
+        model lives at ``model.module``. FSDP2 and DILOCO do not require
+        unwrapping.
         """
+        if self._strategy == "ddp" and hasattr(model, "module"):
+            return model.module
         return model

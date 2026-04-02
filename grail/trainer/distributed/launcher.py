@@ -69,6 +69,25 @@ def _estimate_model_params_b(model_id: str) -> float:
     return 7.0
 
 
+def _resolve_tp_degree(dist_cfg: DistributedConfig, world_size: int) -> int:
+    """Determine TP degree based on strategy and config.
+
+    DDP and DILOCO do not support tensor parallelism (each GPU holds a full
+    model replica), so tp_degree is forced to 1. For FSDP2, use the configured
+    or auto-detected value.
+    """
+    if dist_cfg.strategy in ("ddp", "diloco"):
+        return 1
+
+    if dist_cfg.tp_degree > 0:
+        return dist_cfg.tp_degree
+
+    model_id = os.getenv("GRAIL_TRAIN_MODEL_ID", "")
+    params_b = _estimate_model_params_b(model_id) if model_id else 7.0
+    tp_degree, _ = DistributedConfig.auto_detect_parallelism(world_size, params_b)
+    return tp_degree
+
+
 def _configure_logging(rank: int, verbosity: int = 1) -> None:
     """Configure logging for the distributed worker process."""
     if rank == 0:
@@ -177,33 +196,52 @@ async def _run_training(
         logger.info("Rank 0: chain + replay buffer initialized")
 
     # ── Initial checkpoint bootstrap (orchestrated mode only) ──
-    if rank == 0 and ipc is not None and snapshot_manager is not None:
+    is_fsdp2 = service.dist_config.strategy == "fsdp2"
+    if ipc is not None:
         try:
-            from grail.trainer.distributed.checkpoint import save_full_checkpoint
+            if is_fsdp2:
+                # FSDP2: collective save (all ranks must participate)
+                from grail.trainer.distributed.checkpoint import save_full_checkpoint
 
-            initial_dir = snapshot_manager.cache_root / "snapshots" / f"initial.tmp.{os.getpid()}"
-            save_full_checkpoint(service.train_model, service.tokenizer, initial_dir, rank)
-            snapshot_metadata = {
-                "epoch": 0,
-                "timestamp": time.time(),
-                "status": "initial_upload",
-                "window": current_window,
-            }
-            snapshot_manager.adopt_snapshot_atomic(initial_dir, snapshot_metadata)
-            snapshot_path = snapshot_manager.get_latest_snapshot_path()
-            if snapshot_path:
-                ipc.queue_snapshot(str(snapshot_path), snapshot_metadata, current_window)
-            logger.info("Initial checkpoint saved and queued for upload")
+                if rank == 0 and snapshot_manager is not None:
+                    initial_dir = (
+                        snapshot_manager.cache_root / "snapshots" / f"initial.tmp.{os.getpid()}"
+                    )
+                    save_full_checkpoint(service.train_model, service.tokenizer, initial_dir, rank)
+                else:
+                    save_full_checkpoint(
+                        service.train_model, service.tokenizer, Path("/tmp/unused"), rank
+                    )
+            else:
+                # DDP/DILOCO: rank-0-only save (no collective, no barrier)
+                initial_dir = None
+                if rank == 0 and snapshot_manager is not None:
+                    from grail.trainer.distributed.checkpoint import save_ddp_checkpoint
+
+                    initial_dir = (
+                        snapshot_manager.cache_root / "snapshots" / f"initial.tmp.{os.getpid()}"
+                    )
+                    save_ddp_checkpoint(service.train_model, service.tokenizer, initial_dir, rank)
+
+            # Rank 0: adopt and queue snapshot for upload
+            if rank == 0 and snapshot_manager is not None:
+                initial_dir_path = (
+                    snapshot_manager.cache_root / "snapshots" / f"initial.tmp.{os.getpid()}"
+                )
+                snapshot_metadata = {
+                    "epoch": 0,
+                    "timestamp": time.time(),
+                    "status": "initial_upload",
+                    "window": current_window,
+                }
+                snapshot_manager.adopt_snapshot_atomic(initial_dir_path, snapshot_metadata)
+                snapshot_path = snapshot_manager.get_latest_snapshot_path()
+                if snapshot_path:
+                    ipc.queue_snapshot(str(snapshot_path), snapshot_metadata, current_window)
+                logger.info("Initial checkpoint saved and queued for upload")
         except Exception as exc:
-            logger.error("Initial checkpoint failed: %s", exc)
-    elif rank != 0 and ipc is not None:
-        # Non-rank-0 must participate in the collective save_full_checkpoint
-        try:
-            from grail.trainer.distributed.checkpoint import save_full_checkpoint
-
-            save_full_checkpoint(service.train_model, service.tokenizer, Path("/tmp/unused"), rank)
-        except Exception:
-            pass
+            if rank == 0:
+                logger.error("Initial checkpoint failed: %s", exc)
 
     def _should_stop() -> bool:
         if stop_event.is_set():
@@ -327,21 +365,49 @@ async def _run_training(
             )
             elapsed = time.time() - t0
 
-            # ── All ranks: save checkpoint (collective) ──
+            # ── Save checkpoint ──
             try:
-                from grail.trainer.distributed.checkpoint import save_full_checkpoint
+                strategy = service.dist_config.strategy
 
-                if rank == 0 and snapshot_manager is not None:
-                    # Rank 0: write to temp dir, then adopt atomically
-                    temp_ckpt = (
-                        snapshot_manager.cache_root / "snapshots" / f"epoch.tmp.{epoch_counter}"
-                    )
-                    save_full_checkpoint(
-                        service.train_model,
-                        service.tokenizer,
-                        temp_ckpt,
-                        rank,
-                    )
+                # DILOCO: only save model weights and update snapshots/latest
+                # after outer sync, when local params == global consensus.
+                # Between outer syncs each GPU has diverged params; overwriting
+                # snapshots/latest would expose non-consensus weights to the
+                # upload worker and eval resource loader.
+                diloco_synced = service._diloco_sync_happened  # noqa: SLF001
+                should_save_weights = strategy != "diloco" or diloco_synced
+
+                temp_ckpt: Path | None = None
+                if should_save_weights:
+                    if rank == 0 and snapshot_manager is not None:
+                        temp_ckpt = (
+                            snapshot_manager.cache_root / "snapshots" / f"epoch.tmp.{epoch_counter}"
+                        )
+
+                    if strategy == "fsdp2":
+                        # FSDP2: collective gather (all ranks must participate)
+                        from grail.trainer.distributed.checkpoint import save_full_checkpoint
+
+                        save_full_checkpoint(
+                            service.train_model,
+                            service.tokenizer,
+                            temp_ckpt or Path("/tmp/fsdp2_unused"),
+                            rank,
+                        )
+                    elif rank == 0 and temp_ckpt is not None:
+                        # DDP/DILOCO: rank 0 saves directly, no collective
+                        from grail.trainer.distributed.checkpoint import save_ddp_checkpoint
+
+                        save_ddp_checkpoint(
+                            service.train_model,
+                            service.tokenizer,
+                            temp_ckpt,
+                            rank,
+                        )
+
+                # Rank 0: adopt snapshot and queue for upload (only when
+                # weights were saved, i.e. not a DILOCO non-sync epoch)
+                if rank == 0 and snapshot_manager is not None and temp_ckpt is not None:
                     snapshot_metadata = {
                         "epoch": epoch_counter + 1,
                         "timestamp": time.time(),
@@ -361,25 +427,31 @@ async def _run_training(
                                 current_window,
                             )
 
+                    upload_status = "uploaded"
+                else:
+                    upload_status = "skipped (awaiting DILOCO sync)"
+
+                # Always save resume state for crash recovery (rank 0 only).
+                # This is cheap (optimizer + scheduler + DILOCO state, no model
+                # weights) and ensures we can restart from the last sync point.
+                if rank == 0:
+                    try:
+                        service._save_resume_checkpoint()  # noqa: SLF001
+                    except Exception as resume_exc:
+                        logger.warning("Resume checkpoint save failed: %s", resume_exc)
+
+                if rank == 0:
                     logger.info(
-                        "Epoch %d complete in %.1fs: loss=%.4f (snapshot queued)",
+                        "Epoch %d complete in %.1fs: loss=%.4f (%s)",
                         epoch_counter + 1,
                         elapsed,
                         metrics.get("loss_total", 0.0),
+                        upload_status,
                     )
-                else:
-                    # Non-rank-0: participate in collective gather only
-                    save_full_checkpoint(
-                        service.train_model,
-                        service.tokenizer,
-                        Path("/tmp/fsdp2_unused"),
-                        rank,
-                    )
+
             except Exception as exc:
                 if rank == 0:
                     logger.error("Checkpoint save failed: %s", exc)
-                    # Ensure non-rank-0 don't hang on barrier inside save_full_checkpoint
-                    # (save_full_checkpoint has its own barrier, so we only log here)
 
             # ── Rank 0: log epoch-level metrics to W&B ──
             if rank == 0 and monitor is not None and metrics:
@@ -438,28 +510,23 @@ def main() -> None:
 
         train_cfg = TrainingConfig()
         dist_cfg = DistributedConfig.from_env()
+        dist_cfg.validate(world_size)
 
-        # TP/DP degrees
-        if dist_cfg.tp_degree > 0:
-            tp_degree = dist_cfg.tp_degree
-        else:
-            model_id = os.getenv("GRAIL_TRAIN_MODEL_ID", "")
-            params_b = _estimate_model_params_b(model_id) if model_id else 7.0
-            tp_degree, _ = DistributedConfig.auto_detect_parallelism(world_size, params_b)
-
+        tp_degree = _resolve_tp_degree(dist_cfg, world_size)
         mesh = create_device_mesh(world_size, tp_degree)
         device = torch.device("cuda", local_rank)
 
         if rank == 0:
             logger.info(
-                "Distributed launcher: rank=%d, world=%d, tp=%d, dp=%d",
+                "Distributed launcher: strategy=%s, rank=%d, world=%d, tp=%d, dp=%d",
+                dist_cfg.strategy,
                 rank,
                 world_size,
                 tp_degree,
                 world_size // tp_degree,
             )
 
-        # FSDP2 safety: override DAPO variant (its inner-loop gather causes NCCL mismatch)
+        # Safety: override DAPO variant (its inner-loop gather causes NCCL mismatch)
         train_cfg.grpo_variant = "grpo"
 
         # Build service
@@ -594,17 +661,11 @@ def run_distributed_training_process(
             master_port,
         )
 
-        # TP/DP degrees
-        if dist_cfg.tp_degree > 0:
-            tp_degree = dist_cfg.tp_degree
-        else:
-            model_id = os.getenv("GRAIL_TRAIN_MODEL_ID", "")
-            params_b = _estimate_model_params_b(model_id) if model_id else 7.0
-            tp_degree, _ = DistributedConfig.auto_detect_parallelism(world_size, params_b)
-
+        dist_cfg.validate(world_size)
+        tp_degree = _resolve_tp_degree(dist_cfg, world_size)
         mesh = create_device_mesh(world_size, tp_degree)
 
-        # FSDP2 safety: override DAPO variant
+        # Safety: override DAPO variant (its inner-loop gather causes NCCL mismatch)
         train_cfg.grpo_variant = "grpo"
 
         model_id = os.getenv("GRAIL_TRAIN_MODEL_ID", "Qwen/Qwen3-8B")

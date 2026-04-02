@@ -348,6 +348,35 @@ def apply_fsdp2(
     )
 
 
+def apply_ddp(
+    model: nn.Module,
+    local_rank: int,
+) -> nn.Module:
+    """Wrap model with DistributedDataParallel.
+
+    DDP replicates the full model on each GPU and all-reduces gradients during
+    backward, overlapped with computation. Suitable when the model + optimizer
+    states fit in a single GPU's memory.
+
+    Args:
+        model: Model already moved to the correct CUDA device.
+        local_rank: Local GPU index for this process.
+
+    Returns:
+        The DDP-wrapped model.
+    """
+    from torch.nn.parallel import DistributedDataParallel as DDP
+
+    wrapped = DDP(
+        model,
+        device_ids=[local_rank],
+        static_graph=False,
+        gradient_as_bucket_view=True,
+    )
+    logger.info("DDP applied: device_ids=[%d], static_graph=False", local_rank)
+    return wrapped
+
+
 def setup_ref_model(model: nn.Module) -> None:
     """Freeze and FSDP2-wrap the reference model with CPU offloading.
 
