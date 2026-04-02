@@ -124,6 +124,9 @@ class SGLangServerBackend(TextGenBackend):
                             sampling_params["top_k"] = int(params.top_k)
                         if params.repetition_penalty is not None:
                             sampling_params["repetition_penalty"] = float(params.repetition_penalty)
+                        # Prevent sampling tokens below MIN_EOS_PROBABILITY threshold.
+                        # Aligns generation with protocol termination check.
+                        sampling_params["min_p"] = 0.03
                         if random_seed is not None:
                             sampling_params["sampling_seed"] = int(random_seed)
 
