@@ -24,11 +24,14 @@ else:
     try:
         import torch
     except ImportError:
-        torch = None  # type: ignore
+        torch = None  # type: ignore[assignment]
 
-from ..shared.constants import CHALLENGE_K, PRIME_Q, RNG_LABEL
+from .constants import CHALLENGE_K, PRIME_Q, RNG_LABEL
 
 logger = logging.getLogger(__name__)
+
+# Module-level cache for r_vec_from_randomness (avoids function-attribute monkey-patching)
+_r_vec_cache: dict[tuple[str, int], object] = {}
 
 
 def prf(label: bytes, *parts: bytes, out_bytes: int) -> bytes:
@@ -95,7 +98,7 @@ def prf(label: bytes, *parts: bytes, out_bytes: int) -> bytes:
     return bytes(output[:out_bytes])
 
 
-def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:  # type: ignore[misc]
+def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:
     """Generate random projection vector from drand randomness.
 
     Takes drand randomness (32 bytes hex) and expands it deterministically
@@ -119,10 +122,6 @@ def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:  # type:
     if torch is None:
         raise ImportError("torch is required for r_vec_from_randomness")
 
-    # Initialize cache on first call
-    if not hasattr(r_vec_from_randomness, "_cache"):
-        r_vec_from_randomness._cache = {}  # type: ignore[attr-defined]
-
     # Input validation
     if d_model <= 0:
         raise ValueError(f"d_model must be positive, got {d_model}")
@@ -140,13 +139,9 @@ def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:  # type:
 
     # Check cache
     cache_key = (clean_hex, d_model)
-    cache: dict[tuple[str, int], torch.Tensor] = cast(
-        dict[tuple[str, int], torch.Tensor],
-        getattr(r_vec_from_randomness, "_cache", {}),
-    )
-    if cache_key in cache:
+    if cache_key in _r_vec_cache:
         logger.debug(f"Using cached sketch vector for d_model={d_model}")
-        return cache[cache_key].clone()
+        return cast(torch.Tensor, _r_vec_cache[cache_key]).clone()
 
     # Generate random vector using PRF
     try:
@@ -171,9 +166,8 @@ def r_vec_from_randomness(rand_hex: str, d_model: int) -> torch.Tensor:  # type:
         tensor = torch.tensor(ints, dtype=torch.int32)
 
     # Cache the result (limit cache size to prevent memory issues)
-    if len(cache) < 100:
-        cache[cache_key] = tensor.clone()
-        r_vec_from_randomness._cache = cache  # type: ignore[attr-defined]
+    if len(_r_vec_cache) < 100:
+        _r_vec_cache[cache_key] = tensor.clone()
 
     logger.debug(
         f"Generated sketch vector with shape={tensor.shape}, first 4 values: {tensor[:4].tolist()}"
@@ -286,7 +280,7 @@ def indices_from_root_in_range(
     return [start + i for i in rel]
 
 
-def dot_mod_q(hidden: torch.Tensor, r_vec: torch.Tensor) -> int:  # type: ignore[misc]
+def dot_mod_q(hidden: torch.Tensor, r_vec: torch.Tensor) -> int:
     """Compute modular inner product of hidden state and random projection vector.
 
     Args:

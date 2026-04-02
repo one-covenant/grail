@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from .core import TaskSource
 
@@ -91,12 +91,13 @@ class GSM8KTaskSource(TaskSource):
         if self._split == "test":
             # Load original test set directly
             ds = load_dataset("openai/gsm8k", "main", split="test")
+            rows = cast(list[dict[str, Any]], list(ds))
             self._data = [
                 {
-                    "question": sample.get("question", ""),  # type: ignore[union-attr]
-                    "answer": sample.get("answer", ""),  # type: ignore[union-attr]
+                    "question": sample.get("question", ""),
+                    "answer": sample.get("answer", ""),
                 }
-                for sample in ds
+                for sample in rows
             ]
         else:
             # Load train split and create train/val split
@@ -112,12 +113,13 @@ class GSM8KTaskSource(TaskSource):
         from datasets import load_dataset
 
         ds = load_dataset("openai/gsm8k", "main", split="train")
+        rows = cast(list[dict[str, Any]], list(ds))
         all_samples = [
             {
-                "question": sample.get("question", ""),  # type: ignore[union-attr]
-                "answer": sample.get("answer", ""),  # type: ignore[union-attr]
+                "question": sample.get("question", ""),
+                "answer": sample.get("answer", ""),
             }
-            for sample in ds
+            for sample in rows
         ]
 
         # Deterministic shuffle for val sampling
@@ -268,19 +270,16 @@ class MATHTaskSource(TaskSource):
             all_samples: list[dict[str, Any]] = []
             for subset in _MATH_SUBSETS:
                 ds = load_dataset("EleutherAI/hendrycks_math", subset, split="test")
-                for sample in ds:
-                    answer = _extract_boxed_answer(
-                        sample.get("solution", "")  # type: ignore[union-attr]
-                    )
+                rows = cast(list[dict[str, Any]], list(ds))
+                for sample in rows:
+                    answer = _extract_boxed_answer(sample.get("solution", ""))
                     all_samples.append(
                         {
-                            "problem": sample.get("problem", ""),  # type: ignore[union-attr]
-                            "solution": sample.get("solution", ""),  # type: ignore[union-attr]
+                            "problem": sample.get("problem", ""),
+                            "solution": sample.get("solution", ""),
                             "answer": answer,
-                            "subject": sample.get("type", ""),  # type: ignore[union-attr]
-                            "level": self._parse_level(
-                                sample.get("level", "")  # type: ignore[union-attr]
-                            ),
+                            "subject": sample.get("type", ""),
+                            "level": self._parse_level(sample.get("level", "")),
                         }
                     )
             self._data = all_samples
@@ -307,19 +306,16 @@ class MATHTaskSource(TaskSource):
 
         for subset in _MATH_SUBSETS:
             ds = load_dataset("EleutherAI/hendrycks_math", subset, split="train")
-            for sample in ds:
-                answer = _extract_boxed_answer(
-                    sample.get("solution", "")  # type: ignore[union-attr]
-                )
+            rows = cast(list[dict[str, Any]], list(ds))
+            for sample in rows:
+                answer = _extract_boxed_answer(sample.get("solution", ""))
                 samples_by_subject[subset].append(
                     {
-                        "problem": sample.get("problem", ""),  # type: ignore[union-attr]
-                        "solution": sample.get("solution", ""),  # type: ignore[union-attr]
+                        "problem": sample.get("problem", ""),
+                        "solution": sample.get("solution", ""),
                         "answer": answer,
-                        "subject": sample.get("type", ""),  # type: ignore[union-attr]
-                        "level": self._parse_level(
-                            sample.get("level", "")  # type: ignore[union-attr]
-                        ),
+                        "subject": sample.get("type", ""),
+                        "level": self._parse_level(sample.get("level", "")),
                     }
                 )
 
@@ -743,18 +739,17 @@ class HumanEvalTaskSource(TaskSource):
 
         # HumanEval only has 'test' split
         ds = load_dataset("openai_humaneval", split="test")
+        rows = cast(list[dict[str, Any]], list(ds))
 
         samples = []
-        for sample in ds:
+        for sample in rows:
             samples.append(
                 {
-                    "task_id": str(sample.get("task_id", "")),  # type: ignore[union-attr]
-                    "prompt": str(sample.get("prompt", "")),  # type: ignore[union-attr]
-                    "canonical_solution": str(
-                        sample.get("canonical_solution", "")  # type: ignore[union-attr]
-                    ),
-                    "test": str(sample.get("test", "")),  # type: ignore[union-attr]
-                    "entry_point": str(sample.get("entry_point", "")),  # type: ignore[union-attr]
+                    "task_id": str(sample.get("task_id", "")),
+                    "prompt": str(sample.get("prompt", "")),
+                    "canonical_solution": str(sample.get("canonical_solution", "")),
+                    "test": str(sample.get("test", "")),
+                    "entry_point": str(sample.get("entry_point", "")),
                 }
             )
 

@@ -13,22 +13,25 @@ import math
 import random
 import time
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 import bittensor as bt
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..infrastructure.chain import GrailChainManager
+from ..infrastructure.checkpoint_consumer import CheckpointManager
 from ..infrastructure.comms import get_parquet_file
 from ..model.forward import forward_single_layer
-from ..shared.constants import (
+from ..protocol.constants import (
     FAILURE_LOOKBACK_WINDOWS,
     MAX_ROLLOUT_FILE_SIZE_BYTES,
     MIN_ROLLOUT_FILE_SIZE_BYTES,
     ROLLOUTS_PER_PROBLEM,
 )
 from ..shared.digest import compute_completion_digest
+from ..shared.schemas import BucketCredentials
 from .context import ValidationContext
 from .pipeline import ValidationPipeline, get_hard_check_keys, get_soft_check_keys
 from .types import MinerResults
@@ -40,10 +43,35 @@ logger = logging.getLogger(__name__)
 MAX_SAMPLES_PER_MINER_THRESHOLD = 20  # If <= this many rollouts, check all
 MAX_SAMPLES_PER_MINER = 64  # If > this many rollouts, sample GRPO groups
 SAMPLE_RATE = 0.10  # Fraction of GRPO groups to spot-check
-GRPO_ADV_SUM_TOLERANCE = 0.01  # Sum of advantages should be ~0
 REWARD_REL_TOL = 0.02  # Relative tolerance on reward bounds
 REWARD_ABS_TOL = 1e-6  # Absolute tolerance on reward bounds
 FAILURE_FLAG_KEY = "had_failure"
+
+
+@dataclass
+class _ValidationState:
+    """Mutable state accumulated during rollout validation."""
+
+    valid_count: int = 0
+    checked_count: int = 0
+    successful_rollouts: int = 0
+    unique_rollouts: set[str] = field(default_factory=set)
+    nonces_seen: set[Any] = field(default_factory=set)
+    rollout_groups: defaultdict[str, list[dict[str, Any]]] = field(
+        default_factory=lambda: defaultdict(list)
+    )
+    wallet_rollouts_buffer: list[dict[str, Any]] = field(default_factory=list)
+    soft_failures: defaultdict[str, int] = field(default_factory=lambda: defaultdict(int))
+    hard_failure: bool = False
+    soft_gate_triggered: bool = False
+    failure_reason: str | None = None
+    prompt_valid_count: int = 0
+    prompt_mismatch_count: int = 0
+    pr_total: int = 0
+    pr_invalid_sig: int = 0
+    pr_invalid_proof: int = 0
+    pr_processing_err: int = 0
+    distribution_samples: list[tuple[Any, Any, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -101,7 +129,7 @@ class MinerValidator:
         self,
         pipeline: ValidationPipeline,
         text_log_limit: int = 5,
-        checkpoint_manager: Any = None,
+        checkpoint_manager: CheckpointManager | None = None,
     ):
         """Initialize miner validator.
 
@@ -133,15 +161,15 @@ class MinerValidator:
         window: int,
         window_hash: str,
         window_rand: str,
-        validator_wallet: Any,  # bt.wallet
+        validator_wallet: bt.wallet,
         model: AutoModelForCausalLM,
         tokenizer: AutoTokenizer,
-        credentials: Any,
+        credentials: BucketCredentials,
         chain_manager: GrailChainManager,
         monitor: Any | None,
         uid_by_hotkey: dict[str, int],
         text_logs_emitted: dict[str, int],
-        heartbeat_callback: Any = None,
+        heartbeat_callback: Callable[[], None] | None = None,
         deadline_ts: float | None = None,
         download_times: list[float] | None = None,
     ) -> MinerResults:
@@ -281,13 +309,13 @@ class MinerValidator:
         )
 
         # Step 5: Check for early failures
-        if validation_state["hard_failure"] or validation_state["soft_gate_triggered"]:
+        if validation_state.hard_failure or validation_state.soft_gate_triggered:
             return await self._create_failure_result(
                 miner_hotkey, uid, total_inferences, validation_state, monitor
             )
 
         # Step 6: Validate GRPO groups
-        grpo_valid = self._validate_grpo_groups(validation_state["rollout_groups"])
+        grpo_valid = self._validate_grpo_groups(validation_state.rollout_groups)
 
         if not grpo_valid:
             return await self._create_grpo_failure_result(
@@ -313,7 +341,7 @@ class MinerValidator:
         self,
         miner_hotkey: str,
         window: int,
-        credentials: Any,
+        credentials: BucketCredentials,
         chain_manager: GrailChainManager,
         uid: int | None,
         deadline_ts: float | None,
@@ -355,11 +383,12 @@ class MinerValidator:
             return None
 
         if was_late:
-            late_by = upload_time - deadline_ts  # type: ignore[operator]  # TODO: handle None case
-            logger.warning(
-                f"🚫 LATE UPLOAD: uid={uid_str} uploaded at {upload_time:.0f}, "
-                f"deadline was {deadline_ts:.0f} (late by {late_by:.0f}s)"
-            )
+            if upload_time is not None and deadline_ts is not None:
+                late_by = upload_time - deadline_ts
+                logger.warning(
+                    f"🚫 LATE UPLOAD: uid={uid_str} uploaded at {upload_time:.0f}, "
+                    f"deadline was {deadline_ts:.0f} (late by {late_by:.0f}s)"
+                )
             return None
 
         if deadline_ts and upload_time:
@@ -562,7 +591,7 @@ class MinerValidator:
 
         import torch
 
-        from ..shared.constants import LAYER_INDEX, PROOF_BATCH_SIZE
+        from ..protocol.constants import LAYER_INDEX, PROOF_BATCH_SIZE
 
         # Collect valid token sequences
         token_seqs: list[list[int]] = []
@@ -698,8 +727,8 @@ class MinerValidator:
         """
         import torch
 
+        from ..protocol.constants import CHALLENGE_K
         from ..protocol.crypto import indices_from_root_in_range
-        from ..shared.constants import CHALLENGE_K
 
         result: dict[int, dict[int, float]] = {}
 
@@ -776,36 +805,11 @@ class MinerValidator:
         env_id: str | None = None,
         env_params: dict[str, Any] | None = None,
         generation_params: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Validate selected rollouts and accumulate state.
-
-        Returns:
-            Validation state dict with counters and flags
-        """
+    ) -> _ValidationState:
+        """Validate selected rollouts and accumulate state."""
         from ..protocol.signatures import derive_env_seed
 
-        # Initialize state
-        state = {
-            "valid_count": 0,
-            "checked_count": 0,
-            "successful_rollouts": 0,
-            "unique_rollouts": set(),
-            "nonces_seen": set(),
-            "rollout_groups": defaultdict(list),
-            "wallet_rollouts_buffer": [],
-            "soft_failures": defaultdict(int),
-            "hard_failure": False,
-            "soft_gate_triggered": False,
-            "failure_reason": None,
-            "prompt_valid_count": 0,
-            "prompt_mismatch_count": 0,
-            "pr_total": 0,
-            "pr_invalid_sig": 0,
-            "pr_invalid_proof": 0,
-            "pr_processing_err": 0,
-            # Distribution metrics accumulation
-            "distribution_samples": [],  # List of (metrics, initial_metrics, reasons) tuples
-        }
+        state = _ValidationState()
 
         total_planned_checks = len(indices_to_check)
         soft_fail_cutoffs = {
@@ -865,7 +869,7 @@ class MinerValidator:
                     pass
 
             inference = inferences[inference_idx]
-            state["checked_count"] += 1
+            state.checked_count += 1
 
             try:
                 # Check checkpoint_window matches (if validator has it)
@@ -885,7 +889,7 @@ class MinerValidator:
                             uid_str,
                             window,
                         )
-                        state["hard_failure"] = True
+                        state.hard_failure = True
                         break
 
                 # Basic consistency checks
@@ -896,8 +900,8 @@ class MinerValidator:
 
                 # Signature verification
                 if not self._verify_rollout_signature(inference):
-                    state["pr_invalid_sig"] += 1
-                    state["hard_failure"] = True
+                    state.pr_invalid_sig += 1
+                    state.hard_failure = True
                     logger.warning("Invalid signature; invalidating uid")
                     break
 
@@ -919,11 +923,11 @@ class MinerValidator:
                 # Track rollout group (skip if missing to avoid "None" grouping)
                 rollout_group_raw = inference.get("rollout_group")
                 if rollout_group_raw is None:
-                    state["hard_failure"] = True
+                    state.hard_failure = True
                     logger.warning("Missing rollout_group; invalidating uid")
                     break
                 rollout_group = str(rollout_group_raw)
-                state["rollout_groups"][rollout_group].append(inference)
+                state.rollout_groups[rollout_group].append(inference)
 
                 # Derive file-order group index for deterministic seed derivation
                 group_index = int(group_index_by_id.get(rollout_group, 0))
@@ -969,11 +973,11 @@ class MinerValidator:
                 else:
                     _, checks = self._pipeline.validate(ctx)
 
-                state["pr_total"] += 1
+                state.pr_total += 1
 
                 # Collect distribution metrics from context metadata
                 if "distribution_metrics" in ctx.metadata:
-                    state["distribution_samples"].append(
+                    state.distribution_samples.append(
                         (
                             ctx.metadata.get("distribution_metrics"),
                             ctx.metadata.get("distribution_initial_metrics"),
@@ -991,14 +995,14 @@ class MinerValidator:
                 self._track_prompt_validity(checks, state)
 
                 # Log success
-                state["valid_count"] += 1
+                state.valid_count += 1
 
                 # Log sample text (debug)
                 nonce = inference.get("nonce")
                 await self._log_sample_text(
                     commit_data,
                     rollout_meta,
-                    nonce,  # type: ignore[arg-type]  # TODO: handle None case
+                    nonce,
                     miner_hotkey,
                     uid_str,
                     window,
@@ -1009,18 +1013,18 @@ class MinerValidator:
 
                 # Track success and uniqueness
                 if rollout_meta.get("success", False):
-                    state["successful_rollouts"] += 1
+                    state.successful_rollouts += 1
 
-                state["unique_rollouts"] = self._update_unique_rollouts(
-                    state["unique_rollouts"], commit_data, rollout_meta
+                state.unique_rollouts = self._update_unique_rollouts(
+                    state.unique_rollouts, commit_data, rollout_meta
                 )
 
                 # Recompute per-rollout advantage check placeholder (group-based check later)
-                state["wallet_rollouts_buffer"].append(inference)
+                state.wallet_rollouts_buffer.append(inference)
 
             except Exception as e:
                 logger.debug(f"Error processing inference: {e}")
-                state["pr_processing_err"] += 1
+                state.pr_processing_err += 1
                 continue
 
         t_validation_elapsed = time.monotonic() - t_validation_start
@@ -1032,8 +1036,8 @@ class MinerValidator:
             t_logprob_elapsed,
             t_validation_elapsed,
             t_forward_elapsed + t_logprob_elapsed + t_validation_elapsed,
-            state["valid_count"],
-            state["checked_count"],
+            state.valid_count,
+            state.checked_count,
         )
 
         # Explicitly free GPU tensors from batched pre-computation.
@@ -1071,7 +1075,12 @@ class MinerValidator:
             return False
 
     def _check_inference_consistency(
-        self, inference: dict, window: int, window_hash: str, state: dict, miner_hotkey: str
+        self,
+        inference: dict,
+        window: int,
+        window_hash: str,
+        state: _ValidationState,
+        miner_hotkey: str,
     ) -> bool:
         """Check basic inference consistency (window, hash, nonce).
 
@@ -1079,28 +1088,28 @@ class MinerValidator:
             False if hard failure detected
         """
         if inference.get("window_start") != window:
-            state["hard_failure"] = True
+            state.hard_failure = True
             logger.warning("Window mismatch in inference; invalidating uid")
             return False
 
         if inference.get("block_hash") != window_hash:
-            state["hard_failure"] = True
+            state.hard_failure = True
             logger.warning("Block hash mismatch in inference; invalidating uid")
             return False
 
         nonce = inference.get("nonce")
-        if nonce in state["nonces_seen"]:
-            state["hard_failure"] = True
+        if nonce in state.nonces_seen:
+            state.hard_failure = True
             logger.warning(f"Duplicate nonce {nonce}; invalidating uid")
             return False
 
-        state["nonces_seen"].add(nonce)
+        state.nonces_seen.add(nonce)
         return True
 
     def _process_validation_results(
         self,
         checks: dict[str, bool],
-        state: dict,
+        state: _ValidationState,
         soft_fail_cutoffs: dict[str, int],
         total_planned_checks: int,
         uid_str: str,
@@ -1123,12 +1132,12 @@ class MinerValidator:
 
         # Handle hard failure
         if not hard_valid:
-            state["pr_invalid_proof"] += 1
-            state["hard_failure"] = True
+            state.pr_invalid_proof += 1
+            state.hard_failure = True
             failed_check = next(
                 (k for k in self._hard_check_keys if not checks.get(k, False)), None
             )
-            state["failure_reason"] = f"hard:{failed_check}" if failed_check else "hard:unknown"
+            state.failure_reason = f"hard:{failed_check}" if failed_check else "hard:unknown"
             if failed_check:
                 logger.warning(
                     f"Hard verification failed on check '{failed_check}'; invalidating uid"
@@ -1140,37 +1149,34 @@ class MinerValidator:
         # Handle soft failures (check each soft key independently)
         for key in self._soft_check_keys:
             if not checks.get(key, True):
-                state["soft_failures"][key] += 1
+                state.soft_failures[key] += 1
                 logger.debug(
                     f"CHECK_FAILURE type=soft failed_check={key} "
-                    f"count={state['soft_failures'][key]}/{total_planned_checks} "
+                    f"count={state.soft_failures[key]}/{total_planned_checks} "
                     f"threshold={soft_fail_cutoffs.get(key, 'N/A')}"
                 )
 
                 cutoff = soft_fail_cutoffs.get(key)
-                if cutoff is not None and state["soft_failures"][key] >= cutoff:
-                    state["soft_gate_triggered"] = True
-                    state["failure_reason"] = f"soft:{key}"
+                if cutoff is not None and state.soft_failures[key] >= cutoff:
+                    state.soft_gate_triggered = True
+                    state.failure_reason = f"soft:{key}"
                     logger.warning(
                         f"Soft-check threshold reached for '{key}' "
-                        f"({state['soft_failures'][key]}/{total_planned_checks}); "
+                        f"({state.soft_failures[key]}/{total_planned_checks}); "
                         f"invalidating uid"
                     )
                     return False
 
         return True
 
-    def _track_prompt_validity(self, checks: dict[str, bool], state: dict) -> None:
-        """Track prompt validity metrics (non-gating).
-
-        Uses environment-agnostic check names.
-        """
+    def _track_prompt_validity(self, checks: dict[str, bool], state: _ValidationState) -> None:
+        """Track prompt validity metrics (non-gating)."""
         try:
             if checks.get("tokens_valid") and checks.get("proof_valid"):
                 if checks.get("env_prompt_valid"):
-                    state["prompt_valid_count"] += 1
+                    state.prompt_valid_count += 1
                 else:
-                    state["prompt_mismatch_count"] += 1
+                    state.prompt_mismatch_count += 1
         except Exception:
             pass
 
@@ -1178,7 +1184,7 @@ class MinerValidator:
         self,
         commit_data: dict,
         rollout_meta: dict,
-        nonce: str,
+        nonce: str | None,
         miner_hotkey: str,
         uid_str: str,
         window: int,
@@ -1210,12 +1216,11 @@ class MinerValidator:
             text = tokenizer.decode(completion_ids, skip_special_tokens=False)  # type: ignore[attr-defined]  # transformers stub
 
             reward_val = rollout_meta.get("total_reward", float("nan"))
-            adv_val = rollout_meta.get("advantage", float("nan"))
             success_val = rollout_meta.get("success", False)
 
             logger.debug(
                 f"TEXT[validate] nonce={nonce} reward={float(reward_val):.3f} "
-                f"adv={float(adv_val):.3f} success={bool(success_val)} text={text}"
+                f"success={bool(success_val)} text={text}"
             )
 
             if monitor:
@@ -1226,7 +1231,6 @@ class MinerValidator:
                         "group": uid_str,
                         "nonce": nonce,
                         "reward": float(reward_val),
-                        "advantage": float(adv_val),
                         "success": bool(success_val),
                         "text": f"Problem:\n{problem_text}\n\nCompletion:\n{text}",
                     },
@@ -1263,7 +1267,7 @@ class MinerValidator:
         return unique_rollouts
 
     def _log_aggregated_distribution_metrics(
-        self, uid: int | None, miner_hotkey: str, validation_state: dict
+        self, uid: int | None, miner_hotkey: str, validation_state: _ValidationState
     ) -> None:
         """Compute and log aggregated distribution metrics to W&B for this miner.
 
@@ -1273,12 +1277,12 @@ class MinerValidator:
         - Overall suspicious rollout percentage
         """
         try:
-            import wandb  # type: ignore
+            import wandb
 
             if getattr(wandb, "run", None) is None:
                 return
 
-            samples = validation_state.get("distribution_samples", [])
+            samples = validation_state.distribution_samples
             if not samples:
                 return
 
@@ -1334,7 +1338,7 @@ class MinerValidator:
             logger.debug(f"Failed to log aggregated distribution metrics: {e}")
 
     def _validate_grpo_groups(self, rollout_groups: dict[str, list[dict]]) -> bool:
-        """Validate GRPO group constraints.
+        """Validate GRPO group constraints (structural only, advantages computed trainer-side).
 
         Returns:
             True if all groups valid, False otherwise
@@ -1347,42 +1351,6 @@ class MinerValidator:
                     f"expected {ROLLOUTS_PER_PROBLEM}; invalidating uid"
                 )
                 return False
-
-            # Check advantages sum to zero
-            advantages = []
-            rewards = []
-            for r in group_rollouts:
-                meta = r.get("commit", {}).get("rollout", {})
-                advantages.append(float(meta.get("advantage", 0.0)))
-                rewards.append(float(meta.get("total_reward", 0.0)))
-            advantage_sum = sum(advantages)
-
-            if abs(advantage_sum) > GRPO_ADV_SUM_TOLERANCE:
-                logger.warning(
-                    f"GRPO group {group_id} advantages don't sum to 0: {advantage_sum}; "
-                    "invalidating uid"
-                )
-                return False
-
-            # Optional: sanity check claimed advantages vs group rewards (zero-mean, normalized)
-            try:
-                n = len(rewards)
-                if n > 0:
-                    mean_r = sum(rewards) / n
-                    centered = [r - mean_r for r in rewards]
-                    # Avoid div-by-zero; compare shapes loosely
-                    denom = max(1e-8, (sum(x * x for x in centered) / n) ** 0.5)
-                    recomputed = [x / denom for x in centered]
-                    # Allow small tolerance per element
-                    for a, b in zip(advantages, recomputed, strict=False):
-                        if abs(a - b) > 1e-3:
-                            logger.warning(
-                                "GRPO group %s advantage mismatch vs recomputed", group_id
-                            )
-                            return False
-            except Exception:
-                # Don't hard fail on numerical issues; already checked zero-sum
-                pass
 
             # Check same base environment seed
             base_seeds = [r.get("commit", {}).get("env", {}).get("seed") for r in group_rollouts]
@@ -1464,7 +1432,7 @@ class MinerValidator:
         miner_hotkey: str,
         uid: int | None,
         total_inferences: int,
-        state: dict,
+        state: _ValidationState,
         monitor: Any | None,
     ) -> MinerResults:
         """Create result for validation failure."""
@@ -1472,7 +1440,7 @@ class MinerValidator:
 
         metrics = ValidationMetrics(
             valid_count=0,
-            checked_count=state["checked_count"],
+            checked_count=state.checked_count,
             total_inferences=total_inferences,
             estimated_valid=0,
             successful_rollouts=0,
@@ -1480,18 +1448,18 @@ class MinerValidator:
             unique_rollouts=0,
             estimated_unique=0,
             prompt_valid_count=0,
-            prompt_mismatch_count=state["prompt_mismatch_count"],
+            prompt_mismatch_count=state.prompt_mismatch_count,
             failure_flag=1,
-            failure_reason=state.get("failure_reason"),
+            failure_reason=state.failure_reason,
         )
 
-        total_soft_failures = sum(state["soft_failures"].values())
+        total_soft_failures = sum(state.soft_failures.values())
         logger.warning(
             "🚫 Rejected uid=%s hard=%s soft=%s/%s — miner banned for %d windows",
             uid_str,
-            state["hard_failure"],
-            dict(state["soft_failures"]),
-            state["checked_count"],
+            state.hard_failure,
+            dict(state.soft_failures),
+            state.checked_count,
             FAILURE_LOOKBACK_WINDOWS,
         )
 
@@ -1501,16 +1469,14 @@ class MinerValidator:
             try:
                 await monitor.log_gauge(f"{uid_str}/prompt_valid", 0.0)
                 await monitor.log_gauge(
-                    f"{uid_str}/prompt_mismatch", float(state["prompt_mismatch_count"])
+                    f"{uid_str}/prompt_mismatch", float(state.prompt_mismatch_count)
                 )
                 # Log soft failure metrics
                 await monitor.log_gauge(
                     f"{uid_str}/soft_failures_count", float(total_soft_failures)
                 )
                 soft_failure_ratio = (
-                    total_soft_failures / state["checked_count"]
-                    if state["checked_count"] > 0
-                    else 0.0
+                    total_soft_failures / state.checked_count if state.checked_count > 0 else 0.0
                 )
                 await monitor.log_gauge(f"{uid_str}/soft_failures_ratio", soft_failure_ratio)
             except Exception:
@@ -1523,14 +1489,14 @@ class MinerValidator:
             metrics=metrics.to_dict(),
             rollouts=[],
             processed_counts=(
-                state["pr_total"],
-                state["pr_invalid_sig"],
-                state["pr_invalid_proof"],
-                state["pr_processing_err"],
+                state.pr_total,
+                state.pr_invalid_sig,
+                state.pr_invalid_proof,
+                state.pr_processing_err,
             ),
             digest_counter=None,
             total_inferences_in_file=total_inferences,
-            failure_reason=state.get("failure_reason"),
+            failure_reason=state.failure_reason,
         )
 
     async def _create_grpo_failure_result(
@@ -1538,7 +1504,7 @@ class MinerValidator:
         miner_hotkey: str,
         uid: int | None,
         total_inferences: int,
-        state: dict,
+        state: _ValidationState,
         monitor: Any | None,
     ) -> MinerResults:
         """Create result for GRPO validation failure."""
@@ -1551,16 +1517,15 @@ class MinerValidator:
         miner_hotkey: str,
         uid: int | None,
         total_inferences: int,
-        validation_state: dict,
+        validation_state: _ValidationState,
         inferences: list[dict],
         monitor: Any | None,
     ) -> MinerResults:
         """Create result for successful validation."""
-        # Extrapolate from sample
-        checked = validation_state["checked_count"]
-        valid = validation_state["valid_count"]
-        successful = validation_state["successful_rollouts"]
-        unique = len(validation_state["unique_rollouts"])
+        checked = validation_state.checked_count
+        valid = validation_state.valid_count
+        successful = validation_state.successful_rollouts
+        unique = len(validation_state.unique_rollouts)
 
         sample_pass_rate = (valid / checked) if checked > 0 else 0
         estimated_valid = int(total_inferences * sample_pass_rate)
@@ -1580,8 +1545,8 @@ class MinerValidator:
             estimated_successful=estimated_successful,
             unique_rollouts=unique,
             estimated_unique=estimated_unique,
-            prompt_valid_count=validation_state["prompt_valid_count"],
-            prompt_mismatch_count=validation_state["prompt_mismatch_count"],
+            prompt_valid_count=validation_state.prompt_valid_count,
+            prompt_mismatch_count=validation_state.prompt_mismatch_count,
             failure_flag=0,
         )
 
@@ -1596,17 +1561,17 @@ class MinerValidator:
             await monitor.log_gauge(f"{uid_str}/had_failure", 0.0)
             try:
                 await monitor.log_gauge(
-                    f"{uid_str}/prompt_valid", float(validation_state["prompt_valid_count"])
+                    f"{uid_str}/prompt_valid", float(validation_state.prompt_valid_count)
                 )
                 await monitor.log_gauge(
-                    f"{uid_str}/prompt_mismatch", float(validation_state["prompt_mismatch_count"])
+                    f"{uid_str}/prompt_mismatch", float(validation_state.prompt_mismatch_count)
                 )
                 # Log soft failure metrics (even for successful miners)
-                total_soft = sum(validation_state["soft_failures"].values())
+                total_soft = sum(validation_state.soft_failures.values())
                 await monitor.log_gauge(f"{uid_str}/soft_failures_count", float(total_soft))
                 soft_failure_ratio = (
-                    total_soft / validation_state["checked_count"]
-                    if validation_state["checked_count"] > 0
+                    total_soft / validation_state.checked_count
+                    if validation_state.checked_count > 0
                     else 0.0
                 )
                 await monitor.log_gauge(f"{uid_str}/soft_failures_ratio", soft_failure_ratio)
@@ -1627,12 +1592,12 @@ class MinerValidator:
             uid=uid,
             found_file=True,
             metrics=metrics.to_dict(),
-            rollouts=validation_state["wallet_rollouts_buffer"],
+            rollouts=validation_state.wallet_rollouts_buffer,
             processed_counts=(
-                validation_state["pr_total"],
-                validation_state["pr_invalid_sig"],
-                validation_state["pr_invalid_proof"],
-                validation_state["pr_processing_err"],
+                validation_state.pr_total,
+                validation_state.pr_invalid_sig,
+                validation_state.pr_invalid_proof,
+                validation_state.pr_processing_err,
             ),
             digest_counter=digest_counter,
             total_inferences_in_file=total_inferences,

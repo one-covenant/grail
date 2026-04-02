@@ -18,7 +18,7 @@ else:
     try:
         import bittensor as bt
     except ImportError:
-        bt = None  # type: ignore
+        bt = None  # type: ignore[assignment]
 
 from .tokens import hash_tokens
 
@@ -94,7 +94,7 @@ def sign_commit_binding(
     model_name: str,
     layer_index: int,
     commitments: list[dict],
-    wallet: bt.wallet,  # type: ignore[misc]
+    wallet: bt.wallet,
 ) -> bytes:
     """Sign the commit-binding message with wallet hotkey.
 
@@ -119,7 +119,7 @@ def sign_commit_binding(
         raise TypeError("Wallet must provide hotkey.sign()")
 
     msg = build_commit_binding(tokens, randomness_hex, model_name, layer_index, commitments)
-    return wallet.hotkey.sign(msg)  # type: ignore[union-attr]
+    return wallet.hotkey.sign(msg)  # type: ignore[no-any-return]
 
 
 def verify_commit_signature(commit: dict, wallet_address: str) -> bool:
@@ -154,7 +154,7 @@ def verify_commit_signature(commit: dict, wallet_address: str) -> bool:
         msg = build_commit_binding(tokens, randomness, model_name, layer_index, commitments)
 
         keypair = bt.Keypair(ss58_address=wallet_address)
-        return keypair.verify(data=msg, signature=sig)  # type: ignore[union-attr,return-value]
+        return keypair.verify(data=msg, signature=sig)  # type: ignore[no-any-return]
     except Exception as e:
         logger.debug(f"Signature verification failed: {e}")
         return False

@@ -34,8 +34,7 @@ from ..model.provider import (
     get_model,
     get_tokenizer,
 )
-from ..scoring.weights import WeightComputer
-from ..shared.constants import (
+from ..protocol.constants import (
     FAILURE_LOOKBACK_WINDOWS,
     MINER_SAMPLE_MAX,
     MINER_SAMPLE_MIN,
@@ -47,6 +46,7 @@ from ..shared.constants import (
     UNIQUE_ROLLOUTS_CAP,
     WINDOW_LENGTH,
 )
+from ..scoring.weights import WeightComputer
 from ..shared.window_utils import (
     WindowWaitTracker,
     calculate_next_window,
@@ -212,7 +212,7 @@ class ValidationService:
                 if self._chain_manager:
                     self._chain_manager.metagraph = meta
 
-                current_block = await self._subtensor.get_current_block()  # type: ignore[misc]  # bittensor async stub
+                current_block = await self._subtensor.get_current_block()  # type: ignore[misc]
                 # Validate the last fully completed window, not the in-progress one
                 target_window = self._compute_target_validation_window(current_block)
 
@@ -481,13 +481,13 @@ class ValidationService:
     def _log_tokenizer_info(self, checkpoint_path: Any) -> None:
         """Log tokenizer version information for debugging."""
         try:
-            import tokenizers  # type: ignore
+            import tokenizers  # type: ignore[import-untyped]
             import transformers
 
             logger.info(
                 "VALIDATOR TOKENIZER INFO: transformers=%s, tokenizers=%s, name_or_path=%s, checkpoint=%s",
                 transformers.__version__,
-                tokenizers.__version__,  # type: ignore[attr-defined]
+                getattr(tokenizers, "__version__", "unknown"),
                 getattr(self._tokenizer, "name_or_path", "unknown"),
                 str(checkpoint_path),
             )
@@ -516,7 +516,7 @@ class ValidationService:
         # Get window block hash and randomness
         if self._subtensor is None:
             raise RuntimeError("Subtensor not initialized")
-        target_window_hash = await self._subtensor.get_block_hash(target_window)  # type: ignore[misc]  # bittensor async stub
+        target_window_hash = await self._subtensor.get_block_hash(target_window)  # type: ignore[misc]
 
         # Use the CURRENT window's block hash (not the target window's) for
         # sampling randomness.  The current window starts at target_window +

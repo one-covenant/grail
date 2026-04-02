@@ -18,7 +18,7 @@ else:
     try:
         from transformers import PretrainedConfig
     except ImportError:
-        PretrainedConfig = Any  # type: ignore
+        PretrainedConfig = Any  # type: ignore[assignment]
 
 from ..shared.hf_compat import resolve_max_context_length, resolve_vocab_size
 
