@@ -136,6 +136,67 @@ class SnapshotManager:
                     logger.debug("Cleanup failed: %s", cleanup_exc)
             raise
 
+    def adopt_snapshot_atomic(
+        self,
+        source_dir: Path | str,
+        metadata: dict[str, Any],
+    ) -> None:
+        """Atomically adopt an already-written checkpoint directory as the latest snapshot.
+
+        Unlike ``save_snapshot_atomic``, this does NOT call ``model.save_pretrained()``.
+        It writes only metadata into *source_dir*, then performs the same atomic rename
+        dance so that ``snapshots/latest/`` always points to a complete snapshot.
+
+        Use this when FSDP2's ``save_full_checkpoint()`` has already written model
+        weights to *source_dir* and we just need the snapshot manager to adopt it.
+
+        Args:
+            source_dir: Directory containing model weights (already written).
+            metadata: Snapshot metadata (epoch, timestamp, metrics, etc.).
+        """
+        source_dir = Path(source_dir)
+        target_dir = self.snapshot_dir / "latest"
+
+        if not source_dir.exists():
+            raise FileNotFoundError(f"Source directory does not exist: {source_dir}")
+
+        try:
+            # Write metadata into the source directory
+            metadata_path = source_dir / "snapshot_metadata.json"
+            with open(metadata_path, "w", encoding="utf-8") as f:
+                json.dump(metadata, f, indent=2)
+
+            # Fsync directory
+            try:
+                fd = os.open(source_dir, os.O_RDONLY)
+                os.fsync(fd)
+                os.close(fd)
+            except (OSError, AttributeError):
+                pass
+
+            # Atomic rename chain (same protocol as save_snapshot_atomic)
+            backup_dir = self.snapshot_dir / f"latest.backup.{uuid.uuid4().hex[:8]}"
+
+            if target_dir.exists():
+                target_dir.rename(backup_dir)
+
+            source_dir.rename(target_dir)
+
+            if backup_dir.exists():
+                try:
+                    shutil.rmtree(backup_dir)
+                except Exception as cleanup_exc:
+                    logger.warning("Failed to cleanup backup snapshot: %s", cleanup_exc)
+
+            # Set SNAPSHOT_READY marker
+            self._snapshot_ready_marker.touch()
+
+            logger.info("Snapshot adopted atomically from %s to %s", source_dir, target_dir)
+
+        except Exception as exc:
+            logger.error("Failed to adopt snapshot: %s", exc)
+            raise
+
     def check_snapshot_ready(self) -> bool:
         """Check if new snapshot is available for upload.
 
