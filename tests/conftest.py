@@ -19,8 +19,6 @@ import pytest
 if TYPE_CHECKING:
     from accelerate import Accelerator
 
-    from grail.validation.copycat_service import CopycatTracker
-
 from .proof_test_utils import generate_realistic_sat_prompt
 
 # ============================================================================
@@ -229,14 +227,6 @@ def sat_prompt_tokens(sat_prompts: list[str]) -> list[int]:
     return [tokenizer.encode(prompt, add_special_tokens=False) for prompt in sat_prompts]
 
 
-@pytest.fixture(scope="session")
-def tracker() -> CopycatTracker:
-    """CopycatTracker instance for testing."""
-    from grail.validation.copycat_service import CopycatTracker
-
-    return CopycatTracker()
-
-
 # ============================================================================
 # TRAINER-SPECIFIC FIXTURES
 # ============================================================================
@@ -278,26 +268,17 @@ def seeded_torch_env(monkeypatch: pytest.MonkeyPatch) -> None:
     torch.backends.cudnn.deterministic = True
 
 
-@pytest.fixture
-def tiny_qwen_model_and_tokenizer() -> tuple[Any, Any]:
-    """Load Qwen 1.5B model and tokenizer, ensure pad_token_id is set.
-
-    Uses a small model suitable for fast CPU-based testing. Lazy-loads
-    to avoid slow imports in unrelated tests.
-
-    Returns:
-        Tuple of (model, tokenizer)
-    """
+@pytest.fixture(scope="session")
+def _cached_qwen_model_and_tokenizer() -> tuple[Any, Any]:
+    """Session-scoped: load Qwen 1.5B model and tokenizer once for the entire run."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     model_name = "Qwen/Qwen2.5-1.5B"
 
-    # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    # Load model on CPU
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         trust_remote_code=True,
@@ -307,6 +288,21 @@ def tiny_qwen_model_and_tokenizer() -> tuple[Any, Any]:
     model.eval()
 
     return model, tokenizer
+
+
+@pytest.fixture
+def tiny_qwen_model_and_tokenizer(
+    _cached_qwen_model_and_tokenizer: tuple[Any, Any],
+) -> tuple[Any, Any]:
+    """Per-test: return a deep copy of the cached model so training tests can't leak state.
+
+    The tokenizer is immutable so it's shared directly. The model is deepcopied
+    (~0.5s) instead of reloaded from disk (~15s).
+    """
+    import copy
+
+    model, tokenizer = _cached_qwen_model_and_tokenizer
+    return copy.deepcopy(model), tokenizer
 
 
 @pytest.fixture

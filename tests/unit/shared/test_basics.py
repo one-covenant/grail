@@ -1,3 +1,5 @@
+"""Sanity checks for protocol constants and test environment defaults."""
+
 from __future__ import annotations
 
 from grail.monitoring.config import MonitoringConfig
@@ -9,7 +11,7 @@ from grail.protocol.constants import (
 
 
 def test_constants_are_reasonable() -> None:
-    # Basic sanity checks on shared constants used broadly across the system
+    """Protocol constants have valid types and ranges (catches accidental edits)."""
     assert isinstance(WINDOW_LENGTH, int) and WINDOW_LENGTH > 0
     assert isinstance(ROLLOUTS_PER_PROBLEM, int) and ROLLOUTS_PER_PROBLEM >= 1
     assert isinstance(SUPERLINEAR_EXPONENT, float)
@@ -17,9 +19,8 @@ def test_constants_are_reasonable() -> None:
 
 
 def test_monitoring_config_disabled_env() -> None:
-    # With defaults from conftest, monitoring should be effectively disabled
+    """Conftest autouse fixture disables monitoring; verify it takes effect."""
     assert MonitoringConfig.is_monitoring_enabled() is False
     cfg = MonitoringConfig.from_environment()
-    # Ensure the parsed configuration reflects disabled/NULL backend
     assert cfg["backend_type"] == "null"
     assert cfg["mode"] in {"disabled", "online", "offline"}
