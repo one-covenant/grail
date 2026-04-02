@@ -8,10 +8,9 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
+from ..protocol.constants import MAX_NEW_TOKENS
 from ..shared.chat_templates import apply_chat_template as _apply_chat_template
-from ..shared.constants import MAX_NEW_TOKENS
 from ..shared.hf_compat import resolve_hidden_size
-from .advantages import compute_advantages
 from .backends.base import GenerationParams, TextGenBackend
 from .backends.hf import HFBackend
 from .core import ChatMessage, MultiTurnEnv
@@ -24,9 +23,8 @@ logger = logging.getLogger(__name__)
 class AgentEnvLoop:
     """Stateful episode driver for step-only environments.
 
-    Handles prompt rendering, model generation with logprobs, GRAIL
-    commitments, and GRPO advantage computation. Supports single and
-    vectorized execution.
+    Handles prompt rendering, model generation with logprobs, and GRAIL
+    commitments. Supports single and vectorized execution.
     """
 
     def __init__(
@@ -71,13 +69,13 @@ class AgentEnvLoop:
 
         # Log tokenizer version information for debugging
         try:
-            import tokenizers  # type: ignore
+            import tokenizers  # type: ignore[import-untyped]
             import transformers
 
             logger.info(
                 "MINER TOKENIZER INFO: transformers=%s, tokenizers=%s, name_or_path=%s",
                 transformers.__version__,
-                tokenizers.__version__,  # type: ignore[attr-defined]  # tokenizers has __version__
+                getattr(tokenizers, "__version__", "unknown"),
                 getattr(tokenizer, "name_or_path", "unknown"),
             )
         except Exception as e:
@@ -93,8 +91,8 @@ class AgentEnvLoop:
     ) -> list[tuple[float, bool]]:
         """Lightweight batch generation for evaluation (no GRAIL proofs/commitments).
 
-        This is ~2x faster than run_grpo_group() as it skips expensive proof computation,
-        wallet signing, and advantage calculation.
+        This is ~2x faster than run_grpo_group() as it skips expensive proof computation
+        and wallet signing.
 
         Args:
             env_factory: Factory function to create environment instances
@@ -200,7 +198,7 @@ class AgentEnvLoop:
         batch_size: int = 1,
         seed: int | None = None,
     ) -> list[GRPORollout]:
-        """Generate multiple rollouts for GRPO with proofs and compute advantages."""
+        """Generate multiple rollouts for GRPO with proofs (advantages computed trainer-side)."""
         # Stage 1: Generate and evaluate
         batch_data = self.generate_and_eval(env_factory, count, batch_size=batch_size, seed=seed)
 
@@ -213,14 +211,7 @@ class AgentEnvLoop:
         )
 
         # Stage 3: Assemble rollouts
-        rollouts = assemble_rollouts(batch_data, proof_results)
-
-        # Stage 4: Compute advantages
-        advantages = self._compute_advantages([r.reward for r in rollouts])
-        for rollout, adv in zip(rollouts, advantages, strict=False):
-            rollout.advantage = float(adv)
-
-        return rollouts
+        return assemble_rollouts(batch_data, proof_results)
 
     # ---------------------- Shared eval helpers ----------------------
     def render_prompt_ids_batch(self, messages_list: list[list[dict[str, str]]]) -> list[list[int]]:
@@ -353,7 +344,3 @@ class AgentEnvLoop:
             randomness_hex,
             wallet,
         )
-
-    def _compute_advantages(self, rewards: list[float]) -> list[float]:
-        """GRPO advantages: zero-mean within group, variance-normalized."""
-        return compute_advantages(rewards)

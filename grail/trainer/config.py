@@ -8,14 +8,15 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
-from grail.shared import constants
+from grail.protocol import constants as protocol
+from grail.shared import config as constants
 
 
 @dataclass
 class TrainingConfig:
     """Hyperparameters and settings for training.
 
-    Values default from `grail.shared.constants` to avoid duplication.
+    Values default from `grail.shared.config` to avoid duplication.
     """
 
     # Basic training parameters
@@ -52,6 +53,9 @@ class TrainingConfig:
     # GRPO variant selection
     grpo_variant: str = constants.GRPO_VARIANT
 
+    # Advantage estimation strategy (orthogonal to grpo_variant)
+    adv_estimator: str = constants.ADV_ESTIMATOR
+
     # Gradient checkpointing for memory efficiency
     use_gradient_checkpointing: bool = constants.TRAINER_USE_GRADIENT_CHECKPOINTING
 
@@ -66,7 +70,7 @@ class TrainingConfig:
     logit_chunk_size: int = constants.TRAINER_LOGIT_CHUNK_SIZE
 
     # Data loading
-    rollouts_per_problem: int = constants.ROLLOUTS_PER_PROBLEM
+    rollouts_per_problem: int = protocol.ROLLOUTS_PER_PROBLEM
 
     # Miner/data quality filters
     group_adv_sum_tolerance: float = constants.TRAINER_GROUP_ADV_SUM_TOL

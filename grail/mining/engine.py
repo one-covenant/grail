@@ -14,7 +14,6 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
-from ..environments.advantages import compute_advantages
 from ..environments.backends import GenerationParams
 from ..environments.core import ChatMessage, MultiTurnEnv
 from ..environments.rollout import GRPORollout, assemble_rollouts
@@ -78,7 +77,7 @@ class PipelinedMiningEngine:
         3. Submit proofs immediately (GPU 1, non-blocking — only needs token IDs)
         4. Step environments for kernel eval (GPU 2/3, runs in parallel with proofs)
         5. Collect proofs
-        6. Assemble rollouts + compute advantages
+        6. Assemble rollouts
 
         Args:
             env_factory: Factory for environment instances
@@ -89,7 +88,7 @@ class PipelinedMiningEngine:
             seed: Optional seed for environment reset
 
         Returns:
-            List of GRPORollout with advantages computed
+            List of GRPORollout (advantages computed trainer-side)
         """
         if batch_size is None:
             batch_size = count
@@ -259,14 +258,9 @@ class PipelinedMiningEngine:
             )
             return []
 
-        # Assemble rollouts
+        # Assemble rollouts (advantages computed trainer-side, not here)
         t0 = time.time()
         rollouts = assemble_rollouts(all_batch_data, all_proof_results)
-
-        # Compute advantages
-        advantages = compute_advantages([r.reward for r in rollouts])
-        for rollout, adv in zip(rollouts, advantages, strict=False):
-            rollout.advantage = float(adv)
         assemble_time = time.time() - t0
 
         group_time = time.time() - group_start
