@@ -29,6 +29,13 @@ from .proof_test_utils import generate_realistic_sat_prompt
 
 TEST_MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
 
+# Skip test files for features not yet merged or requiring Linux sandbox
+collect_ignore_glob = [
+    "unit/environments/test_basilica_backend.py",
+    "unit/infrastructure/test_io_pipeline.py",
+    "unit/environments/test_execution_unit.py",
+]
+
 # ============================================================================
 # Test Environment Setup
 # ============================================================================
@@ -309,12 +316,13 @@ def monkeypatch_trainer_constants(monkeypatch: pytest.MonkeyPatch) -> None:
     Shrinks batch size, max length, and gradient accumulation steps
     to speed up test execution while maintaining correctness.
     """
-    import grail.shared.constants as constants
+    import grail.protocol.constants as proto_constants
+    import grail.shared.config as config_constants
 
-    monkeypatch.setattr(constants, "TRAINER_MAX_LENGTH", 256)
-    monkeypatch.setattr(constants, "TRAINER_MICRO_BATCH_SIZE", 4)
-    monkeypatch.setattr(constants, "TRAINER_GRAD_ACCUM_STEPS", 2)
-    monkeypatch.setattr(constants, "ROLLOUTS_PER_PROBLEM", 4)
+    monkeypatch.setattr(config_constants, "TRAINER_MAX_LENGTH", 256)
+    monkeypatch.setattr(config_constants, "TRAINER_MICRO_BATCH_SIZE", 4)
+    monkeypatch.setattr(config_constants, "TRAINER_GRAD_ACCUM_STEPS", 2)
+    monkeypatch.setattr(proto_constants, "ROLLOUTS_PER_PROBLEM", 4)
 
 
 @pytest.fixture

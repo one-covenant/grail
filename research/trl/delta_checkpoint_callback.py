@@ -425,7 +425,7 @@ class DeltaCheckpointCallback(TrainerCallback):
 
         # Load existing metadata
         if metadata_path.exists():
-            with open(metadata_path, "r") as f:
+            with open(metadata_path) as f:
                 metadata = json.load(f)
         else:
             metadata = {

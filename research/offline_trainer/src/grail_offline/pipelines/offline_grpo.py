@@ -256,12 +256,12 @@ async def _run_evaluation(
 def _sync_kl_constant(kl_coef: float) -> None:
     """Patch TRAINER_KL_COEF constant to match config.
 
-    is_kl_enabled() in grail.shared.constants reads the module-level
+    is_kl_enabled() in grail.shared.config reads the module-level
     TRAINER_KL_COEF constant, which is evaluated once at import time from
     the env var. Setting the env var at runtime has no effect on the
     already-loaded constant. We must patch the constant directly.
     """
-    import grail.shared.constants as _constants
+    import grail.shared.config as _constants
 
     _constants.TRAINER_KL_COEF = kl_coef
     os.environ["GRAIL_TRAINER_KL_COEF"] = str(kl_coef)
@@ -493,7 +493,10 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
         scheduler = _create_lr_scheduler(optimizer, warmup_steps=warmup_iters)
         logger.info(
             "LR scheduler created (warmup + constant)",
-            extra={"warmup_iterations": warmup_iters, "total_iterations": int(cfg.train.iterations)},
+            extra={
+                "warmup_iterations": warmup_iters,
+                "total_iterations": int(cfg.train.iterations),
+            },
         )
 
         # Initialize GRPO algorithm with config

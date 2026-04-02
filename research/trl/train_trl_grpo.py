@@ -1859,6 +1859,7 @@ def main() -> None:
 
     # Set random seeds for reproducibility
     import random
+
     import numpy as np
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -1968,7 +1969,7 @@ def main() -> None:
     with profiler.track("model_loading"):
         if cfg.dtype == "float32":
             # Flash Attention 2 doesn't support fp32; use SDPA directly
-            logger.info(f"  Full FP32 mode: using SDPA attention (Flash Attention 2 requires bf16/fp16)")
+            logger.info("  Full FP32 mode: using SDPA attention (Flash Attention 2 requires bf16/fp16)")
             model = AutoModelForCausalLM.from_pretrained(
                 cfg.model_id,
                 torch_dtype=torch.float32,
@@ -2177,7 +2178,7 @@ def main() -> None:
     if cfg.delta_checkpoint_enabled:
         logger.info(f"  ✓ Delta checkpointing enabled (threshold=0.0, exact sparsity, dtype={cfg.delta_checkpoint_dtype})")
     else:
-        logger.info(f"  ✗ Delta checkpointing disabled (set cfg.delta_checkpoint_enabled=True to enable)")
+        logger.info("  ✗ Delta checkpointing disabled (set cfg.delta_checkpoint_enabled=True to enable)")
 
     # Initialize evaluation callback
     vllm_eval_callback = VLLMEvalCallback(

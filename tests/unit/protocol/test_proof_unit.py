@@ -6,15 +6,15 @@ Tests individual functions and properties of the GRAIL proof verification system
 import pytest
 import torch
 
+from grail.protocol.constants import (
+    PROOF_NUM_BUCKETS,
+    PROOF_SKETCH_TOLERANCE_BASE,
+)
 from grail.protocol.grail_verifier import (
     GRAILVerifier,
     adaptive_sketch_tolerance,
     log_magnitude_bucket,
     log_magnitude_bucket_vectorized,
-)
-from grail.shared.constants import (
-    PROOF_NUM_BUCKETS,
-    PROOF_SKETCH_TOLERANCE_BASE,
 )
 
 

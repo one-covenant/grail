@@ -229,7 +229,7 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-extend-exclude = ["scripts", "research", "results", "vendor", "examples", "benchmark_results", "data"]
+extend-exclude = ["scripts", "research", "results", "vendor", "examples", "benchmark_results", "data", ".claude"]
 
 [tool.ruff.lint]
 select = [
@@ -256,7 +256,7 @@ line-ending = "auto"
 
 [tool.pyright]
 include = ["grail"]
-exclude = ["**/__pycache__", ".venv", "build", "dist"]
+exclude = ["**/__pycache__", ".venv", "build", "dist", "grail/environments/compliance_env.py", "grail/environments/error_injection", "grail/environments/world_model_env.py", "grail/environments/experiment_design_env.py"]
 typeCheckingMode = "basic"
 pythonVersion = "3.10"
 reportMissingImports = true

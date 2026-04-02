@@ -875,7 +875,7 @@ class TestGRPOGPURealData:
         # Load configuration
         load_dotenv(override=True)
 
-        import grail.shared.constants as C
+        import grail.shared.config as C
 
         C = importlib.reload(C)
 

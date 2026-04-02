@@ -19,7 +19,6 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
 
 from lium import Config, ExecutorInfo, Lium
 
@@ -52,7 +51,7 @@ def _wait_for_ssh(host: str, port: int, timeout: int = 120, interval: int = 5) -
             sock.close()
             if result == 0:
                 return True
-        except (socket.error, OSError):
+        except OSError:
             pass
         time.sleep(interval)
     return False
@@ -108,12 +107,12 @@ class PodSpec:
     name: str
     gpu_type: str = "A100"
     gpu_count: int = 8
-    country: Optional[str] = None
-    volume_id: Optional[str] = None
-    ttl_hours: Optional[int] = None
+    country: str | None = None
+    volume_id: str | None = None
+    ttl_hours: int | None = None
     # Bandwidth requirements (in Mbps)
-    min_upload_mbps: Optional[float] = None
-    min_download_mbps: Optional[float] = None
+    min_upload_mbps: float | None = None
+    min_download_mbps: float | None = None
 
 
 class LiumInfra:
@@ -199,7 +198,7 @@ class LiumInfra:
             # if e.status not in ["available", "unknown"]:
             #     reasons.append(f"status={e.status}")
             if spec.country and e.location.get("country") != spec.country:
-                reasons.append(f"country mismatch")
+                reasons.append("country mismatch")
 
             # Bandwidth filters
             upload, download = self._get_bandwidth(e)
@@ -215,7 +214,7 @@ class LiumInfra:
                 candidates.append((e, upload, download))
 
         if not candidates:
-            print(f"   ❌ No matching executors. Rejection reasons:")
+            print("   ❌ No matching executors. Rejection reasons:")
             for e, reasons in rejected[:5]:  # Show first 5
                 print(f"      Executor {e.id[:8]}... ({e.gpu_count}x{e.gpu_type}): {', '.join(reasons)}")
             return None
@@ -318,7 +317,7 @@ class LiumInfra:
 
             executor = self._find_executor(spec)
             if not executor:
-                print(f"   ❌ No executor found matching requirements")
+                print("   ❌ No executor found matching requirements")
                 continue
 
             upload, download = self._get_bandwidth(executor)
@@ -332,7 +331,7 @@ class LiumInfra:
 
             pod = self.lium.wait_ready(result, timeout=300)
             if not pod:
-                print(f"   ❌ Pod creation failed or timed out")
+                print("   ❌ Pod creation failed or timed out")
                 continue
 
             # Get SSH connection info - try multiple sources
@@ -344,18 +343,18 @@ class LiumInfra:
                 ssh_host = executor.ip if hasattr(executor, "ip") else None
 
             if not ssh_host:
-                print(f"   ❌ Could not determine SSH host for pod")
+                print("   ❌ Could not determine SSH host for pod")
                 continue
 
             ssh_port = pod.ssh_port
             if not ssh_port:
-                print(f"   ❌ Could not determine SSH port for pod")
+                print("   ❌ Could not determine SSH port for pod")
                 continue
 
             # Wait for SSH port to be accessible (crucial - API reports ready before SSH)
             print(f"   ⏳ Waiting for SSH ({ssh_host}:{ssh_port})...")
             if not _wait_for_ssh(ssh_host, ssh_port, timeout=180, interval=5):
-                print(f"   ⚠️  SSH not accessible after 180s, continuing anyway...")
+                print("   ⚠️  SSH not accessible after 180s, continuing anyway...")
 
             print(f"   ✅ Ready: {ssh_host}:{ssh_port}")
             self.state["pods"][name] = {
@@ -469,7 +468,7 @@ class LiumInfra:
 
                 pod = self.lium.wait_ready(result, timeout=300)
                 if not pod:
-                    print(f"   ❌ Pod creation timed out")
+                    print("   ❌ Pod creation timed out")
                     exclude_ids.add(executor.id)
                     continue
 
@@ -478,7 +477,7 @@ class LiumInfra:
                 ssh_port = pod.ssh_port
 
                 if not ssh_host or not ssh_port:
-                    print(f"   ❌ Could not get SSH info")
+                    print("   ❌ Could not get SSH info")
                     self._cleanup_failed_pod(pod.id, spec.name)
                     exclude_ids.add(executor.id)
                     continue
@@ -492,9 +491,9 @@ class LiumInfra:
                     continue
 
                 # Verify SSH actually works
-                print(f"   🔍 Verifying SSH connection...")
+                print("   🔍 Verifying SSH connection...")
                 if not _verify_ssh_connection(ssh_host, ssh_port):
-                    print(f"   ❌ SSH verification failed")
+                    print("   ❌ SSH verification failed")
                     self._cleanup_failed_pod(pod.id, spec.name)
                     exclude_ids.add(executor.id)
                     continue
@@ -580,7 +579,7 @@ class LiumInfra:
             current_pods = {p.id: p for p in self.lium.ps()}
             if pod_id in current_pods:
                 self.lium.down(current_pods[pod_id])
-                print(f"   🧹 Cleaned up failed pod")
+                print("   🧹 Cleaned up failed pod")
         except Exception as e:
             logger.debug(f"Failed to cleanup pod {name}: {e}")
 
@@ -622,10 +621,10 @@ class LiumInfra:
             print(f"🔍 Verifying pod: {spec.name} ({ssh_host}:{ssh_port})")
 
             if _verify_ssh_connection(ssh_host, ssh_port):
-                print(f"   ✅ Healthy")
+                print("   ✅ Healthy")
                 healthy_pods[spec.name] = pod_info
             else:
-                print(f"   ❌ Unhealthy - replacing...")
+                print("   ❌ Unhealthy - replacing...")
                 exclude_ids = [pod_info.get("executor_id")] if pod_info.get("executor_id") else []
                 new_info = self.replace_pod(spec, exclude_executor_ids=exclude_ids, max_retries=max_retries)
                 if new_info:

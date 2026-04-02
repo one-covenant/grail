@@ -34,7 +34,7 @@ from grail.mining.config import PipelineConfig
 from grail.model.provider import clear_model_and_tokenizer, get_model, get_tokenizer
 from grail.monitoring import get_monitoring_manager
 from grail.monitoring.config import MonitoringConfig
-from grail.shared.constants import TRAINER_UID, WINDOW_LENGTH
+from grail.protocol.constants import TRAINER_UID, WINDOW_LENGTH
 from grail.shared.window_utils import (
     WindowWaitTracker,
     calculate_next_window,
@@ -299,7 +299,6 @@ class MinerNeuron(BaseNeuron):
                                         str(checkpoint_path),
                                         device=model_device,
                                         eval_mode=True,
-                                        use_flash_attention=False,
                                     )
                                     tokenizer = get_tokenizer(str(checkpoint_path))
 

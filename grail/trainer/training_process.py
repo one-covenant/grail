@@ -40,7 +40,8 @@ from grail.infrastructure.checkpoint_consumer import (
 from grail.infrastructure.network import create_subtensor
 from grail.model.train_loading import ModelLoadSpec, load_training_artifacts
 from grail.monitoring import initialize_subprocess_monitoring
-from grail.shared.constants import NETUID, TOTAL_TRAINING_WINDOWS, WINDOW_LENGTH, is_kl_enabled
+from grail.protocol.constants import WINDOW_LENGTH
+from grail.shared.config import NETUID, TOTAL_TRAINING_WINDOWS, is_kl_enabled
 from grail.trainer.algorithms import GRPOAlgorithm, TrainingAlgorithm
 from grail.trainer.algorithms.grpo import load_grpo_groups
 from grail.trainer.config import TrainingConfig
@@ -276,7 +277,36 @@ class TrainingService:
 
         # Enable gradient checkpointing on the raw model before accelerator wrapping (if configured)
         if self.config.use_gradient_checkpointing:
-            if hasattr(self.train_model, "gradient_checkpointing_enable"):
+            gc_freq = int(os.getenv("GRAIL_TRAINER_GC_EVERY_N_LAYERS", "1"))
+            if (
+                gc_freq > 1
+                and hasattr(self.train_model, "model")
+                and hasattr(self.train_model.model, "layers")
+            ):
+                # Selective checkpointing: only wrap every Nth layer
+                from torch.utils.checkpoint import checkpoint
+
+                num_layers = len(self.train_model.model.layers)
+                checkpointed = 0
+                for i, layer in enumerate(self.train_model.model.layers):
+                    if i % gc_freq == 0:
+                        original_forward = layer.forward
+
+                        def make_ckpt_forward(orig_fn):
+                            def ckpt_forward(*args, **kwargs):
+                                return checkpoint(orig_fn, *args, use_reentrant=False, **kwargs)
+
+                            return ckpt_forward
+
+                        layer.forward = make_ckpt_forward(original_forward)
+                        checkpointed += 1
+                logger.info(
+                    "Selective gradient checkpointing: %d/%d layers checkpointed (every %d)",
+                    checkpointed,
+                    num_layers,
+                    gc_freq,
+                )
+            elif hasattr(self.train_model, "gradient_checkpointing_enable"):
                 try:
                     self.train_model.gradient_checkpointing_enable()
                     logger.info(
@@ -290,6 +320,28 @@ class TrainingService:
             logger.info(
                 "Gradient checkpointing disabled (via GRAIL_TRAINER_USE_GRADIENT_CHECKPOINTING=0)"
             )
+
+        # Apply torch.compile to the base transformer (not the full CausalLM) so both
+        # chunked-logits (calls base_model directly) and non-chunked paths benefit.
+        if self.config.use_torch_compile:
+            prefix = getattr(self.train_model, "base_model_prefix", "")
+            base = getattr(self.train_model, prefix, None) if prefix else None
+            if base is not None:
+                try:
+                    compiled = torch.compile(base, mode="default")
+                    setattr(self.train_model, prefix, compiled)
+                    logger.info(
+                        "torch.compile applied to %s.%s (mode=default, fixed shapes via max_length padding)",
+                        type(self.train_model).__name__,
+                        prefix,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to apply torch.compile: %s", exc)
+            else:
+                logger.warning(
+                    "torch.compile requested but base model not found (prefix=%r)", prefix
+                )
+
         logger.info(
             "Training artifacts loaded (train=%s, ref=%s, ref_enabled=%s)",
             getattr(self.train_model, "name_or_path", "unknown"),
@@ -351,14 +403,32 @@ class TrainingService:
     def _create_optimizer(self) -> torch.optim.Optimizer:
         """Create AdamW optimizer with configured hyperparameters.
 
+        Uses fused implementation when available (PyTorch 2.x CUDA) for
+        single-kernel-per-parameter updates instead of multiple kernels.
+
         Returns:
             Configured optimizer instance
         """
+        use_fused = False
+        if torch.cuda.is_available():
+            try:
+                _probe = torch.optim.AdamW([torch.zeros(1, device="cuda")], fused=True)
+                del _probe
+                use_fused = True
+            except (RuntimeError, TypeError):
+                pass
+
+        if use_fused:
+            logger.info("Using fused AdamW optimizer")
+        else:
+            logger.info("Using standard AdamW optimizer (fused not available)")
+
         return torch.optim.AdamW(
             self.train_model.parameters(),
             lr=self.config.lr,
             betas=OPTIMIZER_BETAS,
             weight_decay=OPTIMIZER_WEIGHT_DECAY,
+            fused=use_fused,
         )
 
     def _create_scheduler(self) -> torch.optim.lr_scheduler.LRScheduler:
@@ -837,7 +907,7 @@ class TrainingService:
 
             # Test mode: only use TRAINER_UID
             if self.test_mode:
-                from grail.shared.constants import TRAINER_UID
+                from grail.protocol.constants import TRAINER_UID
 
                 if TRAINER_UID < len(metagraph.hotkeys):
                     trainer_hotkey = metagraph.hotkeys[TRAINER_UID]
@@ -1257,7 +1327,7 @@ class TrainingService:
         Args:
             checkpoint_path: Path to the saved checkpoint directory
         """
-        from grail.shared.constants import HF_TOKEN, HF_USERNAME
+        from grail.shared.config import HF_TOKEN, HF_USERNAME
 
         if not HF_TOKEN or not HF_USERNAME:
             logger.warning(

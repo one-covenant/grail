@@ -22,7 +22,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from ..infrastructure.chain import GrailChainManager
 from ..infrastructure.comms import get_parquet_file
 from ..model.forward import forward_single_layer
-from ..shared.constants import (
+from ..protocol.constants import (
     FAILURE_LOOKBACK_WINDOWS,
     MAX_ROLLOUT_FILE_SIZE_BYTES,
     MIN_ROLLOUT_FILE_SIZE_BYTES,
@@ -562,7 +562,7 @@ class MinerValidator:
 
         import torch
 
-        from ..shared.constants import LAYER_INDEX, PROOF_BATCH_SIZE
+        from ..protocol.constants import LAYER_INDEX, PROOF_BATCH_SIZE
 
         # Collect valid token sequences
         token_seqs: list[list[int]] = []
@@ -698,8 +698,8 @@ class MinerValidator:
         """
         import torch
 
+        from ..protocol.constants import CHALLENGE_K
         from ..protocol.crypto import indices_from_root_in_range
-        from ..shared.constants import CHALLENGE_K
 
         result: dict[int, dict[int, float]] = {}
 

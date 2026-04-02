@@ -45,11 +45,15 @@ def _sanitize_key(key: str) -> str:
 
 
 def _sanitize_value(v: Any) -> Any:
-    """Ensure value is JSON-serializable and finite."""
+    """Ensure value is JSON-serializable and finite.
+
+    Uses 6 significant digits (not 6 decimal places) so small values like
+    LR=2e-8 are preserved instead of rounding to 0.0.
+    """
     if isinstance(v, float):
         if math.isnan(v) or math.isinf(v):
             return None
-        return round(v, 6)
+        return float(f"{v:.6g}")
     if isinstance(v, dict):
         return {_sanitize_key(k): _sanitize_value(val) for k, val in v.items()}
     if isinstance(v, (list, tuple)):

@@ -10,7 +10,7 @@ import fnmatch
 import logging
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import boto3
 from boto3.exceptions import Boto3Error
@@ -165,7 +165,7 @@ class R2Uploader:
 
             except (ClientError, BotoCoreError, Boto3Error) as e:
                 error_code = type(e).__name__
-                error_message: Optional[str] = None
+                error_message: str | None = None
                 if isinstance(e, ClientError):
                     err = e.response.get("Error", {})
                     error_code = err.get("Code", "Unknown")
@@ -300,7 +300,7 @@ class R2Uploader:
             return True
         except (ClientError, BotoCoreError, Boto3Error) as e:
             error_code = type(e).__name__
-            error_message: Optional[str] = None
+            error_message: str | None = None
             if isinstance(e, ClientError):
                 err = e.response.get("Error", {})
                 error_code = err.get("Code", "Unknown")

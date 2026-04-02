@@ -8,14 +8,14 @@ import math
 import torch
 
 from ...environments.registry import get_adapter
-from ...protocol.crypto import indices_from_root_in_range
-from ...protocol.signatures import derive_env_seed
-from ...shared.constants import (
+from ...protocol.constants import (
     CHALLENGE_K,
     CURRENT_ENV_ID,
     REWARD_ABS_TOL,
     REWARD_REL_TOL,
 )
+from ...protocol.crypto import indices_from_root_in_range
+from ...protocol.signatures import derive_env_seed
 from ..base import Validator
 from ..context import ValidationContext
 

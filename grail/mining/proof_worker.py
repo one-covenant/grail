@@ -59,7 +59,6 @@ class ProofWorker:
             str(checkpoint_path),
             device=self._device,
             eval_mode=True,
-            use_flash_attention=self._config.proof_flash_attention,
         )
         self._tokenizer = get_tokenizer(str(checkpoint_path))
         assert self._model is not None, "get_model() returned None"

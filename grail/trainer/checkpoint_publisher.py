@@ -46,19 +46,22 @@ from grail.infrastructure.sparse_codec import (
     encode_sparse_delta_v3,
     encode_sparse_delta_v3_1,
 )
+from grail.protocol.constants import (
+    CHECKPOINT_PREFIX,
+    CHECKPOINT_TYPE_DELTA,
+    CHECKPOINT_TYPE_FULL,
+    CURRENT_ENV_ID,
+    WINDOW_LENGTH,
+)
 from grail.shared.checkpoint_paths import (
     checkpoint_delta_prefix,
     checkpoint_full_prefix,
     checkpoint_ready_marker_key,
     checkpoint_window_prefix,
 )
-from grail.shared.constants import (
+from grail.shared.config import (
     BASE_CHECKPOINT_RETENTION_LIMIT,
-    CHECKPOINT_PREFIX,
-    CHECKPOINT_TYPE_DELTA,
-    CHECKPOINT_TYPE_FULL,
     CLEANUP_INTERVAL_UPLOADS,
-    CURRENT_ENV_ID,
     DELTA_CHECKPOINT_RETENTION_LIMIT,
     DELTA_CODEC_FORMAT,
     DELTA_THRESHOLD,
@@ -71,7 +74,6 @@ from grail.shared.constants import (
     TRAINER_MICRO_BATCH_SIZE,
     TRAINER_WARMUP_STEPS,
     UPLOAD_TIMEOUT,
-    WINDOW_LENGTH,
 )
 from grail.shared.safetensors_utils import load_model_state_dict
 
@@ -367,38 +369,34 @@ def _parse_checkpoint_inventory(keys: list[str]) -> tuple[list[int], list[int], 
     return all_windows_sorted, full_windows_sorted, delta_windows_sorted
 
 
-async def _fetch_delta_anchor_window(
+async def _fetch_delta_chain_info(
     delta_window: int,
     credentials: Any,
-    anchor_cache: dict[int, int] | None = None,
-) -> int | None:
-    """Fetch the anchor_window a delta checkpoint depends on for recovery.
+    chain_cache: dict[int, tuple[int | None, int | None]] | None = None,
+) -> tuple[int | None, int | None]:
+    """Fetch (anchor_window, prev_window) for a delta checkpoint.
 
-    For chained deltas, each delta has:
+    Each delta has:
     - prev_window: immediate predecessor (for computing the delta)
     - anchor_window: nearest FULL checkpoint (for recovery/reconstruction)
 
-    This function retrieves the anchor_window, which is the FULL checkpoint
-    that must be retained for this delta to be usable.
+    Both are needed for chain-aware retention: anchor_window identifies the FULL
+    checkpoint to keep, prev_window enables walking the chain to find all
+    intermediate deltas that must also be kept.
 
     Args:
-        delta_window: The delta checkpoint window
-        credentials: R2 credentials
-        anchor_cache: Optional cache of {delta_window: anchor_window} mappings.
-            If provided and delta_window is in cache, returns cached value
-            without network call. If not in cache, fetches and caches the result.
+        delta_window: The delta checkpoint window.
+        credentials: R2 credentials.
+        chain_cache: Optional cache of {delta_window: (anchor, prev)} tuples.
+            Reused across cleanup calls to avoid redundant metadata downloads.
 
     Returns:
-        The anchor_window from metadata, or None if unavailable
+        (anchor_window, prev_window), either may be None if unavailable.
     """
-    # Check cache first to avoid redundant downloads
-    if anchor_cache is not None and delta_window in anchor_cache:
-        return anchor_cache[delta_window]
+    if chain_cache is not None and delta_window in chain_cache:
+        return chain_cache[delta_window]
 
     from grail.infrastructure.comms import download_file_chunked
-
-    # Delta checkpoints store their metadata under the DELTA sub-prefix so they can
-    # coexist with a FULL checkpoint at the same window.
     from grail.shared.checkpoint_paths import checkpoint_delta_metadata_key
 
     metadata_key = checkpoint_delta_metadata_key(delta_window)
@@ -411,39 +409,42 @@ async def _fetch_delta_anchor_window(
         if metadata_bytes:
             metadata = json.loads(metadata_bytes.decode("utf-8"))
             anchor = metadata.get("anchor_window")
-            # Cache the result if cache is provided
-            if anchor_cache is not None and anchor is not None:
-                anchor_cache[delta_window] = anchor
-            return anchor
+            prev = metadata.get("prev_window")
+            result = (anchor, prev)
+            if chain_cache is not None:
+                chain_cache[delta_window] = result
+            return result
     except Exception as exc:
-        logger.warning("Failed to read metadata for delta %d: %s", delta_window, exc)
-    return None
+        logger.warning("Failed to read chain info for delta %d: %s", delta_window, exc)
+    return (None, None)
 
 
 async def _compute_keep_windows(
     inventory: tuple[list[int], list[int], list[int]],
     credentials: Any,
-    anchor_cache: dict[int, int] | None = None,
+    chain_cache: dict[int, tuple[int | None, int | None]] | None = None,
 ) -> set[int]:
-    """Calculate which checkpoint windows to retain with DELTA dependency tracking.
+    """Calculate which checkpoint windows to retain with chain-aware dependency tracking.
 
-    For chained deltas, we need to keep entire chains from anchor (FULL) to tip.
-    This function combines two strategies:
+    Combines three retention strategies:
 
-    1. Chain-based retention: Keep current anchor + chain, previous anchor + chain
-       (from shared retention_utils)
-    2. Dependency-based retention: Ensure any retained DELTA has its anchor FULL
+    1. Arithmetic retention: Keep windows near computed anchor positions
+       (from shared retention_utils, serves as baseline).
+    2. Recency retention: Keep latest N FULL and M DELTA checkpoints.
+    3. Chain-walk retention: For each retained DELTA, walk its prev_window chain
+       back to its anchor, keeping every intermediate delta. This prevents
+       breaking chains when the trainer skips anchor windows.
 
     Args:
-        inventory: Parsed checkpoint inventory (all_windows, full_windows, delta_windows)
-        credentials: R2 credentials for querying checkpoint metadata
-        anchor_cache: Optional cache of {delta_window: anchor_window} mappings.
+        inventory: Parsed checkpoint inventory (all_windows, full_windows, delta_windows).
+        credentials: R2 credentials for querying checkpoint metadata.
+        chain_cache: Optional cache of {delta_window: (anchor, prev)} tuples.
             Reused across cleanup calls to avoid redundant metadata downloads.
 
     Returns:
-        Set of window numbers to retain
+        Set of window numbers to retain.
     """
-    from grail.shared.retention_utils import compute_retention_windows
+    from grail.shared.retention_utils import compute_chain_windows, compute_retention_windows
 
     all_windows, full_windows, delta_windows = inventory
 
@@ -459,53 +460,52 @@ async def _compute_keep_windows(
     # Get current window (newest in inventory)
     current_window = max(all_windows) if all_windows else 0
 
-    # Start with chain-based retention (keeps entire chains for reconstruction)
+    # Strategy 1: Arithmetic retention (baseline)
     keep = compute_retention_windows(current_window)
 
-    # Also keep latest N FULL checkpoints (anchors) as additional safety margin
+    # Strategy 2: Recency retention
     keep.update(full_windows[:BASE_CHECKPOINT_RETENTION_LIMIT])
-
-    # Also keep latest M DELTA checkpoints
     deltas_to_keep = delta_windows[:DELTA_CHECKPOINT_RETENTION_LIMIT]
     keep.update(deltas_to_keep)
 
-    # Ensure any retained DELTA has its anchor FULL kept
-    # Use cache to avoid redundant metadata downloads
-    anchor_windows = await asyncio.gather(
-        *(
-            _fetch_delta_anchor_window(delta_window, credentials, anchor_cache)
-            for delta_window in deltas_to_keep
-        )
+    # Strategy 3: Chain-walk retention
+    # Fetch chain info (anchor_window, prev_window) for all deltas in inventory
+    # so we can walk complete chains even for intermediates outside deltas_to_keep.
+    chain_infos = await asyncio.gather(
+        *(_fetch_delta_chain_info(dw, credentials, chain_cache) for dw in delta_windows)
     )
-    anchors_kept: set[int] = set()
-    fallback_anchors_kept: set[int] = set()
-    for delta_window, anchor_window in zip(deltas_to_keep, anchor_windows, strict=False):
-        if anchor_window is not None:
-            keep.add(int(anchor_window))
-            anchors_kept.add(int(anchor_window))
-            continue
 
-        # Fallback: keep nearest FULL checkpoint before this delta
-        for full_window in full_windows:
-            if full_window < delta_window:
-                keep.add(full_window)
-                fallback_anchors_kept.add(full_window)
+    chain_map: dict[int, int] = {}
+    anchor_map: dict[int, int] = {}
+    for dw, (anchor, prev) in zip(delta_windows, chain_infos, strict=False):
+        if anchor is not None:
+            anchor_map[dw] = int(anchor)
+        if prev is not None:
+            chain_map[dw] = int(prev)
+
+    # Walk chains for ALL retained deltas (recency + arithmetic), not just
+    # deltas_to_keep, to prevent breaking chains for arithmetically-retained deltas.
+    delta_set = set(delta_windows)
+    all_retained_deltas = keep & delta_set | set(deltas_to_keep)
+    chain_windows = compute_chain_windows(all_retained_deltas, chain_map, anchor_map)
+    keep.update(chain_windows)
+
+    # Fallback: if chain info unavailable, keep nearest FULL before the delta
+    full_set = set(full_windows)
+    for dw in deltas_to_keep:
+        if dw in anchor_map:
+            continue
+        for fw in full_windows:
+            if fw < dw:
+                keep.add(fw)
                 break
 
-    # Log anchor retention summary once (instead of per-delta)
-    if anchors_kept or fallback_anchors_kept:
-        logger.debug(
-            "Anchor retention: %d anchors kept for %d deltas (fallback: %d)",
-            len(anchors_kept),
-            len(deltas_to_keep),
-            len(fallback_anchors_kept),
-        )
-
     logger.info(
-        "Retention: keeping %d checkpoints (%d FULL, %d DELTA)",
+        "Retention: keeping %d checkpoints (%d FULL, %d DELTA, %d chain intermediates)",
         len(keep),
-        sum(1 for w in keep if w in full_windows),
-        sum(1 for w in keep if w in delta_windows),
+        sum(1 for w in keep if w in full_set),
+        sum(1 for w in keep if w in set(delta_windows)),
+        len(chain_windows - set(deltas_to_keep) - full_set),
     )
 
     return keep
@@ -535,10 +535,10 @@ class CheckpointPublisher:
         self.credentials = credentials
         self.wallet = wallet
 
-        # Optimization: Cache {delta_window: anchor_window} mappings to avoid
-        # redundant metadata downloads during cleanup. Anchor windows never change
-        # after a delta is uploaded.
-        self._anchor_cache: dict[int, int] = {}
+        # Optimization: Cache {delta_window: (anchor_window, prev_window)} mappings
+        # to avoid redundant metadata downloads during cleanup. These values never
+        # change after a delta is uploaded.
+        self._chain_cache: dict[int, tuple[int | None, int | None]] = {}
 
         # Optimization: Track upload count to run cleanup less frequently.
         # Cleanup runs every CLEANUP_INTERVAL_UPLOADS uploads instead of every upload.
@@ -614,29 +614,22 @@ class CheckpointPublisher:
         # Prune cache: remove entries for deltas that no longer exist in R2
         # This prevents unbounded cache growth
         delta_set = set(delta_windows)
-        stale_keys = [k for k in self._anchor_cache if k not in delta_set]
+        stale_keys = [k for k in self._chain_cache if k not in delta_set]
         for k in stale_keys:
-            del self._anchor_cache[k]
+            del self._chain_cache[k]
         if stale_keys:
-            logger.debug("Pruned %d stale entries from anchor cache", len(stale_keys))
+            logger.debug("Pruned %d stale entries from chain cache", len(stale_keys))
 
-        # Calculate windows to keep with proper dependency tracking
-        # Pass anchor cache to avoid redundant metadata downloads
-        # Count cache hits: how many deltas_to_keep are already in cache
-        deltas_to_keep = delta_windows[:DELTA_CHECKPOINT_RETENTION_LIMIT]
-        cache_hits = sum(1 for d in deltas_to_keep if d in self._anchor_cache)
-        cache_size_before = len(self._anchor_cache)
+        # Calculate windows to keep with chain-aware dependency tracking
+        cache_size_before = len(self._chain_cache)
 
-        keep_windows = await _compute_keep_windows(inventory, self.credentials, self._anchor_cache)
+        keep_windows = await _compute_keep_windows(inventory, self.credentials, self._chain_cache)
 
-        # Cache misses = new entries added (may undercount if some fetches failed)
-        cache_misses = len(self._anchor_cache) - cache_size_before
+        cache_misses = len(self._chain_cache) - cache_size_before
         logger.debug(
-            "Anchor cache: %d hits, %d misses, %d queried (total cached: %d)",
-            cache_hits,
+            "Chain cache: %d total, %d new fetches",
+            len(self._chain_cache),
             cache_misses,
-            len(deltas_to_keep),
-            len(self._anchor_cache),
         )
 
         if not keep_windows:
@@ -812,7 +805,7 @@ class CheckpointPublisher:
                             use_write=True,
                             upload_timeout=upload_timeout,
                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         logger.error(
                             "Upload TIMEOUT for %s (exceeds %s seconds)",
                             rel_path,
@@ -1012,7 +1005,7 @@ class CheckpointPublisher:
                             use_write=True,
                             upload_timeout=upload_timeout,
                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         logger.error(
                             "Upload TIMEOUT for %s (exceeds %s seconds)",
                             rel_path,
@@ -1303,7 +1296,7 @@ class CheckpointPublisher:
                             use_write=True,
                             upload_timeout=upload_timeout,
                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         logger.error(
                             "Delta upload TIMEOUT for %s (exceeds %s seconds)",
                             rel_path,

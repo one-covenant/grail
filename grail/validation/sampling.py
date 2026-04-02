@@ -13,7 +13,7 @@ import time
 from collections import deque
 from typing import Any
 
-from ..shared.constants import MIN_ROLLOUT_FILE_SIZE_BYTES
+from ..protocol.constants import MIN_ROLLOUT_FILE_SIZE_BYTES
 
 logger = logging.getLogger(__name__)
 

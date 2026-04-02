@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from grail.monitoring.config import MonitoringConfig
-from grail.shared.constants import (
+from grail.protocol.constants import (
     ROLLOUTS_PER_PROBLEM,
     SUPERLINEAR_EXPONENT,
     WINDOW_LENGTH,

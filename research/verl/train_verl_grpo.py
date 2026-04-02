@@ -47,6 +47,7 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", ".."))
 
 # Load environment from .env for WandB
 from dotenv import load_dotenv
+
 load_dotenv(os.path.join(_PROJECT_ROOT, ".env"), override=False)
 
 sys.path.insert(0, _SCRIPT_DIR)

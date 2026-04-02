@@ -21,7 +21,8 @@ from safetensors.torch import load_file, save_file
 from tqdm import tqdm  # type: ignore[import-untyped]
 from transformers import AutoModelForCausalLM
 
-from ..shared.constants import UPLOAD_TIMEOUT, WINDOW_LENGTH
+from ..protocol.constants import WINDOW_LENGTH
+from ..shared.config import UPLOAD_TIMEOUT
 from ..shared.schemas import Bucket, BucketCredentials
 
 logger = logging.getLogger(__name__)
@@ -1646,7 +1647,7 @@ async def upload_model_to_huggingface(
     Returns:
         True if upload succeeded, False otherwise
     """
-    from grail.shared.constants import HF_TOKEN, HF_USERNAME
+    from grail.shared.config import HF_TOKEN, HF_USERNAME
 
     if not HF_TOKEN:
         logger.error("HF_TOKEN not set. Cannot upload model to HuggingFace.")

@@ -8,8 +8,8 @@ from typing import Any
 import pytest
 import torch
 
+from grail.protocol.constants import CHALLENGE_K
 from grail.protocol.crypto import indices_from_root_in_range
-from grail.shared.constants import CHALLENGE_K
 from grail.validation.context import ValidationContext
 from grail.validation.miner_validator import MinerValidator
 from grail.validation.validators.environment import LogprobValidator

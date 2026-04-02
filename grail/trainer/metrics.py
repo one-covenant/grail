@@ -109,10 +109,10 @@ class KMetricsAggregator:
             return {}
 
         # Task-averaged accumulators
-        pass_unbiased_at_k: dict[int, float] = dict.fromkeys(self._report_ks, 0.0)  # type: ignore
-        pass_ordered_at_k: dict[int, float] = dict.fromkeys(self._report_ks, 0.0)  # type: ignore
-        mean_at_k: dict[int, float] = dict.fromkeys(self._report_ks, 0.0)  # type: ignore
-        best_at_k: dict[int, float] = dict.fromkeys(self._report_ks, 0.0)  # type: ignore
+        pass_unbiased_at_k: dict[int, float] = dict.fromkeys(self._report_ks, 0.0)
+        pass_ordered_at_k: dict[int, float] = dict.fromkeys(self._report_ks, 0.0)
+        mean_at_k: dict[int, float] = dict.fromkeys(self._report_ks, 0.0)
+        best_at_k: dict[int, float] = dict.fromkeys(self._report_ks, 0.0)
 
         num_tasks = len(self._by_task)
 

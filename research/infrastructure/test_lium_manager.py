@@ -6,7 +6,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from lium_manager import LiumInfra, PodSpec
+from lium_manager import LiumInfra
 
 # Setup logging
 logging.basicConfig(

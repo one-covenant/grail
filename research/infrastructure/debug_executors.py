@@ -2,7 +2,8 @@
 """Debug script to inspect available Lium executors."""
 
 import os
-from lium import Lium, Config
+
+from lium import Config, Lium
 
 # Initialize Lium
 api_key = os.getenv("LIUM_API_KEY")

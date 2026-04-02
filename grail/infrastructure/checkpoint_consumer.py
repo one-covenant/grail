@@ -50,6 +50,11 @@ from grail.infrastructure.sparse_codec import (
 )
 from grail.shared.safetensors_utils import load_model_state_dict
 
+from ..protocol.constants import (
+    CHECKPOINT_PREFIX,
+    CHECKPOINT_TYPE_DELTA,
+    CHECKPOINT_TYPE_FULL,
+)
 from ..shared.checkpoint_paths import (
     checkpoint_delta_metadata_key,
     checkpoint_delta_prefix,
@@ -58,13 +63,7 @@ from ..shared.checkpoint_paths import (
     checkpoint_window_prefix,
     parse_window_from_prefix,
 )
-from ..shared.constants import (
-    BASE_CHECKPOINT_RETENTION_LIMIT,
-    CHECKPOINT_PREFIX,
-    CHECKPOINT_TYPE_DELTA,
-    CHECKPOINT_TYPE_FULL,
-    GRAIL_CHECKPOINT_MOD10,
-)
+from ..shared.config import BASE_CHECKPOINT_RETENTION_LIMIT, GRAIL_CHECKPOINT_MOD10
 from . import comms
 from .delta_checkpoint import apply_sparse_delta, compute_weights_hash
 

@@ -74,13 +74,13 @@ from typing import Any
 import numpy as np
 
 from ..infrastructure.comms import get_file
-from ..shared.constants import (
+from ..protocol.constants import (
     GRAIL_BURN_UID,
     TRUST_LIST_KEY_PREFIX,
-    TRUST_LIST_MAX_STALENESS_WINDOWS,
     TRUST_LIST_VERSION,
     WINDOW_LENGTH,
 )
+from ..shared.config import TRUST_LIST_MAX_STALENESS_WINDOWS
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +110,7 @@ async def get_trusted_miner_hotkeys(
             _select_top_miners_by_incentive(metagraph, min_trusted_miners),
             timeout=timeout,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.error(
             "Timeout selecting trusted miners after %.1fs; skipping training",
             timeout,

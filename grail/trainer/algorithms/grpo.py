@@ -10,7 +10,6 @@ This module consolidates:
 from __future__ import annotations
 
 import logging
-import math
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -20,13 +19,14 @@ import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
 
-from grail.shared.constants import (
+from grail.protocol.constants import ROLLOUTS_PER_PROBLEM
+from grail.shared.config import (
     GRPO_RANKING_REWARD_WEIGHT,
     GRPO_RANKING_VARIANCE_WEIGHT,
     IMPORTANCE_SAMPLING_LEVEL,
-    ROLLOUTS_PER_PROBLEM,
     is_kl_enabled,
 )
+from grail.trainer.advantages import compute_advantages as compute_group_advantages
 from grail.trainer.dashboard_logger import data_logger, step_logger
 from grail.trainer.metrics import (
     KMetricsAggregator,
@@ -271,26 +271,229 @@ class GRPOGroup:
         return abs(advantage_sum) < advantage_tolerance
 
 
-def _has_advantage_variance(group: GRPOGroup) -> bool:
-    """Check if a GRPO group has variance in advantage values.
+def _chunked_lm_head_logprobs(
+    lm_head: torch.nn.Module,
+    shift_hidden: torch.Tensor,
+    shift_labels: torch.Tensor,
+    chunk_size: int,
+    return_entropy: bool,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Apply LM head in chunks and extract per-token logprobs (and optionally entropy).
 
-    Groups with zero advantage variance (all rollouts have identical advantage)
-    are filtered out as they provide no learning signal.
+    Processes the vocabulary projection in sequence-dimension chunks to avoid
+    materializing the full [batch, seq_len, vocab_size] logits tensor. Uses
+    flash-attn's Triton cross-entropy kernel when entropy is not needed (4.5x
+    faster), falling back to fp32 log_softmax + gather otherwise.
+
+    Args:
+        lm_head: The model's language model head (linear projection to vocab).
+        shift_hidden: Hidden states shifted for next-token prediction [B, S-1, D].
+        shift_labels: Token IDs shifted for next-token prediction [B, S-1].
+        chunk_size: Number of sequence positions per LM head chunk.
+        return_entropy: Whether to compute per-token entropy alongside logprobs.
+
+    Returns:
+        token_log_probs: [B, S-1] per-token log-probabilities.
+        entropy_per_token: [B, S-1] per-token entropy, or None if not requested.
+    """
+    batch_size, shifted_seq_len = shift_labels.shape
+    device = shift_labels.device
+
+    token_log_probs = torch.zeros(batch_size, shifted_seq_len, device=device)
+    entropy_per_token: torch.Tensor | None = None
+    if return_entropy:
+        entropy_per_token = torch.zeros(batch_size, shifted_seq_len, device=device)
+
+    _triton_ce = None
+    try:
+        from flash_attn.ops.triton.cross_entropy import (  # type: ignore[import-not-found]
+            cross_entropy_loss as _triton_ce,
+        )
+    except ImportError:
+        pass
+
+    for chunk_start in range(0, shifted_seq_len, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, shifted_seq_len)
+
+        chunk_hidden = shift_hidden[:, chunk_start:chunk_end, :]
+        chunk_logits = lm_head(chunk_hidden)
+        chunk_labels = shift_labels[:, chunk_start:chunk_end]
+
+        if _triton_ce is not None and not return_entropy:
+            # Fast path: Triton fused CE extracts logprobs without materializing
+            # the full [B, chunk, V] log_softmax tensor (~4.5x faster).
+            # Only available when entropy is not needed.
+            B_c, T_c, V_c = chunk_logits.shape
+            ce_loss, _ = _triton_ce(
+                chunk_logits.reshape(B_c * T_c, V_c),
+                chunk_labels.reshape(B_c * T_c),
+            )
+            token_log_probs[:, chunk_start:chunk_end] = (-ce_loss).reshape(B_c, T_c)
+            del ce_loss
+        else:
+            # Standard path: log_softmax reused for both logprobs and entropy
+            # in a single pass over the [B, chunk, V] tensor.
+            chunk_log_probs = F.log_softmax(chunk_logits.float(), dim=-1)
+            token_log_probs[:, chunk_start:chunk_end] = chunk_log_probs.gather(
+                2, chunk_labels.unsqueeze(-1)
+            ).squeeze(-1)
+            if return_entropy and entropy_per_token is not None:
+                entropy_per_token[:, chunk_start:chunk_end] = -(
+                    chunk_log_probs.exp() * chunk_log_probs
+                ).sum(dim=-1)
+            del chunk_log_probs
+
+        del chunk_logits
+
+    return token_log_probs, entropy_per_token
+
+
+def _partition_by_token_budget(
+    rollouts: list[tuple],
+    max_tokens: int,
+    max_length: int,
+) -> list[list[tuple]]:
+    """Partition rollouts into micro-batches targeting a token budget per batch.
+
+    Uses Greedy LPT (Longest Processing Time first): sort rollouts by length
+    descending, assign each to the micro-batch with the fewest total tokens.
+    This achieves <0.1% imbalance across micro-batches.
+
+    When a rollout would cause a micro-batch to exceed max_tokens, a new
+    micro-batch is created instead (bin-packing constraint).
+
+    Args:
+        rollouts: List of (GRPORollout, group_id) tuples.
+        max_tokens: Token budget per micro-batch.
+        max_length: Maximum sequence length (for truncation accounting).
+
+    Returns:
+        List of micro-batches, each a list of (rollout, group_id) tuples.
+    """
+    import heapq
+
+    if not rollouts:
+        return []
+
+    # Sort longest-first for Greedy LPT
+    indexed = [(min(len(r[0].tokens), max_length), i, r) for i, r in enumerate(rollouts)]
+    indexed.sort(key=lambda x: x[0], reverse=True)
+
+    # Min-heap: (total_tokens, batch_index, rollout_list)
+    batches: list[tuple[int, int, list[tuple]]] = []
+    batch_counter = 0
+
+    for seq_len, _, rollout in indexed:
+        # Try to fit in the lightest existing batch
+        if batches and batches[0][0] + seq_len <= max_tokens:
+            total, idx, batch_list = heapq.heappop(batches)
+            batch_list.append(rollout)
+            heapq.heappush(batches, (total + seq_len, idx, batch_list))
+        else:
+            # Start a new batch
+            heapq.heappush(batches, (seq_len, batch_counter, [rollout]))
+            batch_counter += 1
+
+    # Return in creation order for deterministic training
+    return [batch_list for _, _, batch_list in sorted(batches, key=lambda x: x[1])]
+
+
+@dataclass
+class _ModelArchInfo:
+    """Cached model architecture info for FLOPs computation."""
+
+    num_params: int
+    num_layers: int
+    num_heads: int
+    head_dim: int
+    linear_flops_per_token: float  # 6 * P (forward + backward)
+
+    @classmethod
+    def from_model(cls, model: Any) -> _ModelArchInfo | None:
+        """Extract architecture info from an HF model. Returns None on failure."""
+        try:
+            cfg = model.config
+            num_params = sum(p.numel() for p in model.parameters())
+            return cls(
+                num_params=num_params,
+                num_layers=cfg.num_hidden_layers,
+                num_heads=cfg.num_attention_heads,
+                head_dim=cfg.hidden_size // cfg.num_attention_heads,
+                linear_flops_per_token=6.0 * num_params,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+
+    def compute_mfu(
+        self,
+        total_tokens: int,
+        avg_seq_len: float,
+        step_time_sec: float,
+        gpu_peak_tflops: float,
+    ) -> dict[str, float]:
+        """Compute MFU for one optimizer step.
+
+        Uses the PaLM/Megatron convention: 6P per token for linear layers
+        (2P forward + 4P backward) plus 12 * H * D * L * seq_len per token
+        for attention (4*H*D*L forward, times 3 for fwd+bwd). GC recomputation
+        is excluded because MFU measures model efficiency, not implementation.
+
+        Args:
+            total_tokens: All tokens processed through the model (prompt + completion).
+            avg_seq_len: Average sequence length (for attention FLOPs).
+            step_time_sec: Wall-clock time for this optimizer step.
+            gpu_peak_tflops: GPU peak in TFLOPS (e.g., 2250 for B200 BF16).
+        """
+        if step_time_sec <= 0 or total_tokens <= 0:
+            return {}
+
+        linear_flops = self.linear_flops_per_token * total_tokens
+        attn_flops = (
+            12.0 * self.num_heads * self.head_dim * avg_seq_len * self.num_layers * total_tokens
+        )
+        total_flops = linear_flops + attn_flops
+        tflops = total_flops / step_time_sec / 1e12
+        mfu = tflops / gpu_peak_tflops if gpu_peak_tflops > 0 else 0.0
+
+        return {
+            "mfu": round(mfu, 4),
+            "tflops": round(tflops, 1),
+            "tokens_per_sec": round(total_tokens / step_time_sec, 1),
+        }
+
+
+def _has_reward_variance(group: GRPOGroup) -> bool:
+    """Check if a GRPO group has variance in reward values.
+
+    Groups with identical rewards across all rollouts produce zero-variance
+    advantages under any estimation strategy and provide no learning signal.
 
     Args:
         group: The GRPO group to check
 
     Returns:
-        True if the group has advantage variance, False if all advantages are identical
+        True if the group has reward variance, False if all rewards are identical
     """
     if not group.rollouts:
         return False
 
-    advantages = [r.advantage for r in group.rollouts]
-    first_advantage = advantages[0]
+    rewards = [r.reward for r in group.rollouts]
+    first_reward = rewards[0]
+    return any(rew != first_reward for rew in rewards)
 
-    # Check if all advantages are the same
-    return any(adv != first_advantage for adv in advantages)
+
+def _apply_advantages_to_groups(groups: list[GRPOGroup], estimator: str) -> None:
+    """Compute and assign advantages from rewards for each group.
+
+    Args:
+        groups: List of GRPO groups with rewards already populated.
+        estimator: Advantage estimation strategy name.
+    """
+    for group in groups:
+        rewards = [r.reward for r in group.rollouts]
+        advantages = compute_group_advantages(rewards, estimator=estimator)
+        for rollout, adv in zip(group.rollouts, advantages, strict=True):
+            rollout.advantage = adv
 
 
 def _is_valid_logprobs(logprobs: list[float] | None) -> bool:
@@ -638,7 +841,7 @@ def _filter_valid_groups(
     # Stage 2: DAPO filtering - remove uninformative groups (zero advantage variance)
     # Groups where all rollouts have identical rewards provide no learning signal
     groups_with_variance: list[GRPOGroup] = [
-        group for group in valid_groups if _has_advantage_variance(group)
+        group for group in valid_groups if _has_reward_variance(group)
     ]
     zero_variance_count: int = len(valid_groups) - len(groups_with_variance)
     if zero_variance_count > 0:
@@ -879,6 +1082,10 @@ async def load_grpo_groups(
         GRPOGroup(group_id, rollouts) for group_id, rollouts in grouped.items()
     ]
 
+    # Compute advantages from raw rewards (trainer-side, ignoring miner-provided values)
+    adv_estimator = config.adv_estimator if config else "grpo"
+    _apply_advantages_to_groups(groups, adv_estimator)
+
     # Compute training-set metrics BEFORE filtering invalid groups
     rollouts_per_problem = config.rollouts_per_problem if config else 5
     prefilter_metrics = _compute_training_metrics(
@@ -933,6 +1140,17 @@ def _unwrap_for_chunked_logits(
     except ImportError:
         pass
 
+    # Reject FSDP2 (fully_shard) — wrapped modules become FSDPModule subclasses.
+    # Calling model.model directly would bypass root-level all-gather/reduce-scatter
+    # hooks, desynchronizing NCCL collectives across ranks.
+    try:
+        from torch.distributed.fsdp import FSDPModule  # type: ignore[attr-defined]
+
+        if isinstance(model, FSDPModule):
+            return None
+    except ImportError:
+        pass
+
     # Standard HuggingFace CausalLM: model.model (base) + model.lm_head
     base_model_prefix = getattr(model, "base_model_prefix", "")
     base = getattr(model, base_model_prefix, None) if base_model_prefix else None
@@ -982,49 +1200,28 @@ def _compute_logprobs_chunked(
     )
     hidden_states = base_out.last_hidden_state  # [batch, seq_len, hidden_dim]
 
-    # Shift for next-token prediction: logits[t] predicts token[t+1]
-    shift_hidden = hidden_states[:, :-1, :]
-    shift_labels = input_ids[:, 1:]
+    # Skip prompt tokens for LM head: we only need logprobs for completion tokens.
+    # Due to the shift-by-1 (logits[t] predicts token[t+1]), we need hidden states
+    # starting at position (min_prompt_len - 1) to predict the first completion token.
+    # This avoids running the expensive LM head ([hidden_dim, vocab_size] matmul)
+    # on prompt tokens whose logprobs are never used.
+    min_prompt_len = min(prompt_lengths)
+    keep_from = max(0, min_prompt_len - 1)
 
-    batch_size, shifted_seq_len = shift_labels.shape
-    device = shift_labels.device
+    shift_hidden = hidden_states[:, keep_from:-1, :]
+    shift_labels = input_ids[:, keep_from + 1 :]
 
-    # Pre-allocate output tensors (no vocab dimension — small)
-    token_log_probs = torch.zeros(batch_size, shifted_seq_len, device=device)
-    entropy_per_token: torch.Tensor | None = None
-    if return_entropy:
-        entropy_per_token = torch.zeros(batch_size, shifted_seq_len, device=device)
+    token_log_probs, entropy_per_token = _chunked_lm_head_logprobs(
+        lm_head, shift_hidden, shift_labels, chunk_size, return_entropy
+    )
 
-    # Process lm_head in chunks to avoid materializing full vocab-sized tensors
-    for chunk_start in range(0, shifted_seq_len, chunk_size):
-        chunk_end = min(chunk_start + chunk_size, shifted_seq_len)
-
-        chunk_hidden = shift_hidden[:, chunk_start:chunk_end, :]
-        chunk_logits = lm_head(chunk_hidden)  # [batch, chunk_len, vocab_size]
-
-        # fp32 log_softmax for numerical precision (same as non-chunked path)
-        chunk_log_probs = F.log_softmax(chunk_logits.float(), dim=-1)
-
-        # Gather logprobs for the actual target tokens
-        chunk_labels = shift_labels[:, chunk_start:chunk_end]
-        token_log_probs[:, chunk_start:chunk_end] = chunk_log_probs.gather(
-            2, chunk_labels.unsqueeze(-1)
-        ).squeeze(-1)
-
-        # Entropy: -sum(p * log(p)) per position
-        if return_entropy and entropy_per_token is not None:
-            entropy_per_token[:, chunk_start:chunk_end] = -(
-                chunk_log_probs.exp() * chunk_log_probs
-            ).sum(dim=-1)
-
-        # Free the chunk's vocab-sized tensors immediately
-        del chunk_logits, chunk_log_probs
-
-    # --- Extract completion-token results (identical logic to non-chunked path) ---
+    # Extract completion-token results. Adjust prompt_lengths to account for
+    # the keep_from offset applied above.
+    adjusted_prompt_lengths = [p - keep_from for p in prompt_lengths]
     return _extract_completion_logprobs(
         token_log_probs,
         entropy_per_token,
-        prompt_lengths,
+        adjusted_prompt_lengths,
         completion_lengths,
         return_per_token,
         return_entropy,
@@ -1098,6 +1295,223 @@ def _extract_completion_logprobs(
         return seq_log_probs_tensor, per_token_padded, mean_entropies
 
     return seq_log_probs_tensor, per_token_padded
+
+
+def _extract_completion_logprobs_packed(
+    token_log_probs: torch.Tensor,
+    entropy_per_token: torch.Tensor | None,
+    seq_lengths: list[int],
+    prompt_lengths: list[int],
+    completion_lengths: list[int],
+    return_per_token: bool,
+    return_entropy: bool,
+) -> (
+    torch.Tensor
+    | tuple[torch.Tensor, torch.Tensor]
+    | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+):
+    """Extract per-sequence completion logprobs from packed (flat) token_log_probs.
+
+    The input tensor is [1, total_tokens-1] from a packed forward pass where all
+    sequences are concatenated. This function uses seq_lengths offsets to locate
+    each sequence's completion tokens and re-pads to [B, max_comp_len] for
+    compatibility with all downstream loss computation code.
+
+    The shift-by-1 indexing: logits[t] predicts token[t+1]. For sequence i's
+    k-th completion token at absolute position (offset + prompt_len + k),
+    the logprob is at position (offset + prompt_len + k - 1) in the shifted tensor.
+
+    Cross-boundary positions (last token of seq_i predicting first token of seq_{i+1})
+    are never accessed because extraction starts at offset + prompt_len - 1, which is
+    within the sequence.
+    """
+    device = token_log_probs.device
+    total_shifted = token_log_probs.shape[1]
+    num_seqs = len(seq_lengths)
+
+    if not return_per_token:
+        seq_log_probs: list[torch.Tensor] = []
+        offset = 0
+        for idx in range(num_seqs):
+            start_idx = offset + max(0, prompt_lengths[idx] - 1)
+            end_idx = min(offset + seq_lengths[idx] - 1, start_idx + completion_lengths[idx])
+            end_idx = min(end_idx, total_shifted)
+            if end_idx > start_idx:
+                seq_log_probs.append(token_log_probs[0, start_idx:end_idx].sum())
+            else:
+                seq_log_probs.append(torch.tensor(0.0, device=device))
+            offset += seq_lengths[idx]
+        return torch.stack(seq_log_probs)
+
+    max_comp_len = max(completion_lengths) if completion_lengths else 1
+    per_token_padded = torch.zeros(num_seqs, max_comp_len, device=device)
+    seq_log_probs_tensor = torch.zeros(num_seqs, device=device)
+    entropies_list: list[torch.Tensor] = []
+
+    offset = 0
+    for idx in range(num_seqs):
+        start_idx = offset + max(0, prompt_lengths[idx] - 1)
+        end_idx = min(offset + seq_lengths[idx] - 1, start_idx + completion_lengths[idx])
+        end_idx = min(end_idx, total_shifted)
+        if end_idx > start_idx:
+            comp_logps = token_log_probs[0, start_idx:end_idx]
+            per_token_padded[idx, : len(comp_logps)] = comp_logps
+            seq_log_probs_tensor[idx] = comp_logps.sum()
+            if return_entropy and entropy_per_token is not None:
+                entropies_list.append(entropy_per_token[0, start_idx:end_idx].mean())
+        else:
+            if return_entropy and entropy_per_token is not None:
+                entropies_list.append(torch.tensor(0.0, device=device))
+        offset += seq_lengths[idx]
+
+    if return_entropy and entropy_per_token is not None:
+        mean_entropies = torch.stack(entropies_list)
+        return seq_log_probs_tensor, per_token_padded, mean_entropies
+
+    return seq_log_probs_tensor, per_token_padded
+
+
+def _compute_logprobs_chunked_packed(
+    base_model: Any,
+    lm_head: torch.nn.Module,
+    input_ids: torch.Tensor,
+    position_ids: torch.Tensor,
+    seq_lengths: list[int],
+    prompt_lengths: list[int],
+    completion_lengths: list[int],
+    chunk_size: int,
+    return_per_token: bool = False,
+    return_entropy: bool = False,
+) -> (
+    torch.Tensor
+    | tuple[torch.Tensor, torch.Tensor]
+    | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+):
+    """Compute logprobs from packed sequences using chunked LM head.
+
+    Like _compute_logprobs_chunked but for packed [1, total_tokens] inputs.
+    Passes position_ids (with resets) and attention_mask=None so HF auto-detects
+    packing and uses flash_attn_varlen_func.
+    """
+    # Model forward on packed input (attention_mask=None triggers packing detection)
+    base_out = base_model(
+        input_ids,
+        position_ids=position_ids,
+        attention_mask=None,
+        use_cache=False,
+    )
+    hidden_states = base_out.last_hidden_state  # [1, total_tokens, hidden_dim]
+
+    # Shift for next-token prediction
+    shift_hidden = hidden_states[:, :-1, :]
+    shift_labels = input_ids[:, 1:]
+
+    token_log_probs, entropy_per_token = _chunked_lm_head_logprobs(
+        lm_head, shift_hidden, shift_labels, chunk_size, return_entropy
+    )
+
+    return _extract_completion_logprobs_packed(
+        token_log_probs,
+        entropy_per_token,
+        seq_lengths,
+        prompt_lengths,
+        completion_lengths,
+        return_per_token,
+        return_entropy,
+    )
+
+
+def compute_logprobs_packed(
+    model: Any,
+    input_ids: torch.Tensor,
+    position_ids: torch.Tensor,
+    seq_lengths: list[int],
+    prompt_lengths: list[int],
+    completion_lengths: list[int],
+    return_per_token: bool = False,
+    return_entropy: bool = False,
+    *,
+    chunked: bool = False,
+    chunk_size: int = 256,
+) -> (
+    torch.Tensor
+    | tuple[torch.Tensor, torch.Tensor]
+    | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+):
+    """Compute logprobs from packed [1, total_tokens] inputs.
+
+    Mirrors compute_logprobs() but for packed sequences. Dispatches to chunked
+    or standard path. Output format is identical: [B, max_comp_len] padded tensors.
+    """
+    if chunked:
+        parts = _unwrap_for_chunked_logits(model)
+        if parts is not None:
+            base_model, lm_head = parts
+            return _compute_logprobs_chunked_packed(
+                base_model,
+                lm_head,
+                input_ids,
+                position_ids,
+                seq_lengths,
+                prompt_lengths,
+                completion_lengths,
+                chunk_size,
+                return_per_token=return_per_token,
+                return_entropy=return_entropy,
+            )
+        logger.warning(
+            "Chunked logits requested but model structure incompatible; "
+            "falling back to standard packed forward"
+        )
+
+    # Standard (non-chunked) packed path
+    outputs = model(
+        input_ids=input_ids,
+        position_ids=position_ids,
+        attention_mask=None,
+    )
+    logits = outputs.logits  # [1, total_tokens, vocab_size]
+
+    shift_logits = logits[:, :-1, :].contiguous()
+    shift_labels = input_ids[:, 1:].contiguous()
+
+    # Try Triton fused CE (avoids materializing full fp32 log_softmax tensor,
+    # saves ~18 GB for 48K tokens and is ~4.5x faster). Falls back to standard
+    # path when entropy is needed or Triton is unavailable.
+    _triton_ce_fn = None
+    if not return_entropy:
+        try:
+            from flash_attn.ops.triton.cross_entropy import (  # type: ignore[import-not-found]
+                cross_entropy_loss as _triton_ce_fn,
+            )
+        except ImportError:
+            pass
+
+    entropy_per_token = None
+    if _triton_ce_fn is not None:
+        B_s, T_s, V_s = shift_logits.shape
+        ce_loss, _ = _triton_ce_fn(
+            shift_logits.reshape(B_s * T_s, V_s),
+            shift_labels.reshape(B_s * T_s),
+        )
+        token_log_probs = (-ce_loss).reshape(B_s, T_s)
+        del ce_loss
+    else:
+        log_probs = F.log_softmax(shift_logits.float(), dim=-1)
+        token_log_probs = log_probs.gather(2, shift_labels.unsqueeze(-1)).squeeze(-1)
+        if return_entropy:
+            entropy_per_token = -(log_probs.exp() * log_probs).sum(dim=-1)
+        del log_probs
+
+    return _extract_completion_logprobs_packed(
+        token_log_probs,
+        entropy_per_token,
+        seq_lengths,
+        prompt_lengths,
+        completion_lengths,
+        return_per_token,
+        return_entropy,
+    )
 
 
 def compute_logprobs(
@@ -1183,22 +1597,33 @@ def compute_logprobs(
     shift_logits = logits[:, :-1, :].contiguous()
     shift_labels = input_ids[:, 1:].contiguous()
 
-    # Cast to float32 for precise log_softmax (even if model is bfloat16)
-    log_probs = F.log_softmax(shift_logits.float(), dim=-1)
-    token_log_probs = log_probs.gather(
-        2,
-        shift_labels.unsqueeze(-1),
-    ).squeeze(-1)
+    # Try Triton fused CE (avoids materializing full fp32 log_softmax tensor,
+    # saves ~18 GB for long sequences and is ~4.5x faster). Falls back to
+    # standard path when entropy is needed or Triton is unavailable.
+    _triton_ce_fn = None
+    if not return_entropy:
+        try:
+            from flash_attn.ops.triton.cross_entropy import (  # type: ignore[import-not-found]
+                cross_entropy_loss as _triton_ce_fn,
+            )
+        except ImportError:
+            pass
 
-    # Derive entropy from the same log_probs — no extra vocab-sized allocation.
-    # entropy = -sum(p * log(p)) = -sum(exp(log_p) * log_p)
     entropy_per_token: torch.Tensor | None = None
-    if return_entropy:
-        entropy_per_token = -(log_probs.exp() * log_probs).sum(dim=-1)
-
-    # Free the large log_probs tensor now that we've extracted what we need.
-    # token_log_probs and entropy_per_token are [batch, seq_len-1] (no vocab dim).
-    del log_probs
+    if _triton_ce_fn is not None:
+        B_s, T_s, V_s = shift_logits.shape
+        ce_loss, _ = _triton_ce_fn(
+            shift_logits.reshape(B_s * T_s, V_s),
+            shift_labels.reshape(B_s * T_s),
+        )
+        token_log_probs = (-ce_loss).reshape(B_s, T_s)
+        del ce_loss
+    else:
+        log_probs = F.log_softmax(shift_logits.float(), dim=-1)
+        token_log_probs = log_probs.gather(2, shift_labels.unsqueeze(-1)).squeeze(-1)
+        if return_entropy:
+            entropy_per_token = -(log_probs.exp() * log_probs).sum(dim=-1)
+        del log_probs
 
     return _extract_completion_logprobs(
         token_log_probs,
@@ -1308,6 +1733,16 @@ class GRPOAlgorithm(TrainingAlgorithm):
         self.importance_sampling_level: str = raw_is_level
         logger.info(f"Using {self.importance_sampling_level}-level importance sampling")
 
+        # Validate advantage estimation strategy
+        self.adv_estimator: str = self.config.adv_estimator
+        valid_estimators = {"grpo", "dr_grpo", "dapo"}
+        if self.adv_estimator not in valid_estimators:
+            raise ValueError(
+                f"Invalid adv_estimator '{self.adv_estimator}'. "
+                f"Must be one of {sorted(valid_estimators)}"
+            )
+        logger.info("Using %s advantage estimator", self.adv_estimator.upper())
+
     def _prepare_batch_tensors(
         self,
         batch_rollouts: list[GRPORollout],
@@ -1401,7 +1836,14 @@ class GRPOAlgorithm(TrainingAlgorithm):
                     },
                 )
 
-        max_len = max(len(tokens) for tokens in batch_tokens)
+        # Pad to fixed max_length so tensor shapes are constant across micro-batches.
+        # This enables torch.compile to reuse compiled graphs and avoids recompilation
+        # per unique seq_len. The attention mask ensures padding tokens are ignored.
+        max_len = (
+            self.config.max_length
+            if self.config.use_torch_compile
+            else max(len(tokens) for tokens in batch_tokens)
+        )
         # Ensure pad_token_id is set (fallback to eos_token_id if needed)
         pad_id = tokenizer.pad_token_id
         if pad_id is None:
@@ -1434,6 +1876,90 @@ class GRPOAlgorithm(TrainingAlgorithm):
             batch_advantages,
             batch_behavior_per_token_logprobs,
             batch_rewards,
+        )
+
+    def _prepare_packed_batch_tensors(
+        self,
+        batch_rollouts: list[GRPORollout],
+        tokenizer: Any,
+        accelerator: Accelerator,
+    ) -> tuple[
+        torch.Tensor,  # input_ids [1, total_tokens]
+        torch.Tensor,  # position_ids [1, total_tokens]
+        list[int],  # prompt_lengths
+        list[int],  # completion_lengths
+        list[float],  # advantages
+        list[list[float]],  # behavior_per_token_logprobs
+        list[float],  # rewards
+        list[int],  # seq_lengths (per-sequence token counts for unpacking)
+    ]:
+        """Pack batch sequences into a single flat tensor for flash_attn_varlen_func.
+
+        Instead of padding all sequences to the longest, concatenates them into
+        [1, total_tokens] with position_ids that reset at each boundary. HF
+        Transformers auto-detects this and uses flash_attn_varlen_func, which
+        processes each sequence independently without cross-boundary attention.
+
+        Output metadata (prompt_lengths, completion_lengths, advantages, etc.)
+        is identical to _prepare_batch_tensors. The seq_lengths list enables
+        downstream code to locate each sequence within the flat tensor.
+        """
+        all_tokens: list[int] = []
+        all_position_ids: list[int] = []
+        seq_lengths: list[int] = []
+        batch_prompt_lens: list[int] = []
+        batch_comp_lens: list[int] = []
+        batch_advantages: list[float] = []
+        batch_behavior_per_token_logprobs: list[list[float]] = []
+        batch_rewards: list[float] = []
+
+        for rollout in batch_rollouts:
+            tokens = rollout.tokens[: self.config.max_length]
+            seq_len = len(tokens)
+
+            # Recalculate prompt/completion after truncation (same as padded path)
+            actual_prompt_len = min(rollout.prompt_length, self.config.max_length)
+            actual_comp_len = max(
+                0,
+                min(
+                    rollout.completion_length,
+                    self.config.max_length - rollout.prompt_length,
+                ),
+            )
+
+            # Concatenate tokens and position_ids
+            all_tokens.extend(tokens)
+            all_position_ids.extend(range(seq_len))
+            seq_lengths.append(seq_len)
+
+            batch_prompt_lens.append(actual_prompt_len)
+            batch_comp_lens.append(actual_comp_len)
+            batch_advantages.append(rollout.advantage)
+            batch_rewards.append(rollout.reward)
+
+            # Extract completion behavior logprobs (same logic as padded path)
+            tlp: list[float] = list((rollout.token_logprobs or [])[: self.config.max_length])
+            expected_len = actual_prompt_len + actual_comp_len
+            if len(tlp) >= expected_len:
+                completion_logprobs = tlp[actual_prompt_len : actual_prompt_len + actual_comp_len]
+            else:
+                completion_logprobs = tlp[:actual_comp_len]
+            batch_behavior_per_token_logprobs.append(completion_logprobs)
+
+        input_ids_tensor = torch.tensor([all_tokens], dtype=torch.long, device=accelerator.device)
+        position_ids_tensor = torch.tensor(
+            [all_position_ids], dtype=torch.long, device=accelerator.device
+        )
+
+        return (
+            input_ids_tensor,
+            position_ids_tensor,
+            batch_prompt_lens,
+            batch_comp_lens,
+            batch_advantages,
+            batch_behavior_per_token_logprobs,
+            batch_rewards,
+            seq_lengths,
         )
 
     def _normalize_advantages(self, advantages_tensor: torch.Tensor) -> torch.Tensor:
@@ -1509,11 +2035,14 @@ class GRPOAlgorithm(TrainingAlgorithm):
             ratios_pre_ceiling = torch.exp(log_ratio_seq_clamped)
 
         elif self.importance_sampling_level == "sequence":
-            # Sequence-level: sum logprobs first, then compute ratio
+            # Sequence-level: length-normalized log-ratio (GSPO-style geometric mean).
+            # Without normalization, summing log_ratios across thousands of tokens
+            # produces huge values that saturate PPO clipping on every sequence.
             # Shape: [batch_size]
             logprobs_current_sum = (logprobs_current_per_token * completion_mask).sum(dim=1)
             logprobs_old_sum = (logprobs_old_per_token * completion_mask).sum(dim=1)
-            log_ratio = logprobs_current_sum - logprobs_old_sum
+            seq_lengths = completion_mask.sum(dim=1).clamp(min=1.0)
+            log_ratio = (logprobs_current_sum - logprobs_old_sum) / seq_lengths
 
             if not _is_finite_tensor(log_ratio):
                 logger.debug("Non-finite log-ratio before clamp; applying clamp")
@@ -1895,8 +2424,68 @@ class GRPOAlgorithm(TrainingAlgorithm):
 
         all_rollouts.sort(key=lambda item: (item[1], item[0].nonce))
 
-        # Use micro batch size parameter
-        num_micro_batches = math.ceil(len(all_rollouts) / micro_batch_size)
+        # Split rollouts into mini-batches (one optimizer step each), then each
+        # mini-batch into micro-batches (forward/backward passes).
+        #
+        # With token-budget mode (max_tokens_per_micro_batch > 0):
+        #   - Mini-batch size = grad_accum_steps * avg_seqs_per_micro_batch ≈ effective batch
+        #   - Micro-batches are variable-sized, targeting a token budget
+        #   - Loss scaled by len(micro) / len(mini_batch) (veRL pattern)
+        #
+        # With fixed mode:
+        #   - Mini-batch size = micro_batch_size * grad_accum_steps
+        #   - Micro-batches are fixed-sized
+        #   - Loss scaled by 1 / grad_accum_steps (equivalent)
+        total_rollouts_count = len(all_rollouts)
+        use_token_budget = config.max_tokens_per_micro_batch > 0
+
+        if use_token_budget:
+            # Token-budget: partition ALL rollouts by token budget first,
+            # then group micro-batches into mini-batches of grad_accum_steps each.
+            all_micro_partitions = _partition_by_token_budget(
+                all_rollouts,
+                max_tokens=config.max_tokens_per_micro_batch,
+                max_length=config.max_length,
+            )
+            num_micro_batches = len(all_micro_partitions)
+
+            # Group micro-batches into mini-batches (each gets one optimizer step).
+            # With token-budget batching, compute from effective_batch_size (rollouts
+            # per optimizer step) rather than fixed grad_accum_steps, since the number
+            # of micro-batches varies per epoch.
+            if config.effective_batch_size > 0:
+                target_steps = max(1, total_rollouts_count // config.effective_batch_size)
+            else:
+                target_steps = max(1, num_micro_batches // grad_accum_steps)
+            # Ceiling division ensures all micro-batches fit in exactly target_steps
+            # groups, preventing tiny remainders with noisy gradients.
+            grad_accum_steps = max(1, -(-num_micro_batches // target_steps))
+
+            mini_batches: list[list[list[tuple]]] = []
+            for i in range(0, num_micro_batches, grad_accum_steps):
+                mini_batches.append(all_micro_partitions[i : i + grad_accum_steps])
+
+            logger.info(
+                "Token-budget batching: %d micro-batches in %d mini-batches "
+                "(budget=%d tokens, accum=%d, %d rollouts)",
+                num_micro_batches,
+                len(mini_batches),
+                config.max_tokens_per_micro_batch,
+                grad_accum_steps,
+                total_rollouts_count,
+            )
+        else:
+            # Fixed mode: chunk rollouts into micro-batches of micro_batch_size,
+            # then group into mini-batches of grad_accum_steps each.
+            all_micro_partitions = []
+            for i in range(0, total_rollouts_count, micro_batch_size):
+                chunk = all_rollouts[i : i + micro_batch_size]
+                all_micro_partitions.append(chunk)
+            num_micro_batches = len(all_micro_partitions)
+
+            mini_batches = []
+            for i in range(0, num_micro_batches, grad_accum_steps):
+                mini_batches.append(all_micro_partitions[i : i + grad_accum_steps])
 
         epoch_metrics: dict[str, list[float]] = defaultdict(list)
         grad_accum_counter = 0
@@ -1917,9 +2506,21 @@ class GRPOAlgorithm(TrainingAlgorithm):
             "kl_sum": 0.0,
             "ratio_clip_sum": 0.0,
             "ratio_ceiling_sum": 0.0,
+            "total_model_tokens": 0,
+            "avg_seq_len_sum": 0.0,
         }
 
+        # MFU computation: extract model architecture once, track step timing
+        import os
+        import time as _time
+
+        _arch_info = _ModelArchInfo.from_model(model)
+        _gpu_peak_tflops = float(os.getenv("GRAIL_GPU_PEAK_TFLOPS", "2250"))
+        _step_start_time = _time.monotonic()
+
         def reset_actual_batch_tracker() -> None:
+            nonlocal _step_start_time
+            _step_start_time = _time.monotonic()
             actual_batch_tracker.update(
                 {
                     "micro_batches": 0,
@@ -1938,6 +2539,8 @@ class GRPOAlgorithm(TrainingAlgorithm):
                     "kl_sum": 0.0,
                     "ratio_clip_sum": 0.0,
                     "ratio_ceiling_sum": 0.0,
+                    "total_model_tokens": 0,
+                    "avg_seq_len_sum": 0.0,
                 }
             )
 
@@ -1953,23 +2556,105 @@ class GRPOAlgorithm(TrainingAlgorithm):
         input_ids_tensor: torch.Tensor | None = None
         attention_mask_tensor: torch.Tensor | None = None
 
-        for micro_idx in range(num_micro_batches):
-            start_idx = micro_idx * micro_batch_size
-            end_idx = min(start_idx + micro_batch_size, len(all_rollouts))
-            if start_idx >= len(all_rollouts):
-                break
-            batch_rollouts = [all_rollouts[i][0] for i in range(start_idx, end_idx)]
+        # Flatten mini-batches back to a flat micro-batch list for the training loop,
+        # but track which mini-batch each micro-batch belongs to for loss scaling.
+        flat_micro_batches: list[list[tuple]] = []
+        micro_to_mini_rollout_count: list[int] = []
+        for mini_batch_micros in mini_batches:
+            mini_rollout_count = sum(len(mb) for mb in mini_batch_micros)
+            for micro in mini_batch_micros:
+                flat_micro_batches.append(micro)
+                micro_to_mini_rollout_count.append(mini_rollout_count)
+        num_micro_batches = len(flat_micro_batches)
+        _local_real_micro_count = num_micro_batches
 
-            # Step 1: Prepare batch tensors from rollouts
-            (
-                input_ids_tensor,
-                attention_mask_tensor,
-                batch_prompt_lens,
-                batch_comp_lens,
-                batch_advantages,
-                batch_behavior_per_token_logprobs,
-                batch_rewards,
-            ) = self._prepare_batch_tensors(batch_rollouts, tokenizer, accelerator)
+        # ── FSDP2 collective sync ──
+        # Token-budget packing can produce different micro-batch counts per DP
+        # rank. FSDP2 requires all ranks to execute the same number of
+        # forward/backward passes (each triggers all-gather + reduce-scatter).
+        # Synchronize counts and pad the shorter rank with dummy passes.
+        import torch.distributed as _dist
+
+        if _dist.is_initialized() and _dist.get_world_size() > 1:
+            _sync_dev = accelerator.device
+            _sync_rank = _dist.get_rank()
+            # Sync grad_accum_steps so optimizer steps happen at the same indices
+            _gas_t = torch.tensor([grad_accum_steps], dtype=torch.int64, device=_sync_dev)
+            _dist.all_reduce(_gas_t, op=_dist.ReduceOp.MAX)
+            grad_accum_steps = int(_gas_t.item())
+
+            # Sync micro-batch count, round up to multiple of grad_accum_steps
+            _cnt_t = torch.tensor([num_micro_batches], dtype=torch.int64, device=_sync_dev)
+            _dist.all_reduce(_cnt_t, op=_dist.ReduceOp.MAX)
+            _global_max = int(_cnt_t.item())
+            _padded = -(-_global_max // grad_accum_steps) * grad_accum_steps
+            _num_dummy = _padded - num_micro_batches
+            print(
+                f"[Rank {_sync_rank}] FSDP2 sync: local={num_micro_batches}, "
+                f"global_max={_global_max}, padded={_padded}, dummy={_num_dummy}, "
+                f"accum={grad_accum_steps}",
+                flush=True,
+            )
+            num_micro_batches = _padded
+
+        for micro_idx in range(num_micro_batches):
+            # ── Dummy micro-batch for FSDP2 collective sync ──
+            # Must mirror ALL NCCL collectives from the real path (FSDP2 forward/backward
+            # + DAPO gather + any other distributed ops) to keep ranks in lockstep.
+            if micro_idx >= _local_real_micro_count:
+                with accelerator.autocast():
+                    _dummy_ids = torch.zeros(1, 2, dtype=torch.long, device=accelerator.device)
+                    _dummy_out = model(
+                        input_ids=_dummy_ids,
+                        attention_mask=torch.ones_like(_dummy_ids),
+                    )
+                    _dummy_loss = _dummy_out.logits.sum() * 0.0
+                accelerator.backward(_dummy_loss)
+                del _dummy_ids, _dummy_out, _dummy_loss
+                # Mirror DAPO gather collective (Step 6 in real path)
+                if self.grpo_variant == "dapo":
+                    _zero_tok = torch.zeros(1, device=accelerator.device)
+                    accelerator.gather(_zero_tok)
+                grad_accum_counter += 1
+                if grad_accum_counter >= grad_accum_steps:
+                    # Must mirror clip_grad_norm_ (has FSDP2 all_reduce for total norm)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), self.config.grad_clip)
+                    optimizer.step()
+                    self.optimizer_step_count += 1
+                    optimizer.zero_grad(set_to_none=True)
+                    grad_accum_counter = 0
+                continue
+
+            micro_partition = flat_micro_batches[micro_idx]
+            batch_rollouts = [r[0] for r in micro_partition]
+
+            # Step 1: Prepare batch tensors (packed or padded)
+            _use_packing = config.use_sequence_packing
+            seq_lengths: list[int] = []
+            position_ids_tensor: torch.Tensor | None = None
+            attention_mask_tensor: torch.Tensor | None = None
+
+            if _use_packing:
+                (
+                    input_ids_tensor,
+                    position_ids_tensor,
+                    batch_prompt_lens,
+                    batch_comp_lens,
+                    batch_advantages,
+                    batch_behavior_per_token_logprobs,
+                    batch_rewards,
+                    seq_lengths,
+                ) = self._prepare_packed_batch_tensors(batch_rollouts, tokenizer, accelerator)
+            else:
+                (
+                    input_ids_tensor,
+                    attention_mask_tensor,
+                    batch_prompt_lens,
+                    batch_comp_lens,
+                    batch_advantages,
+                    batch_behavior_per_token_logprobs,
+                    batch_rewards,
+                ) = self._prepare_batch_tensors(batch_rollouts, tokenizer, accelerator)
 
             advantages_tensor = torch.tensor(
                 batch_advantages,
@@ -1978,21 +2663,45 @@ class GRPOAlgorithm(TrainingAlgorithm):
             )
 
             # Step 2: Compute current policy logprobs and entropy in a single forward pass.
-            # Fusing entropy here avoids a redundant forward that would double peak
-            # GPU memory from vocab-sized tensors (~6 GB each at seq_len=10K).
-            _want_entropy = self.config.entropy_coef > 0.0
+            # Under FSDP2 (non-chunked path), skip entropy to avoid materializing the
+            # full fp32 log_softmax tensor (~27 GB for 48K tokens). The Triton fused
+            # CE fast path is only available when entropy is not needed.
+            _is_fsdp2 = False
+            try:
+                from torch.distributed.fsdp import FSDPModule  # type: ignore[attr-defined]
+
+                _is_fsdp2 = isinstance(model, FSDPModule)
+            except ImportError:
+                pass
+            _want_entropy = not _is_fsdp2
             with accelerator.autocast():
-                _logprob_result = compute_logprobs(
-                    model,
-                    input_ids_tensor,
-                    attention_mask_tensor,
-                    batch_prompt_lens,
-                    batch_comp_lens,
-                    return_per_token=True,
-                    return_entropy=_want_entropy,
-                    chunked=config.chunked_logits,
-                    chunk_size=config.logit_chunk_size,
-                )
+                if _use_packing:
+                    assert position_ids_tensor is not None
+                    _logprob_result = compute_logprobs_packed(
+                        model,
+                        input_ids_tensor,
+                        position_ids_tensor,
+                        seq_lengths,
+                        batch_prompt_lens,
+                        batch_comp_lens,
+                        return_per_token=True,
+                        return_entropy=_want_entropy,
+                        chunked=config.chunked_logits,
+                        chunk_size=config.logit_chunk_size,
+                    )
+                else:
+                    assert attention_mask_tensor is not None
+                    _logprob_result = compute_logprobs(
+                        model,
+                        input_ids_tensor,
+                        attention_mask_tensor,
+                        batch_prompt_lens,
+                        batch_comp_lens,
+                        return_per_token=True,
+                        return_entropy=_want_entropy,
+                        chunked=config.chunked_logits,
+                        chunk_size=config.logit_chunk_size,
+                    )
             if _want_entropy:
                 assert isinstance(_logprob_result, tuple) and len(_logprob_result) == 3
                 logprobs_current_sum, logprobs_current_per_token, entropies = _logprob_result
@@ -2002,22 +2711,33 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 entropies = None
 
             if torch.cuda.is_available():
+                _log_batch = len(batch_rollouts)
+                _log_seqlen = (
+                    sum(seq_lengths) // _log_batch if _use_packing else input_ids_tensor.shape[1]
+                )
                 logger.debug(
-                    "MEMORY after_logprobs alloc_gb=%.2f reserved_gb=%.2f seq_len=%d batch=%d",
+                    "MEMORY after_logprobs alloc_gb=%.2f reserved_gb=%.2f seq_len=%d micro_batch=%d packed=%s",
                     torch.cuda.memory_allocated() / (1024**3),
                     torch.cuda.memory_reserved() / (1024**3),
-                    input_ids_tensor.shape[1],
-                    input_ids_tensor.shape[0],
+                    _log_seqlen,
+                    _log_batch,
+                    _use_packing,
                 )
+
+            # FSDP2 safety: after the model forward, NEVER skip backward.
+            # FSDP2 reduce-scatter hooks fire during backward; skipping would
+            # desynchronize NCCL collectives across ranks. Instead, flag the
+            # micro-batch as "skip" and run a zero-loss backward at the end.
+            _fsdp2_skip_micro_batch = False
 
             if not _is_finite_tensor(logprobs_current_sum):
                 cur_min = torch.nan_to_num(logprobs_current_sum).min().item()
                 cur_max = torch.nan_to_num(logprobs_current_sum).max().item()
                 logger.warning(
-                    "Non-finite current logprobs; skipping batch",
+                    "Non-finite current logprobs; skipping micro-batch",
                     extra={"min": float(cur_min), "max": float(cur_max)},
                 )
-                continue
+                _fsdp2_skip_micro_batch = True
 
             # Step 3: Prepare behavior policy logprobs and completion mask for importance sampling
             # Convert per-token behavior logprobs to padded tensor matching completion shape
@@ -2041,42 +2761,55 @@ class GRPOAlgorithm(TrainingAlgorithm):
 
             # Validate behavior logprobs
             logprobs_old_sum = (logprobs_old_per_token * completion_mask).sum(dim=1)
-            if not _is_finite_tensor(logprobs_old_sum):
+            if not _fsdp2_skip_micro_batch and not _is_finite_tensor(logprobs_old_sum):
                 old_min = torch.nan_to_num(logprobs_old_sum).min().item()
                 old_max = torch.nan_to_num(logprobs_old_sum).max().item()
                 logger.warning(
-                    "Non-finite old/behavior logprobs; skipping batch",
+                    "Non-finite old/behavior logprobs; skipping micro-batch",
                     extra={"min": float(old_min), "max": float(old_max)},
                 )
-                continue
+                _fsdp2_skip_micro_batch = True
 
             # Step 4: Compute reference model logprobs for KL divergence penalty (only if enabled)
             logprobs_ref_per_token = None
             if kl_enabled:
                 if ref_model is not None:
                     with torch.no_grad(), accelerator.autocast():
-                        _ref_result = compute_logprobs(
-                            ref_model,
-                            input_ids_tensor,
-                            attention_mask_tensor,
-                            batch_prompt_lens,
-                            batch_comp_lens,
-                            return_per_token=True,
-                            chunked=config.chunked_logits,
-                            chunk_size=config.logit_chunk_size,
-                        )
+                        if _use_packing:
+                            assert position_ids_tensor is not None
+                            _ref_result = compute_logprobs_packed(
+                                ref_model,
+                                input_ids_tensor,
+                                position_ids_tensor,
+                                seq_lengths,
+                                batch_prompt_lens,
+                                batch_comp_lens,
+                                return_per_token=True,
+                                chunked=config.chunked_logits,
+                                chunk_size=config.logit_chunk_size,
+                            )
+                        else:
+                            assert attention_mask_tensor is not None
+                            _ref_result = compute_logprobs(
+                                ref_model,
+                                input_ids_tensor,
+                                attention_mask_tensor,
+                                batch_prompt_lens,
+                                batch_comp_lens,
+                                return_per_token=True,
+                                chunked=config.chunked_logits,
+                                chunk_size=config.logit_chunk_size,
+                            )
                         assert isinstance(_ref_result, tuple) and len(_ref_result) == 2
                         logprobs_ref_sum, logprobs_ref_per_token = _ref_result
-                    if not _is_finite_tensor(logprobs_ref_sum):
+                    if not _fsdp2_skip_micro_batch and not _is_finite_tensor(logprobs_ref_sum):
                         ref_min = torch.nan_to_num(logprobs_ref_sum).min().item()
                         ref_max = torch.nan_to_num(logprobs_ref_sum).max().item()
                         logger.warning(
-                            "Non-finite reference logprobs; skipping batch",
+                            "Non-finite reference logprobs; skipping micro-batch",
                             extra={"min": float(ref_min), "max": float(ref_max)},
                         )
-                        # Free tensors before continuing
-                        del logprobs_ref_sum, logprobs_ref_per_token
-                        continue
+                        _fsdp2_skip_micro_batch = True
                     # Delete reference sum to free memory (only need per-token)
                     del logprobs_ref_sum
                 else:
@@ -2125,65 +2858,85 @@ class GRPOAlgorithm(TrainingAlgorithm):
 
             # Step 9: Entropy regularization (already computed in Step 2's forward pass)
             if entropies is not None:
-                if not _is_finite_tensor(entropies):
-                    logger.warning("Non-finite entropies; skipping batch")
-                    continue
-                loss_entropy = -self.config.entropy_coef * entropies.mean()
+                if not _fsdp2_skip_micro_batch and not _is_finite_tensor(entropies):
+                    logger.warning("Non-finite entropies; skipping micro-batch")
+                    _fsdp2_skip_micro_batch = True
+                loss_entropy = (
+                    -self.config.entropy_coef * entropies.mean()
+                    if not _fsdp2_skip_micro_batch
+                    else torch.tensor(0.0, device=accelerator.device)
+                )
             else:
                 entropies = torch.zeros(len(batch_rollouts), device=accelerator.device)
                 loss_entropy = torch.tensor(0.0, device=accelerator.device)
 
             # Step 10: Aggregate total loss
-            loss_total = loss_pg + loss_kl + loss_entropy
+            # Zero-loss fallback flows through the model graph so backward()
+            # still touches every parameter (required for FSDP2 collectives).
+            _zero_loss = logprobs_current_sum.sum() * 0.0
+            if _fsdp2_skip_micro_batch:
+                loss_total = _zero_loss
+            else:
+                loss_total = loss_pg + loss_kl + loss_entropy
+                if not torch.isfinite(loss_total):
+                    logger.warning(
+                        "Non-finite total loss; skipping micro-batch",
+                        extra={
+                            "loss_pg": float(torch.nan_to_num(loss_pg).item()),
+                            "loss_kl": float(torch.nan_to_num(loss_kl).item()),
+                            "loss_entropy": float(torch.nan_to_num(loss_entropy).item()),
+                        },
+                    )
+                    _fsdp2_skip_micro_batch = True
+                    loss_total = _zero_loss
 
-            # Skip backward on non-finite loss to avoid corrupting optimizer state
-            if not torch.isfinite(loss_total):
-                loss_pg_v = torch.nan_to_num(loss_pg).item()
-                loss_kl_v = torch.nan_to_num(loss_kl).item()
-                loss_ent_v = torch.nan_to_num(loss_entropy).item()
-                logger.warning(
-                    "Non-finite total loss; skipping batch",
-                    extra={
-                        "loss_pg": float(loss_pg_v),
-                        "loss_kl": float(loss_kl_v),
-                        "loss_entropy": float(loss_ent_v),
-                    },
+            if not _fsdp2_skip_micro_batch:
+                micro_sequence_count = len(batch_rollouts)
+                micro_token_count = float(completion_mask.sum().item())
+                reward_sum = float(sum(batch_rewards)) if batch_rewards else 0.0
+
+                # Track total tokens through the model (prompt+completion) and avg seq_len for MFU
+                micro_total_tokens = input_ids_tensor.numel()  # B*S or 1*total_packed
+                actual_batch_tracker["total_model_tokens"] += micro_total_tokens
+                if _use_packing and seq_lengths:
+                    actual_batch_tracker["avg_seq_len_sum"] += sum(seq_lengths)
+                else:
+                    actual_batch_tracker["avg_seq_len_sum"] += float(
+                        input_ids_tensor.shape[1] * micro_sequence_count
+                    )
+
+                actual_batch_tracker["micro_batches"] += 1
+                actual_batch_tracker["sequence_count"] += float(micro_sequence_count)
+                actual_batch_tracker["token_count"] += micro_token_count
+                actual_batch_tracker["loss_total_sum"] += float(loss_total.item())
+                actual_batch_tracker["loss_pg_sum"] += float(loss_pg.item())
+                actual_batch_tracker["loss_kl_sum"] += float(loss_kl.item())
+                actual_batch_tracker["loss_entropy_sum"] += float(loss_entropy.item())
+                actual_batch_tracker["adv_sum"] += float(advantages_tensor.sum().item())
+                actual_batch_tracker["adv_count"] += float(advantages_tensor.numel())
+                actual_batch_tracker["reward_sum"] += reward_sum
+                actual_batch_tracker["reward_count"] += float(len(batch_rewards))
+                actual_batch_tracker["entropy_sum"] += float(entropies.sum().item())
+                actual_batch_tracker["entropy_count"] += float(entropies.numel())
+                actual_batch_tracker["kl_sum"] += float(kl_value)
+                ratio_weight = (
+                    micro_token_count
+                    if self.importance_sampling_level == "token"
+                    else float(micro_sequence_count)
                 )
-                continue
+                actual_batch_tracker["ratio_clip_sum"] += ratio_clip_frac_val * ratio_weight
+                actual_batch_tracker["ratio_ceiling_sum"] += ratio_ceiling_frac_val * ratio_weight
 
-            micro_sequence_count = len(batch_rollouts)
-            micro_token_count = float(completion_mask.sum().item())
-            reward_sum = float(sum(batch_rewards)) if batch_rewards else 0.0
-
-            actual_batch_tracker["micro_batches"] += 1
-            actual_batch_tracker["sequence_count"] += float(micro_sequence_count)
-            actual_batch_tracker["token_count"] += micro_token_count
-            actual_batch_tracker["loss_total_sum"] += float(loss_total.item())
-            actual_batch_tracker["loss_pg_sum"] += float(loss_pg.item())
-            actual_batch_tracker["loss_kl_sum"] += float(loss_kl.item())
-            actual_batch_tracker["loss_entropy_sum"] += float(loss_entropy.item())
-            actual_batch_tracker["adv_sum"] += float(advantages_tensor.sum().item())
-            actual_batch_tracker["adv_count"] += float(advantages_tensor.numel())
-            actual_batch_tracker["reward_sum"] += reward_sum
-            actual_batch_tracker["reward_count"] += float(len(batch_rewards))
-            actual_batch_tracker["entropy_sum"] += float(entropies.sum().item())
-            actual_batch_tracker["entropy_count"] += float(entropies.numel())
-            actual_batch_tracker["kl_sum"] += float(kl_value)
-            ratio_weight = (
-                micro_token_count
-                if self.importance_sampling_level == "token"
-                else float(micro_sequence_count)
-            )
-            actual_batch_tracker["ratio_clip_sum"] += ratio_clip_frac_val * ratio_weight
-            actual_batch_tracker["ratio_ceiling_sum"] += ratio_ceiling_frac_val * ratio_weight
-
-            # Step 11: Perform gradient accumulation and optimization
-            # Zero gradients before backward pass (only at start of accumulation)
+            # Step 11: Gradient accumulation with veRL-style loss scaling.
+            # Each micro-batch's loss is scaled by its rollout count relative to
+            # the mini-batch total. This ensures each sequence contributes equally
+            # regardless of micro-batch sizes (critical for token-budget batching).
+            # With fixed batching this is equivalent to 1/grad_accum_steps.
             if grad_accum_counter == 0:
                 optimizer.zero_grad(set_to_none=True)
-
-            # Scale loss by accumulation steps to keep effective LR stable
-            scaled_loss = loss_total / float(grad_accum_steps)
+            mini_rollout_count = micro_to_mini_rollout_count[micro_idx]
+            loss_scale = len(batch_rollouts) / max(1, mini_rollout_count)
+            scaled_loss = loss_total * loss_scale
             accelerator.backward(scaled_loss)
             grad_accum_counter += 1
 
@@ -2195,7 +2948,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 )
 
             grad_norm_scalar = None
-            # Only step optimizer and clip gradients every N accumulation steps
+            # Step optimizer at mini-batch boundaries (every grad_accum_steps micro-batches)
             if grad_accum_counter >= grad_accum_steps:
                 # Clip gradients in fp32 (no mixed precision)
                 grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -2215,7 +2968,7 @@ class GRPOAlgorithm(TrainingAlgorithm):
                     adv_mean = advantages_tensor.mean().item()
                     adv_std = advantages_tensor.std().item()
                     logger.warning(
-                        "NaN/Inf gradient norm detected; skipping batch",
+                        "NaN/Inf gradient norm detected; skipping optimizer step",
                         extra={
                             "loss_total": float(loss_tot_v),
                             "log_ratio_mean": float(lr_mean),
@@ -2325,11 +3078,32 @@ class GRPOAlgorithm(TrainingAlgorithm):
                 except (IndexError, KeyError):
                     pass
                 step_payload["kl_coef"] = current_kl_coef
+
+                # Compute and log MFU (Model FLOPs Utilization)
+                if _arch_info is not None:
+                    step_time = _time.monotonic() - _step_start_time
+                    total_model_toks = int(actual_batch_tracker["total_model_tokens"])
+                    seq_count = actual_batch_tracker["sequence_count"]
+                    avg_seq = (
+                        actual_batch_tracker["avg_seq_len_sum"] / max(1.0, seq_count)
+                        if seq_count > 0
+                        else 0.0
+                    )
+                    mfu_metrics = _arch_info.compute_mfu(
+                        total_tokens=total_model_toks,
+                        avg_seq_len=avg_seq,
+                        step_time_sec=step_time,
+                        gpu_peak_tflops=_gpu_peak_tflops,
+                    )
+                    step_payload.update(mfu_metrics)
+
                 step_logger.emit(step_payload)
 
                 reset_actual_batch_tracker()
 
-            # Step 12: Collect batch metrics for epoch aggregation
+            # Step 12: Collect batch metrics for epoch aggregation (skip for dropped micro-batches)
+            if _fsdp2_skip_micro_batch:
+                continue
             self._collect_batch_metrics(
                 epoch_metrics,
                 loss_total,

@@ -34,8 +34,7 @@ from ..model.provider import (
     get_model,
     get_tokenizer,
 )
-from ..scoring.weights import WeightComputer
-from ..shared.constants import (
+from ..protocol.constants import (
     FAILURE_LOOKBACK_WINDOWS,
     MINER_SAMPLE_MAX,
     MINER_SAMPLE_MIN,
@@ -47,6 +46,7 @@ from ..shared.constants import (
     UNIQUE_ROLLOUTS_CAP,
     WINDOW_LENGTH,
 )
+from ..scoring.weights import WeightComputer
 from ..shared.window_utils import (
     WindowWaitTracker,
     calculate_next_window,

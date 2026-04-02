@@ -14,10 +14,10 @@ import logging
 import torch
 
 from ...model.forward import forward_single_layer
+from ...protocol.constants import CHALLENGE_K, LAYER_INDEX
 from ...protocol.crypto import indices_from_root_in_range
 from ...protocol.grail_verifier import GRAILVerifier
 from ...protocol.signatures import verify_commit_signature
-from ...shared.constants import CHALLENGE_K, LAYER_INDEX
 from ...shared.hf_compat import resolve_hidden_size, resolve_vocab_size
 from ..base import Validator
 from ..context import ValidationContext

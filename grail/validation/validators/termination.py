@@ -6,7 +6,7 @@ import logging
 
 import torch
 
-from ...shared.constants import MAX_NEW_TOKENS, MIN_EOS_PROBABILITY
+from ...protocol.constants import MAX_NEW_TOKENS, MIN_EOS_PROBABILITY
 from ..base import Validator
 from ..context import ValidationContext
 

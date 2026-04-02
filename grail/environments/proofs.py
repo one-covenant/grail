@@ -12,7 +12,7 @@ from typing import Any
 import torch
 
 from ..model.forward import forward_single_layer
-from ..shared.constants import GRAIL_PROOF_VERSION, LAYER_INDEX
+from ..protocol.constants import GRAIL_PROOF_VERSION, LAYER_INDEX
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ def _batched_forward_pass(
         sequence.  hidden: ``[seq_len, hidden_dim]`` on *device*.
         logits: ``[seq_len, vocab]`` on CPU.
     """
-    from ..shared.constants import PROOF_BATCH_SIZE
+    from ..protocol.constants import PROOF_BATCH_SIZE
 
     batch_size = len(all_token_ids_batch)
     seq_lens = [len(seq) for seq in all_token_ids_batch]

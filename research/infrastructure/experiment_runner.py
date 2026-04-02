@@ -11,7 +11,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import asyncssh
 
@@ -102,7 +102,7 @@ class ExperimentRunner:
         ssh_host: str,
         ssh_port: int,
         ssh_user: str = "root",
-        ssh_key_path: Optional[str] = None,
+        ssh_key_path: str | None = None,
     ):
         """Initialize experiment runner.
 
@@ -116,7 +116,7 @@ class ExperimentRunner:
         self.ssh_port = ssh_port
         self.ssh_user = ssh_user
         self.ssh_key_path = ssh_key_path
-        self._conn: Optional[asyncssh.SSHClientConnection] = None
+        self._conn: asyncssh.SSHClientConnection | None = None
 
     async def connect(self):
         """Establish SSH connection to the pod."""
@@ -145,8 +145,8 @@ class ExperimentRunner:
     async def run_command(
         self,
         command: str,
-        env: Optional[dict[str, str]] = None,
-        timeout: Optional[int] = None,
+        env: dict[str, str] | None = None,
+        timeout: int | None = None,
     ) -> tuple[str, str, int]:
         """Run a command on the remote pod.
 
@@ -174,7 +174,7 @@ class ExperimentRunner:
 
     async def setup_code(
         self,
-        local_path: Optional[Path] = None,
+        local_path: Path | None = None,
         git_repo: str = "https://github.com/your-org/grail.git",
         git_branch: str = "main",
         use_git: bool = True,
@@ -237,7 +237,7 @@ class ExperimentRunner:
             )
 
             if result.returncode == 0:
-                print(f"✅ Code synced successfully")
+                print("✅ Code synced successfully")
             else:
                 print(f"❌ Sync failed: {result.stderr}")
                 raise RuntimeError(f"Code sync failed: {result.stderr}")
@@ -328,7 +328,7 @@ class ExperimentRunner:
         self,
         config: ExperimentConfig,
         remote_path: str = "~/grail",
-        log_file: Optional[str] = None,
+        log_file: str | None = None,
         background: bool = False,
     ) -> int:
         """Run a training experiment with the given configuration.
@@ -474,9 +474,9 @@ exit $TRAIN_EXIT
 async def run_experiments_on_pod(
     pod_info: dict,
     experiments: list[ExperimentConfig],
-    local_code_path: Optional[Path] = None,
-    local_env_path: Optional[Path] = None,
-    git_repo: Optional[str] = None,
+    local_code_path: Path | None = None,
+    local_env_path: Path | None = None,
+    git_repo: str | None = None,
     git_branch: str = "main",
     use_git: bool = True,
     setup_env: bool = True,
@@ -553,9 +553,9 @@ async def run_experiments_on_pod(
 
 async def run_experiments_parallel(
     pod_experiments: dict[str, tuple[dict, list[ExperimentConfig]]],
-    local_code_path: Optional[Path] = None,
-    local_env_path: Optional[Path] = None,
-    git_repo: Optional[str] = None,
+    local_code_path: Path | None = None,
+    local_env_path: Path | None = None,
+    git_repo: str | None = None,
     git_branch: str = "main",
     use_git: bool = True,
     setup_env: bool = True,

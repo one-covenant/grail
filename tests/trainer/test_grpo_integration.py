@@ -260,7 +260,8 @@ class TestGRPOGroupValidation:
         self, synthetic_grpo_groups: list[GRPOGroup], monkeypatch_trainer_constants: None
     ) -> None:
         """Test synthetic groups are valid."""
-        from grail.shared.constants import ROLLOUTS_PER_PROBLEM, TRAINER_GROUP_ADV_SUM_TOL
+        from grail.protocol.constants import ROLLOUTS_PER_PROBLEM
+        from grail.shared.config import TRAINER_GROUP_ADV_SUM_TOL
 
         for group in synthetic_grpo_groups:
             assert group.is_valid(
@@ -303,7 +304,7 @@ class TestTokenTruncation:
         run_grpo_epoch: Any,
     ) -> None:
         """Test training with sequences exceeding TRAINER_MAX_LENGTH."""
-        from grail.shared.constants import TRAINER_MAX_LENGTH
+        from grail.shared.config import TRAINER_MAX_LENGTH
 
         model, tokenizer = tiny_qwen_model_and_tokenizer
         ref_model = model

@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 
-from grail.shared.constants import (
+from grail.protocol.constants import (
     TRUST_LIST_KEY_PREFIX,
     TRUST_LIST_VERSION,
     WINDOW_LENGTH,

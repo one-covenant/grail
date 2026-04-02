@@ -103,7 +103,7 @@ class WandBBackend(MonitoringBackend):
 
     def _run_executor(self, func: Any, *args: Any) -> Any:
         """Run synchronous function in executor."""
-        return asyncio.get_event_loop().run_in_executor(None, func, *args)
+        return asyncio.get_running_loop().run_in_executor(None, func, *args)
 
     def initialize(self, config: dict[str, Any]) -> None:
         """Initialize wandb backend synchronously (no network calls).

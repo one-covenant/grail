@@ -25,12 +25,12 @@ import bittensor as bt
 import torch
 
 from grail.infrastructure.network import create_subtensor
-from grail.shared.constants import (
+from grail.protocol.constants import WINDOW_LENGTH
+from grail.shared.config import (
     DELTA_BASE_INTERVAL,
     DELTA_CHECKPOINT_ENABLED,
     UPLOAD_RETRY_BACKOFF_BASE,
     UPLOAD_RETRY_MAX_ATTEMPTS,
-    WINDOW_LENGTH,
 )
 from grail.shared.safetensors_utils import load_model_state_dict
 from grail.trainer.checkpoint_publisher import (
@@ -58,13 +58,11 @@ async def _wait_for_snapshot(
     Returns:
         Snapshot message dict if available, None if timeout
     """
-    loop = asyncio.get_event_loop()
-
     try:
-        # Use run_in_executor to avoid blocking the event loop
-        msg = await loop.run_in_executor(
-            None,
-            lambda: ipc.snapshot_queue.get(timeout=poll_interval),
+        # Use to_thread to avoid blocking the event loop
+        msg = await asyncio.to_thread(
+            ipc.snapshot_queue.get,
+            timeout=poll_interval,
         )
         if msg and msg.get("type") == "snapshot_ready":
             logger.debug("Received snapshot message from queue: window=%s", msg.get("window"))
@@ -180,9 +178,11 @@ async def upload_worker_loop(
     # Track for chained deltas:
     # - prev_window/prev_state: immediate predecessor (for delta computation)
     # - anchor_window: nearest FULL checkpoint (for recovery metadata)
+    # - delta_chain_length: actual count of deltas since last FULL (not arithmetic distance)
     prev_window: int | None = None
     prev_state: dict[str, torch.Tensor] | None = None
     anchor_window: int | None = None
+    delta_chain_length: int = 0
 
     while not ipc.stop.is_set():
         try:
@@ -240,14 +240,26 @@ async def upload_worker_loop(
 
             # Decide upload strategy:
             # - FULL-only: When delta disabled or no prev_state (initial/restart)
-            # - DELTA (+ FULL background at anchors): Normal operation
+            # - DELTA + background FULL: At stride-aligned anchors, or when chain
+            #   has grown too long (trainer skipped anchor windows). Both DELTA and
+            #   FULL are uploaded so caught-up validators use the small delta while
+            #   validators that need to catch up download the FULL.
             is_anchor_window = checkpoint_window % base_stride_blocks == 0
+            chain_exceeds_limit = delta_chain_length >= delta_base_interval_windows
+            if chain_exceeds_limit and DELTA_CHECKPOINT_ENABLED and prev_window is not None:
+                logger.info(
+                    "Chain length %d >= limit %d, will upload DELTA + background FULL for checkpoint-%s (last anchor=%s)",
+                    delta_chain_length,
+                    delta_base_interval_windows,
+                    checkpoint_window,
+                    anchor_window,
+                )
             should_upload_full_only = (
                 not DELTA_CHECKPOINT_ENABLED or prev_window is None or prev_state is None
             )
             should_upload_full_background = (
-                is_anchor_window and not should_upload_full_only  # Only if we're doing DELTA
-            )
+                is_anchor_window or chain_exceeds_limit
+            ) and not should_upload_full_only
 
             # Attempt upload with retry logic
             upload_result: UploadResult | None = None
@@ -295,6 +307,10 @@ async def upload_worker_loop(
 
                         # Start background FULL upload at anchor windows (non-blocking)
                         if should_upload_full_background:
+                            # Reset chain counter immediately to prevent re-triggering
+                            # while the bg FULL is in flight. anchor_window advances
+                            # only when the bg FULL completes (in _on_bg_done).
+                            delta_chain_length = 0
                             logger.info(
                                 "Starting background FULL upload for anchor checkpoint-%s",
                                 checkpoint_window,
@@ -318,18 +334,27 @@ async def upload_worker_loop(
                                 *,
                                 _checkpoint_window: int = checkpoint_window_for_task,
                             ) -> None:
-                                nonlocal anchor_window
+                                nonlocal anchor_window, delta_chain_length
                                 try:
                                     ok = task.result()
                                 except Exception:  # noqa: BLE001
                                     ok = False
                                 if ok:
-                                    # Only advance the anchor after we know the FULL upload succeeded.
-                                    anchor_window = _checkpoint_window
-                                    logger.info(
-                                        "✅ Background FULL anchor confirmed for checkpoint-%s",
-                                        _checkpoint_window,
-                                    )
+                                    # Only advance forward: guard against an older bg FULL
+                                    # completing after a newer one (would regress the anchor).
+                                    if anchor_window is None or _checkpoint_window > anchor_window:
+                                        anchor_window = _checkpoint_window
+                                        delta_chain_length = 0
+                                        logger.info(
+                                            "✅ Background FULL anchor confirmed for checkpoint-%s",
+                                            _checkpoint_window,
+                                        )
+                                    else:
+                                        logger.info(
+                                            "Background FULL for checkpoint-%s completed but anchor already at %s, skipping",
+                                            _checkpoint_window,
+                                            anchor_window,
+                                        )
 
                             bg_task.add_done_callback(_on_bg_done)
 
@@ -360,17 +385,28 @@ async def upload_worker_loop(
                 if loaded_state is not None:
                     prev_window = checkpoint_window
                     prev_state = loaded_state
-                    # Update anchor on FULL uploads (including background FULL at anchors)
+                    # Update anchor and chain counter
                     is_new_anchor = should_upload_full_only or did_fallback_to_full
                     if is_new_anchor:
+                        # Synchronous FULL: advance anchor immediately
                         anchor_window = checkpoint_window
+                        delta_chain_length = 0
                         logger.info(
                             "Cached checkpoint-%s as new anchor (%d tensors, %d params)",
                             anchor_window,
                             len(prev_state),
                             sum(t.numel() for t in prev_state.values()),
                         )
+                    elif should_upload_full_background:
+                        # Delta with bg FULL in flight: chain counter was already
+                        # reset when bg FULL was triggered, don't increment.
+                        logger.info(
+                            "Cached checkpoint-%s as prev (bg FULL in flight, chain reset)",
+                            prev_window,
+                        )
                     else:
+                        # Pure delta: increment chain counter
+                        delta_chain_length += 1
                         logger.info(
                             "Cached checkpoint-%s as prev for chained delta (%d tensors)",
                             prev_window,
