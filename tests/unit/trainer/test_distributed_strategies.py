@@ -464,11 +464,10 @@ class TestBF16Gating:
         b_theta = theta.bfloat16().float()
         b_local = theta_local.bfloat16().float()
 
-        # Both round to the same BF16 value
+        # Both round to the same BF16 value: gate would not fire
         assert torch.equal(b_theta, b_local)
-        # Gated difference is zero
-        delta_hat = b_theta - b_local
-        assert delta_hat.item() == 0.0
+        bf16_diff = b_theta - b_local
+        assert bf16_diff.item() == 0.0
 
     def test_bf16_gating_nonzero_for_large_changes(self) -> None:
         """Changes larger than BF16 ULP produce non-zero gated pseudo-grad."""
@@ -478,10 +477,10 @@ class TestBF16Gating:
         b_theta = theta.bfloat16().float()
         b_local = theta_local.bfloat16().float()
 
-        # Should be different at BF16
+        # Should be different at BF16: gate would fire
         assert not torch.equal(b_theta, b_local)
-        delta_hat = b_theta - b_local
-        assert delta_hat.item() != 0.0
+        bf16_diff = b_theta - b_local
+        assert bf16_diff.item() != 0.0
 
     def test_residual_conservation(self) -> None:
         """Residual + transmitted = total signal (conservation invariant)."""
@@ -498,14 +497,19 @@ class TestBF16Gating:
         s = residual + delta
         w_tilde = snapshot - s
 
+        # v6: BF16 gate as binary mask, transmit raw FP32 s
         b_theta = snapshot.bfloat16().float()
         b_w_tilde = w_tilde.bfloat16().float()
-        delta_hat = b_theta - b_w_tilde  # Transmitted
+        gate_mask = b_theta != b_w_tilde
 
-        new_residual = s - delta_hat  # Kept
+        transmitted = torch.zeros_like(s)
+        transmitted[gate_mask] = s[gate_mask]
 
-        # Conservation: transmitted + new_residual = total signal (= s = residual + delta)
-        reconstructed = delta_hat + new_residual
+        new_residual = s.clone()
+        new_residual[gate_mask] = 0  # Fired entries fully consumed
+
+        # v6 conservation: transmitted + residual = total signal at all indices
+        reconstructed = transmitted + new_residual
         assert torch.allclose(reconstructed, s, atol=1e-7), (
             f"Conservation violated: max diff = {(reconstructed - s).abs().max().item()}"
         )
@@ -526,12 +530,18 @@ class TestBF16Gating:
             s = residual + delta
             w_tilde = snapshot - s
 
+            # v6: BF16 gate as mask, transmit raw FP32 s
             b_theta = snapshot.bfloat16().float()
             b_w_tilde = w_tilde.bfloat16().float()
-            delta_hat = b_theta - b_w_tilde
+            gate_mask = b_theta != b_w_tilde
 
-            residual = s - delta_hat
-            total_transmitted += delta_hat
+            transmitted = torch.zeros_like(s)
+            transmitted[gate_mask] = s[gate_mask]
+            total_transmitted += transmitted
+
+            # v6 residual: fired=0, unfired=s
+            residual = s.clone()
+            residual[gate_mask] = 0
 
         # After 200 rounds of perturbation=1e-5, total signal = 200 * 1e-5 = 2e-3
         # At least some entries should have been transmitted
@@ -548,17 +558,81 @@ class TestBF16Gating:
         s = residual + delta
         w_tilde = snapshot - s
 
+        # v6: gate mask determines sparsity
         b_theta = snapshot.bfloat16().float()
         b_w_tilde = w_tilde.bfloat16().float()
-        delta_hat = b_theta - b_w_tilde
+        gate_mask = b_theta != b_w_tilde
 
-        nnz = (delta_hat != 0).sum().item()
+        nnz = gate_mask.sum().item()
         sparsity = 1.0 - nnz / n
         # With 1e-7 perturbation, almost everything should be sparse
         assert sparsity > 0.9, f"Expected high sparsity, got {sparsity:.2%}"
 
+    def test_all_entries_fire(self) -> None:
+        """When all entries cross BF16 boundary, residual is zero everywhere."""
+        n = 100
+        snapshot = torch.ones(n, dtype=torch.float32)  # BF16-exact
+        local_params = snapshot + 0.1  # Large perturbation, all entries fire
+        residual = torch.zeros(n, dtype=torch.float32)
+
+        delta = snapshot - local_params
+        s = residual + delta
+        w_tilde = snapshot - s
+        gate_mask = snapshot.bfloat16().float() != w_tilde.bfloat16().float()
+
+        assert gate_mask.all(), "All entries should fire with large perturbation"
+        transmitted = torch.zeros_like(s)
+        transmitted[gate_mask] = s[gate_mask]
+        new_residual = s.clone()
+        new_residual[gate_mask] = 0
+
+        assert torch.equal(transmitted, s), "All-fire: transmitted must equal s"
+        assert (new_residual == 0).all(), "All-fire: residual must be all zeros"
+
+    def test_no_entries_fire(self) -> None:
+        """When no entries cross BF16 boundary, transmitted is zero and residual = s."""
+        n = 100
+        snapshot = torch.ones(n, dtype=torch.float32)  # BF16-exact
+        # Zero perturbation: local == snapshot
+        local_params = snapshot.clone()
+        residual = torch.zeros(n, dtype=torch.float32)
+
+        delta = snapshot - local_params  # all zeros
+        s = residual + delta  # all zeros
+        w_tilde = snapshot - s
+        gate_mask = snapshot.bfloat16().float() != w_tilde.bfloat16().float()
+
+        assert not gate_mask.any(), "No entries should fire with zero perturbation"
+        transmitted = torch.zeros_like(s)
+        new_residual = s.clone()
+
+        assert (transmitted == 0).all(), "No-fire: transmitted must be all zeros"
+        assert torch.equal(new_residual, s), "No-fire: residual must equal s"
+
+    def test_deterministic_residual_crossover(self) -> None:
+        """Known residual pushes a specific entry across BF16 boundary next round."""
+        # Empirically: at snapshot=2.0, the gate fires when s >= 0.004
+        # (w_tilde=1.996 rounds to 2.0, w_tilde=1.9960 rounds to 1.992188)
+        snapshot = torch.tensor([2.0], dtype=torch.float32)
+
+        # Round 1: s = 0.003, below firing threshold -> doesn't fire
+        residual = torch.tensor([0.001], dtype=torch.float32)
+        delta1 = torch.tensor([0.002])
+        s1 = residual + delta1  # 0.003
+        w_tilde1 = snapshot - s1  # 1.997
+        gate1 = snapshot.bfloat16().float() != w_tilde1.bfloat16().float()
+        assert not gate1.item(), "Round 1: should NOT fire (s=0.003 below threshold)"
+        residual = s1.clone()  # carry forward
+
+        # Round 2: s = 0.003 + 0.002 = 0.005, above firing threshold -> fires
+        delta2 = torch.tensor([0.002])
+        s2 = residual + delta2  # 0.005 >= 0.004
+        w_tilde2 = snapshot - s2  # 1.995
+        gate2 = snapshot.bfloat16().float() != w_tilde2.bfloat16().float()
+        assert gate2.item(), "Round 2: MUST fire (residual accumulated past threshold)"
+
     def test_full_pulse_round_single_worker(self) -> None:
-        """End-to-end single-worker PULSE step: gate, transmit, outer step, reset."""
+        """End-to-end single-worker v6 PULSE step: gate, transmit, outer step, reset."""
         model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
 
         # Snapshot global params
@@ -576,7 +650,7 @@ class TestBF16Gating:
 
         local_params = list(model.parameters())
 
-        # Step 1: BF16 gating with residual
+        # Step 1: v6 BF16-gated FP32 pseudo-gradient
         flat_pseudo_grad = torch.zeros(total_numel, dtype=torch.float32)
         offset = 0
         for global_p, local_p in zip(global_params, local_params, strict=True):
@@ -590,10 +664,14 @@ class TestBF16Gating:
 
             b_theta = snapshot.bfloat16().float()
             b_w_tilde = w_tilde.bfloat16().float()
-            delta_hat = b_theta - b_w_tilde
+            gate_mask = b_theta != b_w_tilde
 
-            flat_pseudo_grad[offset : offset + numel] = delta_hat
-            residual[offset : offset + numel] = s - delta_hat
+            transmitted = torch.zeros_like(s)
+            transmitted[gate_mask] = s[gate_mask]
+            flat_pseudo_grad[offset : offset + numel] = transmitted
+
+            residual[offset : offset + numel] = s
+            residual[offset : offset + numel][gate_mask] = 0
             offset += numel
 
         # Step 2: Single worker, so avg_pseudo_grad = flat_pseudo_grad
@@ -776,67 +854,15 @@ class TestDilocoSnapshotGating:
 
 
 # ============================================================================
-# P2 fix: PULSE memory-bounded fallback
+# Sparse averaging correctness
 # ============================================================================
 
 
-class TestPulseMemoryGuard:
-    """Verify PULSE all-gather falls back to dense when GPU memory would be exceeded."""
+class TestSparseAveraging:
+    """Verify sparse scatter-add averaging matches dense averaging."""
 
-    def _compute_memory_and_decision(
-        self, max_nnz: int, dp_size: int, budget_bytes: int = 4 * 1024**3
-    ) -> tuple[int, bool]:
-        """Replicate the memory guard logic from _pulse_diloco_outer_step."""
-        estimated_gpu_bytes = (dp_size + 1) * 12 * max_nnz
-        use_sparse = max_nnz > 0 and estimated_gpu_bytes <= budget_bytes
-        return estimated_gpu_bytes, use_sparse
-
-    def test_low_nnz_uses_sparse(self) -> None:
-        """With 95% sparsity on 8B params, sparse gather fits in budget."""
-        # 8B params, 5% non-zero = 400M nnz, dp_size=2
-        max_nnz = 400_000_000
-        dp_size = 2
-        _, use_sparse = self._compute_memory_and_decision(max_nnz, dp_size)
-        # (2+1) * 12 * 400M = 14.4 GB > 4 GB budget
-        assert not use_sparse, "400M nnz exceeds 4GB budget"
-
-    def test_very_sparse_uses_sparse(self) -> None:
-        """With 99.5% sparsity on 1B params, sparse gather fits easily."""
-        max_nnz = 5_000_000  # 5M non-zero entries
-        dp_size = 2
-        estimated, use_sparse = self._compute_memory_and_decision(max_nnz, dp_size)
-        # (2+1) * 12 * 5M = 180 MB -- well within budget
-        assert estimated == 3 * 12 * 5_000_000
-        assert use_sparse
-
-    def test_moderate_sparsity_falls_back_to_dense(self) -> None:
-        """At 80% sparsity on 1B params, memory exceeds budget."""
-        max_nnz = 200_000_000  # 200M non-zero (20% of 1B)
-        dp_size = 2
-        _, use_sparse = self._compute_memory_and_decision(max_nnz, dp_size)
-        # (2+1) * 12 * 200M = 7.2 GB > 4 GB
-        assert not use_sparse
-
-    def test_zero_nnz_skips_both_paths(self) -> None:
-        """All-zero pseudo-gradient uses neither sparse nor dense path."""
-        max_nnz = 0
-        dp_size = 2
-        _, use_sparse = self._compute_memory_and_decision(max_nnz, dp_size)
-        assert not use_sparse
-
-    def test_larger_dp_size_triggers_fallback_sooner(self) -> None:
-        """More workers increase memory proportionally, triggering fallback sooner."""
-        max_nnz = 50_000_000  # 50M nnz
-        # dp_size=2: (3) * 12 * 50M = 1.8 GB -- fits
-        _, sparse_2 = self._compute_memory_and_decision(max_nnz, dp_size=2)
-        assert sparse_2, "50M nnz with dp=2 should fit in 4GB"
-
-        # dp_size=8: (9) * 12 * 50M = 5.4 GB -- exceeds
-        _, sparse_8 = self._compute_memory_and_decision(max_nnz, dp_size=8)
-        assert not sparse_8, "50M nnz with dp=8 should exceed 4GB"
-
-    def test_dense_fallback_produces_correct_average(self) -> None:
-        """Dense all-reduce of BF16-gated pseudo-grad gives same result as sparse."""
+    def test_sparse_average_matches_dense(self) -> None:
+        """Sparse index_add_ averaging produces same result as dense sum."""
         torch.manual_seed(42)
         # Simulate: two workers with different pseudo-grads
         n = 1000
@@ -861,30 +887,29 @@ class TestPulseMemoryGuard:
             "Dense and sparse averaging must produce the same result"
         )
 
-    def test_dense_fallback_preserves_residual_invariant(self) -> None:
-        """Residual buffer is correct regardless of sparse vs dense communication.
-
-        Conservation invariant: transmitted + residual = total signal.
-        The residual is computed in step 1 (CPU, before communication path choice),
-        so the communication method doesn't affect it.
-        """
+    def test_residual_invariant_independent_of_comms(self) -> None:
+        """v6 conservation invariant: transmitted + residual = s at all indices."""
         torch.manual_seed(123)
         n = 100
-        # Simulate step 1 of PULSE
+        # Simulate step 1 of v6 PULSE
         global_params_flat = torch.randn(n, dtype=torch.float32)
         local_params_flat = global_params_flat + torch.randn(n) * 0.001  # small perturbation
         residual_before = torch.randn(n, dtype=torch.float32) * 0.0001
 
-        # Step 1: BF16 gating with residual correction
+        # Step 1: v6 BF16-gated FP32 pseudo-gradient
         delta = global_params_flat - local_params_flat
         s = residual_before + delta
         w_tilde = global_params_flat - s
         b_theta = global_params_flat.bfloat16().float()
         b_w_tilde = w_tilde.bfloat16().float()
-        delta_hat = b_theta - b_w_tilde  # transmitted
-        residual_after = s - delta_hat  # retained
+        gate_mask = b_theta != b_w_tilde
 
-        # Conservation: transmitted + residual = corrected signal
-        assert torch.allclose(delta_hat + residual_after, s, atol=1e-6), (
+        transmitted = torch.zeros_like(s)
+        transmitted[gate_mask] = s[gate_mask]
+        residual_after = s.clone()
+        residual_after[gate_mask] = 0
+
+        # v6 conservation: transmitted + residual = corrected signal
+        assert torch.allclose(transmitted + residual_after, s, atol=1e-6), (
             "Conservation invariant violated: transmitted + residual != total signal"
         )

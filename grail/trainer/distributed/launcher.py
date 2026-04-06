@@ -497,6 +497,16 @@ def main() -> None:
     if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
+    # Force glibc to use mmap for allocations >= 64KB. Without this, after
+    # a 32GB tensor is freed via munmap, glibc raises its mmap threshold and
+    # routes subsequent medium allocations (1-100MB) through the heap arena.
+    # Arena frees never return memory to the OS, causing RSS to grow
+    # monotonically across PULSE outer steps until the OOM killer fires.
+    if "MALLOC_MMAP_THRESHOLD_" not in os.environ:
+        os.environ["MALLOC_MMAP_THRESHOLD_"] = "65536"
+    if "MALLOC_TRIM_THRESHOLD_" not in os.environ:
+        os.environ["MALLOC_TRIM_THRESHOLD_"] = "65536"
+
     dist.init_process_group(backend="cuda:nccl,cpu:gloo")
 
     try:
@@ -645,6 +655,10 @@ def run_distributed_training_process(
 
     if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    if "MALLOC_MMAP_THRESHOLD_" not in os.environ:
+        os.environ["MALLOC_MMAP_THRESHOLD_"] = "65536"
+    if "MALLOC_TRIM_THRESHOLD_" not in os.environ:
+        os.environ["MALLOC_TRIM_THRESHOLD_"] = "65536"
 
     _configure_logging(rank, verbosity)
 

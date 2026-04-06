@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 OPTIMIZER_BETAS = (0.9, 0.95)
-OPTIMIZER_WEIGHT_DECAY = 0.1
+OPTIMIZER_WEIGHT_DECAY = float(os.getenv("GRAIL_OPTIMIZER_WEIGHT_DECAY", "0.1"))
 
 # Scheduler hyperparameters
 WARMUP_FRACTION = float(os.getenv("GRAIL_WARMUP_FRACTION", "0.05"))
@@ -311,9 +311,27 @@ class DistributedTrainingService:
         unwrapped = (
             self.train_model.module if hasattr(self.train_model, "module") else self.train_model
         )
-        self._diloco_global_params = [p.detach().clone().cpu() for p in unwrapped.parameters()]
+        self._diloco_global_params = [
+            p.data.detach().to(device="cpu", dtype=torch.float32).clone()
+            for p in unwrapped.parameters()
+        ]
 
-        # Outer optimizer: Nesterov SGD on the global params.
+        # Verify precision: outer optimizer MUST operate in FP32 for correct
+        # PULSE BF16 gating. Log model and global param dtypes for debugging.
+        model_dtype = next(unwrapped.parameters()).dtype
+        global_dtype = self._diloco_global_params[0].dtype
+        logger.info(
+            "DILOCO precision: model_params=%s, global_params=%s, residual=float32",
+            model_dtype,
+            global_dtype,
+        )
+        if global_dtype != torch.float32:
+            raise RuntimeError(
+                f"DILOCO global params must be FP32, got {global_dtype}. "
+                "The outer optimizer and PULSE BF16 gate require FP32 precision."
+            )
+
+        # Outer optimizer: Nesterov SGD on the FP32 global params.
         # The .grad field will be filled with pseudo-gradients before each step.
         for p in self._diloco_global_params:
             p.requires_grad = True
@@ -554,6 +572,9 @@ class DistributedTrainingService:
 
         epoch_start = time.time()
 
+        # Track optimizer steps for DILOCO (H counts optimizer steps, not epochs)
+        steps_before = self.algorithm.optimizer_step_count
+
         # Monkey-patch logprob functions for TP-aware computation
         patched = self._patch_logprobs_for_tp()
 
@@ -574,10 +595,13 @@ class DistributedTrainingService:
 
         epoch_duration = time.time() - epoch_start
 
-        # DILOCO: track inner steps and trigger outer sync when H is reached
+        # DILOCO: track inner optimizer steps and trigger outer sync when H is reached.
+        # H counts optimizer steps (not epochs) to match the DiLoCo/PULSE literature
+        # and the TRL reference implementation.
         if self.dist_config.strategy == "diloco":
             self._diloco_sync_happened = False
-            self._diloco_inner_step_counter += 1
+            steps_this_epoch = self.algorithm.optimizer_step_count - steps_before
+            self._diloco_inner_step_counter += max(1, steps_this_epoch)
             diloco_metrics = self._diloco_maybe_outer_step()
             if diloco_metrics:
                 metrics.update(diloco_metrics)
@@ -598,14 +622,21 @@ class DistributedTrainingService:
     # ------------------------------------------------------------------
 
     def _diloco_maybe_outer_step(self) -> dict[str, float]:
-        """Check if H inner steps have elapsed and perform outer sync if so.
+        """Check if H inner optimizer steps have elapsed and perform outer sync if so.
+
+        H counts optimizer steps (not epochs). The counter may increment by
+        more than 1 per epoch if GRPO runs multiple optimizer steps per epoch.
+        We use >= (not modulo) to handle non-unit increments correctly.
 
         Returns:
             Dictionary of DILOCO-specific metrics (empty if no sync happened).
         """
         H = self.dist_config.diloco_inner_steps
-        if self._diloco_inner_step_counter % H != 0:
+        if self._diloco_inner_step_counter < H:
             return {}
+
+        # Reset counter, carrying over excess steps beyond H
+        self._diloco_inner_step_counter -= H
 
         if self.dist_config.pulse_diloco:
             return self._pulse_diloco_outer_step()
@@ -702,6 +733,12 @@ class DistributedTrainingService:
         assert self.context is not None
         assert self._pulse_residual_buffer is not None
 
+        # Free accumulated garbage before allocating ~32GB for pseudo-gradients.
+        # Training epochs accumulate unreferenced tensors (logprobs, advantages,
+        # rollout data) that Python GC hasn't collected yet.
+        gc.collect()
+        torch.cuda.empty_cache()
+
         device = self.context.device
         dp_group = self.dp_mesh.get_group()
         dp_size = self.dp_size
@@ -710,7 +747,11 @@ class DistributedTrainingService:
         total_numel = self._pulse_residual_buffer.numel()
         sync_start = time.time()
 
-        # ── Step 1: Residual-corrected BF16-visible pseudo-gradient ──
+        # ── Step 1: BF16-gated FP32 pseudo-gradient (v6 algorithm) ──
+        # v6 uses the BF16 gate only for sparsity selection but transmits
+        # raw FP32 s values instead of BF16-quantized delta_hat. This
+        # eliminates overshoot oscillations caused by BF16 quantization
+        # error in the residual buffer.
         flat_pseudo_grad = torch.zeros(total_numel, dtype=torch.float32)
         offset = 0
         for global_p, local_p in zip(self._diloco_global_params, local_params, strict=True):
@@ -722,19 +763,32 @@ class DistributedTrainingService:
             s = self._pulse_residual_buffer[offset : offset + numel] + delta
             w_tilde = snapshot - s  # virtual corrected model
 
+            # BF16 gate: determines which entries to transmit (sparsity mask)
             b_theta = snapshot.bfloat16().float()
             b_w_tilde = w_tilde.bfloat16().float()
-            delta_hat = b_theta - b_w_tilde  # BF16-visible pseudo-grad (sparse)
+            gate_mask = b_theta != b_w_tilde
 
-            flat_pseudo_grad[offset : offset + numel] = delta_hat
-            self._pulse_residual_buffer[offset : offset + numel] = s - delta_hat
+            # v6: transmit raw FP32 s at fired indices (not BF16-quantized delta_hat)
+            transmitted = torch.zeros_like(s)
+            transmitted[gate_mask] = s[gate_mask]
+            flat_pseudo_grad[offset : offset + numel] = transmitted
+
+            # v6 residual: fired entries fully consumed (0), unfired accumulate
+            self._pulse_residual_buffer[offset : offset + numel] = s
+            self._pulse_residual_buffer[offset : offset + numel][gate_mask] = 0
             offset += numel
 
+            # Free loop temporaries explicitly to avoid heap fragmentation
+            del param_cpu, delta, s, w_tilde, b_theta, b_w_tilde, gate_mask, transmitted
+
         # ── Step 2: Sparse all-gather ──
+        # Extract sparse indices/values, then delete flat_pseudo_grad
+        # to free ~32GB before allocating GPU tensors for all-gather.
         nonzero_mask = flat_pseudo_grad != 0
         indices = nonzero_mask.nonzero(as_tuple=True)[0]  # int64
         values = flat_pseudo_grad[nonzero_mask]  # FP32
         nnz = indices.numel()
+        del nonzero_mask  # ~8GB bool mask no longer needed
 
         # Exchange counts across workers
         nnz_tensor = torch.tensor([nnz], dtype=torch.int64, device=device)
@@ -744,25 +798,9 @@ class DistributedTrainingService:
 
         comm_sparsity = 1.0 - nnz / total_numel if total_numel > 0 else 0.0
 
-        # Memory guard: estimate GPU cost of sparse all-gather.
-        # Total = (dp_size + 1) * 12 * max_nnz bytes (int64 idx + float32 val).
-        # If this exceeds the budget, fall back to per-parameter dense all-reduce
-        # of the BF16-gated pseudo-gradient. The residual buffer is already
-        # updated correctly in step 1 regardless of the communication path.
-        _PULSE_GPU_BUDGET_BYTES = 4 * 1024**3  # 4 GB
-        estimated_gpu_bytes = (dp_size + 1) * 12 * max_nnz
-        use_sparse_gather = max_nnz > 0 and estimated_gpu_bytes <= _PULSE_GPU_BUDGET_BYTES
+        del flat_pseudo_grad
 
-        if max_nnz > 0 and not use_sparse_gather and self._is_rank0:
-            logger.warning(
-                "PULSE memory guard: max_nnz=%d would need %.1f GB (budget=%.1f GB), "
-                "falling back to dense all-reduce for this outer step",
-                max_nnz,
-                estimated_gpu_bytes / 1e9,
-                _PULSE_GPU_BUDGET_BYTES / 1e9,
-            )
-
-        if use_sparse_gather:
+        if max_nnz > 0:
             # Pad and gather on GPU (NCCL requires equal-size tensors)
             idx_pad = torch.zeros(max_nnz, dtype=torch.int64, device=device)
             val_pad = torch.zeros(max_nnz, dtype=torch.float32, device=device)
@@ -782,26 +820,10 @@ class DistributedTrainingService:
                 if n > 0:
                     avg_pseudo_grad.index_add_(0, all_idx[r][:n].cpu().long(), all_val[r][:n].cpu())
             avg_pseudo_grad.div_(dp_size)
-        elif max_nnz > 0:
-            # Dense fallback: all-reduce BF16-gated pseudo-grad per parameter.
-            # Same math as sparse path but bounded by largest single parameter.
-            avg_pseudo_grad = torch.zeros(total_numel, dtype=torch.float32)
-            offset_dr = 0
-            for global_p in self._diloco_global_params:
-                numel = global_p.numel()
-                chunk = flat_pseudo_grad[offset_dr : offset_dr + numel].to(device)
-                dist.all_reduce(chunk, op=dist.ReduceOp.SUM, group=dp_group)
-                chunk.div_(dp_size)
-                avg_pseudo_grad[offset_dr : offset_dr + numel] = chunk.cpu()
-                offset_dr += numel
-            comm_sparsity = 0.0  # dense fallback, no sparsity benefit
         else:
             avg_pseudo_grad = torch.zeros(total_numel, dtype=torch.float32)
 
         # ── Step 3: Outer optimizer ──
-        # Snapshot global params before step (for weight-update sparsity metric)
-        snapshots_before = [gp.data.clone() for gp in self._diloco_global_params]
-
         offset = 0
         for global_p in self._diloco_global_params:
             numel = global_p.numel()
@@ -810,6 +832,7 @@ class DistributedTrainingService:
 
         self._diloco_outer_optimizer.step()
         self._diloco_outer_optimizer.zero_grad()
+        del avg_pseudo_grad
 
         # ── Step 4: Hard reset ──
         with torch.no_grad():
@@ -820,40 +843,42 @@ class DistributedTrainingService:
 
         # ── Metrics ──
         sync_duration = time.time() - sync_start
-        pseudo_grad_norm = avg_pseudo_grad.norm().item()
-
-        # Weight-update BF16 sparsity (PULSE paper definition)
-        bf16_changed = 0
-        for gp, snap in zip(self._diloco_global_params, snapshots_before, strict=True):
-            bf16_changed += int(
-                (gp.data.bfloat16().float() != snap.bfloat16().float()).sum().item()
-            )
-        weight_bf16_sparsity = 1.0 - bf16_changed / total_numel if total_numel > 0 else 0.0
-
         outer_step_num = self._diloco_inner_step_counter // self.dist_config.diloco_inner_steps
+
         if self._is_rank0:
             logger.info(
-                "PULSE-DiLoCo outer step %d: pseudo_grad_norm=%.4f, "
-                "comm_sparsity=%.2f%%, weight_bf16_sparsity=%.2f%%, "
-                "nnz=%d/%d, sync_time=%.2fs",
+                "PULSE-DiLoCo outer step %d: comm_sparsity=%.2f%%, nnz=%d/%d, sync_time=%.2fs",
                 outer_step_num,
-                pseudo_grad_norm,
                 comm_sparsity * 100,
-                weight_bf16_sparsity * 100,
                 nnz,
                 total_numel,
                 sync_duration,
             )
 
+        self._trim_heap()
+
         return {
-            "diloco/pseudo_grad_norm": pseudo_grad_norm,
             "diloco/sync_duration": sync_duration,
             "diloco/outer_step": float(outer_step_num),
             "pulse/comm_sparsity": comm_sparsity,
-            "pulse/weight_bf16_sparsity": weight_bf16_sparsity,
             "pulse/nnz": float(nnz),
             "pulse/total_numel": float(total_numel),
         }
+
+    @staticmethod
+    def _trim_heap() -> None:
+        """Return freed glibc heap pages to the OS via malloc_trim.
+
+        Without this, glibc's arena allocator retains freed memory, causing
+        RSS to grow monotonically across PULSE outer steps and checkpoint
+        saves. Each call reclaims ~10-50 GB depending on fragmentation.
+        """
+        import ctypes
+
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except OSError:
+            pass  # Non-Linux or missing libc
 
     # ------------------------------------------------------------------
     # TP logprob monkey-patching
@@ -1085,22 +1110,28 @@ class DistributedTrainingService:
         if self.dist_config.strategy == "diloco":
             state["diloco_inner_step_counter"] = self._diloco_inner_step_counter
 
+            # Use direct references (no .clone()) for CPU tensors. These are
+            # not modified during torch.save serialization, and eliminating
+            # the clones avoids ~91 GB of transient CPU allocations that
+            # cause glibc heap fragmentation and OOM on tight-RAM systems.
             if self._diloco_global_params is not None:
-                state["diloco_global_params"] = [p.data.clone() for p in self._diloco_global_params]
+                state["diloco_global_params"] = [p.data for p in self._diloco_global_params]
 
             if self._diloco_outer_optimizer is not None:
                 state["diloco_outer_optimizer_state_dict"] = (
                     self._diloco_outer_optimizer.state_dict()
                 )
 
-            # PULSE residual buffer
+            # PULSE residual buffer (CPU, not modified during save)
             if self._pulse_residual_buffer is not None:
-                state["pulse_residual_buffer"] = self._pulse_residual_buffer.clone()
+                state["pulse_residual_buffer"] = self._pulse_residual_buffer
 
         resume_path = self.snapshot_dir / "resume_state.pt"
         resume_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(state, resume_path)
+        del state
         logger.info("Resume checkpoint saved: %s (epoch=%d)", resume_path, self.epoch_counter)
+        self._trim_heap()
 
     def _load_resume_checkpoint(self) -> bool:
         """Load training state from a resume checkpoint if available.
