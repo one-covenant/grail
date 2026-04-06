@@ -111,7 +111,7 @@ async def _train_epoch_smoke() -> dict[str, float]:
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     algo = GRPOAlgorithm()
-    train_cfg = TrainingConfig(lr=1e-3, batch_size=4)
+    train_cfg = TrainingConfig(lr=1e-3, micro_batch_size=4)
 
     metrics = await algo.train_epoch(
         model=model,

@@ -233,7 +233,7 @@ async def test_vllm_server_training_epoch() -> None:
         optimizer = torch.optim.AdamW(train_model.parameters(), lr=1e-4)
 
         algo = GRPOAlgorithm()
-        train_cfg = TrainingConfig(lr=1e-4, batch_size=8)
+        train_cfg = TrainingConfig(lr=1e-4, micro_batch_size=8)
 
         metrics = await algo.train_epoch(
             model=train_model,
@@ -354,7 +354,7 @@ async def test_end_to_end_iteration() -> None:
         optimizer = torch.optim.AdamW(train_model.parameters(), lr=1e-4)
 
         algo = GRPOAlgorithm()
-        train_cfg = TrainingConfig(lr=1e-4, batch_size=8)
+        train_cfg = TrainingConfig(lr=1e-4, micro_batch_size=8)
 
         train_metrics = await algo.train_epoch(
             model=train_model,
