@@ -26,6 +26,12 @@ manages files on disk and in R2; callers handle loading into Torch/Transformers.
 Note: Remote checkpoint publishing and deletion are handled by
 grail.trainer.checkpoint_publisher module (producer role). This module should never
 perform write operations to R2.
+
+SYNC: The eval service has a standalone reimplementation of delta chain
+reconstruction in grail.trainer.eval_service.r2_download (bittensor-free,
+aiobotocore-based). If the delta format, metadata schema, sparse codec dispatch,
+or chain walk logic changes here, update that module to match. A shared contract
+test in tests/unit/eval_service/test_delta_contract.py verifies parity.
 """
 
 from __future__ import annotations
