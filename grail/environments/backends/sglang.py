@@ -103,15 +103,10 @@ class SGLangServerBackend(TextGenBackend):
                             # Ensure single completion per request
                             "n": 1,
                         }
-                        # Provide vendor extensions via extra_body for SGLang
-                        extra_body: dict[str, Any] = {}
-                        if params.top_k is not None:
-                            extra_body["top_k"] = int(params.top_k)
-                        if params.repetition_penalty is not None:
-                            extra_body["repetition_penalty"] = float(params.repetition_penalty)
-
-                        if extra_body:
-                            completion_kwargs["extra_body"] = extra_body
+                        # SGLang-specific sampling parameters.
+                        # Omit top_k/repetition_penalty to avoid 400 errors with
+                        # older openai library versions that don't support extra_body.
+                        # SGLang defaults (top_k=50, no repetition penalty) are adequate.
 
                         # Add seed (SGLang supports this parameter)
                         if random_seed is not None:
@@ -133,16 +128,25 @@ class SGLangServerBackend(TextGenBackend):
 
                     except Exception as e:
                         req_time = time.time() - req_start
+                        # Log the error body for debugging
+                        err_body = ""
+                        resp = getattr(e, "response", None)
+                        if resp is not None:
+                            try:
+                                err_body = resp.text[:500]
+                            except Exception:
+                                pass
                         if attempt < max_retries - 1:
                             backoff = base_backoff * (2**attempt)
                             logger.warning(
-                                "  Request %d/%d failed (attempt %d/%d), retrying in %.1fs: %s",
+                                "  Request %d/%d failed (attempt %d/%d), retrying in %.1fs: %s body=%s",
                                 idx + 1,
                                 batch_size,
                                 attempt + 1,
                                 max_retries,
                                 backoff,
                                 type(e).__name__,
+                                err_body[:200],
                             )
                             await asyncio.sleep(backoff)
                         else:
