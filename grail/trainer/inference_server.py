@@ -760,6 +760,43 @@ class SGLangServerManager(InferenceServerManager):
         """No-op for SGLang backend (models remain in external process)."""
         pass
 
+    async def reload_with_new_checkpoint(self, new_checkpoint_path: str) -> None:
+        """Reload SGLang server with updated model checkpoint.
+
+        Stops the current server, updates the model path, and restarts with
+        new weights. Waits for GPU memory cleanup between stop and start.
+        """
+        if not os.path.exists(new_checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint not found: {new_checkpoint_path}")
+
+        logger.info(
+            "Reloading SGLang server with new checkpoint",
+            extra={"path": new_checkpoint_path},
+        )
+
+        try:
+            await self._stop_server()
+            self._config.model_path = new_checkpoint_path
+            await self._start_server()
+
+            if self._process is None or self._bound_port is None:
+                raise RuntimeError("Failed to restart SGLang server after reload")
+
+            logger.info(
+                "SGLang server reloaded successfully",
+                extra={
+                    "checkpoint": new_checkpoint_path,
+                    "url": self.base_url,
+                    "model": self.model_name,
+                },
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to reload SGLang server",
+                extra={"checkpoint": new_checkpoint_path, "error": str(exc)},
+            )
+            raise RuntimeError(f"SGLang server reload failed: {exc}") from exc
+
     def _build_command(self) -> list[str]:
         """Build SGLang server launch command with optimized parameters."""
         import sys
