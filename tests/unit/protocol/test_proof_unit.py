@@ -168,11 +168,17 @@ class TestGRAILVerifier:
         assert diagnostics["sketch_diff"] < PROOF_SKETCH_TOLERANCE_BASE
 
     def test_rejects_different_hidden_state(self, verifier: GRAILVerifier, randomness: str) -> None:
-        """Completely different hidden state should be rejected."""
+        """Completely different hidden state should be rejected.
+
+        Uses log-normal scaled activations to produce realistic bucket diversity
+        (spanning multiple magnitude buckets), unlike randn which maps everything
+        to bucket +/-1.
+        """
         torch.manual_seed(7)
         r_vec = verifier.generate_r_vec(randomness)
-        hidden1 = torch.randn(4096)
-        hidden2 = torch.randn(4096)  # Completely different
+        # Log-normal scaling gives realistic activation magnitude diversity
+        hidden1 = torch.randn(4096) * torch.randn(4096).abs().clamp(min=0.01) * 10
+        hidden2 = torch.randn(4096) * torch.randn(4096).abs().clamp(min=0.01) * 10
 
         commitment = verifier.create_commitment(hidden1, r_vec)
 
@@ -180,7 +186,9 @@ class TestGRAILVerifier:
             hidden2, commitment, r_vec, sequence_length=100, position=0
         )
 
-        assert not is_valid, "Different hidden state should be rejected"
+        assert not is_valid, (
+            f"Different hidden state should be rejected, sketch_diff={diagnostics['sketch_diff']}"
+        )
 
 
 class TestVectorizedBucketing:
@@ -236,7 +244,7 @@ class TestCreateCommitmentsBatch:
 
     @pytest.fixture
     def verifier(self) -> GRAILVerifier:
-        return GRAILVerifier(hidden_dim=3584, topk=32)
+        return GRAILVerifier(hidden_dim=3584, topk=16)
 
     @pytest.fixture
     def randomness(self) -> str:

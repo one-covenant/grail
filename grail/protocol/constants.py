@@ -12,7 +12,7 @@ Rules:
 # ────────────────  GRAIL PROOF VERSION  ────────────────
 
 # Protocol version tag embedded in every rollout. Validators reject mismatched versions.
-GRAIL_PROOF_VERSION = "v2"
+GRAIL_PROOF_VERSION = "v5"
 
 # ────────────────  CRYPTOGRAPHIC CONSTANTS  ────────────────
 
@@ -39,7 +39,7 @@ PROOF_BATCH_SIZE = 16
 
 # Top-K activation selection for sketch computation.
 # Changing breaks: sketch bucket population differs between miner/validator.
-PROOF_TOPK = 32
+PROOF_TOPK = 16
 
 # Logarithmic bucketing: buckets per sign (16 total = 8 positive + 8 negative).
 # Changing breaks: sketch vector dimensionality mismatch.
@@ -49,16 +49,20 @@ PROOF_NUM_BUCKETS = 8
 # Changing breaks: r_vec generation, sketch magnitude.
 PROOF_COEFF_RANGE = 127
 
-# Sketch tolerance at position 0 (no FP drift expected at start of sequence).
-# Changing breaks: valid proofs rejected or invalid proofs accepted.
-PROOF_SKETCH_TOLERANCE_BASE = 30
+# Sketch tolerance at position 0. Covers cross-GPU drift across 6 models
+# (Qwen2.5, Qwen3, Llama-3.2) and 3 GPU architectures (B200, A100, L40).
+# Empirical max diff across ~300M positions = 3979. Base of 6000 gives ~50%
+# headroom (matching TOPLOC's empirical safety margin) while staying below
+# the LSH "two-bucket-shift" knee (~8000) to preserve distillation resistance.
+# Forgery prob at base: 10^-167. Changing breaks valid proofs.
+PROOF_SKETCH_TOLERANCE_BASE = 6000
 
 # Sketch tolerance sqrt growth factor per position.
 # FP divergence in causal attention grows as O(sqrt(P)) from different
-# reduction orders across SDPA implementations, torch versions, and GPUs.
-# tolerance(P) = base + growth * sqrt(P)
+# reduction orders across SDPA/FA2 implementations, torch versions, and GPUs.
+# tolerance(P) = base + growth * sqrt(P). At pos 8192: tol=6452, forgery=10^-166.
 # Changing breaks: tolerance envelope too tight (false rejections) or too loose (false accepts).
-PROOF_SKETCH_TOLERANCE_GROWTH = 3.0
+PROOF_SKETCH_TOLERANCE_GROWTH = 5.0
 
 # Attention implementation forced across all model loading paths.
 # FA2 is padding-invariant (uses flash_attn_varlen_func with unpadding), preventing

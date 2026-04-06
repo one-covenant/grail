@@ -92,19 +92,19 @@ How it works:
 
 1. The validator picks 32 random positions (`CHALLENGE_K = 32`) in the completion.
 2. At each position, the model's hidden activations at the last layer are extracted.
-3. The top 32 activations (`PROOF_TOPK = 32`) are selected and mapped into logarithmic buckets (8 buckets per sign, 16 total).
+3. The top 16 activations (`PROOF_TOPK = 16`) are selected and mapped into logarithmic buckets (8 buckets per sign, 16 total).
 4. A random linear projection (sketch) is computed over the bucketed values modulo a Mersenne prime (2^31 - 1).
 5. The validator recomputes this independently and compares against the miner's commitment.
 
 Tolerance is position-dependent to account for floating-point drift in causal attention:
 
 ```
-tolerance(pos) = 30 + 3.0 * sqrt(pos)
+tolerance(pos) = 6000 + 5.0 * sqrt(pos)
 ```
 
 Early positions have tight tolerance, later positions allow more drift. The bucketing (coarse quantization) makes the proof robust across different backends (vLLM, HuggingFace, SGLang) and CUDA versions while remaining cryptographically binding.
 
-Both miner and validator use SDPA (Scaled Dot-Product Attention) by default, not Flash Attention, to ensure consistent floating-point accumulation.
+Both miner and validator use Flash Attention 2 (`ATTN_IMPLEMENTATION = "flash_attention_2"`) to ensure consistent, padding-invariant floating-point accumulation across batch sizes.
 
 ---
 
@@ -146,10 +146,10 @@ This means a single bad window can zero your weight for ~1.4 hours. Consistent, 
 | `GRAIL_BURN_UID` | 0 | Burn destination |
 | `WEIGHT_ROLLING_WINDOWS` | 12 | Windows per submission interval |
 | `CHALLENGE_K` | 32 | Proof challenge positions |
-| `PROOF_TOPK` | 32 | Activations per position |
+| `PROOF_TOPK` | 16 | Activations per position |
 | `PROOF_NUM_BUCKETS` | 8 | Log-magnitude buckets per sign |
-| `PROOF_SKETCH_TOLERANCE_BASE` | 30 | Base FP tolerance |
-| `PROOF_SKETCH_TOLERANCE_GROWTH` | 3.0 | Sqrt-growth tolerance factor |
+| `PROOF_SKETCH_TOLERANCE_BASE` | 6000 | Base FP tolerance |
+| `PROOF_SKETCH_TOLERANCE_GROWTH` | 5.0 | Sqrt-growth tolerance factor |
 | `SAMPLE_RATE` | 10% | Rollout spot-check fraction |
 | `MAX_SAMPLES_PER_MINER` | 64 | Max rollouts checked per miner per window |
 | `MINER_SAMPLE_RATE` | 25% | Fraction of miners checked per window |

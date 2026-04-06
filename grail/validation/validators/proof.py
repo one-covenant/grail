@@ -34,7 +34,7 @@ class GRAILProofValidator(Validator):
     3. Sketch verification at challenged indices
     4. Caches logits for downstream validators (termination check)
 
-    Security: ~10^-234 forgery probability with sketch check at k=32 positions.
+    Security: ~10^-167 forgery probability with sketch check at K=32 challenged positions.
     """
 
     check_name = "proof_valid"
@@ -50,10 +50,10 @@ class GRAILProofValidator(Validator):
             # Check proof version
             proof_version = ctx.commit.get("proof_version")
 
-            if not proof_version or proof_version not in ("v1", "v2"):
+            if not proof_version or proof_version not in ("v4", "v5"):
                 logger.debug(
                     f"[proof_valid] Proof version validation failed | "
-                    f"Expected: v1 or v2 | "
+                    f"Expected: v4 or v5 | "
                     f"Got: {proof_version}"
                 )
                 ctx.checks[self.check_name] = False
