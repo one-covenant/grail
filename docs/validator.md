@@ -315,5 +315,32 @@ Normalize to weights across miners; set on-chain with `set_weights`. An emission
 - Verify wallet path: Ensure `~/.bittensor` is accessible
 - Check hardware support: Ensure your platform's floating point precision is within tolerance thresholds
 
+**Validator exits with `torch.cuda.is_available() is False` / GPU not visible inside the container:**
+
+The validator refuses to load the model on CPU by design: an 8B model on CPU in FP32 saturates every core and exhausts host RAM (we have seen this freeze a 180 GB host). If you see a `RuntimeError: get_model() called with device=None but torch.cuda.is_available() is False` in `docker logs grail-validator`, the container is running without GPU passthrough. Diagnose in this order:
+
+1. Confirm the host sees the GPUs:
+   ```bash
+   nvidia-smi
+   ```
+   If this fails on the host, reinstall the NVIDIA drivers before touching Docker.
+
+2. Confirm Docker can pass GPUs into a container (the preflight check):
+   ```bash
+   docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+   ```
+   If this fails but `nvidia-smi` works on the host, `nvidia-container-toolkit` is either not installed or not wired into the Docker daemon. Install or reconfigure it, then restart Docker:
+   ```bash
+   sudo nvidia-ctk runtime configure --runtime=docker
+   sudo systemctl restart docker
+   ```
+   Re-run the preflight until it prints your GPUs, then `docker compose -f docker/docker-compose.validator.yml up -d`.
+
+3. Confirm the validator container itself sees the GPUs:
+   ```bash
+   docker exec grail-validator nvidia-smi
+   ```
+   If the host preflight passes but this fails, check that `CUDA_VISIBLE_DEVICES` is not being set to an empty string anywhere in `.env`, and that `NVIDIA_VISIBLE_DEVICES=all` is still present in the validator service env block of `docker/docker-compose.validator.yml`.
+
 **Watchtower Not Updating:**
 - Check registry access: `

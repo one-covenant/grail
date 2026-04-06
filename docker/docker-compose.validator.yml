@@ -74,6 +74,12 @@ services:
       - GRAIL_METRIC_BUFFER_SIZE=${GRAIL_METRIC_BUFFER_SIZE}
       - GRAIL_METRIC_FLUSH_INTERVAL=${GRAIL_METRIC_FLUSH_INTERVAL}
 
+      # Explicit GPU visibility. Belt-and-suspenders alongside
+      # `deploy.resources.reservations.devices` below, since that block is
+      # silently ignored if nvidia-container-toolkit isn't wired to Docker.
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
       # Network timeout and retry configuration
       - BT_CALL_TIMEOUT=${BT_CALL_TIMEOUT:-15.0}
       - BT_CALL_RETRIES=${BT_CALL_RETRIES:-3}
@@ -95,6 +101,9 @@ services:
       # Set GRAIL_HOST_STORAGE_PATH in .env to your high-capacity mount (e.g., /ephemeral, /mnt/data).
       # Defaults to ~/grail-storage if unset.
       - ${GRAIL_HOST_STORAGE_PATH:-${HOME}/grail-storage}:${GRAIL_HOST_STORAGE_PATH:-${HOME}/grail-storage}
+
+    # HF dataloaders and multiprocessing IPC need more than the 64 MB default.
+    shm_size: ${GRAIL_VALIDATOR_SHM_SIZE:-2g}
 
     deploy:
       resources:

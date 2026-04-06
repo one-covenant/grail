@@ -465,7 +465,10 @@ class ValidationService:
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-                self._model = get_model(str(checkpoint_path), device=None, eval_mode=True)
+                # Pin to CUDA explicitly. Matches the miner/trainer pattern and
+                # prevents the silent CPU fallback that previously froze a
+                # validator host. The provider will raise if CUDA is missing.
+                self._model = get_model(str(checkpoint_path), device="cuda", eval_mode=True)
                 self._tokenizer = get_tokenizer(str(checkpoint_path))
                 self._current_checkpoint_id = str(checkpoint_path)
                 self._current_checkpoint_window = result.window

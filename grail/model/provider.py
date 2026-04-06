@@ -76,9 +76,33 @@ def get_model(
     """
     logger.debug(f"Loading model: {model_name}")
 
-    # Auto-detect device if not specified
+    # Auto-detect device if not specified.
+    #
+    # We intentionally refuse to fall back to CPU when the caller passes
+    # device=None and CUDA is not available. Silently loading a multi-billion
+    # parameter model on CPU saturates every core (PyTorch defaults to all
+    # visible threads), explodes RAM with FP32 activations, and blocks the
+    # asyncio event loop. That path froze a validator host in production
+    # (60 vCPUs pinned, ~150 GB RAM) when nvidia-container-toolkit was not
+    # wired into Docker. Fail loud instead, so the watchdog restarts us on a
+    # healthy host.
+    #
+    # Escape hatch: tests and dev scripts that genuinely want CPU must pass
+    # device="cpu" explicitly.
     if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "get_model() called with device=None but torch.cuda.is_available() "
+                "is False. Refusing to silently fall back to CPU: loading a "
+                "multi-billion-parameter model on CPU will saturate every core and "
+                "exhaust host RAM. "
+                "Check that nvidia-container-toolkit is installed and wired to "
+                "Docker (`docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 "
+                "nvidia-smi`), that CUDA_VISIBLE_DEVICES is not empty, and that "
+                "`nvidia-smi` works on the host. "
+                'If CPU is genuinely intended (tests, dev), pass device="cpu" explicitly.'
+            )
+        device = "cuda"
         logger.debug(f"Auto-detected device: {device}")
 
     device_is_cuda = str(device).startswith("cuda")
