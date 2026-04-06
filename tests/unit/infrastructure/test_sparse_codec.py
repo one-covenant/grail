@@ -570,11 +570,13 @@ class TestCompressionRatio:
         )
 
 
+@pytest.mark.serial
 class TestPerformance:
     """Tests for encoding/decoding throughput.
 
     Note: Encoding includes O(n log n) lexsort which dominates for large tensors.
     Decoding is faster as it only needs segment-wise cumsum.
+    Must run serial: throughput thresholds assume uncontested CPU.
     """
 
     @pytest.mark.slow
