@@ -733,6 +733,11 @@ class CheckpointPublisher:
                     rel_path = str(file_path.relative_to(temp_dir))
                     file_manifest[rel_path] = hashlib.sha256(file_path.read_bytes()).hexdigest()
 
+            # Compute end-to-end weights hash from the live model state. The
+            # state_dict is a view into the trained model's parameters, so this
+            # is exactly the bytes consumers will reconstruct after download.
+            weights_hash = compute_weights_hash(model.state_dict())
+
             training_config = {
                 "lr": TRAINER_LR,
                 "epochs": TRAINER_EPOCHS,
@@ -764,6 +769,7 @@ class CheckpointPublisher:
                 created_at=time.time(),
                 model_name=model_name,
                 checkpoint_type=CHECKPOINT_TYPE_FULL,
+                weights_hash=weights_hash,
                 env_id=env_id,
                 env_params=env_params,
                 generation_params=generation_params,
@@ -919,6 +925,14 @@ class CheckpointPublisher:
                     rel_path = str(file_path.relative_to(staging_path))
                     file_manifest[rel_path] = hashlib.sha256(file_path.read_bytes()).hexdigest()
 
+            # Compute end-to-end weights hash from the staged safetensors. With
+            # xxh3-128 the load+hash is ~1-2 s for a 7B model — affordable on
+            # the synchronous publish path.
+            staged_state = load_model_state_dict(staging_path)
+            if staged_state is None:
+                raise UploadError(f"No model weights found in staging path: {staging_path}")
+            weights_hash = compute_weights_hash(staged_state)
+
             # Read training config from snapshot metadata or use defaults
             training_config = snapshot_metadata.get(
                 "training_config",
@@ -954,6 +968,7 @@ class CheckpointPublisher:
                 created_at=snapshot_metadata.get("timestamp", time.time()),
                 model_name="async_trainer_snapshot",
                 checkpoint_type=CHECKPOINT_TYPE_FULL,
+                weights_hash=weights_hash,
                 env_id=env_id,
                 env_params=env_params,
                 generation_params=generation_params,
@@ -1407,6 +1422,22 @@ class CheckpointPublisher:
                     rel_path = str(file_path.relative_to(staging_path))
                     file_manifest[rel_path] = hashlib.sha256(file_path.read_bytes()).hexdigest()
 
+            # Compute end-to-end weights hash from the staged safetensors. This
+            # is the background FULL upload path (anchor windows), so we don't
+            # raise on a load failure — we log and ship the FULL with no hash,
+            # and the consumer's verify-on-download will catch it on read.
+            staged_state = load_model_state_dict(staging_path)
+            if staged_state is None:
+                logger.warning(
+                    "[upload_full_background] No model weights in staging %s; "
+                    "publishing FULL anchor without weights_hash for window %s",
+                    staging_path,
+                    target_window,
+                )
+                weights_hash = None
+            else:
+                weights_hash = compute_weights_hash(staged_state)
+
             # Read snapshot metadata
             snapshot_metadata_path = staging_path / "snapshot_metadata.json"
             if snapshot_metadata_path.exists():
@@ -1447,6 +1478,7 @@ class CheckpointPublisher:
                 created_at=snapshot_metadata.get("timestamp", time.time()),
                 model_name="async_trainer_snapshot",
                 checkpoint_type=CHECKPOINT_TYPE_FULL,
+                weights_hash=weights_hash,
                 env_id=env_id,
                 env_params=env_params,
                 generation_params=generation_params,
