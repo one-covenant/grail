@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from types import SimpleNamespace
 from typing import Any
 
@@ -235,7 +236,73 @@ def test_logprob_validator_precomputed_matches_fallback_path() -> None:
     assert fallback_ok is True
     assert precomputed_ok is True
     assert fallback_ctx.metadata["logprob_total"] == precomputed_ctx.metadata["logprob_total"]
-    assert (
-        fallback_ctx.metadata["logprob_mismatches"]
-        == precomputed_ctx.metadata["logprob_mismatches"]
+    assert fallback_ctx.metadata["logprob_median_dev"] == pytest.approx(
+        precomputed_ctx.metadata["logprob_median_dev"], abs=1e-9
     )
+    assert fallback_ctx.metadata["logprob_max_dev"] == pytest.approx(
+        precomputed_ctx.metadata["logprob_max_dev"], abs=1e-9
+    )
+
+
+def test_median_is_robust_to_outlier_positions() -> None:
+    """A handful of grossly perturbed positions must NOT trip the median check."""
+    tokens, logits, prompt_len, completion_len = _make_rollout()
+    challenged_logprobs = _compute_challenged_logprobs(
+        tokens=tokens,
+        logits=logits,
+        prompt_len=prompt_len,
+        completion_len=completion_len,
+    )
+
+    # Perturb floor((K-1)/2) positions by a huge amount.
+    # K=32 → median = avg(sorted[15], sorted[16]); both stay in the unperturbed
+    # half iff n_perturbed <= 15.
+    n_perturbed = (CHALLENGE_K - 1) // 2
+    claimed = [0.0 for _ in tokens]
+    for abs_idx, lp in challenged_logprobs.items():
+        claimed[abs_idx] = lp
+    for abs_idx in list(challenged_logprobs.keys())[:n_perturbed]:
+        claimed[abs_idx] = challenged_logprobs[abs_idx] - 5.0  # exp(5)-1 ≈ 147 deviation
+
+    ctx = _make_context(
+        tokens=tokens,
+        logits=logits,
+        prompt_len=prompt_len,
+        completion_len=completion_len,
+        claimed_logprobs=claimed,
+        precomputed_logprobs=challenged_logprobs,
+    )
+
+    assert LogprobValidator().validate(ctx) is True
+    assert ctx.metadata["logprob_median_dev"] < LogprobValidator.LOGPROB_IS_EPS
+    assert ctx.metadata["logprob_max_dev"] > 100.0  # the outliers were huge
+
+
+def test_median_rejects_systematic_distribution_drift() -> None:
+    """A small but uniform shift across all challenged positions must trip the median."""
+    tokens, logits, prompt_len, completion_len = _make_rollout()
+    challenged_logprobs = _compute_challenged_logprobs(
+        tokens=tokens,
+        logits=logits,
+        prompt_len=prompt_len,
+        completion_len=completion_len,
+    )
+
+    # log(1.2) ≈ 0.182 → exp(0.182) - 1 = 0.2 dev for every position; median = 0.2 > 0.10.
+    drift = math.log(1.2)
+    claimed = [0.0 for _ in tokens]
+    for abs_idx, lp in challenged_logprobs.items():
+        claimed[abs_idx] = lp - drift
+
+    ctx = _make_context(
+        tokens=tokens,
+        logits=logits,
+        prompt_len=prompt_len,
+        completion_len=completion_len,
+        claimed_logprobs=claimed,
+        precomputed_logprobs=challenged_logprobs,
+    )
+
+    assert LogprobValidator().validate(ctx) is False
+    assert ctx.metadata["logprob_median_dev"] > LogprobValidator.LOGPROB_IS_EPS
+    assert ctx.metadata["logprob_median_dev"] == pytest.approx(0.2, abs=1e-6)
