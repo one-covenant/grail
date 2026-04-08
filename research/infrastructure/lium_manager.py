@@ -17,7 +17,7 @@ import socket
 import subprocess
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from lium import Config, ExecutorInfo, Lium
@@ -366,7 +366,7 @@ class LiumInfra:
             }
 
             if spec.ttl_hours:
-                term_time = datetime.now(timezone.utc) + timedelta(hours=spec.ttl_hours)
+                term_time = datetime.now(UTC) + timedelta(hours=spec.ttl_hours)
                 self.lium.schedule_termination(pod, termination_time=term_time.isoformat())
                 print(f"   ⏰ Auto-terminate in {spec.ttl_hours}h")
 
@@ -509,7 +509,7 @@ class LiumInfra:
                 }
 
                 if spec.ttl_hours:
-                    term_time = datetime.now(timezone.utc) + timedelta(hours=spec.ttl_hours)
+                    term_time = datetime.now(UTC) + timedelta(hours=spec.ttl_hours)
                     self.lium.schedule_termination(pod, termination_time=term_time.isoformat())
                     print(f"   ⏰ Auto-terminate in {spec.ttl_hours}h")
 

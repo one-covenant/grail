@@ -23,7 +23,7 @@ operating_sys = "ubuntu22.04"
 tag = f"{cuda_version}-{flavor}-{operating_sys}"
 
 image = (
-    modal.Image.from_registry(f"nvidia/cuda:{tag}", add_python="3.11")
+    modal.Image.from_registry(f"nvidia/cuda:{tag}", add_python="3.12")
     .apt_install("git", "gcc-10", "g++-10", "clang")
     .pip_install("torch", "triton", "numpy")
 )

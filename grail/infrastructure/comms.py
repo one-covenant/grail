@@ -531,7 +531,7 @@ async def upload_file_chunked(
         )
         return True
 
-    except asyncio.TimeoutError as e:
+    except TimeoutError as e:
         logger.error(f"❌ Upload timeout for {key} after {upload_timeout}s: {e}")
         if client is not None and upload_id is not None:
             try:
@@ -616,7 +616,7 @@ async def _upload_single_chunk(
             )
             progress.update(len(data))
             return True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             if attempt < max_retries - 1:
                 wait_time = await _exponential_backoff(attempt, max_retries)
                 logger.warning(
@@ -679,7 +679,7 @@ async def _upload_chunk_with_semaphore(
                 )
                 progress.update(len(data))
                 return {"PartNumber": part_number, "ETag": response["ETag"]}
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 if attempt < max_retries - 1:
                     wait_time = await _exponential_backoff(attempt, max_retries)
                     logger.warning(

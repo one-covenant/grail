@@ -150,7 +150,7 @@ class MinerSampler:
                         return hotkey, False
 
                     return hotkey, bool(exists)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     elapsed = time.time() - start_time
                     logger.debug(
                         "Window file check TIMEOUT for %s window=%s after %.2fs",

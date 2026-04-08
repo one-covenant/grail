@@ -18,7 +18,7 @@ GRAIL (Guaranteed Rollout Authenticity via Inference Ledger) enables cryptograph
 - Typer CLI: `grail mine`, `grail validate`, `grail train`
 
 **Non-Functional**:
-- Python 3.10 or later; seed `random`, `numpy`, `torch` for determinism
+- Python 3.12 or later; seed `random`, `numpy`, `torch` for determinism
 - Reproducibility: manage deps with `uv` (pin exact versions); use `safetensors`
 - Reliability: timeouts on all network calls; avoid blocking event loop; handle transient failures
 - Security: never log secrets; load config via environment; HTTPS with cert verification

@@ -112,7 +112,7 @@ CUDA_VISIBLE_DEVICES=1 python research/trl/train_trl_grpo.py \
 
 ### Prerequisites
 
-1. **Python 3.11+**
+1. **Python 3.12+**
 2. **Lium SDK and AsyncSSH**
    ```bash
    uv pip install lium-sdk asyncssh

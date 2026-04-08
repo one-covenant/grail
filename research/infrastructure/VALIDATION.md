@@ -185,4 +185,4 @@ The system is ready for distributed training experiments on Lium infrastructure.
 ---
 
 **Validated by**: Claude Code
-**Environment**: Ubuntu 22.04, Python 3.11, lium-sdk 0.2.13
+**Environment**: Ubuntu 22.04, Python 3.12, lium-sdk 0.2.13
