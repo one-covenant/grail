@@ -28,7 +28,13 @@ class TestValidateMetadata:
             "window": 100,
             "file_manifest": {},
             "env_id": "triton_kernel",
-            "generation_params": {"max_tokens": 8192, "temperature": 0.7},
+            "generation_params": {
+                "max_tokens": 8192,
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "top_k": 50,
+                "repetition_penalty": 1.0,
+            },
         }
         defaults.update(overrides)
         return CheckpointMetadata(**defaults)  # type: ignore[arg-type]
@@ -53,9 +59,73 @@ class TestValidateMetadata:
         assert "generation_params" in missing
 
     def test_missing_max_tokens(self) -> None:
-        meta = self._make_metadata(generation_params={"temperature": 0.7})
+        meta = self._make_metadata(
+            generation_params={
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "top_k": 50,
+                "repetition_penalty": 1.0,
+            }
+        )
         missing = meta.validate_metadata()
         assert "generation_params.max_tokens" in missing
+
+    def test_missing_temperature(self) -> None:
+        meta = self._make_metadata(
+            generation_params={
+                "max_tokens": 8192,
+                "top_p": 0.9,
+                "top_k": 50,
+                "repetition_penalty": 1.0,
+            }
+        )
+        missing = meta.validate_metadata()
+        assert "generation_params.temperature" in missing
+
+    def test_missing_top_p(self) -> None:
+        meta = self._make_metadata(
+            generation_params={
+                "max_tokens": 8192,
+                "temperature": 0.7,
+                "top_k": 50,
+                "repetition_penalty": 1.0,
+            }
+        )
+        missing = meta.validate_metadata()
+        assert "generation_params.top_p" in missing
+
+    def test_missing_top_k(self) -> None:
+        meta = self._make_metadata(
+            generation_params={
+                "max_tokens": 8192,
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "repetition_penalty": 1.0,
+            }
+        )
+        missing = meta.validate_metadata()
+        assert "generation_params.top_k" in missing
+
+    def test_missing_repetition_penalty(self) -> None:
+        meta = self._make_metadata(
+            generation_params={
+                "max_tokens": 8192,
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "top_k": 50,
+            }
+        )
+        missing = meta.validate_metadata()
+        assert "generation_params.repetition_penalty" in missing
+
+    def test_all_sampling_params_missing_when_only_max_tokens(self) -> None:
+        meta = self._make_metadata(generation_params={"max_tokens": 8192})
+        missing = meta.validate_metadata()
+        assert "generation_params.temperature" in missing
+        assert "generation_params.top_p" in missing
+        assert "generation_params.top_k" in missing
+        assert "generation_params.repetition_penalty" in missing
+        assert "generation_params.max_tokens" not in missing
 
     def test_multiple_missing_fields(self) -> None:
         meta = self._make_metadata(env_id=None, generation_params={})

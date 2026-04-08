@@ -97,7 +97,7 @@ class CheckpointMetadata:
     checkpoint_type: str = CHECKPOINT_TYPE_FULL  # "FULL" or "DELTA"
     prev_window: int | None = None  # For DELTA: immediate predecessor checkpoint (chained)
     anchor_window: int | None = None  # For DELTA: nearest FULL checkpoint for recovery
-    weights_hash: str | None = None  # SHA256 of final weights for verification
+    weights_hash: str | None = None  # xxh3-128 hex digest (32 chars) of final weights
 
     # Environment and generation configuration
     env_id: str | None = None  # Environment identifier (e.g., "mbpp", "gsm8k")
@@ -116,8 +116,17 @@ class CheckpointMetadata:
             missing.append("env_id")
         if not self.generation_params:
             missing.append("generation_params")
-        elif "max_tokens" not in self.generation_params:
-            missing.append("generation_params.max_tokens")
+        else:
+            required_gen_params = (
+                "max_tokens",
+                "temperature",
+                "top_p",
+                "top_k",
+                "repetition_penalty",
+            )
+            for key in required_gen_params:
+                if key not in self.generation_params:
+                    missing.append(f"generation_params.{key}")
         return missing
 
     def remote_prefix(self) -> str:
