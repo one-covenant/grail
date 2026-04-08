@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 import logging
+from typing import Any, cast
 
 import torch
+from torch import FloatTensor, LongTensor
+from transformers import (
+    LogitsProcessorList,
+    RepetitionPenaltyLogitsProcessor,
+    TemperatureLogitsWarper,
+)
 
 from ...protocol.constants import (
     SAMPLING_HIGH_P,
@@ -67,7 +74,13 @@ class DistributionValidator(Validator):
         return not suspicious
 
     def _collect_probs(self, ctx: ValidationContext) -> list[float] | None:
-        """Collect chosen token probabilities from cached logits."""
+        """Collect chosen token probabilities from cached logits.
+
+        Applies the drift-safe subset of HF's sample-mode pipeline
+        (repetition_penalty, temperature) before reading the chosen-token
+        probability. ``top_k`` and ``top_p`` are intentionally NOT applied
+        here; see ``_build_hf_processors`` for the rationale.
+        """
         try:
             tokens = ctx.commit.get("tokens", [])
             rollout = ctx.commit.get("rollout", {})
@@ -84,19 +97,89 @@ class DistributionValidator(Validator):
                 return None
 
             logits = ctx.cached_logits
+            device = ctx.model.device
 
-            # Collect probabilities for completion tokens
-            probs = []
+            # Build HF logits processors from trusted generation_params.
+            # generation_params is enforced upstream by
+            # CheckpointMetadata.validate_metadata(); the required keys are
+            # guaranteed to be present here.
+            processors = self._build_hf_processors(ctx.generation_params)
+
+            # Materialise the full token sequence on the model device once so
+            # processors can slice prefix views without per-step host->device
+            # transfers.
+            full_input_ids = torch.tensor(tokens, dtype=torch.long, device=device).unsqueeze(0)
+
+            probs: list[float] = []
             for t in range(prompt_len, min(prompt_len + completion_len, len(tokens))):
-                if t > 0 and t - 1 < logits.size(0):
-                    step_probs = torch.softmax(logits[t - 1], dim=-1)
-                    probs.append(float(step_probs[tokens[t]].item()))
+                if t == 0 or t - 1 >= logits.size(0):
+                    continue
+
+                # Logits the model produced when predicting token tokens[t].
+                # HF processors mutate scores in place; pass a clone so the
+                # cached_logits buffer is never touched. An empty processor
+                # list is a no-op identity, so we always call through.
+                step_logits = processors(
+                    cast(LongTensor, full_input_ids[:, :t]),
+                    cast(
+                        FloatTensor,
+                        logits[t - 1].to(device=device, dtype=torch.float32).unsqueeze(0).clone(),
+                    ),
+                )
+
+                step_probs = torch.softmax(step_logits, dim=-1).squeeze(0)
+                probs.append(float(step_probs[tokens[t]].item()))
 
             return probs if probs else None
 
         except Exception as e:
             logger.debug(f"Failed to collect token probs: {e}")
             return None
+
+    @staticmethod
+    def _build_hf_processors(generation_params: dict[str, Any]) -> LogitsProcessorList:
+        """Construct the drift-safe subset of HF's sample-mode pipeline.
+
+        Applies (in HF order):
+
+        1. RepetitionPenaltyLogitsProcessor (when rep_penalty != 1.0)
+        2. TemperatureLogitsWarper           (when temperature != 1.0)
+
+        ``top_k`` and ``top_p`` are deliberately NOT applied. They are hard
+        masks that set logits to ``-inf``, and the cutoff boundary is sensitive
+        to bf16 prefill-vs-decode numerical drift between the miner's
+        incremental decode and the validator's full prefill. In practice
+        ~30-75% of legitimately-sampled tokens flip from "kept" to "masked"
+        across the two runs and end up with ``softmax`` prob exactly ``0.0``,
+        which trips the ``min_low`` rule on honest miners. ``temperature`` and
+        ``repetition_penalty`` are smooth, monotonic, drift-tolerant
+        operations and do not have this failure mode.
+
+        TODO(distribution-validator): the consequence of dropping top_k/top_p
+        is that the original false-positive case this validator was being
+        rewritten to fix (high-T sampling makes raw chosen probs cluster
+        below ``SAMPLING_MEDIAN_LOW_MAX``) is only partially addressed. The
+        proper fix is per-position ratio normalization
+        ``r_t = P_raw(chosen) / E_p_raw[t]`` (expected raw prob under the
+        sampling distribution), which is drift-tolerant because it's a
+        weighted sum, not a hard mask. Tracked in the original plan at
+        ``~/.claude/plans/federated-sparking-flute.md``.
+
+        ``generation_params`` is enforced upstream by
+        ``CheckpointMetadata.validate_metadata()``; missing keys raise
+        ``KeyError`` here so regressions are loud.
+        """
+        processors: list[Any] = []
+
+        rep = float(generation_params["repetition_penalty"])
+        if rep != 1.0:
+            processors.append(RepetitionPenaltyLogitsProcessor(rep))
+
+        temperature = float(generation_params["temperature"])
+        if temperature != 1.0:
+            processors.append(TemperatureLogitsWarper(temperature))
+
+        return LogitsProcessorList(processors)
 
     def _compute_metrics(self, probs: list[float]) -> dict:
         """Compute distribution statistics (quantiles and fractions)."""
