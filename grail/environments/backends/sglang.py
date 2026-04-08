@@ -93,7 +93,7 @@ class SGLangServerBackend(TextGenBackend):
                 for attempt in range(max_retries):
                     req_start = time.time()
                     try:
-                        # Build completion kwargs
+                        # Build completion kwargs (OpenAI-standard fields).
                         completion_kwargs: dict[str, Any] = {
                             "model": self._model_name,
                             "prompt": prompt,
@@ -103,10 +103,24 @@ class SGLangServerBackend(TextGenBackend):
                             # Ensure single completion per request
                             "n": 1,
                         }
-                        # SGLang-specific sampling parameters.
-                        # Omit top_k/repetition_penalty to avoid 400 errors with
-                        # older openai library versions that don't support extra_body.
-                        # SGLang defaults (top_k=50, no repetition penalty) are adequate.
+                        # Pass top_k / repetition_penalty via extra_body. SGLang
+                        # accepts these as top-level fields on /v1/completions
+                        # (the openai client merges extra_body into the request
+                        # body). Without this, SGLang falls back to the model's
+                        # generation_config.json defaults (e.g. Qwen3-8B uses
+                        # top_k=20, top_p=0.95) which do not match the values
+                        # the validator's DistributionValidator recomputes
+                        # against, causing systematic min_prob=0.0 failures.
+                        # See: tests on basilica-grail-trainer 2026-04-08
+                        # confirming all 5 params accepted+enforced on SGLang
+                        # 0.5.9 and 0.5.10 via openai client extra_body.
+                        extra_body: dict[str, Any] = {}
+                        if params.top_k is not None:
+                            extra_body["top_k"] = int(params.top_k)
+                        if params.repetition_penalty is not None:
+                            extra_body["repetition_penalty"] = float(params.repetition_penalty)
+                        if extra_body:
+                            completion_kwargs["extra_body"] = extra_body
 
                         # Add seed (SGLang supports this parameter)
                         if random_seed is not None:
