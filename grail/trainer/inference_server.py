@@ -829,6 +829,14 @@ class SGLangServerManager(InferenceServerManager):
             # the parent process already has a CUDA context (e.g. miner's proof
             # model). Negligible perf impact on NVLink-connected GPUs.
             "--disable-custom-all-reduce",
+            # Disable piecewise CUDA graph capture. SGLang 0.5.10 hits an
+            # illegal memory access during piecewise graph capture for Qwen3
+            # on B200 (and likely other Hopper/Blackwell SKUs); the SGLang
+            # error message itself recommends this flag as the workaround.
+            # Reproduced on basilica-grail-trainer (1xB200) 2026-04-08; without
+            # this flag the SGLang server fails to start with `cudaErrorIllegalAddress`
+            # during CUDA graph warmup, and the miner falls back to slow HF generation.
+            "--disable-piecewise-cuda-graph",
         ]
 
         # Explicitly provide chat template to ensure SGLang uses the correct formatting
