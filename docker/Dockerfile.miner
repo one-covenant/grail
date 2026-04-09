@@ -1,0 +1,48 @@
+ARG GRAIL_BASE_IMAGE=grail:base
+FROM ${GRAIL_BASE_IMAGE} AS miner
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pipelined miner image. Builds on the validator-only base
+# (docker/Dockerfile) and adds SGLang for the pipeline generation server.
+#
+# Why a separate image:
+#   - SGLang is large (~3 GB extra over the base) and pulls a long
+#     dependency chain (sgl-kernel, flashinfer, xgrammar, ...). Validators
+#     do NOT need any of it; bundling it would balloon the public ghcr.io
+#     image and break the GitHub Actions runner disk budget.
+#   - SGLang's pip metadata hard-pins transformers==5.3.0, which conflicts
+#     with grail's transformers==4.57.1. We work around it with a two-pass
+#     uv pip install: install sglang first, then force-reinstall the
+#     conflicting deps back to grail's pinned versions. This is the same
+#     install pattern that works on basilica-grail-tester and is verified
+#     end-to-end against the live validator.
+#
+# This image is intended to be built locally on a GPU host (or by a
+# self-hosted GitHub Actions runner with extra disk). The base image
+# stays on the standard ghcr.io publish path.
+# ─────────────────────────────────────────────────────────────────────────────
+
+ARG SGLANG_VERSION=0.5.10
+# Pinned to 0.5.10: matches the version validated end-to-end on
+# basilica-grail-tester with torch 2.9.1 / transformers 4.57.1. Older
+# SGLang releases (0.4.x) silently downgrade torch and transformers,
+# which breaks grail's imports. Bump only after a working e2e on a
+# new SGLang minor + the corresponding grail torch pin.
+RUN uv pip install "sglang[all]==${SGLANG_VERSION}" httpx --prerelease=allow && \
+    uv pip install --reinstall \
+        "transformers==4.57.1" \
+        "tokenizers==0.22.1" \
+        "torch==2.9.1" && \
+    uv cache clean
+
+# Verify grail's import surface still works after the sglang install. Fail
+# the build loudly if a transitive dep silently downgraded torch or
+# transformers (the historical failure mode for SGLang in this image).
+RUN /app/.venv/bin/python -c "\
+import torch, transformers, sglang, grail; \
+assert torch.__version__.startswith('2.9.1'), f'torch={torch.__version__}'; \
+assert transformers.__version__ == '4.57.1', f'transformers={transformers.__version__}'; \
+assert sglang.__version__ == '${SGLANG_VERSION}', f'sglang={sglang.__version__}'; \
+print('grail miner image OK: torch=', torch.__version__, 'transformers=', transformers.__version__, 'sglang=', sglang.__version__)"
+
+# Inherits ENTRYPOINT ["uv", "run", "--no-sync", "grail"] from the base.

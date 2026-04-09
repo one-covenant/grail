@@ -1,15 +1,31 @@
 services:
   validator:
-    image: ghcr.io/one-covenant/grail:latest
+    # Image is overrideable so operators can pin a specific tag (semver or
+    # sha256). Defaults to the public ghcr.io tag published by
+    # .github/workflows/docker-publish.yml. For local builds set
+    # GRAIL_VALIDATOR_IMAGE=grail:base in the environment or .env.
+    image: ${GRAIL_VALIDATOR_IMAGE:-ghcr.io/one-covenant/grail:latest}
     container_name: grail-validator
     restart: unless-stopped
     tty: true
     stdin_open: true
     entrypoint: ["/bin/sh", "-c"]
-    command: ["mkdir -p /var/log/grail && chmod 755 /var/log/grail && if [ \"$$GRAIL_DEBUG\" = \"true\" ]; then exec uv run grail -vv validate; else exec uv run grail validate; fi"]
+    # GRAIL_VALIDATOR_TEST_MODE=true appends --test-mode (validator only
+    # validates its own files; no on-chain weight setting). Required for
+    # local test deployments; MUST be unset/false in production.
+    command:
+      - >-
+        mkdir -p /var/log/grail && chmod 755 /var/log/grail &&
+        if [ "$$GRAIL_DEBUG" = "true" ]; then VERB="-vv"; else VERB=""; fi;
+        if [ "$$GRAIL_VALIDATOR_TEST_MODE" = "true" ]; then ARGS="--test-mode"; else ARGS=""; fi;
+        exec uv run --no-sync grail $$VERB validate $$ARGS
     environment:
       # Debug configuration
       - GRAIL_DEBUG=${GRAIL_DEBUG:-false}
+      # Set to "true" to start the validator with --test-mode (it only
+      # validates its own files and does NOT publish weights on-chain).
+      # MUST be unset/false in production.
+      - GRAIL_VALIDATOR_TEST_MODE=${GRAIL_VALIDATOR_TEST_MODE:-false}
 
       # Core Bittensor configuration
       - BT_WALLET_COLD=${BT_WALLET_COLD}
@@ -62,8 +78,32 @@ services:
       # Environment label for observability
       - GRAIL_ENV=${GRAIL_ENV:-prod}
 
-      # Triton kernel evaluation (requires 2 GPUs: GPU 0 = model, GPU 1 = kernel eval)
-      - GRAIL_GPU_EVAL=${GRAIL_GPU_EVAL:-true}
+      # Protocol-affecting configuration. The validator overrides
+      # GRAIL_THINKING_MODE from the loaded checkpoint metadata at runtime
+      # (see grail/validation/miner_validator.py), so prompt rendering stays
+      # in sync with the miner regardless of what's set here. This
+      # passthrough is belt-and-suspenders for the boot path: any module
+      # that calls ``get_thinking_config()`` BEFORE the first checkpoint is
+      # loaded (parser regex compile, debug helpers, etc.) needs a sensible
+      # value, and ``instructed`` matches the current trainer default.
+      #
+      # NOTE: GRAIL_ENV_ID / GRAIL_ENV_SPLIT / GRAIL_GEN_* are NOT passed
+      # through. They are only consumed on the TRAINER side by
+      # ``get_default_env_config`` / ``get_default_generation_params`` when
+      # publishing a checkpoint. The validator reads these values from
+      # ``checkpoint_metadata.{env_id,env_params,generation_params}`` at
+      # runtime; passing them to the validator container would imply the
+      # validator reads them, which would be a footgun.
+      - GRAIL_THINKING_MODE=${GRAIL_THINKING_MODE:-instructed}
+
+      # Triton kernel evaluation. Only relevant for env_id=triton_kernel
+      # (evaluates generated kernels on a spare GPU). For MBPP/coding/math
+      # environments this is a no-op. Default is `false` because most
+      # validator deployments don't have a spare GPU and `true` would
+      # silently increase the GPU footprint of the validator container.
+      # When using triton_kernel, set GRAIL_GPU_EVAL=true on the host .env
+      # AND bump GRAIL_VALIDATOR_GPU_IDS to include the eval GPU.
+      - GRAIL_GPU_EVAL=${GRAIL_GPU_EVAL:-false}
       - KERNEL_EVAL_GPU_IDS=${KERNEL_EVAL_GPU_IDS:-1}
       - KERNEL_EVAL_BACKEND=${KERNEL_EVAL_BACKEND:-persistent}
       - KERNEL_EVAL_TIMEOUT=${KERNEL_EVAL_TIMEOUT:-60}
@@ -74,10 +114,12 @@ services:
       - GRAIL_METRIC_BUFFER_SIZE=${GRAIL_METRIC_BUFFER_SIZE}
       - GRAIL_METRIC_FLUSH_INTERVAL=${GRAIL_METRIC_FLUSH_INTERVAL}
 
-      # Explicit GPU visibility. Belt-and-suspenders alongside
-      # `deploy.resources.reservations.devices` below, since that block is
-      # silently ignored if nvidia-container-toolkit isn't wired to Docker.
-      - NVIDIA_VISIBLE_DEVICES=all
+      # NVIDIA visibility is controlled by the deploy.resources block below
+      # via ``device_ids``. We deliberately do NOT set NVIDIA_VISIBLE_DEVICES
+      # here: when both are present, Docker Compose's ``device_ids`` is the
+      # contract that actually pins the container to specific physical GPUs,
+      # while ``NVIDIA_VISIBLE_DEVICES=all`` would override it and expose
+      # every GPU. Setting capabilities here is still required.
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
       # Network timeout and retry configuration
@@ -105,14 +147,37 @@ services:
     # HF dataloaders and multiprocessing IPC need more than the 64 MB default.
     shm_size: ${GRAIL_VALIDATOR_SHM_SIZE:-2g}
 
+    # Share the host PID namespace. The validator's checkpoint cache
+    # cleanup uses ``os.kill(pid, 0)`` to detect orphaned ``*.partial``
+    # download dirs left behind by crashed downloaders. Inside the
+    # container's default PID namespace that probe ALWAYS fails for host
+    # PIDs (ESRCH), so a co-located bare-metal miner sharing the same
+    # ``GRAIL_HOST_STORAGE_PATH`` cache will see its in-flight partials
+    # deleted from under it. Sharing the host PID namespace lets the
+    # validator see the real owners and skip live partials. Production
+    # validators with their own dedicated cache directory can drop this.
+    pid: host
+
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              # 2 GPUs required: GPU 0 = model inference / proof verification,
-              #                  GPU 1 = Triton kernel evaluation
-              count: 2
+              # Pin the validator to a single physical GPU via
+              # GRAIL_VALIDATOR_GPU_IDS (e.g. "0", "2", or "7"). This is the
+              # right contract on multi-GPU hosts: ``count: N`` lets docker
+              # pick any N GPUs, which collides with co-located miners and
+              # trainers. Default to GPU 0 alone (validators only need one
+              # GPU for model + proof verification when GRAIL_GPU_EVAL=false).
+              #
+              # NOTE: Compose interpolates ``["${VAR}"]`` as ONE list element,
+              # so a comma-separated value like "0,1" would be parsed as the
+              # literal device id "0,1" (broken). Multi-GPU validators (e.g.
+              # GPU 0 for model + GPU 1 for kernel eval when
+              # GRAIL_GPU_EVAL=true) MUST hand-edit this block to a YAML list
+              # of strings: ``device_ids: ["0", "1"]``. There is no clean way
+              # to source a YAML list from a single env var.
+              device_ids: ["${GRAIL_VALIDATOR_GPU_IDS:-0}"]
               capabilities: [gpu]
 
     networks:
