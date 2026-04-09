@@ -1,6 +1,6 @@
 # Validator Setup
 
-This guide explains how to run a Grail validator. Validators verify miners’ rollouts with GRAIL proofs, compute miner scores over rolling windows, and set weights on-chain. The active environment is set network-wide (currently **Triton Kernel**).
+This guide explains how to run a Grail validator. Validators verify miners’ rollouts with GRAIL proofs, compute miner scores over rolling windows, and set weights on-chain. For this release the active environments are **coding** (MBPP, HumanEval) and **math** (GSM8K, MATH); the trainer publishes the active environment per checkpoint.
 
 ## Table of Contents
 
@@ -40,9 +40,9 @@ Grail validators:
 - Linux with NVIDIA GPU drivers installed
 - Docker and Docker Compose installed
 - [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed (required for GPU passthrough to Docker containers)
-- **2x NVIDIA GPUs** (A100 or H100 recommended) for Triton kernel evaluation
-  - GPU 0: Model inference / proof verification
-  - GPU 1: Triton kernel compilation + correctness evaluation
+- **1x NVIDIA GPU** (A100 or H100 recommended, 40GB+ VRAM) for model inference and proof verification
+  - The coding/math environments run entirely on this GPU; no separate kernel evaluation GPU is required for this release.
+  - A second GPU is only needed if you opt in to the `triton_kernel` environment (not active in this release).
 - At least 40GB RAM recommended for optimal performance
 - Bittensor wallet (cold/hot) registered on the target subnet
 - Cloudflare R2 (or S3-compatible) bucket and credentials
@@ -129,9 +129,9 @@ Set these in `.env` (see `.env.example`). This file will be used with Docker Com
 - Monitoring
   - `GRAIL_MONITORING_BACKEND` (wandb|null)
   - `WANDB_API_KEY`, `WANDB_PROJECT`, `WANDB_ENTITY`, `WANDB_MODE`
-- Kernel evaluation (triton_kernel environment)
+- Kernel evaluation (only needed if the `triton_kernel` environment is active — not the case in this release)
   - `GRAIL_GPU_EVAL` (true|false, default: true) — enable GPU-based kernel correctness evaluation
-  - `KERNEL_EVAL_GPU_IDS` (default: 1) — physical GPU index for kernel eval (GPU 0 runs the model)
+  - `KERNEL_EVAL_GPU_IDS` (default: 1) — physical GPU index for kernel eval (GPU 0 runs the model). Only read when `triton_kernel` is the active environment; safe to leave unset for the coding/math envs.
   - `KERNEL_EVAL_BACKEND` (persistent|subprocess|basilica, default: persistent) — evaluation backend. `persistent` reuses the CUDA context (~40x faster), `subprocess` isolates each eval, `basilica` uses Basilica cloud GPU workers (not yet implemented)
   - `KERNEL_EVAL_TIMEOUT` (default: 60) — per-kernel evaluation timeout in seconds
 - Optional

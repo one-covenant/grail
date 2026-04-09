@@ -51,6 +51,7 @@ Hardware requirements (pipeline mode is mandatory):
   - **GPU 0** — SGLang generation server (decoding)
   - **GPU 1** — HuggingFace model for proof computation (logprobs + GRAIL commitments)
 - Both GPUs must be in `CUDA_VISIBLE_DEVICES`. The miner exits with a clear `ProtocolViolationError` at startup if the configured `GRAIL_PIPELINE_VLLM_GPU` / `GRAIL_PIPELINE_PROOF_GPU` indices exceed the visible device count.
+- **No extra kernel evaluation GPU is required for this release.** The coding/math environments do not run on-GPU kernel eval; an additional GPU is only needed if you opt in to the `triton_kernel` environment.
 - At least 64GB RAM recommended
 - Network bandwidth needs are modest; uploads are Parquet rollout files
 
@@ -104,12 +105,16 @@ Set these in `.env` (see `.env.example` for full list and guidance):
 - Pipeline backend
   - `GRAIL_PIPELINE_BACKEND` (sglang|vllm, default: **sglang**): Generation server backend. SGLang is the production-validated path; it uses the native `/generate` endpoint with `input_ids` so there is no text re-tokenization.
   - `GRAIL_PIPELINE_VLLM_GPU` (default: 0): GPU index for the generation server, relative to `CUDA_VISIBLE_DEVICES`.
-  - `GRAIL_PIPELINE_PROOF_GPU` (default: 1): GPU index for the HuggingFace proof model, relative to `CUDA_VISIBLE_DEVICES`. Must differ from `VLLM_GPU`.
-  - `GRAIL_PIPELINE_VLLM_TP` (default: 1): Tensor-parallel size for the generation server. Set to 4 to spread the model across consecutive GPUs `[VLLM_GPU, VLLM_GPU+VLLM_TP)`.
+  - `GRAIL_PIPELINE_PROOF_GPU` (default: 1): GPU index for the primary HuggingFace proof model, relative to `CUDA_VISIBLE_DEVICES`. Used as the single proof GPU when `GRAIL_PIPELINE_PROOF_GPU_IDS` is unset, and as the primary worker (the one that reuses the parent's loaded model) when the multi-worker pool is enabled.
+  - `GRAIL_PIPELINE_PROOF_GPU_IDS` (default: empty): Comma-separated list of proof GPU indices for the multi-proof-worker pool, e.g. `"4,5,6,7"`. Empty falls back to a single in-process worker on `GRAIL_PIPELINE_PROOF_GPU`. The pool fans proofs out across all listed GPUs in parallel — this is what lifts proof throughput from the single-worker ceiling (~5 r/s on a 7B model) to ~20 r/s with 4 GPUs, and is required for any mining configuration that wants more than ~600 rollouts/window.
+  - `GRAIL_PIPELINE_PROOF_SUBPROCESS` (default: false): Run the proof workers in persistent `mp.spawn` subprocesses instead of an in-process `ThreadPoolExecutor`. Each subprocess pins to one GPU via `CUDA_VISIBLE_DEVICES`, loads its own copy of the HF model on `cuda:0`, and computes proofs without a wallet (the parent process signs the returned commitment hashes). This eliminates GIL contention in the proof phase and is the recommended setting whenever `GRAIL_PIPELINE_PROOF_GPU_IDS` lists more than one GPU. Falls back to in-process workers on any startup error.
+  - `GRAIL_PIPELINE_GROUPS_PER_BATCH` (default: 1): Number of GRPO groups dispatched to the SGLang/vLLM backend in a single `backend.generate()` call. Default 1 keeps the v0.0.59 baseline behaviour (one group of 16 prompts per request). Larger values (24, 48, 72) push many more in-flight sequences into SGLang's continuous batcher and lift TP=4 generation utilisation from ~6% (16 in flight) to ~80%+ (1152 in flight). Pair with `GRAIL_PIPELINE_PROOF_GPU_IDS` so the proof side can keep up with the higher gen rate.
+  - `GRAIL_PIPELINE_VLLM_TP` (default: 1): Tensor-parallel size for the generation server. Set to 4 to spread the model across consecutive GPUs `[VLLM_GPU, VLLM_GPU+VLLM_TP)`. The SGLang launch path correctly wires this through to `--tp-size` and the corresponding `CUDA_VISIBLE_DEVICES` range, symmetric with the vLLM path.
   - `GRAIL_PIPELINE_MAX_MODEL_LEN` (default: 12288): Server context length. The miner clamps `prompt_len + max_new_tokens` to this value before issuing requests.
   - `GRAIL_PIPELINE_PROOF_FLASH_ATTN` (default: false): MUST be left at `false` so the proof path matches the validator's SDPA implementation. Setting it to `true` causes proof divergence.
+  - `GRAIL_PIPELINE_DISABLE_CUDA_GRAPH` (default: false): Belt-and-suspenders SGLang stability flag. The launch already passes `--disable-piecewise-cuda-graph` and `--disable-custom-all-reduce` unconditionally as part of the v0.0.59 Blackwell workaround; this flag also disables the FULL CUDA graph capture, which only matters on GPU topologies where the partial workaround isn't enough.
 - Performance tuning
-  - `GRAIL_GENERATION_BATCH_SIZE` (default: 1): Number of rollouts to generate in parallel per batch. Higher values increase throughput but require more VRAM. Must be ≤ 16 and must divide evenly into `ROLLOUTS_PER_PROBLEM`. Valid options: 1, 2, 4, 8, 16.
+  - `GRAIL_GENERATION_BATCH_SIZE` (default: 1): Legacy single-group batch size for the in-group dispatch. Pre-dates `GRAIL_PIPELINE_GROUPS_PER_BATCH`; on the modern multi-group path the per-group batching is determined by `ROLLOUTS_PER_PROBLEM=16` and the relevant tuning knob is `GRAIL_PIPELINE_GROUPS_PER_BATCH`.
 - Object storage (R2/S3)
   - `R2_BUCKET_ID`, `R2_ACCOUNT_ID`
   - Dual credentials (recommended):
@@ -166,18 +171,24 @@ Other environments (`sat`, `affine_*`, `triton_kernel`, etc.) still exist in the
 
 ### Pipeline architecture
 
-The pipelined mining engine is mandatory and lays out work across at least two GPUs:
+The pipelined mining engine is mandatory and lays out work across at least two GPUs. The reference build supports three proof topologies, in order of capacity:
 
-1. **GPU 0 — Generation server** (SGLang by default): Receives `input_ids`, generates completions in parallel, returns `output_ids` directly. No text re-tokenization.
-2. **GPU 1 — Proof worker**: A HuggingFace model on a dedicated GPU computes the GRAIL commitments and chosen-token logprobs (GPU `log_softmax` + gather; only the chosen-token logprobs cross PCIe).
+1. **Single proof worker (baseline)** — one in-process `ProofWorker` on `GRAIL_PIPELINE_PROOF_GPU`. Sequential one-group-at-a-time dispatch through one proof thread. Easy to set up; ~5 r/s ceiling on a 7B model so ~600 rollouts/window after wallet/upload overhead.
+2. **N in-process workers** — set `GRAIL_PIPELINE_PROOF_GPU_IDS=4,5,6,7`. The engine spins up one `ProofWorker` per listed GPU; the multi-group dispatch fan-out splits work across them. Lifts proof ceiling to ~20 r/s with 4 GPUs but stays GIL-bound on Python-side proof prep.
+3. **N persistent subprocess workers (recommended for production)** — the same `GRAIL_PIPELINE_PROOF_GPU_IDS` setting plus `GRAIL_PIPELINE_PROOF_SUBPROCESS=true`. Each worker runs in an `mp.spawn` subprocess with `CUDA_VISIBLE_DEVICES` pinned to one physical GPU, loads the HF model once on `cuda:0`, and computes proofs without a wallet. The parent process signs commitment hashes after the worker returns. GIL-free; the path used for the FINAL_ARCHITECTURE benchmark of 4,477 rollouts/window on 8x A100 SXM4 with Qwen2.5-7B.
 
-Generation and proof computation overlap across batches, so the pipeline produces several hundred rollouts per window on a 2-GPU setup.
+The generation side is laid out as:
 
-**Weight sync between windows:** When the trainer publishes a new checkpoint, the miner reloads the SGLang/vLLM server weights using the sleep/wake/reload API (~3-30 seconds) instead of a full server restart. This is automatic and requires no configuration.
+- **GPUs 0 to (TP-1)** — SGLang generation server with `--tp-size` set from `GRAIL_PIPELINE_VLLM_TP`. Sees `input_ids`, returns `output_ids` directly, no text re-tokenization. With `GRAIL_PIPELINE_GROUPS_PER_BATCH=N` the miner sends `N×16` prompts in a single `/generate` call so SGLang's continuous batcher can amortise prefill across hundreds of in-flight sequences (vs 16 in the v0.0.59 baseline).
+- **GPUs TP to (TP + len(proof_gpu_ids) - 1)** — proof workers, one per GPU.
+
+Across groups, the miner double-buffers: collect for batch N runs **while** batch N+1 is generating. Combined with multi-group dispatch and the subprocess pool, this is the architecture that pushes per-window throughput from the v0.0.59 single-worker baseline (~600 r/win) toward the FINAL_ARCHITECTURE measured ceiling.
+
+**Weight sync between windows:** When the trainer publishes a new checkpoint, the miner reloads the SGLang/vLLM server weights using the sleep/wake/reload API (~3-30 seconds) instead of a full server restart. The in-process proof workers re-use the parent's freshly-applied state dict (fast path) or `load_model()` from disk (slow path). The subprocess pool reloads workers in-place over the pipe via a `ReloadCommand` instead of restarting the processes, which avoids the `mp.spawn` startup cost on every checkpoint roll. All of this is automatic and requires no configuration.
 
 If checkpoints live on a different volume (e.g. ephemeral/tmpfs), set `GRAIL_PIPELINE_SYMLINK_DIR` to a writable directory on the same filesystem — the symlink used for weight reload will be placed there. (vLLM backend only; harmless when `GRAIL_PIPELINE_BACKEND=sglang`.)
 
-### Two-GPU setup example
+### Two-GPU setup example (single proof worker)
 
 ```bash
 # .env configuration for the default coding/math envs with pipeline mode
@@ -192,7 +203,29 @@ GRAIL_PIPELINE_PROOF_FLASH_ATTN=false  # MUST stay false to match validator SDPA
 CUDA_VISIBLE_DEVICES=0,1 grail -vv mine
 ```
 
-> **Note on GPU indices:** `GRAIL_PIPELINE_VLLM_GPU` and `GRAIL_PIPELINE_PROOF_GPU` are **relative** to `CUDA_VISIBLE_DEVICES`. The miner validates them at startup and exits with a clear `ProtocolViolationError` if they exceed the visible device count.
+### 8-GPU setup example (TP=4 SGLang + 4 subprocess proof workers)
+
+For an 8-GPU host (e.g. 8x A100 SXM4) targeting the FINAL_ARCHITECTURE throughput:
+
+```bash
+# .env additions on top of the two-GPU example
+GRAIL_PIPELINE_VLLM_GPU=0
+GRAIL_PIPELINE_VLLM_TP=4               # GPUs 0-3 → SGLang TP=4 instance
+GRAIL_PIPELINE_PROOF_GPU=4             # primary in-process worker
+GRAIL_PIPELINE_PROOF_GPU_IDS=4,5,6,7   # GPUs 4-7 → proof workers
+GRAIL_PIPELINE_PROOF_SUBPROCESS=true   # GIL-free subprocess pool
+GRAIL_PIPELINE_GROUPS_PER_BATCH=72     # send 72×16=1152 prompts per SGLang call
+GRAIL_PIPELINE_GPU_MEM_UTIL=0.88
+GRAIL_PIPELINE_MAX_MODEL_LEN=4096
+GRAIL_PIPELINE_MAX_NUM_SEQS=512
+GRAIL_PIPELINE_MAX_CONCURRENT=512
+
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 grail -vv mine
+```
+
+Tune `GRAIL_PIPELINE_GROUPS_PER_BATCH` upward (24 → 48 → 72 → 96) until SGLang utilisation flattens; the proof side scales with the number of GPUs in `GRAIL_PIPELINE_PROOF_GPU_IDS`. Smaller boxes (4 GPUs) typically run TP=2 + 2 proof workers + `GROUPS_PER_BATCH=16`.
+
+> **Note on GPU indices:** `GRAIL_PIPELINE_VLLM_GPU` and `GRAIL_PIPELINE_PROOF_GPU(_IDS)` are **relative** to `CUDA_VISIBLE_DEVICES`. The miner validates the full vLLM TP range and every entry in the proof list at startup and exits with a clear `ProtocolViolationError` if any index exceeds the visible device count.
 
 ---
 
@@ -239,8 +272,8 @@ Artifacts uploaded per window (as a Parquet file) include per-rollout:
 ### Quick Fixes
 
 - CUDA OOM or driver errors: Ensure you have adequate GPU VRAM (40GB+ recommended per GPU); verify drivers match CUDA runtime; periodically clear cache.
-- GPU not detected: Check `nvidia-smi` output. For `triton_kernel`, ensure `KERNEL_EVAL_GPU_IDS` points to a valid **physical** device index (as shown by `nvidia-smi`).
-- Kernel eval failures: CUDA sticky errors (illegal memory access, device-side assert) are automatically recovered via subprocess isolation and retry. Check logs for `CUDA sticky error` warnings.
+- GPU not detected: Check `nvidia-smi` output. The coding/math envs in this release only need the SGLang and proof GPUs; `KERNEL_EVAL_GPU_IDS` is only consulted when the (inactive) `triton_kernel` environment is selected.
+- Kernel eval failures: only relevant when `triton_kernel` is active. CUDA sticky errors (illegal memory access, device-side assert) are automatically recovered via subprocess isolation and retry. Check logs for `CUDA sticky error` warnings.
 - No uploads: check `R2_*` variables and bucket permissions; verify network/firewall.
 - Not receiving weights: ensure uploads succeed; validator will score the previous complete window.
 - Drand failures: miner automatically falls back to block-hash; you can use `--no-drand`.
@@ -263,13 +296,14 @@ Key points:
 
 ## Best Practices
 
-- **Two GPUs are mandatory** for the pipelined miner. SGLang on GPU 0, HF proof model on GPU 1. Both must be in `CUDA_VISIBLE_DEVICES`.
+- **Two GPUs are the minimum** for the pipelined miner. SGLang on GPU 0, HF proof model on GPU 1. Both must be in `CUDA_VISIBLE_DEVICES`. To exceed the single-proof-worker baseline (~600 r/win), set `GRAIL_PIPELINE_PROOF_GPU_IDS` and `GRAIL_PIPELINE_PROOF_SUBPROCESS=true` to enable the multi-worker subprocess pool.
+- **Tune `GRAIL_PIPELINE_GROUPS_PER_BATCH`** to push more work into SGLang's continuous batcher. Default 1 reproduces the v0.0.59 baseline; values of 24-72 are typical for production multi-GPU setups.
 - The trainer publishes the active environment, model, and sampling policy per checkpoint. **Do not override `max_tokens`, `temperature`, etc. locally** — let the miner read them from `CheckpointMetadata.generation_params` so the validator's hard checks pass by construction.
 - `GRAIL_PIPELINE_PROOF_FLASH_ATTN` MUST stay `false`. The validator uses SDPA; switching the proof path to FA2 changes FP accumulation and causes sketch divergence.
 - Reserve the final 2 blocks of each window for uploads; the miner does this automatically via its EMA-based time-budget gate.
 - Use `--use-drand` (default) for robust challenge derivation; fall back with `--no-drand` only if needed.
 - Ensure R2 dual-credential setup: write locally, read credentials are committed on-chain by the miner.
-- Monitor GPU memory; the miner periodically empties cache, but size your rollouts (`GRAIL_GENERATION_BATCH_SIZE`) to avoid OOM.
+- Monitor GPU memory; the miner periodically empties cache, but size your rollouts and `GRAIL_PIPELINE_GROUPS_PER_BATCH` to avoid OOM on the SGLang side.
 - Increase verbosity with `-vv` when diagnosing sampling, group sizes, or upload issues.
 
 
