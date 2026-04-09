@@ -116,12 +116,11 @@ Set these in `.env` (see `.env.example`). This file will be used with Docker Com
   - `BT_WALLET_COLD` (coldkey name)
   - `BT_WALLET_HOT` (hotkey name)
 - Model (dynamically loaded from R2 checkpoints)
-  - The model is loaded automatically from R2 checkpoints and evolves through training
-  - Validators automatically load the appropriate checkpoint for each validation window
-  - Maximum new tokens is fixed at 8192 (hardcoded constant `MAX_NEW_TOKENS`)
-  - Rollouts per problem is fixed at 16 (hardcoded constant `ROLLOUTS_PER_PROBLEM`)
-  - Models are shared via R2 storage and updated by the trainer after each window
-  - No manual model configuration required - checkpoints are loaded automatically
+  - The model and the active environment are loaded automatically from each window's R2 checkpoint.
+  - The trainer publishes the per-checkpoint sampling policy (`max_tokens`, `temperature`, `top_p`, `top_k`, `repetition_penalty`) in `CheckpointMetadata.generation_params`. The validator reads `max_tokens` from there and caps the expected completion length at `min(metadata.max_tokens, MAX_NEW_TOKENS_PROTOCOL_CAP)`; rollouts longer than that fail `termination_valid`.
+  - `MAX_NEW_TOKENS_PROTOCOL_CAP = 8192` (in `grail/protocol/constants.py`) is the protocol cap; the trainer's per-checkpoint `max_tokens` is the actual limit.
+  - Rollouts per problem is fixed at 16 (`ROLLOUTS_PER_PROBLEM`).
+  - No manual model or sampling configuration required.
 - Object storage (R2/S3)
   - `R2_BUCKET_ID`, `R2_ACCOUNT_ID`
   - Dual credentials (recommended):
@@ -291,7 +290,7 @@ Apply superlinear curve (`SUPERLINEAR_EXPONENT = 4.0`):
 score = estimated_unique ** SUPERLINEAR_EXPONENT
 ```
 
-Normalize to weights across miners; set on-chain with `set_weights`. An emission burn mechanism (`GRAIL_BURN_PERCENTAGE = 80%`) redirects a portion of emissions to the burn UID.
+Normalize to weights across miners; set on-chain with `set_weights`. An emission burn mechanism (`GRAIL_BURN_PERCENTAGE = 90%`) redirects a portion of emissions to the burn UID.
 
 ### Publishing
 

@@ -1,6 +1,8 @@
 # Miner Setup
 
-This guide explains how to run a Grail miner. Miners generate GRPO rollouts with GRAIL proofs across multiple environments (Triton Kernel, SAT, GSM8K, MATH, MBPP, HumanEval, and more), upload them to object storage, and participate in decentralized scoring via validators.
+This guide explains how to run a Grail miner. Miners generate GRPO rollouts with GRAIL proofs for the network's active environment, upload them to object storage, and participate in decentralized scoring via validators.
+
+For this release the network focuses on **coding** (MBPP, HumanEval) and **math** (GSM8K, MATH) environments. The active environment is published per checkpoint by the trainer and the miner picks it up automatically.
 
 ## Table of Contents
 
@@ -22,12 +24,14 @@ This guide explains how to run a Grail miner. Miners generate GRPO rollouts with
 
 Grail miners:
 - Connect to a Bittensor subnet and follow scoring windows.
-- Derive per-window randomness from drand and the window’s block hash.
-- Generate multiple GRPO rollouts per problem using a HF model across various environments.
-- Produce GRAIL proofs (Prover) binding tokens to the model and seed.
+- Derive per-window randomness from drand and the window's block hash.
+- Run an SGLang generation server (default backend) to produce GRPO rollouts in parallel.
+- Compute GRAIL proofs on a dedicated proof GPU (HuggingFace model).
 - Upload signed rollouts to object storage for validators to verify and score.
 
-The active environment is set network-wide (currently **Triton Kernel**). The environment determines what problems are generated and how rewards are computed. See [Supported Environments](#supported-environments) below.
+The active environment, sampling policy (`max_tokens`, `temperature`, `top_p`, `top_k`, `repetition_penalty`), and model are all published per-checkpoint by the trainer. The miner reads them from each checkpoint's metadata and drives the generation server with exactly those values, so the validator's hard checks (`termination_valid`, `logprobs_valid`, `proof_valid`) line up automatically.
+
+The pipelined mining engine is the **only** generation path. The legacy single-GPU fallback was removed; you need at least two visible GPUs (one for SGLang, one for HF proofs).
 
 ---
 
@@ -42,13 +46,11 @@ The active environment is set network-wide (currently **Triton Kernel**). The en
 
 For detailed hardware specifications, see [`compute.min.yaml`](../compute.min.yaml).
 
-Hardware requirements:
-- **Text-only environments** (SAT, GSM8K, MATH, MBPP, HumanEval): 1 GPU with 24GB+ VRAM
-- **Triton Kernel environment** (current default): 2-3 GPUs recommended with pipeline mode:
-  - **GPU 0** — Model inference / decoding (vLLM/SGLang backend)
-  - **GPU 1** — Proof computation / logprob verification (HuggingFace model)
-  - **Separate physical GPU** — Kernel evaluation (Triton JIT compilation and GPU correctness checks). Set via `KERNEL_EVAL_GPU_IDS` using **physical** GPU index.
-  - The kernel evaluation GPU should be **A100 80GB, H100, or equivalent** to support Triton JIT compilation
+Hardware requirements (pipeline mode is mandatory):
+- **At least 2 visible GPUs** with 40GB+ VRAM each (A100 / H100 / B200 class):
+  - **GPU 0** — SGLang generation server (decoding)
+  - **GPU 1** — HuggingFace model for proof computation (logprobs + GRAIL commitments)
+- Both GPUs must be in `CUDA_VISIBLE_DEVICES`. The miner exits with a clear `ProtocolViolationError` at startup if the configured `GRAIL_PIPELINE_VLLM_GPU` / `GRAIL_PIPELINE_PROOF_GPU` indices exceed the visible device count.
 - At least 64GB RAM recommended
 - Network bandwidth needs are modest; uploads are Parquet rollout files
 
@@ -93,20 +95,21 @@ Set these in `.env` (see `.env.example` for full list and guidance):
 - Wallets
   - `BT_WALLET_COLD` (coldkey name)
   - `BT_WALLET_HOT` (hotkey name)
-- Model & generation (dynamically loaded from R2 checkpoints)
-  - The model is loaded automatically from R2 checkpoints and evolves through training
-  - Miners automatically load the latest checkpoint from the previous window
-  - Maximum new tokens is fixed at 8192 (hardcoded constant `MAX_NEW_TOKENS`)
-  - Rollouts per problem is fixed at 16 (hardcoded constant `ROLLOUTS_PER_PROBLEM`)
-  - Models are shared via R2 storage and updated by the trainer after each window
-  - No manual model configuration required - checkpoints are loaded automatically
+- Model & generation (driven by trainer-published checkpoints)
+  - The model and the active environment are loaded automatically from the trainer's most recent R2 checkpoint.
+  - Sampling policy (`max_tokens`, `temperature`, `top_p`, `top_k`, `repetition_penalty`) is published per-checkpoint and consumed by the miner via `GenerationParams.from_checkpoint_metadata`. The miner drives the SGLang/vLLM backend with exactly those values, so the validator's `termination_valid` check (`min(metadata.max_tokens, MAX_NEW_TOKENS_PROTOCOL_CAP)`) lines up by construction.
+  - `MAX_NEW_TOKENS_PROTOCOL_CAP = 8192` (in `grail/protocol/constants.py`) is the protocol cap; the trainer's per-checkpoint `max_tokens` is the actual limit and is typically much smaller.
+  - Rollouts per problem is fixed at 16 (`ROLLOUTS_PER_PROBLEM`).
+  - No manual model or sampling configuration required.
+- Pipeline backend
+  - `GRAIL_PIPELINE_BACKEND` (sglang|vllm, default: **sglang**): Generation server backend. SGLang is the production-validated path; it uses the native `/generate` endpoint with `input_ids` so there is no text re-tokenization.
+  - `GRAIL_PIPELINE_VLLM_GPU` (default: 0): GPU index for the generation server, relative to `CUDA_VISIBLE_DEVICES`.
+  - `GRAIL_PIPELINE_PROOF_GPU` (default: 1): GPU index for the HuggingFace proof model, relative to `CUDA_VISIBLE_DEVICES`. Must differ from `VLLM_GPU`.
+  - `GRAIL_PIPELINE_VLLM_TP` (default: 1): Tensor-parallel size for the generation server. Set to 4 to spread the model across consecutive GPUs `[VLLM_GPU, VLLM_GPU+VLLM_TP)`.
+  - `GRAIL_PIPELINE_MAX_MODEL_LEN` (default: 12288): Server context length. The miner clamps `prompt_len + max_new_tokens` to this value before issuing requests.
+  - `GRAIL_PIPELINE_PROOF_FLASH_ATTN` (default: false): MUST be left at `false` so the proof path matches the validator's SDPA implementation. Setting it to `true` causes proof divergence.
 - Performance tuning
-  - `GRAIL_GENERATION_BATCH_SIZE` (default: 1): Number of rollouts to generate in parallel per batch. Higher values increase throughput but require more VRAM. Must be ≤ 16 and must divide evenly into `ROLLOUTS_PER_PROBLEM`. Valid options: 1, 2, 4, 8, 16. Start with 1 and gradually increase while monitoring GPU memory with `nvidia-smi`. Example: `export GRAIL_GENERATION_BATCH_SIZE=4` for ~3-4x throughput on A100.
-- Kernel evaluation (Triton Kernel environment only)
-  - `GRAIL_GPU_EVAL` (true|false, default: false): Enable GPU-based kernel correctness evaluation. Must be `true` for the `triton_kernel` environment to verify generated kernels on-GPU.
-  - `KERNEL_EVAL_GPU_IDS` (comma-separated, e.g. `2` or `2,3`): **Physical** GPU device indices for kernel evaluation (as shown by `nvidia-smi`, not relative to `CUDA_VISIBLE_DEVICES`). These GPUs must be separate from decoding and proof GPUs.
-  - `KERNEL_EVAL_BACKEND` (persistent|subprocess|basilica, default: persistent): Evaluation backend. `persistent` uses a long-lived worker per GPU that reuses the CUDA context (~40x faster than subprocess, auto-recovers from CUDA sticky errors). `subprocess` runs each kernel in an isolated subprocess with its own CUDA context. `basilica` uses Basilica cloud GPU workers (no local GPU needed; not yet implemented).
-  - `KERNEL_EVAL_TIMEOUT` (default: 60): Per-kernel evaluation timeout in seconds.
+  - `GRAIL_GENERATION_BATCH_SIZE` (default: 1): Number of rollouts to generate in parallel per batch. Higher values increase throughput but require more VRAM. Must be ≤ 16 and must divide evenly into `ROLLOUTS_PER_PROBLEM`. Valid options: 1, 2, 4, 8, 16.
 - Object storage (R2/S3)
   - `R2_BUCKET_ID`, `R2_ACCOUNT_ID`
   - Dual credentials (recommended):
@@ -150,53 +153,46 @@ Public dashboards:
 
 ## Supported Environments
 
-The active environment is configured network-wide and determines the problem type and reward structure. Miners automatically use the current environment.
+For this release the network is focused on **coding** and **math** environments. The trainer publishes the active environment per checkpoint; the miner reads it from `CheckpointMetadata.env_id` and runs that environment automatically.
 
-| Environment | ID | Description | GPU Requirement |
-|---|---|---|---|
-| **Triton Kernel** | `triton_kernel` | Generate GPU kernels in Triton; evaluated for correctness on-GPU | 3 GPUs (decoding + proof + kernel eval) |
-| **3-SAT** | `sat` | Deterministic 3-SAT constraint satisfaction problems | 1 GPU |
-| **GSM8K** | `gsm8k` | Math word problems with step-by-step reasoning | 1 GPU |
-| **MATH** | `math` | Competition-level mathematics (Hendrycks MATH) | 1 GPU |
-| **MBPP** | `mbpp` | Python code generation (Mostly Basic Python Problems) | 1 GPU |
-| **HumanEval** | `humaneval` | Function-level code generation (OpenAI HumanEval) | 1 GPU |
-| **Affine Trace** | `affine_trace` | Affine type system trace reasoning | 1 GPU |
-| **Affine Logic** | `affine_logic` | Affine type system logic reasoning | 1 GPU |
+| Environment | ID | Description |
+|---|---|---|
+| **MBPP** | `mbpp` | Python code generation (Mostly Basic Python Problems) |
+| **HumanEval** | `humaneval` | Function-level code generation (OpenAI HumanEval) |
+| **GSM8K** | `gsm8k` | Math word problems with step-by-step reasoning |
+| **MATH** | `math` | Competition-level mathematics (Hendrycks MATH) |
 
-The current default environment is **Triton Kernel**. Pipeline mode is the **recommended** way to run miners with 2+ GPUs. The miner pipeline uses GPUs in parallel:
+Other environments (`sat`, `affine_*`, `triton_kernel`, etc.) still exist in the codebase but are not the focus of this release.
 
-1. **GPU 0 — Decoding**: vLLM/SGLang generates Triton kernel code from problem prompts.
-2. **GPU 1 — Proof computation**: A HuggingFace model computes logprobs and GRAIL commitments for verification.
-3. **GPU 2 — Kernel evaluation**: Each generated kernel runs in an isolated subprocess with its own CUDA context, checking correctness against a reference implementation.
+### Pipeline architecture
 
-Proof computation (GPU 1) and kernel evaluation (GPU 2) run **in parallel** after decoding completes, since proofs only need token IDs and do not depend on evaluation results.
+The pipelined mining engine is mandatory and lays out work across at least two GPUs:
 
-**Weight sync between windows:** When a new checkpoint is available, the pipeline reloads vLLM weights using the sleep/wake/reload API (~3-30 seconds) instead of a full server restart (~5 minutes). This is automatic and requires no configuration. If the fast path fails, it falls back to a full restart.
+1. **GPU 0 — Generation server** (SGLang by default): Receives `input_ids`, generates completions in parallel, returns `output_ids` directly. No text re-tokenization.
+2. **GPU 1 — Proof worker**: A HuggingFace model on a dedicated GPU computes the GRAIL commitments and chosen-token logprobs (GPU `log_softmax` + gather; only the chosen-token logprobs cross PCIe).
 
-If checkpoints live on a different volume (e.g. ephemeral/tmpfs), set `GRAIL_PIPELINE_SYMLINK_DIR` to a writable directory on the same filesystem or any accessible path — the symlink used for weight reload will be placed there instead of next to the checkpoint.
+Generation and proof computation overlap across batches, so the pipeline produces several hundred rollouts per window on a 2-GPU setup.
 
-### Triton Kernel GPU Setup Example
+**Weight sync between windows:** When the trainer publishes a new checkpoint, the miner reloads the SGLang/vLLM server weights using the sleep/wake/reload API (~3-30 seconds) instead of a full server restart. This is automatic and requires no configuration.
+
+If checkpoints live on a different volume (e.g. ephemeral/tmpfs), set `GRAIL_PIPELINE_SYMLINK_DIR` to a writable directory on the same filesystem — the symlink used for weight reload will be placed there. (vLLM backend only; harmless when `GRAIL_PIPELINE_BACKEND=sglang`.)
+
+### Two-GPU setup example
 
 ```bash
-# .env configuration for triton_kernel mining with pipeline mode
-GRAIL_GPU_EVAL=true
-KERNEL_EVAL_GPU_IDS=2          # Physical GPU index for kernel eval (not relative to CUDA_VISIBLE_DEVICES)
-KERNEL_EVAL_BACKEND=persistent  # Long-lived worker, ~40x faster (default)
-KERNEL_EVAL_TIMEOUT=60          # Seconds per kernel (default)
+# .env configuration for the default coding/math envs with pipeline mode
+GRAIL_PIPELINE_BACKEND=sglang   # Default and recommended
+GRAIL_PIPELINE_VLLM_GPU=0       # Relative to CUDA_VISIBLE_DEVICES
+GRAIL_PIPELINE_PROOF_GPU=1      # Relative to CUDA_VISIBLE_DEVICES
+GRAIL_PIPELINE_VLLM_TP=1        # Bump only if you have spare GPUs
+GRAIL_PIPELINE_MAX_MODEL_LEN=12288
+GRAIL_PIPELINE_PROOF_FLASH_ATTN=false  # MUST stay false to match validator SDPA
 
-# Pipeline mode (recommended for 2+ GPUs)
-GRAIL_PIPELINE_ENABLED=true
-GRAIL_PIPELINE_BACKEND=vllm
-GRAIL_PIPELINE_VLLM_GPU=0      # Relative to CUDA_VISIBLE_DEVICES
-GRAIL_PIPELINE_PROOF_GPU=1     # Relative to CUDA_VISIBLE_DEVICES
-
-# Run with GPU 0 for decoding, GPU 1 for proofs, GPU 2 for kernel eval
+# Run with GPU 0 for SGLang, GPU 1 for proofs
 CUDA_VISIBLE_DEVICES=0,1 grail -vv mine
 ```
 
-> **Note on GPU indices:** `GRAIL_PIPELINE_VLLM_GPU` and `GRAIL_PIPELINE_PROOF_GPU` are **relative** to `CUDA_VISIBLE_DEVICES`. `KERNEL_EVAL_GPU_IDS` is a **physical** GPU index (the eval subprocess overrides `CUDA_VISIBLE_DEVICES` internally).
-
-For miners without 3 GPUs or without A100/H100-class hardware, set `GRAIL_GPU_EVAL=false`. This disables on-GPU kernel evaluation (max reward capped at 0.35 based on compilation checks only).
+> **Note on GPU indices:** `GRAIL_PIPELINE_VLLM_GPU` and `GRAIL_PIPELINE_PROOF_GPU` are **relative** to `CUDA_VISIBLE_DEVICES`. The miner validates them at startup and exits with a clear `ProtocolViolationError` if they exceed the visible device count.
 
 ---
 
@@ -215,17 +211,20 @@ Flags are minimal; most behavior is configured via `.env`. Increase verbosity wi
 
 ## Operations
 
-High-level loop (see `grail/cli/mine.py`):
+High-level loop (see `grail/cli/mine.py` and `grail/neurons/miner.py`):
 
 1. Load R2 credentials and initialize `GrailChainManager`; commit read credentials on-chain.
 2. Connect to subtensor; compute `window_start = (current_block // WINDOW_LENGTH) * WINDOW_LENGTH`.
-3. **Load checkpoint**: Download the model checkpoint from the previous window (`window_start - WINDOW_LENGTH`) from R2.
-4. For the window:
+3. **Load checkpoint**: Download the latest checkpoint from R2 (fast path if a delta on top of a cached checkpoint exists, full reconstruction otherwise).
+4. **Initialize the pipeline (first window only)**: Start the SGLang generation server on `GRAIL_PIPELINE_VLLM_GPU` and load the proof model on `GRAIL_PIPELINE_PROOF_GPU`. Init failures `SystemExit(1)` so the supervisor restarts the process.
+5. **Read sampling policy**: Pull `generation_params` from `CheckpointMetadata` and convert via `GenerationParams.from_checkpoint_metadata`. Malformed metadata raises `ProtocolViolationError`, which the outer loop catches and skips the window cleanly (no 10s retry storm).
+6. For each problem in the window:
    - Derive randomness: `sha256(block_hash + drand.randomness)` (or block hash only).
-   - Generate problems from the active environment and create GRPO batches using the loaded checkpoint.
-   - Use `Prover` to commit/open GRAIL proofs and package signed rollouts.
-5. Upload the window's rollouts to R2/S3 with write credentials.
-6. Repeat on the next window (loading new checkpoint if available).
+   - Drive the generation server with the trainer's sampling policy to produce a GRPO group.
+   - Compute proofs on the proof GPU; drop the entire group if any proof fails (so the validator's `group_size` check never sees a partial group).
+   - Package signed rollouts.
+7. Upload the window's rollouts to R2/S3 with write credentials.
+8. Repeat on the next window. New checkpoints are detected automatically.
 
 Artifacts uploaded per window (as a Parquet file) include per-rollout:
 - GRAIL commit (`tokens`, `s_vals`, signature, beacon)
@@ -264,13 +263,13 @@ Key points:
 
 ## Best Practices
 
-- **GPU-intensive environments** (Triton Kernel): Use 3 GPUs with A100/H100 class for kernel eval. Ensure `GRAIL_GPU_EVAL=true` and `KERNEL_EVAL_GPU_IDS` are set correctly.
-- **Text-only environments** (SAT, GSM8K, MATH, etc.): 1 GPU is sufficient; any CUDA-capable accelerator works.
-- Models evolve through training: the initial base model is loaded from R2 and automatically updated with new checkpoints each window. Fixed at 8192 max new tokens and 16 rollouts per problem.
-- Reserve the final 2 blocks of each window for uploads; the miner does this automatically but avoid heavy generation near the end.
+- **Two GPUs are mandatory** for the pipelined miner. SGLang on GPU 0, HF proof model on GPU 1. Both must be in `CUDA_VISIBLE_DEVICES`.
+- The trainer publishes the active environment, model, and sampling policy per checkpoint. **Do not override `max_tokens`, `temperature`, etc. locally** — let the miner read them from `CheckpointMetadata.generation_params` so the validator's hard checks pass by construction.
+- `GRAIL_PIPELINE_PROOF_FLASH_ATTN` MUST stay `false`. The validator uses SDPA; switching the proof path to FA2 changes FP accumulation and causes sketch divergence.
+- Reserve the final 2 blocks of each window for uploads; the miner does this automatically via its EMA-based time-budget gate.
 - Use `--use-drand` (default) for robust challenge derivation; fall back with `--no-drand` only if needed.
 - Ensure R2 dual-credential setup: write locally, read credentials are committed on-chain by the miner.
-- Monitor GPU memory; the miner periodically empties cache, but size your rollouts to avoid OOM.
+- Monitor GPU memory; the miner periodically empties cache, but size your rollouts (`GRAIL_GENERATION_BATCH_SIZE`) to avoid OOM.
 - Increase verbosity with `-vv` when diagnosing sampling, group sizes, or upload issues.
 
 
