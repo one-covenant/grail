@@ -105,6 +105,14 @@ class CheckpointMetadata:
     generation_params: dict[str, Any] = field(
         default_factory=dict
     )  # Generation parameters (max_tokens, temperature, etc.)
+    # Thinking mode is protocol-affecting: it controls the system prompt and the
+    # chat template applied to every prompt. Miner and validator must agree, so
+    # the trainer is the single source of truth and publishes it here. Allowed
+    # values: "native" (model's built-in thinking, e.g. Qwen3 <think>...</think>)
+    # or "instructed" (custom <start_working_out>/</end_working_out> via system
+    # prompt + ChatML template). NEVER read GRAIL_THINKING_MODE on the miner or
+    # validator path — always read this field.
+    thinking_mode: str | None = None
 
     def validate_metadata(self) -> list[str]:
         """Validate that required fields for mining/validation are present.
@@ -114,6 +122,10 @@ class CheckpointMetadata:
         missing = []
         if not self.env_id:
             missing.append("env_id")
+        if not self.thinking_mode:
+            missing.append("thinking_mode")
+        elif self.thinking_mode not in ("native", "instructed"):
+            missing.append(f"thinking_mode (invalid value '{self.thinking_mode}')")
         if not self.generation_params:
             missing.append("generation_params")
         else:
@@ -834,8 +846,38 @@ class CheckpointManager:
             return metadata
         return await self._fetch_full_metadata(window)
 
+    def _build_metadata_from_payload(
+        self, payload: dict[str, Any], window: int, default_type: str
+    ) -> CheckpointMetadata:
+        """Construct CheckpointMetadata from a raw R2 payload dict."""
+        return CheckpointMetadata(
+            window=payload.get("window", window),
+            file_manifest=payload.get("file_manifest", {}),
+            training_config=payload.get("training_config", {}),
+            git_commit=payload.get("git_commit", "unknown"),
+            created_at=float(payload.get("created_at", 0.0)),
+            model_name=payload.get("model_name", "no_name"),
+            checkpoint_type=payload.get("checkpoint_type", default_type),
+            prev_window=payload.get("prev_window"),
+            anchor_window=payload.get("anchor_window"),
+            weights_hash=payload.get("weights_hash"),
+            env_id=payload.get("env_id"),
+            env_params=payload.get("env_params", {}),
+            generation_params=payload.get("generation_params", {}),
+            thinking_mode=payload.get("thinking_mode"),
+        )
+
     async def _fetch_delta_metadata(self, window: int) -> CheckpointMetadata | None:
-        """Fetch DELTA checkpoint metadata from DELTA subdir."""
+        """Fetch DELTA checkpoint metadata from DELTA subdir.
+
+        Cache contract: only metadata that PASSES ``validate_metadata()`` is
+        cached. An invalid payload (legacy schema, missing thinking_mode,
+        out-of-range field, etc.) is returned to the caller for inspection
+        but never written to ``_metadata_cache`` — otherwise a one-time bad
+        publish would poison the cache for the entire process lifetime, and
+        a subsequent trainer republish at the same window could not be
+        observed without restarting the validator.
+        """
         cache_key = (window, CHECKPOINT_TYPE_DELTA)
         if cache_key in self._metadata_cache:
             return self._metadata_cache[cache_key]
@@ -845,26 +887,24 @@ class CheckpointManager:
         if not payload:
             return None
 
-        metadata = CheckpointMetadata(
-            window=payload.get("window", window),
-            file_manifest=payload.get("file_manifest", {}),
-            training_config=payload.get("training_config", {}),
-            git_commit=payload.get("git_commit", "unknown"),
-            created_at=float(payload.get("created_at", 0.0)),
-            model_name=payload.get("model_name", "no_name"),
-            checkpoint_type=payload.get("checkpoint_type", CHECKPOINT_TYPE_DELTA),
-            prev_window=payload.get("prev_window"),
-            anchor_window=payload.get("anchor_window"),
-            weights_hash=payload.get("weights_hash"),
-            env_id=payload.get("env_id"),
-            env_params=payload.get("env_params", {}),
-            generation_params=payload.get("generation_params", {}),
-        )
+        metadata = self._build_metadata_from_payload(payload, window, CHECKPOINT_TYPE_DELTA)
+        missing = metadata.validate_metadata()
+        if missing:
+            logger.debug(
+                "Skipping cache write for DELTA metadata at window %s: missing %s",
+                window,
+                ", ".join(missing),
+            )
+            return metadata
         self._metadata_cache[cache_key] = metadata
         return metadata
 
     async def _fetch_full_metadata(self, window: int) -> CheckpointMetadata | None:
-        """Fetch FULL checkpoint metadata from FULL subdir."""
+        """Fetch FULL checkpoint metadata from FULL subdir.
+
+        Cache contract: only metadata that PASSES ``validate_metadata()`` is
+        cached. See ``_fetch_delta_metadata`` for the rationale.
+        """
         cache_key = (window, CHECKPOINT_TYPE_FULL)
         if cache_key in self._metadata_cache:
             return self._metadata_cache[cache_key]
@@ -877,21 +917,15 @@ class CheckpointManager:
             return None
         logger.debug("Found FULL metadata for window %s", window)
 
-        metadata = CheckpointMetadata(
-            window=payload.get("window", window),
-            file_manifest=payload.get("file_manifest", {}),
-            training_config=payload.get("training_config", {}),
-            git_commit=payload.get("git_commit", "unknown"),
-            created_at=float(payload.get("created_at", 0.0)),
-            model_name=payload.get("model_name", "no_name"),
-            checkpoint_type=payload.get("checkpoint_type", CHECKPOINT_TYPE_FULL),
-            prev_window=payload.get("prev_window"),
-            anchor_window=payload.get("anchor_window"),
-            weights_hash=payload.get("weights_hash"),
-            env_id=payload.get("env_id"),
-            env_params=payload.get("env_params", {}),
-            generation_params=payload.get("generation_params", {}),
-        )
+        metadata = self._build_metadata_from_payload(payload, window, CHECKPOINT_TYPE_FULL)
+        missing = metadata.validate_metadata()
+        if missing:
+            logger.debug(
+                "Skipping cache write for FULL metadata at window %s: missing %s",
+                window,
+                ", ".join(missing),
+            )
+            return metadata
         self._metadata_cache[cache_key] = metadata
         return metadata
 
