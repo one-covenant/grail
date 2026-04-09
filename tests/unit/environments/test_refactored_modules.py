@@ -25,10 +25,10 @@ from tests.fixtures.fakes import DummyModel, DummyTokenizer, FakeBackend
 
 def test_generation_params_defaults():
     """Verify dataclass defaults match expected constants."""
-    from grail.protocol.constants import MAX_NEW_TOKENS
+    from grail.protocol.constants import MAX_NEW_TOKENS_PROTOCOL_CAP
 
     p = GenerationParams()
-    assert p.max_new_tokens == MAX_NEW_TOKENS
+    assert p.max_new_tokens == MAX_NEW_TOKENS_PROTOCOL_CAP
     assert p.temperature == 0.6
     assert p.do_sample is True
     assert p.top_p == 0.95

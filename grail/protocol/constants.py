@@ -102,9 +102,15 @@ DRAND_FUTURE_BUFFER = 30
 # Changing breaks: advantage computation, group-level validation.
 ROLLOUTS_PER_PROBLEM = 16
 
-# Maximum new tokens per rollout completion.
-# Changing breaks: validators reject completions exceeding this.
-MAX_NEW_TOKENS = 8192
+# Network-wide PROTOCOL CAP on completion length: validators reject any
+# rollout whose completion exceeds this. The trainer's per-checkpoint
+# ``generation_params.max_tokens`` is the actual operating limit and must
+# be <= this value; the miner drives its backend with
+# ``min(metadata.max_tokens, MAX_NEW_TOKENS_PROTOCOL_CAP)``.
+# This is NOT a default; it is an immutable upper bound that miner and
+# validator agree on at code level. Changing it would require a
+# coordinated network upgrade and a GRAIL_PROOF_VERSION bump.
+MAX_NEW_TOKENS_PROTOCOL_CAP = 8192
 
 # Minimum EOS probability for valid termination.
 # Changing breaks: termination validation (TerminationValidator).
@@ -137,13 +143,13 @@ SUPERLINEAR_EXPONENT = 4.0
 # Maximum unique rollouts per miner per window that count toward weight allocation.
 # The effective period cap = this value x rolling_windows.
 # Changing breaks: weight normalization, cap enforcement.
-UNIQUE_ROLLOUTS_CAP = 1500
+UNIQUE_ROLLOUTS_CAP = 5000
 UNIQUE_ROLLOUTS_CAP_ENABLED = True
 
 # Emission burn: percentage burned to UID 0, remainder distributed to miners.
 # Changing breaks: weight distribution economics.
 GRAIL_BURN_UID = 0
-GRAIL_BURN_PERCENTAGE = 80.0
+GRAIL_BURN_PERCENTAGE = 90.0
 
 # Trainer identity UID for checkpoint publication and data filtering.
 # Changing breaks: checkpoint discovery, trust list filtering.

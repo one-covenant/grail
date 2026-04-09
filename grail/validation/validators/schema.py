@@ -23,7 +23,7 @@ class SchemaValidator(Validator):
     This validator runs FIRST (before GPU validators) to filter out:
     - Missing required fields
     - Wrong types (str instead of int, etc.)
-    - Out-of-range values (completion_length > MAX_NEW_TOKENS)
+    - Out-of-range values (completion_length > MAX_NEW_TOKENS_PROTOCOL_CAP)
     - Cross-field inconsistencies (commitments length != tokens length)
 
     Uses Pydantic for automatic validation with clear error messages.

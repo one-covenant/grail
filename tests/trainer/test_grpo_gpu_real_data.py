@@ -943,7 +943,7 @@ class TestGRPOGPURealData:
             model,
             tokenizer,
             device=str(accelerator.device),
-            max_new_tokens=int(C.MAX_NEW_TOKENS),
+            max_new_tokens=int(C.MAX_NEW_TOKENS_PROTOCOL_CAP),
             temperature=TEST_CONFIG.temperature,
         )
 
