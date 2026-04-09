@@ -25,7 +25,6 @@ from grail.validation.miner_validator import (
 )
 from grail.validation.pipeline import create_env_validation_pipeline
 
-
 # --------------------------------------------------------------------------- #
 #                              fixtures                                       #
 # --------------------------------------------------------------------------- #
