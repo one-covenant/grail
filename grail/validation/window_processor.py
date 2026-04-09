@@ -19,7 +19,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from ..infrastructure.chain import GrailChainManager
 from ..logging_utils import miner_log_context
 from .copycat_service import CopycatService
-from .miner_validator import FAILURE_FLAG_KEY, MinerValidator
+from .miner_validator import (
+    FAILURE_FLAG_KEY,
+    MinerValidator,
+    WindowEnvConfig,
+)
 from .types import MinerResults, WindowResults
 
 logger = logging.getLogger(__name__)
@@ -57,6 +61,17 @@ class WindowProcessor:
         self._miner_validator = miner_validator
         self._copycat_service = copycat_service
 
+    async def resolve_window_env_config(
+        self, model: AutoModelForCausalLM
+    ) -> WindowEnvConfig:
+        """Public delegate to ``MinerValidator.resolve_window_env_config``.
+
+        Exposed so that ``ValidationService._process_window`` can resolve the
+        per-window protocol config BEFORE it touches any rolling history,
+        without having to reach into ``WindowProcessor``'s internals.
+        """
+        return await self._miner_validator.resolve_window_env_config(model)
+
     async def process_window(
         self,
         window: int,
@@ -71,6 +86,7 @@ class WindowProcessor:
         monitor: Any | None,
         uid_by_hotkey: dict[str, int],
         subtensor: Any,  # bt.subtensor
+        env_config: WindowEnvConfig,
         heartbeat_callback: Any = None,
         deadline_ts: float | None = None,
     ) -> WindowResults:
@@ -89,6 +105,11 @@ class WindowProcessor:
             monitor: Optional monitoring client
             uid_by_hotkey: Mapping of hotkey to UID
             subtensor: Subtensor instance for block queries
+            env_config: Per-window protocol config resolved by
+                ``ValidationService._process_window`` BEFORE any rolling-history
+                mutation. Carries the trainer-published env_id, env_params,
+                generation_params, and thinking_mode. If the resolve failed,
+                the service aborts the window and never reaches this method.
             heartbeat_callback: Optional watchdog heartbeat callback
             deadline_ts: Upload deadline timestamp (unix seconds)
 
@@ -152,6 +173,7 @@ class WindowProcessor:
                         monitor=monitor,
                         uid_by_hotkey=uid_by_hotkey,
                         text_logs_emitted=text_logs_emitted,
+                        env_config=env_config,
                         heartbeat_callback=heartbeat_callback,
                         deadline_ts=deadline_ts,
                         download_times=download_times,

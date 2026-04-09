@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import random
 import time
 from collections import Counter, defaultdict
@@ -44,6 +45,35 @@ GRPO_ADV_SUM_TOLERANCE = 0.01  # Sum of advantages should be ~0
 REWARD_REL_TOL = 0.02  # Relative tolerance on reward bounds
 REWARD_ABS_TOL = 1e-6  # Absolute tolerance on reward bounds
 FAILURE_FLAG_KEY = "had_failure"
+
+
+class MissingCheckpointMetadataError(RuntimeError):
+    """Raised when the validator cannot resolve the trainer-published metadata
+    required to validate a window (env_id, env_params, generation_params,
+    thinking_mode).
+
+    This is treated as a *window-level* failure, not a per-miner failure: the
+    issue is on the trainer/validator side, not in any miner's submission.
+    The window processor catches this and skips the entire window so the
+    validator never silently scores miners against an unverifiable baseline.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class WindowEnvConfig:
+    """Per-window protocol configuration resolved from trainer's checkpoint.
+
+    All four fields are protocol-affecting and must come from the same
+    ``CheckpointMetadata``. Frozen so the resolved value cannot accidentally
+    drift mid-window. Constructed only by
+    ``MinerValidator.resolve_window_env_config``; raise
+    ``MissingCheckpointMetadataError`` if any field is missing or malformed.
+    """
+
+    env_id: str
+    env_params: dict[str, Any]
+    generation_params: dict[str, Any]
+    thinking_mode: str  # "native" or "instructed"
 
 
 @dataclass
@@ -127,6 +157,104 @@ class MinerValidator:
             f"and {len(self._soft_check_keys)} soft checks (thresholds={self._soft_thresholds})"
         )
 
+    async def resolve_window_env_config(
+        self,
+        model: AutoModelForCausalLM,
+    ) -> WindowEnvConfig:
+        """Resolve the per-window protocol config from the trainer's checkpoint.
+
+        Reads ``model.grail_checkpoint_window`` (set by ``get_model``), fetches
+        the matching ``CheckpointMetadata`` from R2, runs ``validate_metadata``,
+        and overrides the process-wide ``GRAIL_THINKING_MODE`` env var so all
+        subsequent ``apply_chat_template``/``get_thinking_config`` calls in this
+        window agree with what the trainer published.
+
+        Raises ``MissingCheckpointMetadataError`` if any required field is
+        missing or unfetchable. Callers MUST treat this as a window-level
+        skip — falling through with defaults would silently let the validator
+        score every miner against the wrong baseline.
+        """
+        if self._checkpoint_manager is None:
+            raise MissingCheckpointMetadataError(
+                "Validator has no checkpoint_manager; cannot resolve window env config"
+            )
+
+        validator_checkpoint_window = getattr(model, "grail_checkpoint_window", None)
+        if validator_checkpoint_window is None:
+            raise MissingCheckpointMetadataError(
+                "Validator model has no grail_checkpoint_window; cannot resolve window env config"
+            )
+
+        try:
+            checkpoint_metadata = await self._checkpoint_manager.get_checkpoint_metadata(
+                validator_checkpoint_window
+            )
+        except Exception as e:
+            raise MissingCheckpointMetadataError(
+                f"Failed to fetch checkpoint metadata for window "
+                f"{validator_checkpoint_window}: {e}"
+            ) from e
+
+        if checkpoint_metadata is None:
+            raise MissingCheckpointMetadataError(
+                f"No checkpoint metadata found for window {validator_checkpoint_window}"
+            )
+
+        missing = checkpoint_metadata.validate_metadata()
+        if missing:
+            raise MissingCheckpointMetadataError(
+                f"Checkpoint {validator_checkpoint_window} missing required "
+                f"trainer-published fields: {', '.join(missing)}. "
+                f"This indicates a trainer misconfiguration; skipping window."
+            )
+
+        # validate_metadata() guarantees env_id and thinking_mode are non-None
+        # / well-formed; raise explicitly (NOT bare assert: -O strips it) if
+        # that invariant ever drifts so the failure surfaces at the trust
+        # boundary instead of producing a silently malformed dataclass.
+        if checkpoint_metadata.env_id is None:
+            raise MissingCheckpointMetadataError(
+                f"Checkpoint {validator_checkpoint_window} has env_id=None after "
+                "validate_metadata() passed — schema invariant violated"
+            )
+        if checkpoint_metadata.thinking_mode is None:
+            raise MissingCheckpointMetadataError(
+                f"Checkpoint {validator_checkpoint_window} has thinking_mode=None "
+                "after validate_metadata() passed — schema invariant violated"
+            )
+        config = WindowEnvConfig(
+            env_id=checkpoint_metadata.env_id,
+            env_params=checkpoint_metadata.env_params or {},
+            generation_params=checkpoint_metadata.generation_params or {},
+            thinking_mode=checkpoint_metadata.thinking_mode,
+        )
+
+        # Override the process-wide thinking mode from the checkpoint so all
+        # subsequent ``get_thinking_config()`` callers (registry adapters,
+        # parsers, debug helpers) see the trainer-published value, never the
+        # validator host's local ``GRAIL_THINKING_MODE``. This is the trust
+        # boundary that keeps the validator in sync with the miner when their
+        # hosts diverge — e.g. validator running in a docker container that
+        # didn't inherit ``GRAIL_THINKING_MODE`` from the host ``.env``.
+        if os.environ.get("GRAIL_THINKING_MODE") != config.thinking_mode:
+            logger.info(
+                "Overriding GRAIL_THINKING_MODE from checkpoint metadata: prev=%s, new=%s",
+                os.environ.get("GRAIL_THINKING_MODE", "<unset>"),
+                config.thinking_mode,
+            )
+            os.environ["GRAIL_THINKING_MODE"] = config.thinking_mode
+
+        logger.info(
+            "Resolved window env config from checkpoint %s: env_id=%s "
+            "thinking_mode=%s max_tokens=%s",
+            validator_checkpoint_window,
+            config.env_id,
+            config.thinking_mode,
+            config.generation_params.get("max_tokens"),
+        )
+
+        return config
+
     async def validate_miner(
         self,
         miner_hotkey: str,
@@ -141,6 +269,7 @@ class MinerValidator:
         monitor: Any | None,
         uid_by_hotkey: dict[str, int],
         text_logs_emitted: dict[str, int],
+        env_config: WindowEnvConfig,
         heartbeat_callback: Any = None,
         deadline_ts: float | None = None,
         download_times: list[float] | None = None,
@@ -160,6 +289,11 @@ class MinerValidator:
             monitor: Optional monitoring client
             uid_by_hotkey: Mapping of hotkey to UID
             text_logs_emitted: Counter of text logs per miner
+            env_config: Per-window protocol config resolved once via
+                ``resolve_window_env_config``. Carries env_id, env_params,
+                generation_params, and thinking_mode from the trainer's
+                published ``CheckpointMetadata``. Never read from local env
+                vars.
             heartbeat_callback: Optional callback to update watchdog
             deadline_ts: Upload deadline timestamp (unix seconds)
             download_times: Optional list to collect download durations
@@ -212,52 +346,12 @@ class MinerValidator:
             inferences, miner_hotkey, window_rand, validator_wallet, total_inferences
         )
 
-        # Extract validator's checkpoint window from model attribute (set by get_model())
+        # Extract validator's checkpoint window from model attribute (set by get_model()).
+        # The trainer-published env config (env_id, env_params, generation_params,
+        # thinking_mode) is resolved ONCE per window by
+        # ``resolve_window_env_config`` and passed in as parameters above. We
+        # do not refetch it here.
         validator_checkpoint_window = getattr(model, "grail_checkpoint_window", None)
-
-        # Fetch environment config from checkpoint metadata if checkpoint_manager is available
-        env_id = None
-        env_params = {}
-        generation_params: dict[str, Any] = {}
-        if self._checkpoint_manager is not None and validator_checkpoint_window is not None:
-            try:
-                checkpoint_metadata = await self._checkpoint_manager.get_checkpoint_metadata(
-                    validator_checkpoint_window
-                )
-                if checkpoint_metadata is not None:
-                    missing = checkpoint_metadata.validate_metadata()
-                    if missing:
-                        logger.error(
-                            "Checkpoint %s missing required metadata: %s. "
-                            "Skipping validation — trainer may be misconfigured.",
-                            validator_checkpoint_window,
-                            ", ".join(missing),
-                        )
-                        return self._create_not_found_result(miner_hotkey, uid)
-
-                    env_id = checkpoint_metadata.env_id
-                    env_params = checkpoint_metadata.env_params or {}
-                    generation_params = checkpoint_metadata.generation_params or {}
-                    logger.debug(
-                        "Loaded checkpoint config from %s: env_id=%s max_tokens=%s",
-                        validator_checkpoint_window,
-                        env_id,
-                        generation_params.get("max_tokens"),
-                    )
-                else:
-                    logger.warning(
-                        f"No metadata found for validator checkpoint window {validator_checkpoint_window}"
-                    )
-                    if monitor:
-                        monitor.log_counter("validation/metadata_missing")
-            except Exception as e:
-                logger.warning(
-                    f"Failed to fetch checkpoint metadata for env config "
-                    f"(window={validator_checkpoint_window}): {e}",
-                    exc_info=True,
-                )
-                if monitor:
-                    monitor.log_counter("validation/metadata_fetch_errors")
 
         # Step 4: Validate selected rollouts
         validation_state = await self._validate_rollouts(
@@ -275,9 +369,9 @@ class MinerValidator:
             text_logs_emitted=text_logs_emitted,
             heartbeat_callback=heartbeat_callback,
             validator_checkpoint_window=validator_checkpoint_window,
-            env_id=env_id,
-            env_params=env_params,
-            generation_params=generation_params,
+            env_id=env_config.env_id,
+            env_params=env_config.env_params,
+            generation_params=env_config.generation_params,
         )
 
         # Step 5: Check for early failures
@@ -925,8 +1019,24 @@ class MinerValidator:
                 rollout_group = str(rollout_group_raw)
                 state["rollout_groups"][rollout_group].append(inference)
 
-                # Derive file-order group index for deterministic seed derivation
-                group_index = int(group_index_by_id.get(rollout_group, 0))
+                # Use the rollout_group integer DIRECTLY as the seed material —
+                # this is the same value the miner used (`problem_index =
+                # problem_count - 1`). The previous file-encounter index
+                # (``group_index_by_id``) was a latent bug: if the miner ever
+                # dropped a group (proof failure, short rollouts, etc.), the
+                # file would have non-contiguous rollout_group values, the
+                # validator would assign 0..N-1 in encounter order, and every
+                # rollout's seed would differ from the miner's by one slot.
+                # See ``grail/cli/mine.py::_pipelined_generation_loop`` for
+                # the matching seed derivation on the miner side.
+                try:
+                    group_index = int(rollout_group_raw)
+                except (TypeError, ValueError):
+                    state["hard_failure"] = True
+                    logger.warning(
+                        "rollout_group=%r is not an integer; invalidating uid", rollout_group_raw
+                    )
+                    break
 
                 # Inject canonical env field (validator-derived, never trust miner)
                 seed_int = derive_env_seed(miner_hotkey, window_hash, group_index)
