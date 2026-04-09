@@ -61,9 +61,7 @@ class WindowProcessor:
         self._miner_validator = miner_validator
         self._copycat_service = copycat_service
 
-    async def resolve_window_env_config(
-        self, model: AutoModelForCausalLM
-    ) -> WindowEnvConfig:
+    async def resolve_window_env_config(self, model: AutoModelForCausalLM) -> WindowEnvConfig:
         """Public delegate to ``MinerValidator.resolve_window_env_config``.
 
         Exposed so that ``ValidationService._process_window`` can resolve the

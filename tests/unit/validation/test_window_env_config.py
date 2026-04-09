@@ -50,7 +50,9 @@ def _full_metadata(**overrides: Any) -> CheckpointMetadata:
     return CheckpointMetadata(**payload)
 
 
-def _make_validator(metadata: CheckpointMetadata | None, raises: Exception | None = None) -> MinerValidator:
+def _make_validator(
+    metadata: CheckpointMetadata | None, raises: Exception | None = None
+) -> MinerValidator:
     """Build a MinerValidator with a stubbed checkpoint manager."""
     pipeline = create_env_validation_pipeline()
     cm = MagicMock()

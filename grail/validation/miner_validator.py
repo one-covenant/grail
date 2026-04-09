@@ -191,8 +191,7 @@ class MinerValidator:
             )
         except Exception as e:
             raise MissingCheckpointMetadataError(
-                f"Failed to fetch checkpoint metadata for window "
-                f"{validator_checkpoint_window}: {e}"
+                f"Failed to fetch checkpoint metadata for window {validator_checkpoint_window}: {e}"
             ) from e
 
         if checkpoint_metadata is None:

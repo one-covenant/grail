@@ -530,9 +530,7 @@ class ValidationService:
         if self._model is None:
             raise RuntimeError("Model must be loaded")
         try:
-            env_config = await self._window_processor.resolve_window_env_config(
-                self._model
-            )
+            env_config = await self._window_processor.resolve_window_env_config(self._model)
         except MissingCheckpointMetadataError as exc:
             logger.error(
                 "Window %s: cannot resolve trainer-published env config: %s. "
@@ -543,9 +541,7 @@ class ValidationService:
             )
             if self._monitor:
                 try:
-                    await self._monitor.log_counter(
-                        "validation/window_skipped_missing_metadata"
-                    )
+                    await self._monitor.log_counter("validation/window_skipped_missing_metadata")
                 except Exception:
                     pass
             return
