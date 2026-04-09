@@ -21,6 +21,8 @@ def _batched_forward_pass(
     model: Any,
     device: str,
     all_token_ids_batch: list[list[int]],
+    *,
+    keep_logits_on_gpu: bool = False,
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     """Run sub-batched forward passes with right-padding.
 
@@ -35,11 +37,16 @@ def _batched_forward_pass(
         model: HuggingFace causal LM
         device: Device string (e.g. ``"cuda:1"``)
         all_token_ids_batch: Variable-length token sequences
+        keep_logits_on_gpu: When True, return logits on GPU (no H2D copy).
+            Caller is responsible for freeing them after use. Saves
+            ~1.2 GB/seq H2D transfer when used with GPU log_softmax in
+            ``compute_proofs(..., gpu_logprobs=True)``.
 
     Returns:
         ``(per_seq_hidden, per_seq_logits)`` -- lists of tensors, one per
         sequence.  hidden: ``[seq_len, hidden_dim]`` on *device*.
-        logits: ``[seq_len, vocab]`` on CPU.
+        logits: ``[seq_len, vocab]`` on CPU (default) or *device* (if
+        ``keep_logits_on_gpu=True``).
     """
     from ..protocol.constants import PROOF_BATCH_SIZE
 
@@ -78,7 +85,10 @@ def _batched_forward_pass(
             # .clone() decouples from the batched tensor so del frees GPU memory.
             for i, slen in enumerate(sub_lens):
                 per_seq_hidden.append(h_layer[i, :slen, :].clone())
-                per_seq_logits.append(logits[i, :slen, :].detach().to("cpu"))
+                if keep_logits_on_gpu:
+                    per_seq_logits.append(logits[i, :slen, :].clone())
+                else:
+                    per_seq_logits.append(logits[i, :slen, :].detach().to("cpu"))
 
             del h_layer, logits, input_ids, attn_mask
             torch.cuda.empty_cache()
@@ -129,16 +139,27 @@ def compute_proofs(
     prompt_lens: list[int],
     randomness_hex: str,
     wallet: Any,
+    *,
+    gpu_logprobs: bool = True,
 ) -> list[tuple[list[dict], list[float], bytes, dict, str]]:
-    """Compute GRAIL commitments and logprobs.  Used by AgentEnvLoop and ProofWorker.
+    """Compute GRAIL commitments and logprobs for the miner pipeline.
 
     Two-phase design:
       Phase 1 -- Forward passes via ``_batched_forward_pass`` (which internally
         calls ``forward_single_layer``, the same function the validator uses).
         Sub-batch size is the constant PROOF_BATCH_SIZE (16).
         Falls back to sequential single-sequence passes on OOM.
-      Phase 2 -- Per-sequence commitment + logprob extraction from cached
-        hidden states and logits.
+      Phase 2 -- Per-sequence commitment + GPU log_softmax + gather. Only the
+        chosen-token logprobs (~16 KB/seq) are transferred to CPU; full
+        ``[seq_len, vocab]`` logits never leave the GPU.  The validator
+        recomputes the same fp32 ``log_softmax`` so the divergence stays
+        well below ``LOGPROB_IS_EPS=0.10``.
+
+    The ``gpu_logprobs=False`` branch is retained ONLY as the OOM fallback
+    for ``_batched_forward_pass``: when sub-batch=1 still OOMs, the function
+    falls back to sequential CPU forwards which return CPU logits.  In that
+    rare case the per-sequence loop transparently uses the CPU log_softmax
+    branch.  Steady-state mining always runs the GPU path.
 
     Args:
         model: The loaded PyTorch model
@@ -148,6 +169,8 @@ def compute_proofs(
         prompt_lens: List of prompt lengths corresponding to each sequence
         randomness_hex: Hex string for randomness beacon
         wallet: Bittensor wallet for signing commitments
+        gpu_logprobs: Default True. Set to False only by tests that need
+            bit-identical CPU output.
 
     Returns:
         List of tuples: (commitments, logprobs, signature, beacon, proof_version)
@@ -168,7 +191,9 @@ def compute_proofs(
     per_seq_logits: list[torch.Tensor | None] = [None] * batch_size
 
     try:
-        hidden_list, logits_list = _batched_forward_pass(model, device, all_token_ids_batch)
+        hidden_list, logits_list = _batched_forward_pass(
+            model, device, all_token_ids_batch, keep_logits_on_gpu=gpu_logprobs
+        )
         for i in range(batch_size):
             per_seq_hidden[i] = hidden_list[i]
             per_seq_logits[i] = logits_list[i]
@@ -199,7 +224,13 @@ def compute_proofs(
         if use_batched:
             h_layer = per_seq_hidden[idx]
             logits = per_seq_logits[idx]
-            assert h_layer is not None and logits is not None
+            if h_layer is None or logits is None:
+                from ..protocol.errors import ProtocolViolationError
+
+                raise ProtocolViolationError(
+                    f"Proof batched forward returned None for sequence {idx} "
+                    f"(batch_size={batch_size}); cannot continue"
+                )
         else:
             # Sequential fallback: one sequence at a time using the same
             # forward_single_layer path for numerical consistency.
@@ -262,18 +293,40 @@ def compute_proofs(
                 skip_front = valid_start - start_logit
                 n_valid = valid_end - valid_start
                 valid_token_ids = completion_ids[skip_front : skip_front + n_valid]
-                token_tensor = torch.tensor(valid_token_ids, dtype=torch.long)
 
-                # Chunked log_softmax to cap CPU memory (~600MB per chunk)
-                LOGPROB_CHUNK = 512
-                chunk_logprobs: list[float] = []
-                for c_start in range(0, n_valid, LOGPROB_CHUNK):
-                    c_end = min(c_start + LOGPROB_CHUNK, n_valid)
-                    logit_slice = logits[valid_start + c_start : valid_start + c_end]
-                    log_probs_chunk = torch.log_softmax(logit_slice.float(), dim=-1)
-                    tok_slice = token_tensor[c_start:c_end]
-                    selected = log_probs_chunk[torch.arange(c_end - c_start), tok_slice]
-                    chunk_logprobs.extend(selected.tolist())
+                if gpu_logprobs and logits.is_cuda:
+                    # GPU path: chunked log_softmax on the device, gather only
+                    # the chosen-token logprobs, then tiny H2D for the result.
+                    # Caps GPU peak memory to LOGPROB_CHUNK * vocab * 4 B
+                    # (~312 MB for chunk=512, vocab=152k).
+                    token_tensor_gpu = torch.tensor(
+                        valid_token_ids, dtype=torch.long, device=logits.device
+                    )
+                    LOGPROB_CHUNK = 512
+                    chunk_logprobs: list[float] = []
+                    for c_start in range(0, n_valid, LOGPROB_CHUNK):
+                        c_end = min(c_start + LOGPROB_CHUNK, n_valid)
+                        logit_slice = logits[valid_start + c_start : valid_start + c_end]
+                        log_probs_chunk = torch.log_softmax(logit_slice.float(), dim=-1)
+                        tok_slice = token_tensor_gpu[c_start:c_end]
+                        selected = log_probs_chunk[
+                            torch.arange(c_end - c_start, device=logits.device), tok_slice
+                        ]
+                        chunk_logprobs.extend(selected.tolist())
+                        del log_probs_chunk
+                    del token_tensor_gpu
+                else:
+                    # Legacy CPU path (bit-identical to historical behavior).
+                    token_tensor = torch.tensor(valid_token_ids, dtype=torch.long)
+                    LOGPROB_CHUNK = 512
+                    chunk_logprobs: list[float] = []
+                    for c_start in range(0, n_valid, LOGPROB_CHUNK):
+                        c_end = min(c_start + LOGPROB_CHUNK, n_valid)
+                        logit_slice = logits[valid_start + c_start : valid_start + c_end]
+                        log_probs_chunk = torch.log_softmax(logit_slice.float(), dim=-1)
+                        tok_slice = token_tensor[c_start:c_end]
+                        selected = log_probs_chunk[torch.arange(c_end - c_start), tok_slice]
+                        chunk_logprobs.extend(selected.tolist())
 
                 logprobs = (
                     [float("-inf")] * skip_front
@@ -288,6 +341,10 @@ def compute_proofs(
                     end_logit,
                     logits.size(0),
                 )
+
+        # Free this sequence's logits eagerly when they're on GPU to bound peak memory.
+        if gpu_logprobs and use_batched and per_seq_logits[idx] is not None:
+            per_seq_logits[idx] = None
 
         commitment_data = json.dumps(commitments, sort_keys=True)
         commitment_hash = hashlib.sha256(commitment_data.encode()).digest()

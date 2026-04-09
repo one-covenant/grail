@@ -1,7 +1,8 @@
 """Proof computation worker for pipelined mining.
 
-Manages an HF model on a dedicated proof GPU (GPU 1) and computes
-GRAIL commitments + logprobs for completed rollouts.
+Manages an HF model on a dedicated proof GPU and computes GRAIL commitments
++ chosen-token logprobs for completed rollouts. Always runs the GPU
+log_softmax path (no env-var toggle).
 """
 
 from __future__ import annotations
@@ -20,8 +21,9 @@ class ProofWorker:
     """Manages the HF model on a dedicated proof GPU.
 
     Loads the model to ``cuda:{config.proof_gpu}`` and exposes a method
-    that mirrors ``AgentEnvLoop._batch_compute_commitments_and_logprobs``
-    but delegates to the shared ``compute_proofs()`` function.
+    that delegates to the shared ``compute_proofs()`` function with
+    ``gpu_logprobs=True`` so log_softmax + gather run on the proof GPU
+    and only chosen-token logprobs cross PCIe.
     """
 
     def __init__(self, config: PipelineConfig) -> None:
@@ -61,7 +63,13 @@ class ProofWorker:
             eval_mode=True,
         )
         self._tokenizer = get_tokenizer(str(checkpoint_path))
-        assert self._model is not None, "get_model() returned None"
+        if self._model is None:
+            from ..protocol.errors import ProtocolViolationError
+
+            raise ProtocolViolationError(
+                f"get_model({checkpoint_path}) returned None; "
+                "ProofWorker cannot start without a loaded HF model"
+            )
         self._hidden_dim = resolve_hidden_size(self._model)
         logger.info(
             "ProofWorker: model loaded (hidden_dim=%d, device=%s)",
@@ -133,6 +141,7 @@ class ProofWorker:
             prompt_lens,
             randomness_hex,
             wallet,
+            gpu_logprobs=True,
         )
 
     def shutdown(self) -> None:
