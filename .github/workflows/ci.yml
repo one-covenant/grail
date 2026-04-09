@@ -74,9 +74,13 @@ jobs:
         run: uv sync --extra dev
 
       - name: Run tests (parallel)
-        run: uv run pytest tests/ -n auto --dist loadfile -m "not serial" -v --tb=short
+        # Marker filter must repeat the addopts default exclusions because a
+        # command-line -m REPLACES the addopts -m (pytest does not compose them).
+        # Excluded: serial (run separately below), gpu_real_data / benchmark
+        # (need a real GPU), long (10-15 min, opt-in), integration (slow).
+        run: uv run pytest tests/ -n auto --dist loadfile -m "not serial and not gpu_real_data and not benchmark and not long and not integration" -v --tb=short
 
       - name: Run serial tests
-        run: uv run pytest tests/ -m "serial" -v --tb=short
+        run: uv run pytest tests/ -m "serial and not gpu_real_data and not benchmark and not long and not integration" -v --tb=short
         env:
           PYTHONPATH: ${{ github.workspace }}
