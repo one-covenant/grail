@@ -18,7 +18,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..infrastructure.chain import GrailChainManager
 from ..logging_utils import miner_log_context
-from .copycat_service import CopycatService
+from .copycat_service import CopycatService, MinerCopycatSubmission
 from .miner_validator import (
     FAILURE_FLAG_KEY,
     MinerValidator,
@@ -87,6 +87,7 @@ class WindowProcessor:
         env_config: WindowEnvConfig,
         heartbeat_callback: Any = None,
         deadline_ts: float | None = None,
+        uploads_by_hotkey: dict[str, float | None] | None = None,
     ) -> WindowResults:
         """Process a complete validation window.
 
@@ -110,6 +111,12 @@ class WindowProcessor:
                 the service aborts the window and never reaches this method.
             heartbeat_callback: Optional watchdog heartbeat callback
             deadline_ts: Upload deadline timestamp (unix seconds)
+            uploads_by_hotkey: Per-hotkey S3 LastModified timestamps from
+                ``MinerSampler.discover_active_miners``. Used by
+                ``CopycatService.detect_cheaters`` for directional
+                attribution: the later uploader of a violating pair is the
+                copier; the earlier uploader is the victim and is not gated.
+                When omitted, the copycat detector abstains from gating.
 
         Returns:
             WindowResults with all aggregated metrics and rollouts
@@ -123,7 +130,14 @@ class WindowProcessor:
 
         # Initialize aggregation structures
         window_metrics: dict[str, dict[str, int]] = {}
-        miner_rollout_counters: dict[str, tuple[Counter[str], int]] = {}
+        # Raw per-miner copycat inputs collected during the validation loop.
+        # Upload-time (from S3 LastModified, forwarded from the sampler) is
+        # joined in at the end to produce MinerCopycatSubmission objects
+        # handed to the copycat detector. Keeping this as an intermediate
+        # dict (rather than constructing submissions piecemeal) keeps the
+        # per-miner error path at line ~248 focused on metrics and avoids
+        # exposing upload-time to the validator loop.
+        miner_digest_counters: dict[str, tuple[Counter[str], int]] = {}
         text_logs_emitted: dict[str, int] = {}
 
         # Aggregated counters
@@ -199,7 +213,7 @@ class WindowProcessor:
                 # No longer aggregate rollouts for upload
 
                 if result.digest_counter is not None:
-                    miner_rollout_counters[miner_hotkey] = (
+                    miner_digest_counters[miner_hotkey] = (
                         result.digest_counter,
                         result.total_inferences_in_file,
                     )
@@ -263,6 +277,22 @@ class WindowProcessor:
             metrics.get("estimated_valid", 0) for metrics in window_metrics.values()
         )
 
+        # Build per-miner submission objects for copycat detection. This is
+        # the single place where the per-miner digest counters meet the
+        # per-miner upload timestamps propagated from the sampler: building
+        # MinerCopycatSubmission here is what lets ``detect_cheaters``
+        # receive everything it needs in one argument, rather than
+        # threading ``uploads_by_hotkey`` through every downstream method.
+        upload_times = uploads_by_hotkey or {}
+        submissions: dict[str, MinerCopycatSubmission] = {
+            hotkey: MinerCopycatSubmission(
+                digest_counter=counter,
+                total_rollouts=total,
+                upload_time=upload_times.get(hotkey),
+            )
+            for hotkey, (counter, total) in miner_digest_counters.items()
+        }
+
         # Copycat detection and gating
         (
             window_cheaters,
@@ -270,7 +300,7 @@ class WindowProcessor:
             violations,
         ) = await self._copycat_service.detect_cheaters(
             window=window,
-            miner_rollout_counters=miner_rollout_counters,
+            submissions=submissions,
             uid_by_hotkey=uid_by_hotkey,
             monitor=monitor,
         )

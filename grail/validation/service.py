@@ -590,7 +590,7 @@ class ValidationService:
         with timer_ctx:
             if self._miner_sampler is None:
                 raise RuntimeError("MinerSampler not initialized")
-            active_hotkeys = await self._miner_sampler.discover_active_miners(
+            active_hotkeys, active_upload_times = await self._miner_sampler.discover_active_miners(
                 meta_hotkeys=list(meta.hotkeys),
                 window=target_window,
                 chain_manager=self._chain_manager,
@@ -616,20 +616,30 @@ class ValidationService:
 
         # Determine subset to validate
         if test_mode:
-            # Test mode: validate only TRAINER_UID
-            if TRAINER_UID < len(meta.hotkeys):
-                trainer_hotkey = meta.hotkeys[TRAINER_UID]
-                hotkeys_to_check = [trainer_hotkey]
+            # Test mode: validate only the validator's OWN wallet (i.e. the
+            # miner this validator is co-located with). Useful for verifying
+            # a freshly-built miner's rollouts in isolation: the validator
+            # still loads checkpoints from TRAINER_UID's bucket but it
+            # ignores all other miners on the network and only fetches the
+            # parquet files we just uploaded ourselves.
+            own_hotkey = self._wallet.hotkey.ss58_address
+            if own_hotkey in meta.hotkeys:
+                own_uid = meta.hotkeys.index(own_hotkey)
+                hotkeys_to_check = [own_hotkey]
                 logger.info(
-                    "Test mode: Validating TRAINER_UID %d with hotkey %s",
+                    "Test mode: validating own wallet UID %d (hotkey %s); "
+                    "trainer checkpoints still loaded from UID %d",
+                    own_uid,
+                    own_hotkey[:12],
                     TRAINER_UID,
-                    trainer_hotkey[:12],
                 )
             else:
                 logger.warning(
-                    "Test mode: TRAINER_UID %d not found in metagraph (size: %d)",
-                    TRAINER_UID,
+                    "Test mode: own hotkey %s not found in metagraph (size: %d); "
+                    "validator wallet is not registered on subnet %d",
+                    own_hotkey[:12],
                     len(meta.hotkeys),
+                    self._netuid if hasattr(self, "_netuid") else -1,
                 )
                 hotkeys_to_check = []
         elif MINER_SAMPLING_ENABLED:
@@ -689,6 +699,7 @@ class ValidationService:
                 env_config=env_config,
                 heartbeat_callback=heartbeat_callback,
                 deadline_ts=deadline_ts,
+                uploads_by_hotkey=active_upload_times,
             )
 
         # Update inference counts for weight computation

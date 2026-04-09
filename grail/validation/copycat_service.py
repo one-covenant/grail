@@ -51,9 +51,63 @@ COPYCAT_WINDOW_THRESHOLD = 0.05
 COPYCAT_INTERVAL_THRESHOLD = 0.03
 
 
+# Upload-time map propagated from ``MinerSampler.discover_active_miners``.
+# Values are S3 ``LastModified`` unix timestamps; ``None`` means the
+# timestamp could not be retrieved for that hotkey. Miner-supplied row
+# timestamps are NEVER stored here because they are forgeable.
+UploadTimesByHotkey = dict[str, float | None]
+
+
+@dataclass(frozen=True)
+class MinerCopycatSubmission:
+    """All per-miner state that copycat detection needs for one window.
+
+    Packaging this into a value object (rather than threading parallel
+    ``digest_counter``, ``total_rollouts``, ``upload_time`` parameters
+    through every layer from ``MinerSampler`` to ``CopycatTracker``) gives
+    us two concrete wins:
+
+    1. The public ``detect_cheaters`` API takes one argument per miner
+       instead of three, and a new copycat signal added in a later tier
+       (e.g. a ``prompt_digest_counter`` for Tier 1's cross-hotkey prompt
+       collision check) becomes a new field on this dataclass rather than
+       yet another parallel parameter plumbed through four modules.
+    2. Callers are forced to assemble all of a miner's state in one place
+       (currently :meth:`WindowProcessor.process_window`), which means
+       there is exactly one point where ``upload_time`` can be forgotten,
+       rather than four independent opportunities to drop it on the floor
+       and silently reintroduce the victim-punishment bug.
+
+    Fields:
+        digest_counter: Counter of completion-token digests as produced by
+            :func:`grail.shared.digest.compute_completion_digest`.
+        total_rollouts: Number of rollouts in the miner's submitted parquet.
+            Used as the denominator for the overlap ratio.
+        upload_time: Unix timestamp from the S3 ``LastModified`` header of
+            the parquet object, propagated from
+            ``file_exists_with_deadline``. ``None`` means the timestamp was
+            not retrievable; in that case, directional attribution for any
+            pair involving this miner abstains rather than gating the
+            wrong side. NEVER populate this from miner-supplied row data.
+    """
+
+    digest_counter: Counter[str]
+    total_rollouts: int
+    upload_time: float | None = None
+
+
 @dataclass(frozen=True)
 class CopycatViolation:
-    """Details about a detected copycat relationship between two miners."""
+    """Details about a detected copycat relationship between two miners.
+
+    When directional attribution succeeds (both miners have an S3 LastModified
+    timestamp and the timestamps differ), ``copier`` is the hotkey that
+    uploaded later and ``victim`` is the other one. Only the copier is added
+    to the cheater set for gating; the victim is left intact. When direction
+    cannot be resolved (either upload time is missing, or they are equal
+    within resolution), ``copier`` and ``victim`` are both ``None`` and the
+    pair is logged but not gated.
+    """
 
     miner_a: str
     miner_b: str
@@ -63,6 +117,80 @@ class CopycatViolation:
     threshold: float
     scope: Literal["window", "interval"]
     window_start: int
+    copier: str | None = None
+    victim: str | None = None
+
+
+@dataclass(frozen=True)
+class _PairAttribution:
+    """Result of directional attribution for a violating miner pair.
+
+    This is an internal value object; its sole purpose is to decouple the
+    "who uploaded later" decision from the "gate the copier and build a
+    violation record" logic inside :meth:`CopycatTracker._find_cheaters`.
+    Making it a named, frozen dataclass (rather than a bare tuple or inline
+    ``None`` checks) means the two downstream consumers — gating and logging
+    — read the same property rather than repeating the None-checks.
+    """
+
+    copier: str | None
+    victim: str | None
+
+    @property
+    def is_resolved(self) -> bool:
+        """True when both parties are known and distinct."""
+        return self.copier is not None and self.victim is not None
+
+    @classmethod
+    def unresolved(cls) -> _PairAttribution:
+        """Sentinel for a pair whose direction cannot be determined.
+
+        Callers MUST treat this as "log but do not gate". Returning this
+        value is how we guarantee the pre-Tier-0 victim-punishment bug
+        cannot regress: an unresolved attribution carries no hotkey to add
+        to the cheater set.
+        """
+        return cls(copier=None, victim=None)
+
+    @classmethod
+    def resolved(cls, copier: str, victim: str) -> _PairAttribution:
+        """Direction has been determined: ``copier`` uploaded after ``victim``."""
+        return cls(copier=copier, victim=victim)
+
+
+def _attribute_pair_direction(
+    miner_a: str,
+    miner_b: str,
+    uploads: UploadTimesByHotkey,
+) -> _PairAttribution:
+    """Decide which side of a violating pair is the copier.
+
+    Uses only object-store ``LastModified`` timestamps propagated from
+    ``file_exists_with_deadline`` (``grail/infrastructure/comms.py:988``).
+    Never uses miner-supplied row timestamps — those are forgeable and would
+    reintroduce the bug this module is designed to prevent.
+
+    Abstains (returns :meth:`_PairAttribution.unresolved`) when:
+
+    - either miner's upload time is unknown, or
+    - the two upload times are equal within resolution.
+
+    We prefer a missed detection over punishing a victim, so abstention is
+    the safe default whenever the signal is ambiguous.
+
+    This function is intentionally module-level and stateless so it is
+    trivially testable and so future detectors (e.g. a multi-signal variant
+    in Tier 1) can reuse it without instantiating the tracker.
+    """
+    t_a = uploads.get(miner_a)
+    t_b = uploads.get(miner_b)
+    if t_a is None or t_b is None:
+        return _PairAttribution.unresolved()
+    if t_a == t_b:
+        return _PairAttribution.unresolved()
+    if t_a > t_b:
+        return _PairAttribution.resolved(copier=miner_a, victim=miner_b)
+    return _PairAttribution.resolved(copier=miner_b, victim=miner_a)
 
 
 class CopycatTracker:
@@ -94,7 +222,7 @@ class CopycatTracker:
     def ingest_window(
         self,
         window_start: int,
-        miner_rollouts: dict[str, tuple[Counter[str], int]],
+        submissions: dict[str, MinerCopycatSubmission],
     ) -> tuple[
         set[str],
         list[CopycatViolation],
@@ -103,27 +231,37 @@ class CopycatTracker:
         list[CopycatViolation],
         list[CopycatViolation],
     ]:
-        """Ingest a window of rollouts and compute copycat cheaters.
+        """Ingest a window of submissions and compute copycat cheaters.
 
         Args:
             window_start: Window start block number (used in violation details).
-            miner_rollouts: Map of miner hotkey -> (digest_counter, total_rollouts_in_window).
+            submissions: Per-hotkey :class:`MinerCopycatSubmission` records.
+                Each submission bundles the completion-digest counter, the
+                total rollout count, and the S3 ``LastModified`` timestamp
+                for that miner. Caller is
+                :meth:`WindowProcessor.process_window`, which assembles the
+                submissions from ``MinerResults`` plus the
+                ``discover_active_miners`` upload-time map.
 
         Returns:
             Tuple of:
-            - window_cheaters: Miners flagged at the window scope
-            - window_details: Per-pair violation details for window scope
-            - interval_cheaters: Miners flagged at the interval scope
-            - interval_details: Per-pair violation details for interval scope
-            - window_all_pairs: All observed miner pairs this window
-            - interval_all_pairs: All observed miner pairs for the current interval
+            - window_cheaters: Copiers flagged at the window scope (victims not included).
+            - window_details: Per-pair violation details for window scope.
+            - interval_cheaters: Copiers flagged at the interval scope.
+            - interval_details: Per-pair violation details for interval scope.
+            - window_all_pairs: All observed miner pairs this window.
+            - interval_all_pairs: All observed miner pairs for the current interval.
         """
         window_pair_overlap: defaultdict[frozenset[str], int] = defaultdict(int)
-        window_totals = {miner: total for miner, (_, total) in miner_rollouts.items()}
+        window_totals = {miner: s.total_rollouts for miner, s in submissions.items()}
+        # Extract the upload-time view once so _find_cheaters does not need
+        # to know about MinerCopycatSubmission internals; keeps the
+        # attribution helper decoupled from the submission schema.
+        uploads: UploadTimesByHotkey = {miner: s.upload_time for miner, s in submissions.items()}
 
         digest_map: defaultdict[str, list[tuple[str, int]]] = defaultdict(list)
-        for miner, (counter, _) in miner_rollouts.items():
-            for digest, count in counter.items():
+        for miner, submission in submissions.items():
+            for digest, count in submission.digest_counter.items():
                 digest_map[digest].append((miner, count))
 
         for miners in digest_map.values():
@@ -137,8 +275,8 @@ class CopycatTracker:
                 window_pair_overlap[pair_key] += overlap
                 self.interval_pair_overlap[pair_key] += overlap
 
-        for miner, (_, total_rollouts) in miner_rollouts.items():
-            self.interval_totals[miner] += total_rollouts
+        for miner, submission in submissions.items():
+            self.interval_totals[miner] += submission.total_rollouts
 
         window_cheaters, window_details = self._find_cheaters(
             pair_overlap=window_pair_overlap,
@@ -146,6 +284,7 @@ class CopycatTracker:
             threshold=COPYCAT_WINDOW_THRESHOLD,
             scope="window",
             window_start=window_start,
+            uploads=uploads,
         )
         interval_cheaters, interval_details = self._find_cheaters(
             pair_overlap=self.interval_pair_overlap,
@@ -153,6 +292,7 @@ class CopycatTracker:
             threshold=COPYCAT_INTERVAL_THRESHOLD,
             scope="interval",
             window_start=window_start,
+            uploads=uploads,
         )
 
         # Build complete pair lists (not only those exceeding threshold)
@@ -212,15 +352,29 @@ class CopycatTracker:
         threshold: float,
         scope: Literal["window", "interval"],
         window_start: int,
+        uploads: UploadTimesByHotkey,
     ) -> tuple[set[str], list[CopycatViolation]]:
-        """Return flagged miners and detailed violations for a given scope.
+        """Return flagged copiers and detailed violations for a given scope.
 
-        The ratio criterion is shared / min(total_a, total_b) >= threshold.
+        The ratio criterion is ``shared / min(total_a, total_b) >= threshold``.
+
+        Directional attribution:
+            When a pair exceeds the threshold, the later uploader (by S3
+            LastModified in ``uploads``) is identified as the copier and is
+            the *only* hotkey added to the cheater set. The earlier
+            uploader (the victim) is deliberately left intact. When
+            direction cannot be resolved (see :func:`_attribute_pair_direction`
+            for the abstain criteria), the violation is logged but NEITHER
+            side is gated. We prefer a missed detection over punishing a
+            victim.
 
         Returns:
             Tuple of:
-            - flagged: Miners appearing in at least one violating pair
-            - details: One record per violating pair capturing magnitude and scope
+            - flagged: Copiers appearing in at least one directionally
+              resolved violating pair. Victims are never included.
+            - details: One record per violating pair. When direction is
+              resolved, the record carries ``copier`` and ``victim``; when
+              unresolved, both are ``None``.
         """
         flagged: set[str] = set()
         details: list[CopycatViolation] = []
@@ -228,26 +382,54 @@ class CopycatTracker:
             if shared <= 0:
                 continue
             miner_a, miner_b = tuple(pair_key)
-            total_a = totals.get(miner_a, 0)
-            total_b = totals.get(miner_b, 0)
-            denominator = min(total_a, total_b)
+            denominator = min(totals.get(miner_a, 0), totals.get(miner_b, 0))
             if denominator <= 0:
                 continue
             ratio = shared / float(denominator)
-            if ratio >= threshold:
-                flagged.update((miner_a, miner_b))
-                details.append(
-                    CopycatViolation(
-                        miner_a=miner_a,
-                        miner_b=miner_b,
-                        shared=shared,
-                        denominator=denominator,
-                        ratio=ratio,
-                        threshold=threshold,
-                        scope=scope,
-                        window_start=window_start,
-                    )
+            if ratio < threshold:
+                continue
+
+            attribution = _attribute_pair_direction(miner_a, miner_b, uploads)
+            if not attribution.is_resolved:
+                # Log the violation but do not gate either side. This is
+                # the explicit fix for the pre-Tier-0 victim-punishment
+                # bug: we used to ``flagged.update((miner_a, miner_b))``
+                # here, which zeroed the victim's metrics alongside the
+                # attacker's. On the subnet 81 investigation this was
+                # actively penalising UID 53 and UID 7 (Oriea) while the
+                # real copycats (UIDs 20/229) stayed below the window
+                # threshold.
+                logger.warning(
+                    "Copycat threshold exceeded but upload-time direction "
+                    "unresolved; suppressing gating. miner_a=%s miner_b=%s "
+                    "shared=%d denom=%d ratio=%.3f threshold=%.2f scope=%s "
+                    "window=%d",
+                    miner_a,
+                    miner_b,
+                    shared,
+                    denominator,
+                    ratio,
+                    threshold,
+                    scope,
+                    window_start,
                 )
+            elif attribution.copier is not None:
+                flagged.add(attribution.copier)
+
+            details.append(
+                CopycatViolation(
+                    miner_a=miner_a,
+                    miner_b=miner_b,
+                    shared=shared,
+                    denominator=denominator,
+                    ratio=ratio,
+                    threshold=threshold,
+                    scope=scope,
+                    window_start=window_start,
+                    copier=attribution.copier,
+                    victim=attribution.victim,
+                )
+            )
         return flagged, details
 
 
@@ -287,25 +469,31 @@ class CopycatService:
     async def detect_cheaters(
         self,
         window: int,
-        miner_rollout_counters: dict[str, tuple[Counter[str], int]],
+        submissions: dict[str, MinerCopycatSubmission],
         uid_by_hotkey: dict[str, int],
         monitor: Any | None = None,
     ) -> tuple[set[str], set[str], list[CopycatViolation]]:
         """Detect copycat cheaters for a window.
 
         Args:
-            window: Window start block number
-            miner_rollout_counters: Map of hotkey -> (digest_counter, total_rollouts)
-            uid_by_hotkey: Mapping of hotkey to UID (for monitor namespacing)
-            monitor: Optional monitoring client
+            window: Window start block number.
+            submissions: Per-hotkey :class:`MinerCopycatSubmission` records
+                assembled by :meth:`WindowProcessor.process_window`. Each
+                record bundles the miner's digest counter, rollout total,
+                and S3 ``LastModified`` upload timestamp; there is no
+                parallel ``uploads_by_hotkey`` parameter because everything
+                the detector needs for one miner lives in one object.
+            uid_by_hotkey: Mapping of hotkey to UID (for monitor namespacing).
+            monitor: Optional monitoring client.
 
         Returns:
             Tuple of:
-            - window_cheaters: Miners exceeding window threshold
-            - interval_cheaters: Miners exceeding interval threshold
-            - all_violations: All violation details for logging
+            - window_cheaters: Copiers exceeding the window threshold
+              (victims excluded by directional attribution).
+            - interval_cheaters: Copiers exceeding the interval threshold.
+            - all_violations: All violation details for logging.
         """
-        if not miner_rollout_counters:
+        if not submissions:
             return set(), set(), []
 
         # Time the copycat detection if monitor available
@@ -321,7 +509,7 @@ class CopycatService:
                 interval_violation_details,
                 window_all_pairs,
                 interval_all_pairs,
-            ) = COPYCAT_TRACKER.ingest_window(window, miner_rollout_counters)
+            ) = COPYCAT_TRACKER.ingest_window(window, submissions)
 
         # Log detection metrics to monitor
         if monitor:
@@ -335,21 +523,40 @@ class CopycatService:
             except Exception:
                 pass
 
-        # Log all violations
+        # Log all violations. When direction is resolved (copier/victim set),
+        # surface them explicitly so operators can tell at a glance who was
+        # gated and who was the victim. When direction is unresolved, log as
+        # an unresolved pair — only the copier (if any) is gated by
+        # ``_find_cheaters``, so this is purely informational.
         all_violations = window_violation_details + interval_violation_details
         for violation in all_violations:
-            logger.warning(
-                "Copycat overlap detected: miners %s & %s shared=%d denom=%d ratio=%.3f "
-                "threshold=%.2f scope=%s window=%d",
-                violation.miner_a,
-                violation.miner_b,
-                violation.shared,
-                violation.denominator,
-                violation.ratio,
-                violation.threshold,
-                violation.scope,
-                violation.window_start,
-            )
+            if violation.copier is not None and violation.victim is not None:
+                logger.warning(
+                    "Copycat gated: copier=%s victim=%s shared=%d denom=%d "
+                    "ratio=%.3f threshold=%.2f scope=%s window=%d",
+                    violation.copier,
+                    violation.victim,
+                    violation.shared,
+                    violation.denominator,
+                    violation.ratio,
+                    violation.threshold,
+                    violation.scope,
+                    violation.window_start,
+                )
+            else:
+                logger.warning(
+                    "Copycat overlap (direction unresolved, no gating): "
+                    "miners %s & %s shared=%d denom=%d ratio=%.3f "
+                    "threshold=%.2f scope=%s window=%d",
+                    violation.miner_a,
+                    violation.miner_b,
+                    violation.shared,
+                    violation.denominator,
+                    violation.ratio,
+                    violation.threshold,
+                    violation.scope,
+                    violation.window_start,
+                )
 
         # Log per-miner proximity metrics to monitor
         if monitor:
