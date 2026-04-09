@@ -128,14 +128,14 @@ def test_generation_params_validation():
     ):
         params = get_default_generation_params()
         # Should fall back to defaults
-        assert params["max_tokens"] == 8192  # Default from parse_int_param
+        assert params["max_tokens"] == 2048  # Default from parse_int_param
         assert params["temperature"] == 0.7  # Default from parse_float_param
         assert params["top_p"] == 0.9  # Default from parse_float_param
 
     # Invalid types should fallback gracefully
     with patch.dict("os.environ", {"GRAIL_GEN_MAX_TOKENS": "not_a_number"}):
         params = get_default_generation_params()
-        assert params["max_tokens"] == 8192  # Falls back to default
+        assert params["max_tokens"] == 2048  # Falls back to default
 
 
 def test_environment_factory_respects_runtime_params():

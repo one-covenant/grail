@@ -211,6 +211,34 @@ def _parse_float_param(
         return float(default)
 
 
+def get_default_thinking_mode() -> str:
+    """Get the trainer-side thinking mode.
+
+    Reads ``GRAIL_THINKING_MODE`` once on the trainer host and validates it.
+    The trainer is the single source of truth: it bakes the value into every
+    published checkpoint's metadata so the miner and validator can read it
+    from there instead of their own (potentially diverging) env var.
+
+    Allowed values:
+        - "instructed" (DEFAULT): custom ``<start_working_out>``/``</end_working_out>``
+          for thinking and ``<SOLUTION>``/``</SOLUTION>`` for the final answer,
+          injected via a system prompt + a custom ChatML template. This is the
+          mode grail builds entirely itself, so it's portable across base
+          models that don't ship a thinking-aware chat template.
+        - "native": model's built-in thinking tokens (e.g. Qwen3 ``<think>``)
+          via the model's own chat template; ``<SOLUTION>`` for the answer.
+
+    Invalid values raise ``ValueError`` so the trainer fails loudly at
+    startup instead of silently publishing an unverifiable mode.
+    """
+    raw = os.getenv("GRAIL_THINKING_MODE", "instructed").strip().lower()
+    if raw not in ("native", "instructed"):
+        raise ValueError(
+            f"GRAIL_THINKING_MODE='{raw}' is invalid; must be 'native' or 'instructed'"
+        )
+    return raw
+
+
 def get_default_generation_params() -> dict[str, Any]:
     """Get default generation parameters from environment variables.
 
@@ -220,8 +248,21 @@ def get_default_generation_params() -> dict[str, Any]:
     Returns:
         Dictionary of validated generation parameters
     """
+    # max_tokens default is 2048: matches the production policy on
+    # basilica-grail-tester and avoids the historical 8192-vs-trainer
+    # mismatch that caused validator hard-rejects. The protocol cap
+    # (MAX_NEW_TOKENS_PROTOCOL_CAP=8192 in grail/protocol/constants.py)
+    # still acts as the immutable upper bound; this is just the default
+    # the trainer publishes per checkpoint when GRAIL_GEN_MAX_TOKENS is
+    # unset.
+    #
+    # Each range here MUST match the validation in
+    # grail/environments/backends/base.py::GenerationParams.from_checkpoint_metadata
+    # exactly. If they drift, the trainer will publish a value the miner
+    # rejects with ProtocolViolationError, and the miner skips the
+    # affected window. Keep them in sync.
     return {
-        "max_tokens": _parse_int_param("GRAIL_GEN_MAX_TOKENS", "8192", min_val=1, max_val=16384),
+        "max_tokens": _parse_int_param("GRAIL_GEN_MAX_TOKENS", "2048", min_val=1, max_val=16384),
         "temperature": _parse_float_param(
             "GRAIL_GEN_TEMPERATURE", "0.7", min_val=0.01, max_val=2.0
         ),
@@ -759,6 +800,7 @@ class CheckpointPublisher:
             # Get environment and generation configuration
             env_id, env_params = get_default_env_config()
             generation_params = get_default_generation_params()
+            thinking_mode = get_default_thinking_mode()
 
             metadata = CheckpointMetadata(
                 window=target_window,
@@ -773,6 +815,7 @@ class CheckpointPublisher:
                 env_id=env_id,
                 env_params=env_params,
                 generation_params=generation_params,
+                thinking_mode=thinking_mode,
             )
 
             metadata_dict = {**metadata.__dict__, "config_hash": config_hash}
@@ -958,6 +1001,7 @@ class CheckpointPublisher:
             # Get environment and generation configuration
             env_id, env_params = get_default_env_config()
             generation_params = get_default_generation_params()
+            thinking_mode = get_default_thinking_mode()
 
             metadata = CheckpointMetadata(
                 window=target_window,
@@ -972,6 +1016,7 @@ class CheckpointPublisher:
                 env_id=env_id,
                 env_params=env_params,
                 generation_params=generation_params,
+                thinking_mode=thinking_mode,
             )
 
             config_hash = hashlib.sha256(
@@ -1241,6 +1286,7 @@ class CheckpointPublisher:
             # Get environment and generation configuration
             env_id, env_params = get_default_env_config()
             generation_params = get_default_generation_params()
+            thinking_mode = get_default_thinking_mode()
 
             metadata = CheckpointMetadata(
                 window=target_window,
@@ -1257,6 +1303,7 @@ class CheckpointPublisher:
                 env_id=env_id,
                 env_params=env_params,
                 generation_params=generation_params,
+                thinking_mode=thinking_mode,
             )
 
             config_hash = hashlib.sha256(
@@ -1468,6 +1515,7 @@ class CheckpointPublisher:
             # Get environment and generation configuration
             env_id, env_params = get_default_env_config()
             generation_params = get_default_generation_params()
+            thinking_mode = get_default_thinking_mode()
 
             metadata = CheckpointMetadata(
                 window=target_window,
@@ -1482,6 +1530,7 @@ class CheckpointPublisher:
                 env_id=env_id,
                 env_params=env_params,
                 generation_params=generation_params,
+                thinking_mode=thinking_mode,
             )
 
             config_hash = hashlib.sha256(
