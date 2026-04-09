@@ -56,7 +56,7 @@ from ..shared.window_utils import (
 
 # Imports retained only where used
 from .copycat_service import COPYCAT_SERVICE
-from .miner_validator import MinerValidator
+from .miner_validator import MinerValidator, MissingCheckpointMetadataError
 from .pipeline import ValidationPipeline
 from .sampling import MinerSampler
 from .window_processor import WindowProcessor
@@ -516,6 +516,40 @@ class ValidationService:
             test_mode: Test mode flag
             heartbeat_callback: Optional heartbeat callback
         """
+        # Resolve the trainer-published per-window protocol config BEFORE any
+        # rolling-history mutation. If the trainer has not published the
+        # required metadata (env_id, env_params, generation_params,
+        # thinking_mode), the validator MUST abort this window without
+        # touching availability_counts/selection_counts/inference_counts so
+        # that downstream weight + sampling state remains untouched. Falling
+        # through with defaults — or even returning empty WindowResults
+        # AFTER advancing the rolling history — would silently distort
+        # weights and sampling.
+        if self._window_processor is None:
+            raise RuntimeError("WindowProcessor not initialized")
+        if self._model is None:
+            raise RuntimeError("Model must be loaded")
+        try:
+            env_config = await self._window_processor.resolve_window_env_config(
+                self._model
+            )
+        except MissingCheckpointMetadataError as exc:
+            logger.error(
+                "Window %s: cannot resolve trainer-published env config: %s. "
+                "Aborting window before any rolling-history update — no miner "
+                "will be scored, no rolling counters will advance.",
+                target_window,
+                exc,
+            )
+            if self._monitor:
+                try:
+                    await self._monitor.log_counter(
+                        "validation/window_skipped_missing_metadata"
+                    )
+                except Exception:
+                    pass
+            return
+
         # Get window block hash and randomness
         if self._subtensor is None:
             raise RuntimeError("Subtensor not initialized")
@@ -656,6 +690,7 @@ class ValidationService:
                 monitor=self._monitor,
                 uid_by_hotkey=uid_by_hotkey,
                 subtensor=self._subtensor,
+                env_config=env_config,
                 heartbeat_callback=heartbeat_callback,
                 deadline_ts=deadline_ts,
             )
