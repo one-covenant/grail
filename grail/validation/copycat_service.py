@@ -27,6 +27,7 @@ from __future__ import annotations
 import contextlib
 import logging
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from itertools import combinations
 from typing import Any, Literal
@@ -161,7 +162,7 @@ class _PairAttribution:
 def _attribute_pair_direction(
     miner_a: str,
     miner_b: str,
-    uploads: UploadTimesByHotkey,
+    uploads: Mapping[str, float | None],
 ) -> _PairAttribution:
     """Decide which side of a violating pair is the copier.
 
@@ -206,6 +207,17 @@ class CopycatTracker:
         self.current_interval_id: int | None = None
         self.interval_pair_overlap: defaultdict[frozenset[str], int] = defaultdict(int)
         self.interval_totals: defaultdict[str, int] = defaultdict(int)
+        # Per-miner upload timestamp (S3 LastModified) archived across the
+        # current interval. Only real (non-None) timestamps are ever
+        # written. We type the value as ``float | None`` to match
+        # :data:`UploadTimesByHotkey` exactly so the map can be passed
+        # straight into ``_find_cheaters`` without a second copy or a
+        # covariant Mapping wrapper. Used for interval-scope directional
+        # attribution so a pair whose overlap accumulated across multiple
+        # windows can still be attributed when one miner is absent from
+        # the current window. See the regression test
+        # ``test_interval_attribution_survives_victim_going_offline``.
+        self.interval_upload_times: UploadTimesByHotkey = {}
 
     def reset_interval(self, interval_id: int) -> None:
         """Reset interval statistics when a new submission interval starts.
@@ -218,6 +230,7 @@ class CopycatTracker:
         self.current_interval_id = interval_id
         self.interval_pair_overlap.clear()
         self.interval_totals.clear()
+        self.interval_upload_times.clear()
 
     def ingest_window(
         self,
@@ -277,6 +290,15 @@ class CopycatTracker:
 
         for miner, submission in submissions.items():
             self.interval_totals[miner] += submission.total_rollouts
+            # Archive the most recent upload time for each miner seen in
+            # this interval. Interval-scope attribution must reference this
+            # map, not the current window's uploads, because
+            # interval_pair_overlap accumulates across windows and one of
+            # the pair may be absent from the current window. Without this
+            # archive, absent victims would cause _attribute_pair_direction
+            # to abstain and the accumulated cheat would escape gating.
+            if submission.upload_time is not None:
+                self.interval_upload_times[miner] = submission.upload_time
 
         window_cheaters, window_details = self._find_cheaters(
             pair_overlap=window_pair_overlap,
@@ -292,7 +314,7 @@ class CopycatTracker:
             threshold=COPYCAT_INTERVAL_THRESHOLD,
             scope="interval",
             window_start=window_start,
-            uploads=uploads,
+            uploads=self.interval_upload_times,
         )
 
         # Build complete pair lists (not only those exceeding threshold)
@@ -352,7 +374,7 @@ class CopycatTracker:
         threshold: float,
         scope: Literal["window", "interval"],
         window_start: int,
-        uploads: UploadTimesByHotkey,
+        uploads: Mapping[str, float | None],
     ) -> tuple[set[str], list[CopycatViolation]]:
         """Return flagged copiers and detailed violations for a given scope.
 

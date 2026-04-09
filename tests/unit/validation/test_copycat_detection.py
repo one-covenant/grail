@@ -513,3 +513,83 @@ class TestDirectionalGating:
 
         assert i_cheat == {"copier"}, "victim must not accumulate as a cheater"
         assert all(v.copier == "copier" and v.victim == "victim" for v in i_det)
+
+    def test_interval_attribution_survives_victim_going_offline(
+        self,
+        tracker: CopycatTracker,
+    ) -> None:
+        """Regression: interval-scope attribution must still work when the
+        victim is absent from the current window.
+
+        Reproduces the blocker found independently by two reviewers against
+        an earlier draft of this change. Before the fix,
+        ``CopycatTracker._find_cheaters`` at interval scope used only the
+        current window's ``uploads`` map. When the victim went offline
+        mid-interval, ``_attribute_pair_direction`` returned
+        :meth:`_PairAttribution.unresolved` because ``uploads[victim]`` was
+        missing, and the accumulated cheat escaped gating entirely.
+
+        The fix archives per-miner upload times on the tracker as
+        ``interval_upload_times``, updated on each ingested window and
+        cleared on ``reset_interval``. This test locks in the expected
+        post-fix behaviour: a victim who stops submitting must still be
+        recognised as the earlier uploader, and the copier must still be
+        flagged at interval scope.
+        """
+        tracker.reset_interval(0)
+
+        # Windows 1-5: both submit, accumulate interval overlap.
+        # Per-window ratio 4/100 = 0.04 (just under window threshold 0.05)
+        # but interval after 5 windows is 20/500 = 0.04 > interval threshold 0.03.
+        both = {
+            "victim": _sub(Counter({"shared": 4, "u_a": 96}), 100, upload_time=100.0),
+            "copier": _sub(Counter({"shared": 4, "u_b": 96}), 100, upload_time=200.0),
+        }
+        for i in range(5):
+            tracker.ingest_window(100 * i, both)
+
+        # Window 6: victim goes offline, only copier submits. The
+        # submissions map has no entry for the victim, so the current-window
+        # uploads view also has no entry for them. The pre-fix code would
+        # abstain here; the fix must remember the victim's upload time
+        # from windows 1-5.
+        copier_only = {
+            "copier": _sub(Counter({"u_b_new": 100}), 100, upload_time=600.0),
+        }
+        _, _, i_cheat, i_det, _, _ = tracker.ingest_window(600, copier_only)
+
+        assert i_cheat == {"copier"}, (
+            "interval-scope attribution must still fire on the absent victim's "
+            "accumulated overlap — this is the regression guard for the "
+            "reviewers' blocker finding"
+        )
+        assert "victim" not in i_cheat, "victim is offline but must not be gated"
+        victim_copier_pairs = [v for v in i_det if {"victim", "copier"} == {v.miner_a, v.miner_b}]
+        assert victim_copier_pairs, "violation record should still exist"
+        assert victim_copier_pairs[0].copier == "copier"
+        assert victim_copier_pairs[0].victim == "victim"
+
+    def test_reset_interval_clears_archived_upload_times(
+        self,
+        tracker: CopycatTracker,
+    ) -> None:
+        """`reset_interval` must clear interval_upload_times along with
+        interval_pair_overlap and interval_totals. Otherwise a stale
+        upload_time from a previous interval could leak into attribution.
+        """
+        tracker.reset_interval(0)
+        submissions = {
+            "miner_a": _sub(Counter({"x": 10}), 10, upload_time=100.0),
+            "miner_b": _sub(Counter({"y": 10}), 10, upload_time=200.0),
+        }
+        tracker.ingest_window(0, submissions)
+        assert tracker.interval_upload_times == {
+            "miner_a": 100.0,
+            "miner_b": 200.0,
+        }
+
+        tracker.reset_interval(1)
+        assert tracker.interval_upload_times == {}, (
+            "reset_interval must clear archived upload times to avoid "
+            "cross-interval timestamp leakage"
+        )
