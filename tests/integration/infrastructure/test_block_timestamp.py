@@ -4,7 +4,7 @@ Tests the GrailChainManager's ability to accurately retrieve and estimate
 block timestamps using the Substrate Timestamp pallet.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -95,8 +95,8 @@ async def test_get_block_timestamp_current_block(chain_manager: GrailChainManage
     )
 
     # Convert to datetime and verify it's recent
-    block_datetime = datetime.fromtimestamp(timestamp, tz=timezone.utc)
-    now = datetime.now(timezone.utc)
+    block_datetime = datetime.fromtimestamp(timestamp, tz=UTC)
+    now = datetime.now(UTC)
     age = now - block_datetime
 
     # Block should be from within the last hour (Bittensor blocks are ~12s)
@@ -178,11 +178,9 @@ async def test_estimate_block_timestamp_accuracy(chain_manager: GrailChainManage
     )
 
     print(f"✅ Block {test_block} estimation:")
+    print(f"   Actual:    {actual_timestamp} ({datetime.fromtimestamp(actual_timestamp, tz=UTC)})")
     print(
-        f"   Actual:    {actual_timestamp} ({datetime.fromtimestamp(actual_timestamp, tz=timezone.utc)})"
-    )
-    print(
-        f"   Estimated: {estimated_timestamp} ({datetime.fromtimestamp(estimated_timestamp, tz=timezone.utc)})"
+        f"   Estimated: {estimated_timestamp} ({datetime.fromtimestamp(estimated_timestamp, tz=UTC)})"
     )
     print(f"   Error:     {error_seconds:.2f}s ({error_percent:.3f}%)")
     print(f"✅ Future block {future_block} estimate: {future_estimate}")
@@ -204,8 +202,8 @@ async def test_block_timestamp_edge_cases(chain_manager: GrailChainManager) -> N
     old_timestamp = await chain_manager.get_block_timestamp(1)
     if old_timestamp is not None:
         # If we got it, verify it's plausible (should be years ago)
-        old_datetime = datetime.fromtimestamp(old_timestamp, tz=timezone.utc)
-        now = datetime.now(timezone.utc)
+        old_datetime = datetime.fromtimestamp(old_timestamp, tz=UTC)
+        now = datetime.now(UTC)
         age = now - old_datetime
         assert age > timedelta(days=30), "Genesis block should be at least months old"
         print(f"✅ Genesis block (1) timestamp: {old_datetime} UTC")
@@ -224,8 +222,8 @@ async def test_block_timestamp_edge_cases(chain_manager: GrailChainManager) -> N
     future_estimate = await chain_manager.estimate_block_timestamp(future_block)
     if future_estimate is not None:
         # If we got an estimate, it should be in the future
-        future_datetime = datetime.fromtimestamp(future_estimate, tz=timezone.utc)
-        now = datetime.now(timezone.utc)
+        future_datetime = datetime.fromtimestamp(future_estimate, tz=UTC)
+        now = datetime.now(UTC)
         assert future_datetime > now, "Estimated future timestamp should be in the future"
         print(f"✅ Far future block estimate: {future_datetime} UTC")
 

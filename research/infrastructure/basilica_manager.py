@@ -320,7 +320,7 @@ def wait_for_ssh(host: str, port: int, timeout: int = SSH_CONNECT_TIMEOUT) -> bo
         try:
             with socket.create_connection((host, port), timeout=5):
                 return True
-        except (socket.error, OSError):
+        except OSError:
             time.sleep(5)
     return False
 
@@ -390,7 +390,7 @@ class BasilicaInfra:
                     data = json.loads(backup.read_text())
                     for name, inst_data in data.get("instances", {}).items():
                         self._instances[name] = Instance.from_dict(inst_data)
-                    logger.info(f"Recovered state from backup")
+                    logger.info("Recovered state from backup")
                 except Exception as e2:
                     logger.error(f"Backup also corrupted: {e2}")
                     logger.warning("Starting with empty state - may have orphaned instances!")
@@ -504,7 +504,7 @@ class BasilicaInfra:
         if not instance:
             print(f"   ❌ Rental {rental_id[:8]}... failed to become ready")
             # Optionally terminate the failed rental
-            print(f"   🗑️  Terminating failed rental...")
+            print("   🗑️  Terminating failed rental...")
             BasilicaCli.stop_rental(rental_id)
 
         return instance
@@ -525,7 +525,7 @@ class BasilicaInfra:
             # Wait for SSH info (polls until provisioning complete)
             ssh_info = self._wait_for_ssh_info(rental_id)
             if not ssh_info:
-                print(f"   ❌ SSH info not available after provisioning")
+                print("   ❌ SSH info not available after provisioning")
                 return None
 
             host, port = ssh_info
@@ -533,12 +533,12 @@ class BasilicaInfra:
             # Wait for SSH connectivity (port open)
             print(f"   ⏳ Waiting for SSH port ({host}:{port})...")
             if not wait_for_ssh(host, port):
-                print(f"   ❌ SSH port connection timeout")
+                print("   ❌ SSH port connection timeout")
                 return None
 
             # Verify SSH login works (retry for up to 20 minutes - system boot can take time)
             # Basilica instances often show "System is booting up" even after port is open
-            print(f"   🔍 Verifying SSH login (may take 10-20 min for system boot)...")
+            print("   🔍 Verifying SSH login (may take 10-20 min for system boot)...")
             ssh_user = None
             max_ssh_verify_attempts = 80  # 80 * 15s = 20 minutes
             for attempt in range(max_ssh_verify_attempts):
@@ -589,7 +589,7 @@ class BasilicaInfra:
             # Check status - it's a string like "running", "provisioning", "failed"
             rental_status = status.get("status", "")
             if rental_status == "failed":
-                print(f"   ❌ Rental failed")
+                print("   ❌ Rental failed")
                 return None
 
             # Extract SSH info from ip_address field
@@ -693,10 +693,10 @@ class BasilicaInfra:
             # Verify existing instance
             print(f"🔍 Verifying: {config.name} ({instance.ssh.host}:{instance.ssh.port})")
             if verify_ssh(instance.ssh.host, instance.ssh.port, user=instance.ssh.user):
-                print(f"   ✅ Healthy")
+                print("   ✅ Healthy")
                 healthy[config.name] = instance
             else:
-                print(f"   ❌ Unhealthy - replacing...")
+                print("   ❌ Unhealthy - replacing...")
                 new_instance = self.provision(config, max_retries=max_retries)
                 if new_instance:
                     healthy[config.name] = new_instance

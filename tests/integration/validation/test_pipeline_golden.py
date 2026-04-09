@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 import torch
 
-from grail.shared.constants import CHALLENGE_K, CURRENT_ENV_ID
+from grail.protocol.constants import CHALLENGE_K, CURRENT_ENV_ID
 from grail.validation import create_env_validation_pipeline
 from grail.validation.context import ValidationContext
 

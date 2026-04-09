@@ -7,8 +7,8 @@ from collections import defaultdict
 
 import pytest
 
+from grail.protocol.constants import UNIQUE_ROLLOUTS_CAP
 from grail.scoring.weights import WeightComputer
-from grail.shared.constants import UNIQUE_ROLLOUTS_CAP
 
 # ---------------------------------------------------------------------------
 # Helpers

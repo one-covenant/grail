@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from grail.infrastructure.checkpoint_consumer import CheckpointMetadata
-from grail.shared.retention_utils import compute_retention_windows
+from grail.shared.retention_utils import compute_chain_windows, compute_retention_windows
 
 # ============================================================================
 # Tests for _compute_keep_windows
@@ -28,7 +28,14 @@ class TestValidateMetadata:
             "window": 100,
             "file_manifest": {},
             "env_id": "triton_kernel",
-            "generation_params": {"max_tokens": 8192, "temperature": 0.7},
+            "thinking_mode": "instructed",
+            "generation_params": {
+                "max_tokens": 8192,
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "top_k": 50,
+                "repetition_penalty": 1.0,
+            },
         }
         defaults.update(overrides)
         return CheckpointMetadata(**defaults)  # type: ignore[arg-type]
@@ -53,16 +60,107 @@ class TestValidateMetadata:
         assert "generation_params" in missing
 
     def test_missing_max_tokens(self) -> None:
-        meta = self._make_metadata(generation_params={"temperature": 0.7})
+        meta = self._make_metadata(
+            generation_params={
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "top_k": 50,
+                "repetition_penalty": 1.0,
+            }
+        )
         missing = meta.validate_metadata()
         assert "generation_params.max_tokens" in missing
+
+    def test_missing_temperature(self) -> None:
+        meta = self._make_metadata(
+            generation_params={
+                "max_tokens": 8192,
+                "top_p": 0.9,
+                "top_k": 50,
+                "repetition_penalty": 1.0,
+            }
+        )
+        missing = meta.validate_metadata()
+        assert "generation_params.temperature" in missing
+
+    def test_missing_top_p(self) -> None:
+        meta = self._make_metadata(
+            generation_params={
+                "max_tokens": 8192,
+                "temperature": 0.7,
+                "top_k": 50,
+                "repetition_penalty": 1.0,
+            }
+        )
+        missing = meta.validate_metadata()
+        assert "generation_params.top_p" in missing
+
+    def test_missing_top_k(self) -> None:
+        meta = self._make_metadata(
+            generation_params={
+                "max_tokens": 8192,
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "repetition_penalty": 1.0,
+            }
+        )
+        missing = meta.validate_metadata()
+        assert "generation_params.top_k" in missing
+
+    def test_missing_repetition_penalty(self) -> None:
+        meta = self._make_metadata(
+            generation_params={
+                "max_tokens": 8192,
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "top_k": 50,
+            }
+        )
+        missing = meta.validate_metadata()
+        assert "generation_params.repetition_penalty" in missing
+
+    def test_all_sampling_params_missing_when_only_max_tokens(self) -> None:
+        meta = self._make_metadata(generation_params={"max_tokens": 8192})
+        missing = meta.validate_metadata()
+        assert "generation_params.temperature" in missing
+        assert "generation_params.top_p" in missing
+        assert "generation_params.top_k" in missing
+        assert "generation_params.repetition_penalty" in missing
+        assert "generation_params.max_tokens" not in missing
 
     def test_multiple_missing_fields(self) -> None:
         meta = self._make_metadata(env_id=None, generation_params={})
         missing = meta.validate_metadata()
         assert "env_id" in missing
         assert "generation_params" in missing
+        assert "thinking_mode" not in missing  # still set in defaults
         assert len(missing) == 2
+
+    def test_missing_thinking_mode(self) -> None:
+        meta = self._make_metadata(thinking_mode=None)
+        missing = meta.validate_metadata()
+        assert "thinking_mode" in missing
+
+    def test_empty_thinking_mode(self) -> None:
+        meta = self._make_metadata(thinking_mode="")
+        missing = meta.validate_metadata()
+        assert "thinking_mode" in missing
+
+    def test_invalid_thinking_mode_value(self) -> None:
+        meta = self._make_metadata(thinking_mode="bogus")
+        missing = meta.validate_metadata()
+        # validate_metadata reports the bad value in the field name so
+        # operators see exactly what's wrong in the verdict log.
+        assert any("thinking_mode" in m for m in missing)
+        assert any("bogus" in m for m in missing)
+
+    def test_native_thinking_mode_is_valid(self) -> None:
+        meta = self._make_metadata(thinking_mode="native")
+        assert meta.validate_metadata() == []
+
+    def test_instructed_thinking_mode_is_valid(self) -> None:
+        meta = self._make_metadata(thinking_mode="instructed")
+        assert meta.validate_metadata() == []
 
 
 class TestComputeKeepWindows:
@@ -326,7 +424,7 @@ class TestCleanupOldCheckpoints:
 
         mock_list = AsyncMock(return_value=mock_keys)
         mock_delete = AsyncMock()
-        mock_fetch_anchor = AsyncMock(return_value=60)  # All deltas depend on anchor 60
+        mock_fetch_chain = AsyncMock(return_value=(60, None))  # All deltas: anchor=60
 
         with patch("grail.shared.retention_utils.DELTA_BASE_INTERVAL", 2):
             with patch("grail.shared.retention_utils.WINDOW_LENGTH", 30):
@@ -339,8 +437,8 @@ class TestCleanupOldCheckpoints:
                         mock_delete,
                     ):
                         with patch(
-                            "grail.trainer.checkpoint_publisher._fetch_delta_anchor_window",
-                            mock_fetch_anchor,
+                            "grail.trainer.checkpoint_publisher._fetch_delta_chain_info",
+                            mock_fetch_chain,
                         ):
                             from grail.trainer.checkpoint_publisher import CheckpointPublisher
 
@@ -365,7 +463,7 @@ class TestCleanupOldCheckpoints:
 
         mock_list = AsyncMock(return_value=mock_keys)
         mock_delete = AsyncMock()
-        mock_fetch_anchor = AsyncMock(return_value=7055500)
+        mock_fetch_chain = AsyncMock(return_value=(7055500, None))
 
         with patch("grail.shared.retention_utils.DELTA_BASE_INTERVAL", 10):
             with patch("grail.shared.retention_utils.WINDOW_LENGTH", 30):
@@ -378,8 +476,8 @@ class TestCleanupOldCheckpoints:
                         mock_delete,
                     ):
                         with patch(
-                            "grail.trainer.checkpoint_publisher._fetch_delta_anchor_window",
-                            mock_fetch_anchor,
+                            "grail.trainer.checkpoint_publisher._fetch_delta_chain_info",
+                            mock_fetch_chain,
                         ):
                             from grail.trainer.checkpoint_publisher import CheckpointPublisher
 
@@ -431,7 +529,7 @@ class TestCleanupOldCheckpoints:
 
         mock_list = AsyncMock(return_value=mock_keys)
         mock_delete = AsyncMock()
-        mock_fetch_anchor = AsyncMock(return_value=0)
+        mock_fetch_chain = AsyncMock(return_value=(0, None))
 
         with patch("grail.shared.retention_utils.DELTA_BASE_INTERVAL", 1):
             with patch("grail.shared.retention_utils.WINDOW_LENGTH", 30):
@@ -444,8 +542,8 @@ class TestCleanupOldCheckpoints:
                         mock_delete,
                     ):
                         with patch(
-                            "grail.trainer.checkpoint_publisher._fetch_delta_anchor_window",
-                            mock_fetch_anchor,
+                            "grail.trainer.checkpoint_publisher._fetch_delta_chain_info",
+                            mock_fetch_chain,
                         ):
                             from grail.trainer.checkpoint_publisher import CheckpointPublisher
 
@@ -477,7 +575,7 @@ class TestCleanupOldCheckpoints:
 
         mock_list = AsyncMock(return_value=mock_keys)
         mock_delete = AsyncMock()
-        mock_fetch_anchor = AsyncMock(return_value=400)
+        mock_fetch_chain = AsyncMock(return_value=(400, None))
 
         with patch("grail.shared.retention_utils.DELTA_BASE_INTERVAL", 1):
             with patch("grail.shared.retention_utils.WINDOW_LENGTH", 100):
@@ -491,8 +589,8 @@ class TestCleanupOldCheckpoints:
                             mock_delete,
                         ):
                             with patch(
-                                "grail.trainer.checkpoint_publisher._fetch_delta_anchor_window",
-                                mock_fetch_anchor,
+                                "grail.trainer.checkpoint_publisher._fetch_delta_chain_info",
+                                mock_fetch_chain,
                             ):
                                 from grail.trainer.checkpoint_publisher import CheckpointPublisher
 
@@ -505,3 +603,72 @@ class TestCleanupOldCheckpoints:
         # With WINDOW_LENGTH=100, bootstrap_windows=10 keeps 0, 100, 200, 300, 400, 500, 600, 700, 800, 900
         # So nothing is deleted
         assert mock_delete.call_count == 0
+
+
+# ============================================================================
+# Tests for compute_chain_windows (chain-aware retention)
+# ============================================================================
+
+
+class TestComputeChainWindows:
+    """Tests for the chain-walking retention utility."""
+
+    def test_single_chain(self) -> None:
+        """Walk a simple chain: anchor=0 -> 30 -> 60 -> 90."""
+        chain_map = {90: 60, 60: 30, 30: 0}
+        anchor_map = {90: 0}
+        result = compute_chain_windows({90}, chain_map, anchor_map)
+        assert result == {0, 30, 60}
+
+    def test_keeps_all_intermediates(self) -> None:
+        """Retained delta at tip should keep every link back to anchor."""
+        chain_map = {120: 90, 90: 60, 60: 30, 30: 0}
+        anchor_map = {120: 0}
+        result = compute_chain_windows({120}, chain_map, anchor_map)
+        assert 0 in result
+        assert 30 in result
+        assert 60 in result
+        assert 90 in result
+
+    def test_shared_chain_prefix(self) -> None:
+        """Two retained deltas sharing a chain prefix don't duplicate work."""
+        chain_map = {90: 60, 60: 30, 30: 0, 120: 90}
+        anchor_map = {90: 0, 120: 0}
+        result = compute_chain_windows({90, 120}, chain_map, anchor_map)
+        assert result == {0, 30, 60, 90}
+
+    def test_missing_anchor_skips_delta(self) -> None:
+        """Delta without anchor info is skipped (no crash)."""
+        chain_map = {90: 60}
+        anchor_map: dict[int, int] = {}
+        result = compute_chain_windows({90}, chain_map, anchor_map)
+        assert result == set()
+
+    def test_broken_chain_stops_gracefully(self) -> None:
+        """Chain with a missing link stops walking without error."""
+        chain_map = {90: 60}  # 60 -> ? is missing
+        anchor_map = {90: 0}
+        result = compute_chain_windows({90}, chain_map, anchor_map)
+        # Keeps anchor and the known link (60), stops there
+        assert 0 in result
+        assert 60 in result
+
+    def test_cycle_protection(self) -> None:
+        """Cycle in chain_map does not cause infinite loop."""
+        chain_map = {90: 60, 60: 90}  # cycle
+        anchor_map = {90: 0}
+        result = compute_chain_windows({90}, chain_map, anchor_map)
+        assert 0 in result
+        # Should terminate without hanging
+
+    def test_empty_inputs(self) -> None:
+        """No retained deltas returns empty set."""
+        result = compute_chain_windows(set(), {}, {})
+        assert result == set()
+
+    def test_delta_is_direct_successor_of_anchor(self) -> None:
+        """Delta whose prev_window is the anchor needs no intermediates."""
+        chain_map = {30: 0}
+        anchor_map = {30: 0}
+        result = compute_chain_windows({30}, chain_map, anchor_map)
+        assert result == {0}

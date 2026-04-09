@@ -8,20 +8,22 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
-from grail.shared import constants
+from grail.protocol import constants as protocol
+from grail.shared import config as constants
 
 
 @dataclass
 class TrainingConfig:
     """Hyperparameters and settings for training.
 
-    Values default from `grail.shared.constants` to avoid duplication.
+    Values default from `grail.shared.config` to avoid duplication.
     """
 
     # Basic training parameters
     lr: float = constants.TRAINER_LR
     epochs: int = constants.TRAINER_EPOCHS
     micro_batch_size: int = constants.TRAINER_MICRO_BATCH_SIZE
+    max_tokens_per_micro_batch: int = constants.TRAINER_MAX_TOKENS_PER_MICRO_BATCH
     max_length: int = constants.TRAINER_MAX_LENGTH
     grad_clip: float = constants.TRAINER_GRAD_CLIP
     warmup_steps: int = constants.TRAINER_WARMUP_STEPS
@@ -36,6 +38,7 @@ class TrainingConfig:
 
     # Gradient accumulation and clipping
     grad_accum_steps: int = constants.TRAINER_GRAD_ACCUM_STEPS
+    effective_batch_size: int = constants.TRAINER_EFFECTIVE_BATCH_SIZE
 
     # Advantage normalization and PPO clipping
     adv_clip_percentile: float = constants.TRAINER_ADV_CLIP_PERCENTILE
@@ -50,15 +53,24 @@ class TrainingConfig:
     # GRPO variant selection
     grpo_variant: str = constants.GRPO_VARIANT
 
+    # Advantage estimation strategy (orthogonal to grpo_variant)
+    adv_estimator: str = constants.ADV_ESTIMATOR
+
     # Gradient checkpointing for memory efficiency
     use_gradient_checkpointing: bool = constants.TRAINER_USE_GRADIENT_CHECKPOINTING
+
+    # Sequence packing (eliminates padding waste, requires FA2)
+    use_sequence_packing: bool = constants.TRAINER_USE_SEQUENCE_PACKING
+
+    # torch.compile for training (fuses ops, reduces kernel launch overhead)
+    use_torch_compile: bool = constants.TRAINER_USE_TORCH_COMPILE
 
     # Chunked logit computation (avoids materializing full vocab-sized tensors)
     chunked_logits: bool = constants.TRAINER_CHUNKED_LOGITS
     logit_chunk_size: int = constants.TRAINER_LOGIT_CHUNK_SIZE
 
     # Data loading
-    rollouts_per_problem: int = constants.ROLLOUTS_PER_PROBLEM
+    rollouts_per_problem: int = protocol.ROLLOUTS_PER_PROBLEM
 
     # Miner/data quality filters
     group_adv_sum_tolerance: float = constants.TRAINER_GROUP_ADV_SUM_TOL
@@ -97,7 +109,7 @@ class EvalConfig:
     Defaults chosen to be safe and reasonably fast for initial integration.
     """
 
-    enabled: bool = True
+    enabled: bool = os.getenv("GRAIL_EVAL_ENABLED", "1").lower() in ("1", "true", "yes")
     window_interval: int = 20
     env_id: str | None = None  # If None, uses CURRENT_ENV_ID from constants
     split: str = "val"  # dataset-backed envs (e.g., GSM8K, MBPP)
@@ -111,7 +123,7 @@ class EvalConfig:
     top_p: float = 0.95
     do_sample: bool = True
     # Backend control: "hf" | "vllm" | "sglang"
-    backend: str = "vllm"  # Server mode with async API avoids Gloo socket issues
+    backend: str = constants.INFERENCE_BACKEND
     # sgLang server options (used when backend == "sglang")
     server_host: str = "127.0.0.1"
     server_port: int = 30000
@@ -143,11 +155,14 @@ class EvalConfig:
         48  # 12288 max_model_len × 64 seqs = 786K KV tokens, fits in ~115GB KV cache at 0.95 util
     )
     vllm_max_concurrent_requests: int = 32  # 75% of max_num_seqs=64
-    # SGLang server memory and concurrency tuning
-    sglang_mem_fraction_static: float = 0.75  # Fraction of GPU memory for SGLang
-    sglang_context_length: int = 1024  # Maximum sequence length
-    sglang_max_running_requests: int = 4  # Server-side: max concurrent requests
-    sglang_max_concurrent_requests: int = 4  # Client-side: max parallel HTTP requests
+    # SGLang server memory and concurrency tuning (optimized for single A100)
+    sglang_python_executable: str = field(
+        default_factory=lambda: os.getenv("GRAIL_SGLANG_PYTHON", "")
+    )
+    sglang_mem_fraction_static: float = 0.90  # Fraction of GPU memory for SGLang
+    sglang_context_length: int = 12288  # Maximum sequence length
+    sglang_max_running_requests: int = 48  # Server-side: max concurrent requests
+    sglang_max_concurrent_requests: int = 32  # Client-side: max parallel HTTP requests
     use_num_return_sequences: bool = False  # HF-only optimization
     # Metrics aggregation: which k to report (subset of 1..replicates)
     report_ks: tuple[int, ...] = (1, 5, 10)

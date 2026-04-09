@@ -26,7 +26,7 @@ else:
     except ImportError:
         torch = None  # type: ignore
 
-from ..shared.constants import CHALLENGE_K, PRIME_Q, RNG_LABEL
+from .constants import CHALLENGE_K, PRIME_Q, RNG_LABEL
 
 logger = logging.getLogger(__name__)
 

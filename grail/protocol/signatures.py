@@ -139,7 +139,7 @@ def verify_commit_signature(commit: dict, wallet_address: str) -> bool:
         sig = bytes.fromhex(commit["signature"])
         proof_version = commit.get("proof_version")
 
-        if not proof_version or proof_version not in ("v1", "v2"):
+        if not proof_version or proof_version not in ("v4", "v5"):
             logger.debug(f"Invalid proof version: {proof_version}")
             return False
 

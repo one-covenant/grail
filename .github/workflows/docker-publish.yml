@@ -38,7 +38,7 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Set up Python
-        run: uv python install 3.11
+        run: uv python install 3.12
 
       - name: Install dependencies
         run: uv sync --extra dev
@@ -130,6 +130,17 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Publishes the VALIDATOR-ONLY base image (docker/Dockerfile). The
+      # miner image (docker/Dockerfile.miner) adds SGLang on top of this
+      # base and is intentionally NOT published from the standard GitHub
+      # Actions runner: SGLang's full dependency closure (~3 GB extra +
+      # transformers downgrade) blows the runner's ~14 GB free disk
+      # budget. Miners build the miner image locally on their GPU host
+      # via:
+      #     docker build -f docker/Dockerfile.miner \
+      #         --build-arg GRAIL_BASE_IMAGE=ghcr.io/<owner>/grail:latest \
+      #         -t grail:miner .
+      # See docs/miner.md for the full operator workflow.
       - name: Build and push Docker image
         id: push
         uses: docker/build-push-action@v6

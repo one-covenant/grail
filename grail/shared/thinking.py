@@ -90,9 +90,23 @@ NATIVE_CONFIG = ThinkingConfig(
 
 
 def get_thinking_config(mode: ThinkingMode | str | None = None) -> ThinkingConfig:
-    """Return config for given mode. Reads GRAIL_THINKING_MODE env var if None."""
+    """Return config for given mode.
+
+    Reads ``GRAIL_THINKING_MODE`` if ``mode`` is ``None``. Defaults to
+    ``"instructed"`` because that mode uses tags grail builds itself
+    (``<start_working_out>``/``</end_working_out>`` for thinking,
+    ``<SOLUTION>``/``</SOLUTION>`` for the answer) and is portable across
+    base models that don't ship a thinking-aware chat template.
+
+    NOTE: On the miner and validator hot path the env var is overridden at
+    runtime from the trainer-published ``CheckpointMetadata.thinking_mode``,
+    so this default only affects boot-time prompt-rendering before the first
+    checkpoint arrives. The trainer is the single source of truth for the
+    *protocol* mode; this fallback exists for non-protocol callers (parsers,
+    debug helpers, tests).
+    """
     if mode is None:
-        mode = os.getenv("GRAIL_THINKING_MODE", "native")
+        mode = os.getenv("GRAIL_THINKING_MODE", "instructed")
     if isinstance(mode, str):
         mode = ThinkingMode(mode.lower())
     return {

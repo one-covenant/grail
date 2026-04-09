@@ -283,7 +283,7 @@ class TestComputeWeightsHash:
 
         digest = compute_weights_hash(state)
         assert isinstance(digest, str)
-        assert len(digest) == 64
+        assert len(digest) == 32  # xxh3-128 hex digest
 
     def test_different_states_different_hash(self) -> None:
         """Test that different states produce different hashes."""
@@ -312,13 +312,37 @@ class TestComputeWeightsHash:
         assert hash1 == hash2
 
     def test_hash_format(self) -> None:
-        """Test that hash is a valid hex string."""
+        """Test that hash is a valid xxh3-128 hex string."""
         state = {"layer": torch.tensor([1.0])}
         hash_value = compute_weights_hash(state)
 
         assert isinstance(hash_value, str)
-        assert len(hash_value) == 64  # SHA256 hex digest
+        assert len(hash_value) == 32  # xxh3-128 hex digest
         assert all(c in "0123456789abcdef" for c in hash_value)
+
+    def test_dtype_change_changes_hash(self) -> None:
+        """Tensors with same byte pattern but different dtype hash differently.
+
+        Because the hash digests raw bytes, a tensor's dtype is reflected
+        implicitly via its byte width: a float32 tensor and a float16 tensor
+        with the same numeric values produce different byte streams (4 bytes
+        vs 2 bytes per element) and therefore different hashes.
+        """
+        state_fp32 = {"layer": torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)}
+        state_bf16 = {"layer": torch.tensor([1.0, 2.0, 3.0], dtype=torch.bfloat16)}
+
+        assert compute_weights_hash(state_fp32) != compute_weights_hash(state_bf16)
+
+    def test_large_state_deterministic(self) -> None:
+        """Hashing a multi-MB synthetic state is stable across two calls."""
+        torch.manual_seed(42)
+        state = {f"layer_{i}.weight": torch.randn(256, 256, dtype=torch.bfloat16) for i in range(8)}
+
+        hash1 = compute_weights_hash(state)
+        hash2 = compute_weights_hash(state)
+
+        assert hash1 == hash2
+        assert len(hash1) == 32
 
 
 class TestVerifyWeightsHash:
@@ -334,7 +358,7 @@ class TestVerifyWeightsHash:
     def test_invalid_hash_verification(self) -> None:
         """Test that incorrect hash fails verification."""
         state = {"layer": torch.tensor([1.0, 2.0, 3.0])}
-        wrong_hash = "0" * 64
+        wrong_hash = "0" * 32
 
         assert verify_weights_hash(state, wrong_hash) is False
 

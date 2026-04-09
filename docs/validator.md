@@ -116,12 +116,11 @@ Set these in `.env` (see `.env.example`). This file will be used with Docker Com
   - `BT_WALLET_COLD` (coldkey name)
   - `BT_WALLET_HOT` (hotkey name)
 - Model (dynamically loaded from R2 checkpoints)
-  - The model is loaded automatically from R2 checkpoints and evolves through training
-  - Validators automatically load the appropriate checkpoint for each validation window
-  - Maximum new tokens is fixed at 8192 (hardcoded constant `MAX_NEW_TOKENS`)
-  - Rollouts per problem is fixed at 16 (hardcoded constant `ROLLOUTS_PER_PROBLEM`)
-  - Models are shared via R2 storage and updated by the trainer after each window
-  - No manual model configuration required - checkpoints are loaded automatically
+  - The model and the active environment are loaded automatically from each window's R2 checkpoint.
+  - The trainer publishes the per-checkpoint sampling policy (`max_tokens`, `temperature`, `top_p`, `top_k`, `repetition_penalty`) in `CheckpointMetadata.generation_params`. The validator reads `max_tokens` from there and caps the expected completion length at `min(metadata.max_tokens, MAX_NEW_TOKENS_PROTOCOL_CAP)`; rollouts longer than that fail `termination_valid`.
+  - `MAX_NEW_TOKENS_PROTOCOL_CAP = 8192` (in `grail/protocol/constants.py`) is the protocol cap; the trainer's per-checkpoint `max_tokens` is the actual limit.
+  - Rollouts per problem is fixed at 16 (`ROLLOUTS_PER_PROBLEM`).
+  - No manual model or sampling configuration required.
 - Object storage (R2/S3)
   - `R2_BUCKET_ID`, `R2_ACCOUNT_ID`
   - Dual credentials (recommended):
@@ -291,7 +290,7 @@ Apply superlinear curve (`SUPERLINEAR_EXPONENT = 4.0`):
 score = estimated_unique ** SUPERLINEAR_EXPONENT
 ```
 
-Normalize to weights across miners; set on-chain with `set_weights`. An emission burn mechanism (`GRAIL_BURN_PERCENTAGE = 80%`) redirects a portion of emissions to the burn UID.
+Normalize to weights across miners; set on-chain with `set_weights`. An emission burn mechanism (`GRAIL_BURN_PERCENTAGE = 90%`) redirects a portion of emissions to the burn UID.
 
 ### Publishing
 
@@ -314,6 +313,33 @@ Normalize to weights across miners; set on-chain with `set_weights`. An emission
 - Check logs: `docker logs grail-validator`
 - Verify wallet path: Ensure `~/.bittensor` is accessible
 - Check hardware support: Ensure your platform's floating point precision is within tolerance thresholds
+
+**Validator exits with `torch.cuda.is_available() is False` / GPU not visible inside the container:**
+
+The validator refuses to load the model on CPU by design: an 8B model on CPU in FP32 saturates every core and exhausts host RAM (we have seen this freeze a 180 GB host). If you see a `RuntimeError: get_model() called with device=None but torch.cuda.is_available() is False` in `docker logs grail-validator`, the container is running without GPU passthrough. Diagnose in this order:
+
+1. Confirm the host sees the GPUs:
+   ```bash
+   nvidia-smi
+   ```
+   If this fails on the host, reinstall the NVIDIA drivers before touching Docker.
+
+2. Confirm Docker can pass GPUs into a container (the preflight check):
+   ```bash
+   docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+   ```
+   If this fails but `nvidia-smi` works on the host, `nvidia-container-toolkit` is either not installed or not wired into the Docker daemon. Install or reconfigure it, then restart Docker:
+   ```bash
+   sudo nvidia-ctk runtime configure --runtime=docker
+   sudo systemctl restart docker
+   ```
+   Re-run the preflight until it prints your GPUs, then `docker compose -f docker/docker-compose.validator.yml up -d`.
+
+3. Confirm the validator container itself sees the GPUs:
+   ```bash
+   docker exec grail-validator nvidia-smi
+   ```
+   If the host preflight passes but this fails, check that `CUDA_VISIBLE_DEVICES` is not being set to an empty string anywhere in `.env`, and that `NVIDIA_VISIBLE_DEVICES=all` is still present in the validator service env block of `docker/docker-compose.validator.yml`.
 
 **Watchtower Not Updating:**
 - Check registry access: `

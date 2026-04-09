@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from grail.shared.constants import TRUST_LIST_KEY_PREFIX, TRUST_LIST_VERSION
+from grail.protocol.constants import TRUST_LIST_KEY_PREFIX, TRUST_LIST_VERSION
 
 
 def _make_service():

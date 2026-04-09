@@ -421,14 +421,13 @@ class VLLMServerManager(InferenceServerManager):
             stderr_target = (
                 subprocess.STDOUT if self._eval_config.stream_server_logs else subprocess.DEVNULL
             )
-            # Compose environment for subprocess: inherit and then apply overrides
-            popen_env = os.environ.copy()
-            if isinstance(self._config.env, dict) and self._config.env:
-                popen_env.update({str(k): str(v) for k, v in self._config.env.items()})
-                # Log CUDA device mapping if present (avoid logging other env content)
-                cuda_env = self._config.env.get("CUDA_VISIBLE_DEVICES")
-                if cuda_env is not None:
-                    logger.info("Launching vLLM with CUDA_VISIBLE_DEVICES=%s", cuda_env)
+            # Use config.env as the base if provided (allows callers to pass
+            # a clean env without the parent's CUDA_VISIBLE_DEVICES to avoid
+            # NCCL IPC failures from nested device remapping).
+            popen_env = dict(self._config.env) if self._config.env else os.environ.copy()
+            cuda_env = popen_env.get("CUDA_VISIBLE_DEVICES")
+            if cuda_env is not None:
+                logger.info("Launching vLLM with CUDA_VISIBLE_DEVICES=%s", cuda_env)
             self._process = subprocess.Popen(
                 cmd,
                 stdout=stdout_target,
@@ -645,9 +644,11 @@ class SGLangServerManager(InferenceServerManager):
         *,
         config: ServerConfig,
         eval_config: EvalConfig,
+        python_executable: str = "",
     ) -> None:
         super().__init__(config=config)
         self._eval_config = eval_config
+        self._python_executable = python_executable
 
     async def _start_server(self) -> None:
         """Launch SGLang server with optimized memory settings."""
@@ -671,19 +672,21 @@ class SGLangServerManager(InferenceServerManager):
                 subprocess.STDOUT if self._eval_config.stream_server_logs else subprocess.DEVNULL
             )
 
-            # Prepare environment for subprocess
-            popen_env = os.environ.copy()
-            if self._config.env:
-                popen_env.update(self._config.env)
-                cuda_env = self._config.env.get("CUDA_VISIBLE_DEVICES")
-                if cuda_env is not None:
-                    logger.info("Launching SGLang with CUDA_VISIBLE_DEVICES=%s", cuda_env)
+            # Prepare environment for subprocess.
+            # Use config.env as the base if provided (allows callers to pass
+            # a clean env without the parent's CUDA_VISIBLE_DEVICES to avoid
+            # NCCL custom_all_reduce IPC failures from nested device remapping).
+            popen_env = dict(self._config.env) if self._config.env else os.environ.copy()
+            cuda_env = popen_env.get("CUDA_VISIBLE_DEVICES")
+            if cuda_env is not None:
+                logger.info("Launching SGLang with CUDA_VISIBLE_DEVICES=%s", cuda_env)
             # Ensure the Python executable's directory is on PATH so that
             # tools installed in the same venv (e.g. ninja for flashinfer JIT)
             # are discoverable by SGLang subprocesses.
             import sys
 
-            python_bin_dir = os.path.dirname(os.path.abspath(sys.executable))
+            python_exe = self._python_executable or sys.executable
+            python_bin_dir = os.path.dirname(os.path.abspath(python_exe))
             existing_path = popen_env.get("PATH", "")
             if python_bin_dir not in existing_path.split(os.pathsep):
                 popen_env["PATH"] = f"{python_bin_dir}{os.pathsep}{existing_path}"
@@ -757,12 +760,50 @@ class SGLangServerManager(InferenceServerManager):
         """No-op for SGLang backend (models remain in external process)."""
         pass
 
+    async def reload_with_new_checkpoint(self, new_checkpoint_path: str) -> None:
+        """Reload SGLang server with updated model checkpoint.
+
+        Stops the current server, updates the model path, and restarts with
+        new weights. Waits for GPU memory cleanup between stop and start.
+        """
+        if not os.path.exists(new_checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint not found: {new_checkpoint_path}")
+
+        logger.info(
+            "Reloading SGLang server with new checkpoint",
+            extra={"path": new_checkpoint_path},
+        )
+
+        try:
+            await self._stop_server()
+            self._config.model_path = new_checkpoint_path
+            await self._start_server()
+
+            if self._process is None or self._bound_port is None:
+                raise RuntimeError("Failed to restart SGLang server after reload")
+
+            logger.info(
+                "SGLang server reloaded successfully",
+                extra={
+                    "checkpoint": new_checkpoint_path,
+                    "url": self.base_url,
+                    "model": self.model_name,
+                },
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to reload SGLang server",
+                extra={"checkpoint": new_checkpoint_path, "error": str(exc)},
+            )
+            raise RuntimeError(f"SGLang server reload failed: {exc}") from exc
+
     def _build_command(self) -> list[str]:
         """Build SGLang server launch command with optimized parameters."""
         import sys
 
+        python_exe = self._python_executable or sys.executable
         cmd = [
-            sys.executable,
+            python_exe,
             "-m",
             "sglang.launch_server",
             "--model-path",
@@ -777,19 +818,26 @@ class SGLangServerManager(InferenceServerManager):
             self._config.dtype,
             "--tp-size",
             str(self._config.tensor_parallel_size),
-            # Memory optimizations from EvalConfig to prevent OOM during KV cache allocation
             "--mem-fraction-static",
             str(self._eval_config.sglang_mem_fraction_static),
-            "--max-running-requests",
-            str(self._eval_config.sglang_max_running_requests),
-            "--schedule-policy",
-            "fcfs",  # Fair scheduling
             "--context-length",
             str(self._eval_config.sglang_context_length),
+            "--trust-remote-code",
+            "--load-balance-method",
+            "total_tokens",
+            # Disable custom all-reduce to avoid NCCL IPC handle conflicts when
+            # the parent process already has a CUDA context (e.g. miner's proof
+            # model). Negligible perf impact on NVLink-connected GPUs.
+            "--disable-custom-all-reduce",
+            # Disable piecewise CUDA graph capture. SGLang 0.5.10 hits an
+            # illegal memory access during piecewise graph capture for Qwen3
+            # on B200 (and likely other Hopper/Blackwell SKUs); the SGLang
+            # error message itself recommends this flag as the workaround.
+            # Reproduced on basilica-grail-trainer (1xB200) 2026-04-08; without
+            # this flag the SGLang server fails to start with `cudaErrorIllegalAddress`
+            # during CUDA graph warmup, and the miner falls back to slow HF generation.
+            "--disable-piecewise-cuda-graph",
         ]
-
-        if self._config.trust_remote_code:
-            cmd.append("--trust-remote-code")
 
         # Explicitly provide chat template to ensure SGLang uses the correct formatting
         # with system prompt and reasoning tags during generation
@@ -844,7 +892,11 @@ def create_inference_server(
             module_entrypoint=eval_config.vllm_module_entrypoint,
         )
     if backend_lower == "sglang":
-        return SGLangServerManager(config=config, eval_config=eval_config)
+        return SGLangServerManager(
+            config=config,
+            eval_config=eval_config,
+            python_executable=eval_config.sglang_python_executable,
+        )
 
     msg = f"Unsupported backend: {backend} (choose 'hf', 'vllm', or 'sglang')"
     raise ValueError(msg)

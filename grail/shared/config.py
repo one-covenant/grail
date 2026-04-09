@@ -1,0 +1,227 @@
+"""GRAIL Deployment Configuration.
+
+Environment-configurable parameters that vary per deployment. Each value has a
+sensible default and can be overridden via environment variable.
+
+For immutable protocol constants (values that all network participants must agree on),
+see grail.protocol.constants.
+"""
+
+import os
+
+# ────────────────  NETWORK & IDENTITY  ────────────────
+
+NETWORK = os.getenv("BT_NETWORK", "finney")
+NETUID = int(os.getenv("NETUID", 81))
+
+# ────────────────  UPLOAD & TIMING  ────────────────
+
+# Upload timeout for object storage operations (seconds)
+UPLOAD_TIMEOUT = float(os.getenv("UPLOAD_TIMEOUT", "90"))
+
+# Trainer checkpoint upload buffer (blocks before window ends to force publish)
+TRAINER_UPLOAD_BUFFER_BLOCKS = 10  # ~60 seconds at 12s/block
+
+# Time needed to upload the READY marker file to object storage
+READY_MARKER_UPLOAD_BLOCKS = 1  # ~12 seconds at 12s/block
+
+# ────────────────  TRAINER HYPERPARAMETERS  ────────────────
+
+TRAINER_LR = float(os.getenv("GRAIL_TRAINER_LR", "1e-6"))
+TRAINER_EPOCHS = int(os.getenv("GRAIL_TRAINER_EPOCHS", "1"))
+TRAINER_MICRO_BATCH_SIZE = int(os.getenv("GRAIL_TRAINER_MICRO_BATCH_SIZE", "16"))
+
+# Token-budget dynamic batching: when set (>0), replaces micro_batch_size.
+# Each micro-batch gets a variable number of sequences targeting this token count.
+# Mutually exclusive with micro_batch_size (follows veRL/OpenRLHF pattern).
+TRAINER_MAX_TOKENS_PER_MICRO_BATCH = int(os.getenv("GRAIL_TRAINER_MAX_TOKENS_PER_MICRO_BATCH", "0"))
+TRAINER_MAX_LENGTH = int(os.getenv("GRAIL_TRAINER_MAX_LENGTH", "12288"))
+TRAINER_GRAD_CLIP = float(os.getenv("GRAIL_TRAINER_GRAD_CLIP", "0.5"))
+TRAINER_WARMUP_STEPS = int(os.getenv("GRAIL_TRAINER_WARMUP_STEPS", "10"))
+TRAINER_KL_COEF = float(os.getenv("GRAIL_TRAINER_KL_COEF", "0.02"))
+TRAINER_ENTROPY_COEF = float(os.getenv("GRAIL_TRAINER_ENTROPY_COEF", "0.001"))
+TRAINER_ADV_CLIP_PERCENTILE = float(os.getenv("GRAIL_TRAINER_ADV_CLIP_PERCENTILE", "99.0"))
+TRAINER_GROUP_ADV_SUM_TOL = float(os.getenv("GRAIL_TRAINER_GROUP_ADV_SUM_TOL", "0.01"))
+TRAINER_GRAD_ACCUM_STEPS = int(os.getenv("GRAIL_TRAINER_GRAD_ACCUM_STEPS", "8"))
+
+# Effective batch size: number of rollouts per optimizer step. Used with token-budget
+# batching to compute grad_accum_steps dynamically. When 0, uses grad_accum_steps directly.
+TRAINER_EFFECTIVE_BATCH_SIZE = int(os.getenv("GRAIL_TRAINER_EFFECTIVE_BATCH_SIZE", "0"))
+
+# ────────────────  IMPORTANCE SAMPLING & PPO CLIPPING  ────────────────
+
+TRAINER_USE_IS = os.getenv("GRAIL_TRAINER_USE_IS", "1") == "1"
+TRAINER_PPO_CLIP_EPS = float(os.getenv("GRAIL_TRAINER_PPO_CLIP_EPS", "0.2"))
+
+# Asymmetric upper bound for PPO clipping (DAPO-style). If unset, defaults to 0.28.
+TRAINER_PPO_CLIP_EPS_UPPER = float(os.getenv("GRAIL_TRAINER_PPO_CLIP_EPS_UPPER", "0.28"))
+
+# Hard ceiling for importance sampling ratios to prevent instability (DCPO-style safety)
+TRAINER_IS_RATIO_MAX = float(os.getenv("GRAIL_TRAINER_IS_RATIO_MAX", "10.0"))
+
+# Log-ratio clamp for numerical stability when exponentiating to ratios
+TRAINER_LOGRATIO_CLAMP = float(os.getenv("GRAIL_TRAINER_LOGRATIO_CLAMP", "5.0"))
+
+# ────────────────  ADAPTIVE KL  ────────────────
+
+TRAINER_ADAPTIVE_KL = os.getenv("GRAIL_TRAINER_ADAPTIVE_KL", "1") == "1"
+TRAINER_KL_TARGET = float(os.getenv("GRAIL_TRAINER_KL_TARGET", "0.04"))
+TRAINER_KL_ADAPT_RATE = float(os.getenv("GRAIL_TRAINER_KL_ADAPT_RATE", "1.5"))
+TRAINER_KL_MIN = float(os.getenv("GRAIL_TRAINER_KL_MIN", "0.001"))
+TRAINER_KL_MAX = float(os.getenv("GRAIL_TRAINER_KL_MAX", "0.2"))
+
+# ────────────────  TRAINING MEMORY & PERFORMANCE  ────────────────
+
+# Gradient checkpointing: reduces activation memory by recomputing on backward pass.
+# ~20-30% memory reduction, ~10-15% slower training.
+TRAINER_USE_GRADIENT_CHECKPOINTING = (
+    os.getenv("GRAIL_TRAINER_USE_GRADIENT_CHECKPOINTING", "1") == "1"
+)
+
+# Selective gradient checkpointing: only checkpoint every Nth layer.
+# N=1 = full checkpointing (default). N=2 = every other layer. N=0 = same as N=1.
+TRAINER_GC_EVERY_N_LAYERS = int(os.getenv("GRAIL_TRAINER_GC_EVERY_N_LAYERS", "1"))
+
+# Sequence packing: concatenate micro-batch sequences into a single [1, total_tokens]
+# tensor with position_ids resets at boundaries. Requires FA2.
+TRAINER_USE_SEQUENCE_PACKING = os.getenv("GRAIL_TRAINER_USE_SEQUENCE_PACKING", "0") == "1"
+
+# torch.compile for training model (fuses ops, reduces kernel launch overhead).
+TRAINER_USE_TORCH_COMPILE = os.getenv("GRAIL_TRAINER_USE_TORCH_COMPILE", "0") == "1"
+
+# Chunked logit computation: apply lm_head in sequence-dimension chunks to avoid
+# materializing the full [batch, seq_len, vocab_size] logits tensor (~5.4 GB for
+# Qwen3-8B at seq_len=10K). Saves ~10 GB peak memory on single-GPU training.
+TRAINER_CHUNKED_LOGITS = os.getenv("GRAIL_TRAINER_CHUNKED_LOGITS", "1") == "1"
+TRAINER_LOGIT_CHUNK_SIZE = int(os.getenv("GRAIL_TRAINER_LOGIT_CHUNK_SIZE", "256"))
+
+# Trainer miner trust filtering (incentive-based via Yuma Consensus)
+TRAINER_MIN_TRUSTED_MINERS = int(os.getenv("GRAIL_TRAINER_MIN_TRUSTED_MINERS", "1"))
+
+# ────────────────  GRPO DATA FILTERING  ────────────────
+
+# Stage 1 (fast structural/cheap filters) happens before Stage 2.
+GRPO_MAX_GROUPS = int(os.getenv("GRAIL_GRPO_MAX_GROUPS", "32"))
+GRPO_MAX_COMPLETION_TOKENS = int(os.getenv("GRAIL_GRPO_MAX_COMPLETION_TOKENS", "8192"))
+
+# GRPO loss aggregation variant.
+# Options: 'grpo' (per-sequence), 'bnpo' (global token avg),
+#          'dapo' (distributed token norm), 'dr_grpo' (fixed denominator)
+GRPO_VARIANT = os.getenv("GRAIL_GRPO_VARIANT", "dapo")
+
+# Advantage estimation strategy (orthogonal to GRPO_VARIANT loss aggregation).
+# Options: 'grpo' (zero-mean, variance-normalized), 'dr_grpo' (zero-mean only),
+#          'dapo' (rank-based)
+ADV_ESTIMATOR = os.getenv("GRAIL_ADV_ESTIMATOR", "grpo")
+
+# Importance sampling level for policy gradient computation.
+# Options: 'sequence' (one ratio per sequence), 'token' (per-token ratios)
+IMPORTANCE_SAMPLING_LEVEL = os.getenv("GRAIL_IMPORTANCE_SAMPLING_LEVEL", "sequence")
+
+# Stage 2 (refinement): quality/efficiency-oriented filters.
+GRPO_MIN_SUCCESS_FRACTION = float(os.getenv("GRAIL_GRPO_MIN_SUCCESS_FRACTION", "0.0"))
+GRPO_MIN_REWARD_PER_TOKEN = float(os.getenv("GRAIL_GRPO_MIN_REWARD_PER_TOKEN", "0.0"))
+GRPO_REWARD_PER_TOKEN_DROP_QUANTILE = float(
+    os.getenv("GRAIL_GRPO_REWARD_PER_TOKEN_DROP_QUANTILE", "0.0")
+)
+
+# Group ranking: combined efficiency score weights (must sum to 1.0).
+GRPO_RANKING_REWARD_WEIGHT = float(os.getenv("GRAIL_GRPO_RANKING_REWARD_WEIGHT", "0.7"))
+GRPO_RANKING_VARIANCE_WEIGHT = float(os.getenv("GRAIL_GRPO_RANKING_VARIANCE_WEIGHT", "0.3"))
+
+# ────────────────  CHECKPOINT RETENTION  ────────────────
+
+CHECKPOINT_MILESTONE_INTERVAL = int(os.getenv("GRAIL_CHECKPOINT_MILESTONE_INTERVAL", "0"))
+
+# R2 retention limits (used by checkpoint_publisher for trainer uploads).
+# BASE: complete model weights (~14GB). DELTA: sparse diffs that depend on a BASE.
+BASE_CHECKPOINT_RETENTION_LIMIT = int(os.getenv("GRAIL_BASE_CHECKPOINT_RETENTION_LIMIT", "3"))
+DELTA_CHECKPOINT_RETENTION_LIMIT = int(os.getenv("GRAIL_DELTA_CHECKPOINT_RETENTION_LIMIT", "15"))
+
+# Cleanup frequency: run cleanup every N uploads instead of every upload.
+CLEANUP_INTERVAL_UPLOADS = int(os.getenv("GRAIL_CLEANUP_INTERVAL_UPLOADS", "10"))
+
+# ────────────────  DELTA CHECKPOINT  ────────────────
+
+# Upload FULL checkpoint every N windows (deltas for intermediate windows).
+# Set to 1 to disable delta uploads (all FULL checkpoints).
+DELTA_BASE_INTERVAL = int(os.getenv("GRAIL_DELTA_BASE_INTERVAL", "10"))
+
+# Threshold for sparse delta (0 = keep all non-zero deltas).
+DELTA_THRESHOLD = float(os.getenv("GRAIL_DELTA_THRESHOLD", "0.0"))
+
+# Enable/disable delta checkpoint uploads (fallback to full if disabled).
+DELTA_CHECKPOINT_ENABLED = os.getenv("GRAIL_DELTA_CHECKPOINT_ENABLED", "1") == "1"
+
+# Delta codec format for trainer uploads.
+DELTA_CODEC_FORMAT = os.getenv("GRAIL_DELTA_FORMAT", "sparse_codec_v3.1")
+
+# ──────────────── INVARIANT VALIDATION ────────────────
+# Ensure retained deltas always have their base checkpoint available.
+if DELTA_CHECKPOINT_RETENTION_LIMIT < DELTA_BASE_INTERVAL:
+    raise ValueError(
+        f"DELTA_CHECKPOINT_RETENTION_LIMIT ({DELTA_CHECKPOINT_RETENTION_LIMIT}) must be >= "
+        f"DELTA_BASE_INTERVAL ({DELTA_BASE_INTERVAL}) to prevent orphaned delta checkpoints. "
+        f"Deltas are created every DELTA_BASE_INTERVAL windows, so we must keep at least that "
+        f"many to ensure validators can reconstruct recent checkpoints."
+    )
+
+# ────────────────  INFERENCE BACKEND  ────────────────
+
+# Default generation backend for both mining pipeline and trainer evaluation.
+INFERENCE_BACKEND = os.getenv("GRAIL_INFERENCE_BACKEND", "sglang")
+
+# ────────────────  TRUST LIST  ────────────────
+
+TRUST_LIST_MAX_STALENESS_WINDOWS = int(os.getenv("GRAIL_TRUST_LIST_MAX_STALENESS_WINDOWS", "5"))
+
+# ────────────────  ASYNC TRAINING  ────────────────
+
+# Upload worker poll interval (seconds between snapshot checks).
+SNAPSHOT_POLL_INTERVAL_SECONDS = int(os.getenv("GRAIL_SNAPSHOT_POLL_INTERVAL", "30"))
+
+# Training heartbeat timeout for liveness monitoring.
+TRAINING_HEARTBEAT_TIMEOUT_SECONDS = int(os.getenv("GRAIL_TRAINING_HEARTBEAT_TIMEOUT", "3600"))
+
+# Upload retry configuration.
+UPLOAD_RETRY_MAX_ATTEMPTS = int(os.getenv("GRAIL_UPLOAD_RETRY_MAX_ATTEMPTS", "3"))
+UPLOAD_RETRY_BACKOFF_BASE = int(os.getenv("GRAIL_UPLOAD_RETRY_BACKOFF_BASE", "60"))
+
+# ────────────────  PARAMETER CHANGE TRACKING  ────────────────
+
+# Measure parameter changes every N optimizer steps (0 disables tracking).
+PARAM_CHANGE_MEASURE_INTERVAL = int(os.getenv("GRAIL_PARAM_CHANGE_MEASURE_INTERVAL", "0"))
+PARAM_CHANGE_THRESHOLD = float(os.getenv("GRAIL_PARAM_CHANGE_THRESHOLD", "0.0"))
+PARAM_CHANGE_TRACK_PER_LAYER = os.getenv("GRAIL_PARAM_CHANGE_TRACK_PER_LAYER", "1") == "1"
+PARAM_CHANGE_TRACK_COMPONENTS = os.getenv("GRAIL_PARAM_CHANGE_TRACK_COMPONENTS", "1") == "1"
+PARAM_CHANGE_TRACK_SIGN_FLIPS = os.getenv("GRAIL_PARAM_CHANGE_TRACK_SIGN_FLIPS", "1") == "1"
+PARAM_CHANGE_RELATIVE_EPS = float(os.getenv("GRAIL_PARAM_CHANGE_RELATIVE_EPS", "1e-10"))
+
+# ────────────────  SPARSE QUALITY ANALYSIS  ────────────────
+
+SPARSE_QUALITY_ENABLED = os.getenv("GRAIL_SPARSE_QUALITY_ENABLED", "0") == "1"
+
+# ────────────────  TRAINING COMPLETION  ────────────────
+
+# Total training windows before completing training.
+TOTAL_TRAINING_WINDOWS = int(os.getenv("GRAIL_TRAINER_TOTAL_WINDOWS", "100"))
+
+# Hugging Face credentials for model upload after training completion.
+HF_TOKEN = os.getenv("HF_TOKEN", "")
+HF_USERNAME = os.getenv("HF_USERNAME", "")
+
+# ────────────────  TESTING / TEMPORARY  ────────────────
+
+# Only for testing purposes; going to be removed later on.
+GRAIL_CHECKPOINT_MOD10 = False
+
+# ────────────────  HELPER FUNCTIONS  ────────────────
+
+
+def is_kl_enabled() -> bool:
+    """Check if KL divergence is enabled based on TRAINER_KL_COEF.
+
+    Returns:
+        True if KL coefficient is greater than zero, False otherwise.
+    """
+    return float(TRAINER_KL_COEF) > 0.0

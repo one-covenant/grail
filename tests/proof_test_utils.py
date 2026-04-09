@@ -14,14 +14,14 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from grail.environments.sat_env import create_sat_prompt, generate_sat_problem
-from grail.protocol.crypto import indices_from_root
-from grail.protocol.grail_verifier import GRAILVerifier
-from grail.shared.constants import (
+from grail.protocol.constants import (
     CHALLENGE_K,
     GRAIL_PROOF_VERSION,
     LAYER_INDEX,
     PROOF_TOPK,
 )
+from grail.protocol.crypto import indices_from_root
+from grail.protocol.grail_verifier import GRAILVerifier
 from grail.shared.hf_compat import resolve_hidden_size
 
 

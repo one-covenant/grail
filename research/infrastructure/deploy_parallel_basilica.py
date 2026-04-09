@@ -503,7 +503,7 @@ async def deploy_and_run(
         logger.error(f"No instances defined in config '{config_name}'")
         return False
 
-    logger.info(f"Configurations:")
+    logger.info("Configurations:")
     missing_model_configs = []
     for c in configs:
         logger.info(f"  - {c.name}: {c.gpu_count}x {c.gpu_type}")

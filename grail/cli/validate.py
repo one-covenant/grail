@@ -73,6 +73,45 @@ def _install_crash_diagnostics() -> None:
 
 
 # --------------------------------------------------------------------------- #
+#                       Validator Startup GPU Probe                           #
+# --------------------------------------------------------------------------- #
+
+
+def _probe_validator_gpus() -> None:
+    """Verify a CUDA device is visible before any other validator setup runs.
+
+    Validators load a multi-billion-parameter checkpoint and run proof
+    verification forward passes. A silent CPU fallback pins every vCPU at
+    100% and exhausts host RAM, which has frozen production hosts.
+
+    This probe is intentionally scoped to the validator CLI entry only.
+    Miners and other grail entry points (mine, train) stay device-agnostic
+    and are free to run on CPU, MLX, MacBook M4, etc.
+    """
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "Validator startup GPU probe failed: torch.cuda.is_available() is False. "
+            "The validator requires a visible CUDA device. "
+            "If running via Docker, run the preflight "
+            "`docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi` "
+            "on the host. If that fails, reinstall or reconfigure "
+            "nvidia-container-toolkit (`sudo nvidia-ctk runtime configure "
+            "--runtime=docker && sudo systemctl restart docker`). "
+            "See docs/validator.md troubleshooting for the full diagnostic flow."
+        )
+
+    device_count = torch.cuda.device_count()
+    device_names = [torch.cuda.get_device_name(i) for i in range(device_count)]
+    logger.info(
+        "Validator startup GPU probe: count=%d names=%s",
+        device_count,
+        device_names,
+    )
+
+
+# --------------------------------------------------------------------------- #
 #                               CLI                                           #
 # --------------------------------------------------------------------------- #
 
@@ -112,6 +151,12 @@ def validate(
     """
     # Install crash diagnostics early to catch silent failures
     _install_crash_diagnostics()
+
+    # Fail loud and early if no CUDA device is visible to this process.
+    # Runs before any subtensor, R2, pool, or checkpoint work so a broken
+    # GPU setup is diagnosed at second 0 instead of ~2 minutes in.
+    _probe_validator_gpus()
+
     from ..neurons import ValidatorNeuron
 
     asyncio.run(ValidatorNeuron(use_drand=use_drand, test_mode=test_mode).main())

@@ -6,7 +6,7 @@ import logging
 
 import torch
 
-from ...shared.constants import MAX_NEW_TOKENS, MIN_EOS_PROBABILITY
+from ...protocol.constants import MAX_NEW_TOKENS_PROTOCOL_CAP, MIN_EOS_PROBABILITY
 from ..base import Validator
 from ..context import ValidationContext
 
@@ -38,13 +38,13 @@ class TerminationValidator(Validator):
             # Prefer checkpoint-provided generation max_tokens when available.
             # This avoids false failures when miners/validators intentionally use
             # shorter completions (e.g., max_tokens=512 for code tasks).
-            expected_max_new_tokens = MAX_NEW_TOKENS
+            expected_max_new_tokens = MAX_NEW_TOKENS_PROTOCOL_CAP
             max_tokens_raw = ctx.generation_params.get("max_tokens")
             if max_tokens_raw is not None:
                 try:
                     max_tokens_int = int(max_tokens_raw)
                     if max_tokens_int > 0:
-                        expected_max_new_tokens = min(max_tokens_int, MAX_NEW_TOKENS)
+                        expected_max_new_tokens = min(max_tokens_int, MAX_NEW_TOKENS_PROTOCOL_CAP)
                 except (TypeError, ValueError):
                     pass
 

@@ -9,12 +9,13 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
-from grail.environments.core import ChatMessage, MultiTurnEnv
-from grail.environments.gsm8k_env import GSM8KEnv
 from grail.environments.backends import SGLangServerBackend, VLLMServerBackend
+from grail.environments.core import ChatMessage, MultiTurnEnv
 from grail.environments.episode import AgentEnvLoop
+from grail.environments.gsm8k_env import GSM8KEnv
 from grail.environments.sat_env import SATEnv
-from grail.shared.constants import ROLLOUTS_PER_PROBLEM, TRAINER_MAX_LENGTH
+from grail.protocol.constants import ROLLOUTS_PER_PROBLEM
+from grail.shared.config import TRAINER_MAX_LENGTH
 from grail.trainer.algorithms.grpo import GRPOGroup, GRPORollout
 
 if TYPE_CHECKING:
@@ -208,12 +209,13 @@ class OfflineRolloutGenerator:
         # Prepare input tensor on model's device
         input_ids = torch.tensor([token_ids], dtype=torch.long, device=model.device)
 
-        # Forward pass without gradients for efficiency
+        # Forward pass without gradients for efficiency while preserving the
+        # caller's training/eval state after logprob recomputation.
         was_training = model.training
         model.eval()
         try:
-            with torch.inference_mode():
-                outputs = model(input_ids)
+            with torch.no_grad():
+                outputs = model(input_ids, use_cache=False)
         except RuntimeError as exc:
             logger.error(
                 "Failed to compute HF logprobs due to model forward error",

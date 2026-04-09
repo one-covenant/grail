@@ -7,6 +7,7 @@ Fixtures follow pytest best practices with proper scoping and dependency injecti
 from __future__ import annotations
 
 import hashlib
+import os
 import pathlib
 import sys
 from collections import Counter
@@ -19,8 +20,6 @@ import pytest
 if TYPE_CHECKING:
     from accelerate import Accelerator
 
-    from grail.validation.copycat_service import CopycatTracker
-
 from .proof_test_utils import generate_realistic_sat_prompt
 
 # ============================================================================
@@ -29,9 +28,24 @@ from .proof_test_utils import generate_realistic_sat_prompt
 
 TEST_MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
 
+# Skip test files for features not yet merged or requiring Linux sandbox
+collect_ignore_glob = [
+    "unit/environments/test_basilica_backend.py",
+    "unit/infrastructure/test_io_pipeline.py",
+    "unit/environments/test_execution_unit.py",
+]
+
 # ============================================================================
 # Test Environment Setup
 # ============================================================================
+
+# grail/__init__.py calls load_dotenv(override=True) on import, which can set
+# HF_HOME to a server-specific path (e.g. /ephemeral/huggingface). Remove it
+# at module level so session-scoped fixtures (which run before monkeypatch)
+# use the default local HuggingFace cache.
+_SERVER_ENV_VARS = ("HF_HOME", "HF_HUB_CACHE", "TRANSFORMERS_CACHE")
+for _var in _SERVER_ENV_VARS:
+    os.environ.pop(_var, None)
 
 
 @pytest.fixture(autouse=True)
@@ -44,6 +58,9 @@ def _set_test_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GRAIL_MONITORING_BACKEND", "null")
     monkeypatch.setenv("BT_NETWORK", "test")
     monkeypatch.setenv("NETUID", "1")
+    # Ensure server-specific HF paths from .env don't leak into tests
+    for var in _SERVER_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
     # Ensure project root is on path when running from different CWDs
     root = str(pathlib.Path(__file__).resolve().parents[1])
     if root not in sys.path:
@@ -188,16 +205,20 @@ def sample_size_cases(request: pytest.FixtureRequest) -> tuple[int, float, int, 
 
 
 @pytest.fixture(scope="session")
-def sat_prompts() -> list[str]:
+def sat_prompts(tmp_path_factory: pytest.TempPathFactory) -> list[str]:
     """Pregenerated realistic SAT prompts for proof tests.
 
     Uses deterministic seeds and production chat templates to ensure
-    prompts match actual mining scenarios.
+    prompts match actual mining scenarios. Filelock prevents concurrent
+    HuggingFace cache corruption under pytest-xdist.
     """
+    from filelock import FileLock
     from transformers import AutoTokenizer
 
-    # Load tokenizer for chat template application
-    tokenizer = AutoTokenizer.from_pretrained(TEST_MODEL_ID)
+    # Serialize model downloads across xdist workers
+    lock_path = tmp_path_factory.getbasetemp().parent / "hf_download.lock"
+    with FileLock(str(lock_path)):
+        tokenizer = AutoTokenizer.from_pretrained(TEST_MODEL_ID)
 
     seeds = [
         "test_seed_easy_01",
@@ -220,14 +241,6 @@ def sat_prompt_tokens(sat_prompts: list[str]) -> list[int]:
 
     tokenizer = AutoTokenizer.from_pretrained(TEST_MODEL_ID)
     return [tokenizer.encode(prompt, add_special_tokens=False) for prompt in sat_prompts]
-
-
-@pytest.fixture(scope="session")
-def tracker() -> CopycatTracker:
-    """CopycatTracker instance for testing."""
-    from grail.validation.copycat_service import CopycatTracker
-
-    return CopycatTracker()
 
 
 # ============================================================================
@@ -271,35 +284,52 @@ def seeded_torch_env(monkeypatch: pytest.MonkeyPatch) -> None:
     torch.backends.cudnn.deterministic = True
 
 
-@pytest.fixture
-def tiny_qwen_model_and_tokenizer() -> tuple[Any, Any]:
-    """Load Qwen 1.5B model and tokenizer, ensure pad_token_id is set.
+@pytest.fixture(scope="session")
+def _cached_qwen_model_and_tokenizer(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[Any, Any]:
+    """Session-scoped: load Qwen 1.5B model and tokenizer once per worker.
 
-    Uses a small model suitable for fast CPU-based testing. Lazy-loads
-    to avoid slow imports in unrelated tests.
-
-    Returns:
-        Tuple of (model, tokenizer)
+    Uses a filelock to prevent concurrent HuggingFace cache corruption
+    when running under pytest-xdist (multiple workers downloading simultaneously).
     """
+    from filelock import FileLock
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     model_name = "Qwen/Qwen2.5-1.5B"
 
-    # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token_id = tokenizer.eos_token_id
+    # Serialize model downloads across xdist workers
+    lock_path = tmp_path_factory.getbasetemp().parent / "hf_download.lock"
+    with FileLock(str(lock_path)):
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    # Load model on CPU
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        trust_remote_code=True,
-        torch_dtype="auto",
-        device_map="cpu",
-    )
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            trust_remote_code=True,
+            torch_dtype="auto",
+            device_map="cpu",
+        )
+
     model.eval()
 
     return model, tokenizer
+
+
+@pytest.fixture
+def tiny_qwen_model_and_tokenizer(
+    _cached_qwen_model_and_tokenizer: tuple[Any, Any],
+) -> tuple[Any, Any]:
+    """Per-test: return a deep copy of the cached model so training tests can't leak state.
+
+    The tokenizer is immutable so it's shared directly. The model is deepcopied
+    (~0.5s) instead of reloaded from disk (~15s).
+    """
+    import copy
+
+    model, tokenizer = _cached_qwen_model_and_tokenizer
+    return copy.deepcopy(model), tokenizer
 
 
 @pytest.fixture
@@ -309,12 +339,13 @@ def monkeypatch_trainer_constants(monkeypatch: pytest.MonkeyPatch) -> None:
     Shrinks batch size, max length, and gradient accumulation steps
     to speed up test execution while maintaining correctness.
     """
-    import grail.shared.constants as constants
+    import grail.protocol.constants as proto_constants
+    import grail.shared.config as config_constants
 
-    monkeypatch.setattr(constants, "TRAINER_MAX_LENGTH", 256)
-    monkeypatch.setattr(constants, "TRAINER_MICRO_BATCH_SIZE", 4)
-    monkeypatch.setattr(constants, "TRAINER_GRAD_ACCUM_STEPS", 2)
-    monkeypatch.setattr(constants, "ROLLOUTS_PER_PROBLEM", 4)
+    monkeypatch.setattr(config_constants, "TRAINER_MAX_LENGTH", 256)
+    monkeypatch.setattr(config_constants, "TRAINER_MICRO_BATCH_SIZE", 4)
+    monkeypatch.setattr(config_constants, "TRAINER_GRAD_ACCUM_STEPS", 2)
+    monkeypatch.setattr(proto_constants, "ROLLOUTS_PER_PROBLEM", 4)
 
 
 @pytest.fixture

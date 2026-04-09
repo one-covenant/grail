@@ -132,7 +132,7 @@ async def test_training_epoch() -> None:
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     algo = GRPOAlgorithm()
-    train_cfg = TrainingConfig(lr=1e-3, batch_size=4)
+    train_cfg = TrainingConfig(lr=1e-3, micro_batch_size=4)
 
     metrics = await algo.train_epoch(
         model=model,
@@ -214,7 +214,7 @@ async def test_training_with_gpu() -> None:
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     algo = GRPOAlgorithm()
-    train_cfg = TrainingConfig(lr=1e-3, batch_size=8)
+    train_cfg = TrainingConfig(lr=1e-3, micro_batch_size=8)
 
     metrics = await algo.train_epoch(
         model=model,

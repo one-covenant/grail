@@ -64,6 +64,13 @@ from grail.trainer.analysis import (  # noqa: E402
     ModelAnalysisManager,
 )
 
+# Import shared callbacks
+from callbacks import (  # noqa: E402
+    DeltaCheckpointCallback,
+    SparsityCallback,
+    get_profiler,
+)
+
 # Import from train_trl_grpo.py for shared utilities
 from train_trl_grpo import (  # noqa: E402
     QWEN_CHAT_TEMPLATE,
@@ -77,13 +84,6 @@ from train_trl_grpo import (  # noqa: E402
     get_gradient_checkpointing_kwargs,
     prepare_eval_dataset,
     print_memory_estimate,
-)
-
-# Import shared callbacks
-from callbacks import (  # noqa: E402
-    DeltaCheckpointCallback,
-    SparsityCallback,
-    get_profiler,
 )
 
 # ════════════════════════════════════════════════════════════════════════════

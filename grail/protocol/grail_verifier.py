@@ -8,7 +8,7 @@ Key innovations:
 2. Logarithmic bucketing: Coarse quantization reduces sensitivity
 3. Sketch verification: Random linear projection for cryptographic binding
 
-Security: ~10^-234 forgery probability across k=32 positions with sketch-only verification.
+Security: ~10^-167 forgery probability across K=32 challenged positions with sketch-only verification.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import math
 
 import torch
 
-from ..shared.constants import (
+from .constants import (
     PRIME_Q,
     PROOF_COEFF_RANGE,
     PROOF_NUM_BUCKETS,
@@ -140,9 +140,10 @@ def adaptive_sketch_tolerance(
     The tolerance follows the same sqrt model so it tracks the actual drift:
         tolerance = base + growth * sqrt(position)
 
-    Security is not affected: even at tolerance=300 (pos=8000), a cheater
-    with wrong hidden states (expected sketch diff ~1600) has < 10^-23
-    probability of passing all 32 challenged positions.
+    Security: at tolerance=6452 (pos=8192), forgery probability is 10^-166
+    per challenged position set (K=32). Cross-GPU empirical max diff across
+    6 models (Qwen2.5, Qwen3, Llama-3.2) and 3 GPUs (B200, A100, L40) was
+    3979, well within the base tolerance of 6000 (50% headroom).
 
     Args:
         position: Token position in sequence
@@ -158,7 +159,7 @@ class GRAILVerifier:
     """Sketch-based verifier for framework-agnostic hidden state proofs.
 
     Uses a single sketch check (random linear projection of bucketed top-k activations)
-    which provides sufficient security (~10^-234 forgery probability) while being
+    which provides sufficient security (~10^-167 forgery probability) while being
     robust to floating-point variations across GPUs and frameworks.
     """
 
@@ -231,6 +232,11 @@ class GRAILVerifier:
         abs_hidden = torch.abs(hidden_state)
         topk_result = torch.topk(abs_hidden, k=self.topk)
         indices = topk_result.indices  # [topk]
+
+        # Sort by index position for order-invariant sketch (v3).
+        # Rank-ordering caused batch-size sensitivity: near-tied activations
+        # swap ranks under different GEMM tiling, producing sketch drift.
+        indices, _ = torch.sort(indices)
         values = hidden_state[indices]  # [topk] with signs preserved
 
         # Step 2: Logarithmic bucketing
@@ -264,8 +270,11 @@ class GRAILVerifier:
         # Step 1: Batched top-k selection
         abs_h = h_layer.abs()  # [seq_len, hidden_dim]
         _, topk_indices = torch.topk(abs_h, k=self.topk, dim=1)  # [seq_len, topk]
-        signed_values = torch.gather(h_layer, dim=1, index=topk_indices)  # [seq_len, topk]
         del abs_h
+
+        # Sort by index position for order-invariant sketch (v3)
+        topk_indices, _ = torch.sort(topk_indices, dim=1)
+        signed_values = torch.gather(h_layer, dim=1, index=topk_indices)  # [seq_len, topk]
 
         # Step 2: Vectorized log-magnitude bucketing (float64 for precision match)
         buckets = log_magnitude_bucket_vectorized(signed_values, self.num_buckets)
@@ -273,9 +282,9 @@ class GRAILVerifier:
         del signed_values
 
         # Step 3: Batched sketch via matrix-vector product
-        # Max |dot| = topk * 7 * 127 = 28,448 — fits in int32, but CUDA
+        # Max |dot| = topk * 7 * 127 = 14,224 (topk=16) — fits in int32, but CUDA
         # doesn't support int matmul ("addmv_impl_cuda" not implemented for 'Int').
-        # Use float32 — exact for integers up to 2^24 (our max is 28,448).
+        # Use float32 — exact for integers up to 2^24 (our max is 14,224).
         buckets_f = buckets.to(torch.float32)
         r_vec_f = r_vec.to(torch.float32).to(buckets_f.device)
         sketches = (buckets_f @ r_vec_f).to(torch.int64)  # [seq_len]
@@ -318,7 +327,8 @@ class GRAILVerifier:
         # Independently compute top-k on validator's own hidden state
         abs_hidden = torch.abs(validator_hidden)
         topk_result = torch.topk(abs_hidden, k=self.topk)
-        validator_values = validator_hidden[topk_result.indices]
+        indices, _ = torch.sort(topk_result.indices)
+        validator_values = validator_hidden[indices]
 
         # Compute validator's buckets
         validator_buckets = torch.tensor(

@@ -2,8 +2,8 @@
 """Deploy only the Qwen models."""
 
 import asyncio
-import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 from lium_manager import LiumInfra, PodSpec

@@ -18,7 +18,7 @@ The subnet switches between two scoring modes depending on network conditions. T
 
 ### Capped Mode (current default)
 
-Each miner's unique rollouts are capped at `UNIQUE_ROLLOUTS_CAP` (2,500) per window, with a period cap of 2,500 x 12 = 30,000 over the rolling submission interval.
+Each miner's unique rollouts are capped at `UNIQUE_ROLLOUTS_CAP` (5,000) per window, with a period cap of 5,000 x 12 = 60,000 over the rolling submission interval.
 
 Scoring:
 
@@ -29,7 +29,7 @@ weight = score / (period_cap ^ SUPERLINEAR_EXPONENT)
 
 Producing more than the cap gives no additional weight. Producing less than the cap gives proportionally less, and the "missing" weight goes to burn rather than being redistributed to other miners.
 
-The burn mechanism works as follows. 80% of total emissions always go to the burn UID (UID 0). The remaining 20% is split among miners proportionally to their cap achievement. If miners collectively produce below the cap, the unallocated portion of that 20% also goes to burn. For example, a miner at 50% of cap gets `0.20 x 0.50 = 0.10` (10%) of emissions, with the remaining 90% going to burn.
+The burn mechanism works as follows. 90% of total emissions always go to the burn UID (UID 0). The remaining 10% is split among miners proportionally to their cap achievement. If miners collectively produce below the cap, the unallocated portion of that 10% also goes to burn. For example, a miner at 50% of cap gets `0.10 x 0.50 = 0.05` (5%) of emissions, with the remaining 95% going to burn.
 
 ### Uncapped Mode
 
@@ -40,11 +40,11 @@ score = unique_rollouts ^ SUPERLINEAR_EXPONENT
 weight = score / sum(all_scores)
 ```
 
-Producing more rollouts yields proportionally more weight. Burn is fixed at 80% regardless of production level, miners always split the remaining 20%.
+Producing more rollouts yields proportionally more weight. Burn is fixed at 90% regardless of production level, miners always split the remaining 10%.
 
 ### What This Means for Miners
 
-- **Capped mode**: Target 2,500 unique rollouts per window. Going above yields nothing, going below costs you proportionally. Optimize for consistency across windows, not peak throughput.
+- **Capped mode**: Target 5,000 unique rollouts per window. Going above yields nothing, going below costs you proportionally. Optimize for consistency across windows, not peak throughput.
 - **Uncapped mode**: Maximize throughput. More unique rollouts = more weight, no ceiling.
 - **Both modes**: The superlinear exponent (4.0) heavily amplifies differences. A miner with 2x the unique rollouts of another gets 2^4 = 16x the weight. This also makes sybil splitting unprofitable: splitting into k identities yields k^(1-4) of the total reward.
 
@@ -92,19 +92,19 @@ How it works:
 
 1. The validator picks 32 random positions (`CHALLENGE_K = 32`) in the completion.
 2. At each position, the model's hidden activations at the last layer are extracted.
-3. The top 32 activations (`PROOF_TOPK = 32`) are selected and mapped into logarithmic buckets (8 buckets per sign, 16 total).
+3. The top 16 activations (`PROOF_TOPK = 16`) are selected and mapped into logarithmic buckets (8 buckets per sign, 16 total).
 4. A random linear projection (sketch) is computed over the bucketed values modulo a Mersenne prime (2^31 - 1).
 5. The validator recomputes this independently and compares against the miner's commitment.
 
 Tolerance is position-dependent to account for floating-point drift in causal attention:
 
 ```
-tolerance(pos) = 30 + 3.0 * sqrt(pos)
+tolerance(pos) = 6000 + 5.0 * sqrt(pos)
 ```
 
 Early positions have tight tolerance, later positions allow more drift. The bucketing (coarse quantization) makes the proof robust across different backends (vLLM, HuggingFace, SGLang) and CUDA versions while remaining cryptographically binding.
 
-Both miner and validator use SDPA (Scaled Dot-Product Attention) by default, not Flash Attention, to ensure consistent floating-point accumulation.
+Both miner and validator use Flash Attention 2 (`ATTN_IMPLEMENTATION = "flash_attention_2"`) to ensure consistent, padding-invariant floating-point accumulation across batch sizes.
 
 ---
 
@@ -139,17 +139,17 @@ This means a single bad window can zero your weight for ~1.4 hours. Consistent, 
 |----------|-------|-------------|
 | `WINDOW_LENGTH` | 30 blocks | ~6 minutes per window |
 | `ROLLOUTS_PER_PROBLEM` | 16 | GRPO group size |
-| `MAX_NEW_TOKENS` | 8192 | Maximum completion length |
-| `UNIQUE_ROLLOUTS_CAP` | 2,500 | Per-window cap (capped mode) |
+| `MAX_NEW_TOKENS_PROTOCOL_CAP` | 8192 | Hard upper bound on completion length (immutable). Trainer's per-checkpoint `max_tokens` is the actual operating limit. |
+| `UNIQUE_ROLLOUTS_CAP` | 5,000 | Per-window cap (capped mode) |
 | `SUPERLINEAR_EXPONENT` | 4.0 | Weight amplification exponent |
-| `GRAIL_BURN_PERCENTAGE` | 80% | Base emissions to burn UID |
+| `GRAIL_BURN_PERCENTAGE` | 90% | Base emissions to burn UID |
 | `GRAIL_BURN_UID` | 0 | Burn destination |
 | `WEIGHT_ROLLING_WINDOWS` | 12 | Windows per submission interval |
 | `CHALLENGE_K` | 32 | Proof challenge positions |
-| `PROOF_TOPK` | 32 | Activations per position |
+| `PROOF_TOPK` | 16 | Activations per position |
 | `PROOF_NUM_BUCKETS` | 8 | Log-magnitude buckets per sign |
-| `PROOF_SKETCH_TOLERANCE_BASE` | 30 | Base FP tolerance |
-| `PROOF_SKETCH_TOLERANCE_GROWTH` | 3.0 | Sqrt-growth tolerance factor |
+| `PROOF_SKETCH_TOLERANCE_BASE` | 6000 | Base FP tolerance |
+| `PROOF_SKETCH_TOLERANCE_GROWTH` | 5.0 | Sqrt-growth tolerance factor |
 | `SAMPLE_RATE` | 10% | Rollout spot-check fraction |
 | `MAX_SAMPLES_PER_MINER` | 64 | Max rollouts checked per miner per window |
 | `MINER_SAMPLE_RATE` | 25% | Fraction of miners checked per window |

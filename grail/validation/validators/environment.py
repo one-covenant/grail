@@ -4,18 +4,19 @@ from __future__ import annotations
 
 import logging
 import math
+from statistics import median
 
 import torch
 
 from ...environments.registry import get_adapter
-from ...protocol.crypto import indices_from_root_in_range
-from ...protocol.signatures import derive_env_seed
-from ...shared.constants import (
+from ...protocol.constants import (
     CHALLENGE_K,
     CURRENT_ENV_ID,
     REWARD_ABS_TOL,
     REWARD_REL_TOL,
 )
+from ...protocol.crypto import indices_from_root_in_range
+from ...protocol.signatures import derive_env_seed
 from ..base import Validator
 from ..context import ValidationContext
 
@@ -253,11 +254,26 @@ class RewardValidator(Validator):
 
 
 class LogprobValidator(Validator):
+    """Validate miner-claimed logprobs via a robust median IS-ratio check.
+
+    Over the K=32 cryptographically chosen completion positions, computes the
+    per-position importance-sampling deviation
+        dev_i = exp(|model_lp_i - miner_lp_i|) - 1
+    and rejects the rollout iff ``median(dev_i) > LOGPROB_IS_EPS``.
+
+    The median is robust to a handful of bf16-noise outliers while still
+    rejecting miners whose distribution diverges meaningfully from the
+    canonical model. Empirically (430k honest cross-GPU/cross-attn/cross-batch
+    trials, 0% FP) ``LOGPROB_IS_EPS=0.10`` leaves ~50% headroom over the worst
+    observed honest pair (max median dev = 0.066).
+    """
+
     check_name = "logprobs_valid"
     severity = "hard"
 
-    LOGPROB_ABS_TOL = 1e-3
-    LOGPROB_REL_TOL = 0.02
+    # Maximum allowed median importance-sampling deviation per K-sample.
+    # Equivalent PPO ratio bound is ``1 + LOGPROB_IS_EPS``.
+    LOGPROB_IS_EPS = 0.10
 
     def validate(self, ctx: ValidationContext) -> bool:
         try:
@@ -267,16 +283,15 @@ class LogprobValidator(Validator):
                 ctx.checks[self.check_name] = False
                 return False
 
-            # Use cached logits from proof validator
-            logits = ctx.cached_logits  # shape [seq_len, vocab]
             tokens = ctx.commit.get("tokens", [])
             prompt_len = int(rollout.get("prompt_length", 0))
             completion_len = int(rollout.get("completion_length", 0))
 
-            # Enforce minimum completion length
+            # Enforce minimum completion length so the K=32 challenge fits
             if completion_len < CHALLENGE_K:
                 logger.debug(
-                    "[logprobs_valid] Completion too short | required>=%d got=%d | prompt_len=%d seq_len=%d",
+                    "[logprobs_valid] Completion too short | required>=%d got=%d "
+                    "| prompt_len=%d seq_len=%d",
                     CHALLENGE_K,
                     completion_len,
                     prompt_len,
@@ -285,23 +300,23 @@ class LogprobValidator(Validator):
                 ctx.checks[self.check_name] = False
                 return False
 
-            if logits is None:
-                logger.debug(
-                    "[logprobs_valid] No cached logits available so we set the checks to False for now. (Investigate why this is happening.)"
-                )
-                ctx.checks[self.check_name] = False
-                return False
-
-            # Miner expect to generate token_logprobs as: [0.0] * prompt_len + logprobs
-            # So len(claimed) should equal len(tokens) = prompt_len + completion_len
+            # Miner emits token_logprobs as [0.0] * prompt_len + completion_lps
             if len(claimed) != len(tokens):
                 logger.debug(
-                    "Logprob length mismatch: expected %d, got %d", len(tokens), len(claimed)
+                    "[logprobs_valid] Length mismatch: expected %d, got %d",
+                    len(tokens),
+                    len(claimed),
                 )
                 ctx.checks[self.check_name] = False
                 return False
 
-            # Choose deterministic challenge indices restricted to completion slice
+            logits = ctx.cached_logits  # [seq_len, vocab] on CPU; may be None
+            precomputed = ctx.precomputed_logprobs
+            if logits is None and precomputed is None:
+                logger.debug("[logprobs_valid] No cached logits or precomputed logprobs available")
+                ctx.checks[self.check_name] = False
+                return False
+
             challenged_idxs = indices_from_root_in_range(
                 tokens,
                 ctx.challenge_randomness,
@@ -310,63 +325,47 @@ class LogprobValidator(Validator):
                 CHALLENGE_K,
             )
 
-            # Debug: challenge selection overview
-            logger.debug(
-                ("VALIDATOR LOGPROB CHALLENGE: completion_len=%d selected=%d"),
-                completion_len,
-                len(challenged_idxs),
+            devs = self._compute_devs(
+                challenged_idxs=challenged_idxs,
+                tokens=tokens,
+                claimed=claimed,
+                logits=logits,
+                precomputed=precomputed,
             )
-            if challenged_idxs:
-                preview = challenged_idxs[: min(5, len(challenged_idxs))]
-                logger.debug("Challenged completion indices (abs): %s", preview)
 
-            # logits correspond to next-token scores; align per-generation index
-            mismatches = 0
-            total = len(challenged_idxs)
-            first_mismatch_details = None
-            precomputed = ctx.precomputed_logprobs
-
-            for abs_idx in challenged_idxs:
-                if precomputed is not None and abs_idx in precomputed:
-                    model_lp = precomputed[abs_idx]
-                else:
-                    # Fallback: compute per-position log_softmax
-                    pos = abs_idx - 1
-                    if pos < 0 or pos >= logits.size(0):
-                        continue
-                    dist = torch.log_softmax(logits[pos].float(), dim=-1)
-                    model_lp = float(dist[tokens[abs_idx]].item())
-
-                miner_lp = float(claimed[abs_idx])
-                if not self._close_lp(model_lp, miner_lp):
-                    mismatches += 1
-                    if first_mismatch_details is None:
-                        first_mismatch_details = {
-                            "abs_index": abs_idx,
-                            "rel_index": abs_idx - prompt_len,
-                            "token_id": tokens[abs_idx],
-                            "model_lp": model_lp,
-                            "miner_lp": miner_lp,
-                            "diff": abs(model_lp - miner_lp),
-                        }
-
-            # Soft check: allow some noise
-            ok = mismatches <= max(1, total // 10)
-            ctx.metadata["logprob_mismatches"] = mismatches
-            ctx.metadata["logprob_total"] = total
-
-            if not ok and first_mismatch_details:
+            # Fail closed if any challenged position could not be resolved.
+            if devs is None or len(devs) != CHALLENGE_K:
+                resolved = -1 if devs is None else len(devs)
                 logger.debug(
-                    "Logprob validation failed: %d/%d mismatches. First mismatch at abs %d (rel %d): "
-                    "token=%d, model_lp=%.6f, miner_lp=%.6f, diff=%.6f",
-                    mismatches,
-                    total,
-                    first_mismatch_details["abs_index"],
-                    first_mismatch_details["rel_index"],
-                    first_mismatch_details["token_id"],
-                    first_mismatch_details["model_lp"],
-                    first_mismatch_details["miner_lp"],
-                    first_mismatch_details["diff"],
+                    "[logprobs_valid] Could not resolve all challenged positions "
+                    "| resolved=%d expected=%d",
+                    resolved,
+                    CHALLENGE_K,
+                )
+                ctx.checks[self.check_name] = False
+                return False
+
+            median_dev = median(devs)
+            max_dev = max(devs)
+            ok = median_dev <= self.LOGPROB_IS_EPS
+
+            ctx.metadata["logprob_median_dev"] = median_dev
+            ctx.metadata["logprob_max_dev"] = max_dev
+            ctx.metadata["logprob_total"] = len(devs)
+
+            if not ok:
+                worst_idx = max(range(len(devs)), key=devs.__getitem__)
+                worst_abs = challenged_idxs[worst_idx]
+                logger.debug(
+                    "[logprobs_valid] FAIL median_dev=%.6f max_dev=%.6f eps=%.4f "
+                    "| worst pos=%d (rel=%d) token=%d miner_lp=%.6f",
+                    median_dev,
+                    max_dev,
+                    self.LOGPROB_IS_EPS,
+                    worst_abs,
+                    worst_abs - prompt_len,
+                    tokens[worst_abs],
+                    float(claimed[worst_abs]),
                 )
 
             ctx.checks[self.check_name] = ok
@@ -376,8 +375,29 @@ class LogprobValidator(Validator):
             ctx.checks[self.check_name] = False
             return False
 
-    def _close_lp(self, a: float, b: float) -> bool:
-        if abs(a - b) <= self.LOGPROB_ABS_TOL:
-            return True
-        denom = max(1e-6, abs(a))
-        return abs(a - b) / denom <= self.LOGPROB_REL_TOL
+    @staticmethod
+    def _compute_devs(
+        *,
+        challenged_idxs: list[int],
+        tokens: list[int],
+        claimed: list[float],
+        logits: torch.Tensor | None,
+        precomputed: dict[int, float] | None,
+    ) -> list[float] | None:
+        """Return per-position IS deviation ``exp(|Δlp|) - 1`` or ``None`` on failure."""
+        devs: list[float] = []
+        for abs_idx in challenged_idxs:
+            if precomputed is not None and abs_idx in precomputed:
+                model_lp = precomputed[abs_idx]
+            else:
+                if logits is None:
+                    return None
+                pos = abs_idx - 1
+                if pos < 0 or pos >= logits.size(0):
+                    return None
+                dist = torch.log_softmax(logits[pos].float(), dim=-1)
+                model_lp = float(dist[tokens[abs_idx]].item())
+
+            miner_lp = float(claimed[abs_idx])
+            devs.append(math.exp(abs(model_lp - miner_lp)) - 1.0)
+        return devs

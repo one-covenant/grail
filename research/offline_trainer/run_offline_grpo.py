@@ -66,10 +66,14 @@ def _initialize_monitoring(cfg: DictConfig) -> Any | None:
         return None
 
     logger.info("Initializing monitoring system (WandB enabled)")
+    wandb_cfg = cfg.logging.wandb
+    tags = list(wandb_cfg.get("tags", [])) or ["offline_trainer", "grpo", str(cfg.data.environment)]
     monitoring_config = MonitoringConfig.for_training()
     monitoring_config.update(
         {
-            "tags": ["offline_trainer", "grpo", str(cfg.data.environment)],
+            "project": str(wandb_cfg.get("project", "grail-offline")),
+            "entity": str(wandb_cfg.get("entity", "tplr")),
+            "tags": tags,
             "hyperparameters": {
                 "model": str(cfg.model.train_id),
                 "environment": str(cfg.data.environment),
@@ -83,6 +87,12 @@ def _initialize_monitoring(cfg: DictConfig) -> Any | None:
             },
         }
     )
+    run_name = wandb_cfg.get("run_name", None)
+    if run_name:
+        monitoring_config["run_name"] = str(run_name)
+    notes = wandb_cfg.get("notes", None)
+    if notes:
+        monitoring_config["notes"] = str(notes)
     backend_type = monitoring_config.pop("backend_type", "wandb")
     initialize_monitoring(backend_type=backend_type, **monitoring_config)
     return get_monitoring_manager()

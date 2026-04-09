@@ -14,6 +14,8 @@ Uses pytest best practices:
 - Clear test names
 """
 
+import pytest
+
 from grail.validation.copycat_service import COPYCAT_SERVICE, COPYCAT_TRACKER, CopycatService
 
 
@@ -136,6 +138,7 @@ class TestRolloutFiltering:
         assert filtered[0]["list"] == [1, 2, 3]
 
 
+@pytest.mark.serial
 class TestServiceIntegration:
     """Test service integration with global tracker."""
 

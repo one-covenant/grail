@@ -95,20 +95,23 @@ Run trainer + validator + miner locally for end-to-end testing.
    CUDA_VISIBLE_DEVICES=2 grail -vv validate --test-mode > validate.log 2>&1 &
    ```
 
-   For **Triton Kernel environment** (miner needs 2+ GPUs for pipeline mode):
+   The pipelined miner is mandatory and needs at least 2 GPUs (one for SGLang
+   generation, one for HF proofs):
    ```bash
-   # Miner: GPU 0 decoding, GPU 1 proofs (pipeline), GPU 2 kernel eval (physical index)
-   CUDA_VISIBLE_DEVICES=0,1 GRAIL_GPU_EVAL=true KERNEL_EVAL_GPU_IDS=2 \
-     GRAIL_PIPELINE_ENABLED=true GRAIL_PIPELINE_BACKEND=vllm \
+   # Miner: GPU 0 SGLang, GPU 1 proofs
+   CUDA_VISIBLE_DEVICES=0,1 \
+     GRAIL_PIPELINE_BACKEND=sglang \
      GRAIL_PIPELINE_VLLM_GPU=0 GRAIL_PIPELINE_PROOF_GPU=1 \
      grail -vv mine > mine.log 2>&1 &
 
-   # Validator on a separate GPU, with its own kernel eval GPU
-   CUDA_VISIBLE_DEVICES=3 KERNEL_EVAL_GPU_IDS=4 \
+   # Validator on a separate GPU
+   CUDA_VISIBLE_DEVICES=2 \
      grail -vv validate --test-mode > validate.log 2>&1 &
    ```
-   > **Note:** `KERNEL_EVAL_GPU_IDS` uses **physical** GPU indices (as shown by `nvidia-smi`).
-   > `GRAIL_PIPELINE_VLLM_GPU` and `GRAIL_PIPELINE_PROOF_GPU` are **relative** to `CUDA_VISIBLE_DEVICES`.
+   > **Note:** `GRAIL_PIPELINE_VLLM_GPU` and `GRAIL_PIPELINE_PROOF_GPU` are
+   > **relative** to `CUDA_VISIBLE_DEVICES`. The miner exits with a clear
+   > `ProtocolViolationError` at startup if either index exceeds the visible
+   > device count.
 
 **Why this is harder:**
 - Requires multiple GPUs

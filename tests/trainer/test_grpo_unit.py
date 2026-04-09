@@ -309,7 +309,7 @@ class TestGRPOGroupValidation:
 
     def test_valid_group(self, monkeypatch_trainer_constants: None) -> None:
         """Test valid group with correct count and zero-sum advantages."""
-        from grail.shared.constants import ROLLOUTS_PER_PROBLEM
+        from grail.protocol.constants import ROLLOUTS_PER_PROBLEM
 
         rollouts = [
             GRPORollout(

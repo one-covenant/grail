@@ -21,7 +21,8 @@ from safetensors.torch import load_file, save_file
 from tqdm import tqdm  # type: ignore[import-untyped]
 from transformers import AutoModelForCausalLM
 
-from ..shared.constants import UPLOAD_TIMEOUT, WINDOW_LENGTH
+from ..protocol.constants import WINDOW_LENGTH
+from ..shared.config import UPLOAD_TIMEOUT
 from ..shared.schemas import Bucket, BucketCredentials
 
 logger = logging.getLogger(__name__)
@@ -530,7 +531,7 @@ async def upload_file_chunked(
         )
         return True
 
-    except asyncio.TimeoutError as e:
+    except TimeoutError as e:
         logger.error(f"❌ Upload timeout for {key} after {upload_timeout}s: {e}")
         if client is not None and upload_id is not None:
             try:
@@ -615,7 +616,7 @@ async def _upload_single_chunk(
             )
             progress.update(len(data))
             return True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             if attempt < max_retries - 1:
                 wait_time = await _exponential_backoff(attempt, max_retries)
                 logger.warning(
@@ -678,7 +679,7 @@ async def _upload_chunk_with_semaphore(
                 )
                 progress.update(len(data))
                 return {"PartNumber": part_number, "ETag": response["ETag"]}
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 if attempt < max_retries - 1:
                     wait_time = await _exponential_backoff(attempt, max_retries)
                     logger.warning(
@@ -1646,7 +1647,7 @@ async def upload_model_to_huggingface(
     Returns:
         True if upload succeeded, False otherwise
     """
-    from grail.shared.constants import HF_TOKEN, HF_USERNAME
+    from grail.shared.config import HF_TOKEN, HF_USERNAME
 
     if not HF_TOKEN:
         logger.error("HF_TOKEN not set. Cannot upload model to HuggingFace.")

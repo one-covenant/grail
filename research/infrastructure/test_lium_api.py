@@ -3,9 +3,8 @@
 
 import inspect
 import json
-from typing import Any
 
-from lium import Lium, Config
+from lium import Config, Lium
 
 
 def test_lium_methods() -> None:
@@ -43,7 +42,7 @@ def test_executor_fields() -> None:
         if executors:
             executor = executors[0]
             print(f"\nSample Executor: {executor.huid}")
-            print(f"Available attributes:")
+            print("Available attributes:")
             for attr in dir(executor):
                 if not attr.startswith("_"):
                     try:
@@ -53,7 +52,7 @@ def test_executor_fields() -> None:
                     except Exception:
                         pass
 
-            print(f"\nExecutor specs structure:")
+            print("\nExecutor specs structure:")
             print(json.dumps(executor.specs, indent=2, default=str))
 
     except Exception as e:
@@ -74,7 +73,7 @@ def test_pod_info_fields() -> None:
         if pods:
             pod = pods[0]
             print(f"\nSample Pod: {pod.name}")
-            print(f"Available attributes:")
+            print("Available attributes:")
             for attr in dir(pod):
                 if not attr.startswith("_"):
                     try:

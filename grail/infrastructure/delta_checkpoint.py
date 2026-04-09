@@ -14,12 +14,12 @@ bit-exact results without precision loss from add operations.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import math
 from typing import Any
 
 import torch
+import xxhash
 
 logger = logging.getLogger(__name__)
 
@@ -173,82 +173,58 @@ def apply_sparse_delta(
 
 
 def compute_weights_hash(state_dict: dict[str, torch.Tensor]) -> str:
-    """Compute deterministic hash of all weights for verification.
+    """Deterministic xxh3-128 hash of all weights for verification.
 
-    Uses sorted keys and raw bytes for reproducibility.
-    The hash covers parameter names and their byte representations.
+    NOT a cryptographic boundary. This hash is purely for detecting
+    download / reconstruction / load corruption between trainer publish and
+    miner/validator consumption. Trust in the checkpoint contents is
+    established by R2 access control, not by this digest.
+
+    Determinism guarantees:
+    - xxh3-128 digest format frozen since xxhash v0.8.0 (2020) — same input
+      bytes produce the same digest across CPU architectures and across
+      ``xxhash`` Python package versions >= 3.0.
+    - Sorted parameter ordering is deterministic across Python dict insertion
+      orders.
+    - GIL is released for the inner ``update()`` call so future parallelization
+      with ``concurrent.futures.ThreadPoolExecutor`` is trivial if profiling
+      shows ``.cpu().contiguous()`` is no longer the bottleneck.
 
     Args:
-        state_dict: Model state dict to hash
+        state_dict: Model state dict to hash.
 
     Returns:
-        SHA256 hex digest of all weights
+        32-character hex digest (128 bits).
     """
-    hasher = hashlib.sha256()
-
-    # Log input state info for debugging
-    sample_dtypes: dict[str, int] = {}
-    total_bytes = 0
-
+    hasher = xxhash.xxh3_128()
     for name in sorted(state_dict.keys()):
-        tensor = state_dict[name]
-        # Convert to contiguous CPU bytes in a deterministic way.
-        #
-        # Note: torch.bfloat16 tensors cannot be converted to numpy directly.
-        # We instead reinterpret the underlying storage as uint8 bytes.
-        tensor_cpu = tensor.detach().cpu().contiguous()
-        tensor_bytes = tensor_cpu.view(torch.uint8).numpy().tobytes()
-
-        # Track dtype distribution for debugging
-        dtype_str = str(tensor_cpu.dtype)
-        sample_dtypes[dtype_str] = sample_dtypes.get(dtype_str, 0) + 1
-        total_bytes += len(tensor_bytes)
-
-        # Hash both name and tensor bytes
-        hasher.update(name.encode("utf-8"))
-        hasher.update(str(tensor_cpu.dtype).encode("utf-8"))
-        hasher.update(str(tuple(tensor_cpu.shape)).encode("utf-8"))
-        hasher.update(tensor_bytes)
-
-    result_hash = hasher.hexdigest()
-
-    logger.debug(
-        "[compute_weights_hash] Computed hash: %s... | params=%d | bytes=%d | dtypes=%s",
-        result_hash[:16],
-        len(state_dict),
-        total_bytes,
-        sample_dtypes,
-    )
-
-    return result_hash
+        tensor = state_dict[name].detach().cpu().contiguous()
+        # Zero-copy: memoryview over the numpy buffer, no .tobytes() materialization.
+        hasher.update(memoryview(tensor.view(torch.uint8).numpy()))
+    return hasher.hexdigest()
 
 
 def verify_weights_hash(
     state_dict: dict[str, torch.Tensor],
     expected_hash: str,
 ) -> bool:
-    """Verify that state dict matches expected hash.
+    """Verify that state dict matches expected xxh3-128 hash.
 
     Args:
-        state_dict: Model state dict to verify
-        expected_hash: Expected SHA256 hex digest
+        state_dict: Model state dict to verify.
+        expected_hash: Expected xxh3-128 hex digest (32 chars).
 
     Returns:
-        True if hash matches, False otherwise
+        True if hash matches, False otherwise.
     """
     actual_hash = compute_weights_hash(state_dict)
     matches = actual_hash == expected_hash
 
     if not matches:
-        # Collect diagnostic info about the state
-        dtypes = {}
-        for name, tensor in list(state_dict.items())[:5]:  # Sample first 5
-            dtypes[name] = str(tensor.dtype)
-
+        dtypes = {name: str(tensor.dtype) for name, tensor in list(state_dict.items())[:5]}
         logger.error(
-            "[verify_weights_hash] HASH MISMATCH: expected=%s, got=%s | "
-            "params=%d | sample_dtypes=%s | "
-            "This usually indicates floating-point precision differences during reconstruction",
+            "[verify_weights_hash] HASH MISMATCH: expected=%s, got=%s | params=%d | "
+            "sample_dtypes=%s | check delta-apply correctness or storage corruption",
             expected_hash,
             actual_hash,
             len(state_dict),
@@ -256,8 +232,8 @@ def verify_weights_hash(
         )
     else:
         logger.debug(
-            "[verify_weights_hash] Hash verified: %s... | params=%d",
-            actual_hash[:16],
+            "[verify_weights_hash] Hash verified: %s | params=%d",
+            actual_hash,
             len(state_dict),
         )
 

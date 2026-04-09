@@ -21,13 +21,11 @@ from grail.infrastructure.chain import GrailChainManager
 from grail.infrastructure.checkpoint_consumer import default_checkpoint_cache_root
 from grail.model.provider import get_model, get_tokenizer
 from grail.model.train_loading import ModelLoadSpec
-from grail.shared.constants import (
-    CURRENT_ENV_ID,
+from grail.protocol.constants import CURRENT_ENV_ID, WINDOW_LENGTH
+from grail.shared.config import (
     NETUID,
     SNAPSHOT_POLL_INTERVAL_SECONDS,
-    TRAINER_USE_FLASH_ATTENTION,
     TRAINING_HEARTBEAT_TIMEOUT_SECONDS,
-    WINDOW_LENGTH,
 )
 from grail.trainer.checkpoint_publisher import CheckpointPublisher
 from grail.trainer.config import EvalConfig, TrainingConfig
@@ -193,7 +191,17 @@ class TrainerNeuron(BaseNeuron):
     # ────────────────────────────────────────────────────────────────────────────
 
     def _start_training_process(self) -> None:
-        """Spawn training process for continuous training."""
+        """Spawn training process(es) for continuous training.
+
+        Checks ``GRAIL_DIST_NPROC`` env var.  If > 1, spawns N distributed
+        training processes via ``run_distributed_training_process``.
+        Otherwise, spawns a single process via ``run_training_process``.
+        """
+        nproc = int(os.getenv("GRAIL_DIST_NPROC", "1"))
+        if nproc > 1:
+            self._start_distributed_training(nproc)
+            return
+
         wallet_args = self._serialize_wallet()
         monitor_config = self._prepare_monitor_config(subprocess_label="training_process")
 
@@ -214,6 +222,55 @@ class TrainerNeuron(BaseNeuron):
         )
         self._training_process.start()
         logger.info("Training process started (PID=%d)", self._training_process.pid)
+
+    def _start_distributed_training(self, nproc: int) -> None:
+        """Spawn N distributed training processes via multiprocessing.Process.
+
+        Each process receives the same ``IPCChannels`` object.  Only rank 0
+        interacts with IPC (heartbeat, stop, snapshots).  Other ranks follow
+        rank 0 via NCCL broadcast.
+
+        Evaluation is disabled in distributed mode (remote eval handles it).
+
+        Args:
+            nproc: Number of training processes (one per GPU).
+        """
+        from grail.trainer.distributed.config import DistributedConfig
+        from grail.trainer.distributed.launcher import run_distributed_training_process
+
+        # Disable local evaluation in distributed mode
+        self._eval_cfg.enabled = False
+        logger.info("Distributed training: nproc=%d, local evaluation disabled", nproc)
+
+        wallet_args = self._serialize_wallet()
+        monitor_config = self._prepare_monitor_config(subprocess_label="distributed_training")
+        dist_cfg = DistributedConfig.from_env()
+
+        self._distributed_processes: list[multiprocessing.Process] = []
+
+        for rank in range(nproc):
+            p = multiprocessing.Process(
+                target=run_distributed_training_process,
+                args=(
+                    rank,
+                    nproc,
+                    self._ipc,
+                    self._snapshot_manager,
+                    self._train_cfg,
+                    dist_cfg,
+                    self._context.credentials,
+                    wallet_args,
+                    monitor_config,
+                    self._context.verbosity,
+                    self._context.test_mode,
+                ),
+            )
+            p.start()
+            logger.info("Distributed rank %d started (PID=%d)", rank, p.pid)
+            self._distributed_processes.append(p)
+
+        # Point _training_process to rank 0 for health checks
+        self._training_process = self._distributed_processes[0]
 
     def _start_upload_worker(self) -> None:
         """Spawn upload worker process for async uploads."""
@@ -241,7 +298,13 @@ class TrainerNeuron(BaseNeuron):
 
         self._ipc.stop.set()
 
-        await self._shutdown_process(self._training_process, "Training")
+        # Shutdown distributed training processes (if any)
+        if hasattr(self, "_distributed_processes"):
+            for i, p in enumerate(self._distributed_processes):
+                await self._shutdown_process(p, f"Rank-{i}")
+        else:
+            await self._shutdown_process(self._training_process, "Training")
+
         await self._shutdown_process(self._upload_process, "Upload")
 
         logger.info("Child processes shut down")
@@ -353,7 +416,15 @@ class TrainerNeuron(BaseNeuron):
 
     async def _check_process_health(self) -> None:
         """Monitor training and upload process health."""
-        if self._training_process and not self._training_process.is_alive():
+        if hasattr(self, "_distributed_processes"):
+            for i, p in enumerate(self._distributed_processes):
+                if not p.is_alive():
+                    logger.error(
+                        "Distributed rank %d died (PID=%s) - system should restart",
+                        i,
+                        p.pid,
+                    )
+        elif self._training_process and not self._training_process.is_alive():
             logger.error("Training process died - system should restart")
 
         if self._upload_process and not self._upload_process.is_alive():
@@ -456,7 +527,7 @@ class TrainerNeuron(BaseNeuron):
         timeout = PAUSE_CONFIRMATION_TIMEOUT_SECONDS
 
         # Use Event.wait() with timeout in thread pool to avoid blocking event loop
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         while True:
             # Check for shutdown request
@@ -724,7 +795,6 @@ class TrainerNeuron(BaseNeuron):
                 str(snapshot_path),
                 device="cuda",
                 eval_mode=True,
-                use_flash_attention=TRAINER_USE_FLASH_ATTENTION,
             )
             logger.info(f"   ✓ Model loaded in {time.time() - model_start:.2f}s")
 

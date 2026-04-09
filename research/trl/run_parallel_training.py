@@ -435,7 +435,7 @@ class ProcessManager:
                 if i < len(self.gpu_pairs) - 1:  # Don't sleep after the last one
                     # Longer delay (45s) to ensure init_communicator completes fully
                     # before next instance starts (vLLM uses fire_and_forget async RPC)
-                    print(f"   ⏳ Waiting 45s for NCCL init before next instance...")
+                    print("   ⏳ Waiting 45s for NCCL init before next instance...")
                     time.sleep(45)
 
             print("\n✅ All training processes started!")

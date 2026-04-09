@@ -4,7 +4,7 @@ Get up and running with Lium infrastructure in 5 minutes.
 
 ## Prerequisites
 
-- Python 3.11+
+- Python 3.12+
 - SSH key for authentication
 - Lium account and API key
 - WandB account (optional, for tracking)

@@ -9,6 +9,7 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -58,7 +59,6 @@ def get_model(
     device: str | None = None,
     use_safetensors: bool = True,
     eval_mode: bool = True,
-    use_flash_attention: bool = False,
     checkpoint_window: int | None = None,
 ) -> Any:
     """Load model with consistent configuration.
@@ -68,8 +68,6 @@ def get_model(
         device: Target device (e.g., "cuda", "cuda:0", "cpu", or None for auto-detect)
         use_safetensors: Whether to prefer safetensors format
         eval_mode: Whether to set model to eval() mode
-        use_flash_attention: Whether to use Flash Attention 2 (requires flash-attn package).
-                            Only enabled for training, not for evaluation/inference.
         checkpoint_window: Optional checkpoint window number. If not provided, will be
                           extracted from metadata.json or parsed from the path.
 
@@ -78,9 +76,33 @@ def get_model(
     """
     logger.debug(f"Loading model: {model_name}")
 
-    # Auto-detect device if not specified
+    # Auto-detect device if not specified.
+    #
+    # We intentionally refuse to fall back to CPU when the caller passes
+    # device=None and CUDA is not available. Silently loading a multi-billion
+    # parameter model on CPU saturates every core (PyTorch defaults to all
+    # visible threads), explodes RAM with FP32 activations, and blocks the
+    # asyncio event loop. That path froze a validator host in production
+    # (60 vCPUs pinned, ~150 GB RAM) when nvidia-container-toolkit was not
+    # wired into Docker. Fail loud instead, so the watchdog restarts us on a
+    # healthy host.
+    #
+    # Escape hatch: tests and dev scripts that genuinely want CPU must pass
+    # device="cpu" explicitly.
     if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "get_model() called with device=None but torch.cuda.is_available() "
+                "is False. Refusing to silently fall back to CPU: loading a "
+                "multi-billion-parameter model on CPU will saturate every core and "
+                "exhaust host RAM. "
+                "Check that nvidia-container-toolkit is installed and wired to "
+                "Docker (`docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 "
+                "nvidia-smi`), that CUDA_VISIBLE_DEVICES is not empty, and that "
+                "`nvidia-smi` works on the host. "
+                'If CPU is genuinely intended (tests, dev), pass device="cpu" explicitly.'
+            )
+        device = "cuda"
         logger.debug(f"Auto-detected device: {device}")
 
     device_is_cuda = str(device).startswith("cuda")
@@ -113,19 +135,63 @@ def get_model(
             except (ValueError, IndexError):
                 pass
 
-    # Configure attention implementation
-    attn_implementation = None
-    if use_flash_attention and device_is_cuda:
-        try:
-            import flash_attn  # type: ignore[import-not-found]  # noqa: F401
+    # Configure attention implementation from protocol constant.
+    # On CUDA: use ATTN_IMPLEMENTATION (FA2), fail loudly if flash-attn is missing.
+    # On CPU (tests, dev): use default SDPA (no proof computation happens on CPU).
+    # GRAIL_TRAINER_ATTN_IMPL overrides for training only (e.g., "sdpa" for torch.compile).
+    from ..protocol.constants import ATTN_IMPLEMENTATION
 
+    attn_implementation = None
+    trainer_attn_override = os.getenv("GRAIL_TRAINER_ATTN_IMPL")
+    fa4_registered = False
+    if trainer_attn_override:
+        if trainer_attn_override == "flash_attention_4":
+            # Load with FA2 (HF's import validation requires it), then swap the
+            # attention handler to FA4 via AttentionInterface after model creation.
             attn_implementation = "flash_attention_2"
-            logger.info("Using Flash Attention 2 for model loading")
-        except ImportError:
-            logger.warning(
-                "flash-attn not installed; falling back to default attention. "
-                "Install with: uv pip install flash-attn"
+            try:
+                from .fa4_attention import register_fa4_attention
+
+                register_fa4_attention()
+                fa4_registered = True
+            except ImportError:
+                logger.warning("flash-attn-4 not installed, falling back to FA2")
+        else:
+            attn_implementation = trainer_attn_override
+        logger.info("Using attention implementation: %s (trainer override)", trainer_attn_override)
+    elif device_is_cuda and ATTN_IMPLEMENTATION:
+        attn_implementation = ATTN_IMPLEMENTATION
+        if ATTN_IMPLEMENTATION == "flash_attention_2":
+            try:
+                import flash_attn  # type: ignore[import-not-found]  # noqa: F401
+            except ImportError as err:
+                raise RuntimeError(
+                    "flash-attn is required but not installed. "
+                    "GRAIL requires Flash Attention 2 for consistent proof verification. "
+                    "Install with: uv pip install flash-attn --no-build-isolation"
+                ) from err
+        logger.info("Using attention implementation: %s", attn_implementation)
+
+    # Apply Liger kernel optimizations (fused RMSNorm, RoPE, SwiGLU, CrossEntropy)
+    # Must be called BEFORE model loading as it monkey-patches the model class.
+    if os.getenv("GRAIL_TRAINER_USE_LIGER_KERNEL", "0") == "1":
+        try:
+            from liger_kernel.transformers import (  # type: ignore[import-not-found]
+                apply_liger_kernel_to_qwen3,
             )
+
+            apply_liger_kernel_to_qwen3(
+                rope=True,
+                rms_norm=True,
+                swiglu=True,
+                cross_entropy=False,
+                fused_linear_cross_entropy=False,
+            )
+            logger.info("Liger kernel applied to Qwen3 (rope, rms_norm, swiglu)")
+        except ImportError:
+            logger.warning("GRAIL_TRAINER_USE_LIGER_KERNEL=1 but liger-kernel not installed")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to apply Liger kernel: %s", exc)
 
     # Load model with optimized attention if available
     model = AutoModelForCausalLM.from_pretrained(
@@ -134,6 +200,15 @@ def get_model(
         attn_implementation=attn_implementation,
         torch_dtype=torch.bfloat16 if device_is_cuda else torch.float32,
     )
+
+    # Swap attention dispatch to FA4 after loading (must be after from_pretrained
+    # because HF validates attn_implementation during loading).
+    if fa4_registered:
+        try:
+            model.config._attn_implementation = "flash_attention_4"  # type: ignore[reportPrivateUsage]
+            logger.info("Model attention dispatch set to flash_attention_4 (FA4 native)")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to set FA4 attention dispatch: %s", exc)
 
     # Preserve original model name for GRAIL proof validation
     model.name_or_path = original_model_name  # type: ignore[attr-defined]

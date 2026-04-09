@@ -4,7 +4,6 @@
 # --------------------------------------------------------------------------- #
 import asyncio
 import hashlib
-import json
 import logging
 import math
 import os
@@ -17,18 +16,18 @@ import torch
 import typer
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from ..environments.episode import AgentEnvLoop
 from ..environments.factory import create_env
 from ..grail import derive_env_seed
 from ..infrastructure.comms import sink_window_inferences
 from ..infrastructure.drand import get_drand_beacon
-from ..shared.constants import (
+from ..protocol.constants import (
     BLOCK_TIME_SECONDS,
     CHALLENGE_K,
     LAYER_INDEX,
     ROLLOUTS_PER_PROBLEM,
     WINDOW_LENGTH,
 )
+from ..protocol.errors import ProtocolViolationError
 from . import console
 
 # --------------------------------------------------------------------------- #
@@ -513,18 +512,31 @@ async def _pipelined_generation_loop(
     checkpoint_window: int | None,
     env_id: str | None = None,
     env_params: dict[str, Any] | None = None,
+    generation_params: dict[str, Any] | None = None,
 ) -> list[dict]:
-    """Generate rollouts using the 3-GPU pipeline engine.
+    """Generate rollouts using the multi-GPU pipeline engine.
 
-    Uses PipelinedMiningEngine for overlapped generation (GPU 0),
-    proof computation (GPU 1), and kernel eval (GPU 2).
-
-    Mirrors the time-budgeting and packaging logic of
-    ``generate_rollouts_for_window`` but delegates generation to the pipeline.
+    Reads ``generation_params`` from the trainer-published checkpoint metadata
+    and forwards them to the engine for every group, so that the SGLang/vLLM
+    backend's effective ``max_new_tokens`` matches what the validator expects
+    (otherwise rollouts hard-fail ``termination_valid``).
     """
-    from ..environments.factory import create_env
-    from ..grail import derive_env_seed
-    from ..shared.constants import CHALLENGE_K, ROLLOUTS_PER_PROBLEM
+    if generation_params is None:
+        raise ProtocolViolationError(
+            "Pipeline generation requires generation_params from checkpoint metadata; got None."
+        )
+    from ..environments.backends import GenerationParams
+
+    gen_params = GenerationParams.from_checkpoint_metadata(generation_params)
+    logger.info(
+        "Pipeline gen params: max_new_tokens=%d temperature=%.2f top_p=%.3f top_k=%s "
+        "repetition_penalty=%s",
+        gen_params.max_new_tokens,
+        gen_params.temperature,
+        gen_params.top_p,
+        gen_params.top_k,
+        gen_params.repetition_penalty,
+    )
 
     inferences: list[dict] = []
     start_time = time.time()
@@ -565,6 +577,7 @@ async def _pipelined_generation_loop(
                 combined_randomness,
                 wallet,
                 seed=seed_int,
+                gen_params=gen_params,
             )
 
             if grpo_rollouts:
@@ -618,6 +631,14 @@ async def _pipelined_generation_loop(
             timers.update_gen_time_ema(min(gen_duration, max_gen_s))
             await asyncio.sleep(0.01)
 
+        except ProtocolViolationError:
+            # Window-scoped protocol violations (e.g. malformed checkpoint
+            # metadata mid-window) must propagate to the miner outer loop's
+            # ProtocolViolationError branch so the whole window is skipped
+            # cleanly. ProtocolViolationError is a RuntimeError subclass, so
+            # this except MUST come before the RuntimeError branch below or
+            # it would be unreachable.
+            raise
         except RuntimeError as e:
             if "CUDA" in str(e):
                 logger.error("Pipeline CUDA error: %s", e)
@@ -625,8 +646,11 @@ async def _pipelined_generation_loop(
                     torch.cuda.empty_cache()
                 continue
             raise
-        except Exception as e:
-            logger.warning("Pipeline generation failed: %s", e)
+        except Exception:
+            # Per-problem failure: log with traceback and try the next problem.
+            # Use logger.exception so operators can diagnose the failure from
+            # logs alone, instead of seeing only the exception message.
+            logger.exception("Pipeline group failed, continuing to next problem")
             continue
 
     elapsed_time = time.time() - start_time
@@ -636,358 +660,6 @@ async def _pipelined_generation_loop(
         elapsed_time,
         window_start,
     )
-    return inferences
-
-
-async def generate_rollouts_for_window(
-    wallet: bt.wallet,
-    model: AutoModelForCausalLM,
-    tokenizer: AutoTokenizer,
-    subtensor: bt.subtensor,
-    window_start: int,
-    window_block_hash: str,
-    combined_randomness: str,
-    timers: MiningTimers,
-    monitor: Any | None,
-    use_drand: bool,
-    checkpoint_window: int | None,
-    env_id: str | None = None,
-    env_params: dict[str, Any] | None = None,
-    generation_params: dict[str, Any] | None = None,
-) -> list[dict]:
-    """Generate as many GRPO rollouts as safely possible within a window.
-
-    Core loop responsibilities:
-      - Respect time budget using EMAs (stop before window end)
-      - Periodically clear CUDA cache to reduce fragmentation
-      - Track and log per-window metrics
-      - Package each rollout with commit-binding signatures and proofs
-
-    Args:
-        wallet: Miner wallet for signing and authentication.
-        model: Loaded model instance.
-        tokenizer: Loaded tokenizer instance.
-        subtensor: Bittensor client for chain reads.
-        window_start: Start block of the current window.
-        window_block_hash: Block hash at window start.
-        combined_randomness: Per-window randomness for challenges.
-        timers: EMA-based timing estimates for safety.
-        monitor: Optional monitoring client for metrics.
-        use_drand: Whether drand was used in randomness generation.
-        checkpoint_window: The checkpoint window used for this generation
-        env_id: Environment identifier from checkpoint metadata
-        env_params: Environment parameters from checkpoint metadata
-        generation_params: Generation parameters from checkpoint metadata
-
-    Returns:
-        List of signed rollout data ready for upload.
-    """
-    # Window generation state and metrics
-    inferences: list[dict] = []
-    start_time = time.time()
-    inference_count = 0  # Total number of problems attempted in this window
-    successful_rollouts = 0
-    failed_rollouts = 0
-    total_reward = 0.0
-    # Avoid flooding logs in debug mode
-    text_logs_emitted = 0  # Running count of emitted debug texts
-    problem_count = 0
-
-    device = model.device  # type: ignore[attr-defined]
-    # Batch size for parallel rollout generation (tune per node for memory/throughput)
-    batch_size = int(os.getenv("GRAIL_GENERATION_BATCH_SIZE", "2"))
-    if batch_size > ROLLOUTS_PER_PROBLEM:
-        logger.warning(
-            "GRAIL_GENERATION_BATCH_SIZE=%d exceeds ROLLOUTS_PER_PROBLEM=%d; capping at %d",
-            batch_size,
-            ROLLOUTS_PER_PROBLEM,
-            ROLLOUTS_PER_PROBLEM,
-        )
-        batch_size = ROLLOUTS_PER_PROBLEM
-    # Create AgentEnvLoop with generation parameters from checkpoint metadata (if available)
-    # Validate and clamp generation params to safe ranges
-    generation_params = generation_params or {}
-
-    def clamp(value: float | int, min_val: float | int, max_val: float | int) -> float | int:
-        """Clamp value to [min_val, max_val] range."""
-        return max(min_val, min(value, max_val))
-
-    max_tokens = clamp(generation_params["max_tokens"], 1, 16384)
-    temperature = clamp(generation_params.get("temperature", 0.7), 0.01, 2.0)
-    top_p = clamp(generation_params.get("top_p", 0.95), 0.0, 1.0)
-    top_k = clamp(generation_params.get("top_k", 50), 0, 1000)
-    repetition_penalty = clamp(generation_params.get("repetition_penalty", 1.1), 1.0, 2.0)
-
-    loop = AgentEnvLoop(
-        model,
-        tokenizer,
-        device,
-        max_new_tokens=int(max_tokens),
-        temperature=float(temperature),
-        top_p=float(top_p),
-        top_k=int(top_k) if top_k > 0 else None,
-        repetition_penalty=float(repetition_penalty),
-    )
-    if batch_size > 1:
-        logger.info("Using batch_size=%d for parallel rollout generation", batch_size)
-
-    while True:
-        current_block = await subtensor.get_current_block()  # type: ignore[await-not-coroutine]
-        timers.update_block_time_ema(current_block)
-        current_window = calculate_window_start(current_block)
-        if current_window > window_start:
-            logger.info("Window %s has ended, moving to next window", window_start)
-            break
-
-        blocks_remaining = (window_start + WINDOW_LENGTH) - current_block
-        needed_blocks = timers.blocks_needed_for_next_gen()
-        if blocks_remaining <= needed_blocks:
-            logger.info(
-                (
-                    "Stopping generation: %s blocks remain, need %s "
-                    "(gen≈%.1fs, upload≈%.1fs, block≈%.2fs)"
-                ),
-                blocks_remaining,
-                needed_blocks,
-                (timers.gen_time_ema_s or 0.0),
-                (timers.upload_time_ema_s or 0.0),
-                timers.block_time_ema_s,
-            )
-            break
-
-        try:
-            gen_start = time.time()
-            problem_count += 1
-            inference_count += 1
-
-            logger.info(
-                "⚡ Generating GRPO rollouts for problem %s (block %s/%s)...",
-                problem_count,
-                current_block,
-                window_start + WINDOW_LENGTH - 1,
-            )
-
-            # Periodically reclaim free memory — helpful for long runs
-            if inference_count % 10 == 0 and torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                logger.debug(
-                    "GPU memory allocated: %s MB",
-                    f"{torch.cuda.memory_allocated() / 1024**2:.2f}",
-                )
-
-            # Deterministically derive environment seed from miner+window+index
-            problem_index = max(0, problem_count - 1)
-            seed_int = derive_env_seed(wallet.hotkey.ss58_address, window_block_hash, problem_index)
-            # Use deterministic problem index as rollout_group identifier
-            base_nonce = problem_index
-            logger.debug(
-                ("MINER SEED DERIVATION: hotkey=%s window_hash=%s problem_index=%d -> seed=%d"),
-                wallet.hotkey.ss58_address[:12],
-                window_block_hash[:12],
-                problem_index,
-                seed_int,
-            )
-
-            # Generate GRPO rollouts using AgentEnvLoop
-            # Factory uses cached task source automatically (no manual instantiation needed)
-            # Use environment configuration from checkpoint metadata if available
-            def _env_factory():
-                return create_env(env_id=env_id, env_params=env_params)
-
-            # Time the rollout generation for both logging and monitoring
-            rollout_gen_start = time.time()
-            if monitor:
-                with monitor.timer("profiling/rollout_generation"):
-                    grpo_rollouts = await asyncio.to_thread(
-                        loop.run_grpo_group,
-                        _env_factory,
-                        ROLLOUTS_PER_PROBLEM,
-                        combined_randomness,
-                        wallet,
-                        batch_size=batch_size,
-                        seed=seed_int,
-                    )
-            else:
-                grpo_rollouts = await asyncio.to_thread(
-                    loop.run_grpo_group,
-                    _env_factory,
-                    ROLLOUTS_PER_PROBLEM,
-                    combined_randomness,
-                    wallet,
-                    batch_size=batch_size,
-                    seed=seed_int,
-                )
-            rollout_gen_duration = time.time() - rollout_gen_start
-
-            if grpo_rollouts:
-                text_logs_emitted = await maybe_log_debug_sample(
-                    tokenizer,
-                    grpo_rollouts[0],
-                    window_start,
-                    base_nonce,
-                    monitor,
-                    text_logs_emitted,
-                    DEBUG_TEXT_LOG_LIMIT_PER_WINDOW,
-                )
-
-            successful_count = sum(1 for r in grpo_rollouts if r.success)
-            mean_reward = (
-                sum(r.reward for r in grpo_rollouts) / len(grpo_rollouts) if grpo_rollouts else 0
-            )
-            logger.info(
-                "GRPO batch: %s/%s successful, mean reward: %.3f, generation time: %.2fs",
-                successful_count,
-                len(grpo_rollouts),
-                mean_reward,
-                rollout_gen_duration,
-            )
-
-            # Check generation timing and log metrics
-            await log_generation_timing(
-                subtensor, timers, window_start, rollout_gen_duration, len(grpo_rollouts), monitor
-            )
-
-            if problem_count % 2 == 0:
-                elapsed = time.time() - start_time
-                rollouts_per_sec = (len(inferences) / elapsed) if elapsed > 0 else 0
-                logger.info(
-                    ("📊 Progress: %s rollouts from %s problems in %.1fs (%.1f rollouts/sec)"),
-                    len(inferences),
-                    problem_count,
-                    elapsed,
-                    rollouts_per_sec,
-                )
-                if monitor:
-                    await monitor.log_gauge("mining/rollouts_generated", len(inferences))
-                    await monitor.log_gauge("mining/problems_processed", problem_count)
-                    await monitor.log_gauge("mining/rollouts_per_second", rollouts_per_sec)
-                    if successful_rollouts + failed_rollouts > 0:
-                        success_rate = successful_rollouts / (successful_rollouts + failed_rollouts)
-                        await monitor.log_gauge("mining/success_rate", success_rate)
-
-            # ─────────────────────────────────────────────────────────────────────
-            # COMPLETION LENGTH GATE: Drop entire group if any rollout is too short
-            # ─────────────────────────────────────────────────────────────────────
-            # Validators require at least CHALLENGE_K tokens in the completion region
-            # to perform cryptographic verification (sketch checks at k=32 positions).
-            # If any rollout in the group has completion_length < CHALLENGE_K, the
-            # validator will reject that rollout. Rather than waste bandwidth uploading
-            # a partially valid group, we drop the entire group preemptively.
-            short_rollouts = [
-                (i, r.completion_length)
-                for i, r in enumerate(grpo_rollouts)
-                if r.completion_length < CHALLENGE_K
-            ]
-            if short_rollouts:
-                short_details = ", ".join(f"idx={i}:len={length}" for i, length in short_rollouts)
-                logger.warning(
-                    "Dropping group %d: %d/%d rollouts have completion < %d tokens (%s)",
-                    base_nonce,
-                    len(short_rollouts),
-                    len(grpo_rollouts),
-                    CHALLENGE_K,
-                    short_details,
-                )
-                # Skip packaging this group entirely; continue to next problem
-                timers.update_gen_time_ema(time.time() - gen_start)
-                continue
-
-            # Package each rollout with signatures and proofs for validation
-            for rollout_idx, rollout in enumerate(grpo_rollouts):
-                rollout_data = package_rollout_data(
-                    model,
-                    wallet,
-                    rollout,
-                    base_nonce,
-                    rollout_idx,
-                    len(grpo_rollouts),
-                    window_start,
-                    current_block,
-                    window_block_hash,
-                    combined_randomness,
-                    use_drand,
-                    checkpoint_window,
-                )
-                inferences.append(rollout_data)
-
-                if rollout.success:
-                    successful_rollouts += 1
-                    total_reward += rollout.reward
-                    if monitor:
-                        await monitor.log_counter("mining/successful_rollouts")
-                        await monitor.log_histogram("mining/reward_distribution", rollout.reward)
-                else:
-                    failed_rollouts += 1
-                    if monitor:
-                        await monitor.log_counter("mining/failed_rollouts")
-
-            timers.update_gen_time_ema(time.time() - gen_start)
-            await asyncio.sleep(0.01)
-
-        except RuntimeError as e:
-            if "CUDA" in str(e):
-                logger.error("CUDA error at inference %s: %s", inference_count, e)
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                continue
-            raise
-        except Exception as e:
-            logger.warning("Failed to generate inference %s: %s", inference_count, e)
-            continue
-
-    elapsed_time = time.time() - start_time
-    avg_gen_time = timers.gen_time_ema_s or 0.0
-
-    logger.info(
-        "🎯 Generated %s rollouts in %.1fs for window %s (avg gen time: %.2fs/problem)",
-        len(inferences),
-        elapsed_time,
-        window_start,
-        avg_gen_time,
-    )
-    if monitor:
-        await monitor.log_counter("mining/windows_completed")
-        await monitor.log_gauge(
-            "profiling/window_duration",
-            elapsed_time,
-        )
-        await monitor.log_gauge("mining/total_rollouts_in_window", len(inferences))
-        await monitor.log_gauge(
-            "profiling/average_generation_time",
-            avg_gen_time,
-        )
-        if successful_rollouts + failed_rollouts > 0:
-            final_success_rate = successful_rollouts / (successful_rollouts + failed_rollouts)
-            await monitor.log_gauge("mining/final_success_rate", final_success_rate)
-        if successful_rollouts > 0:
-            avg_reward = total_reward / successful_rollouts
-            await monitor.log_gauge("mining/average_reward", avg_reward)
-
-    # Emit structured window summary log
-    try:
-        total_attempts = successful_rollouts + failed_rollouts
-        window_entry = {
-            "event": "window_summary",
-            "window": window_start,
-            "total_rollouts": len(inferences),
-            "successful_rollouts": successful_rollouts,
-            "failed_rollouts": failed_rollouts,
-            "success_rate": round(successful_rollouts / total_attempts * 100, 1)
-            if total_attempts
-            else 0.0,
-            "avg_reward": round(total_reward / successful_rollouts, 4)
-            if successful_rollouts
-            else 0.0,
-            "elapsed_sec": round(elapsed_time, 1),
-            "avg_gen_sec": round(avg_gen_time, 2),
-            "rollouts_per_min": round(len(inferences) / (elapsed_time / 60), 1)
-            if elapsed_time > 0
-            else 0.0,
-        }
-        window_logger.info(json.dumps(window_entry))
-    except Exception:
-        logger.debug("Failed to emit window summary log", exc_info=True)
-
     return inferences
 
 

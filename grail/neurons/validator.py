@@ -19,15 +19,15 @@ from grail.infrastructure.credentials import load_r2_credentials
 from grail.logging_utils import flush_all_logs
 from grail.monitoring import get_monitoring_manager
 from grail.monitoring.config import MonitoringConfig
-from grail.scoring import WeightComputer
-from grail.shared.constants import (
+from grail.protocol.constants import (
     GRAIL_BURN_PERCENTAGE,
     GRAIL_BURN_UID,
-    NETUID,
     SUPERLINEAR_EXPONENT,
     UNIQUE_ROLLOUTS_CAP_ENABLED,
     WINDOW_LENGTH,
 )
+from grail.scoring import WeightComputer
+from grail.shared.config import NETUID
 from grail.validation import create_env_validation_pipeline
 from grail.validation.service import (
     WEIGHT_ROLLING_WINDOWS,

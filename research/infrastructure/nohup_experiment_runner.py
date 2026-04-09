@@ -13,7 +13,6 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import asyncssh
 
@@ -89,7 +88,7 @@ class NohupExperimentRunner:
         ssh_port: int,
         r2_config: dict[str, str],
         ssh_user: str = "root",
-        ssh_key_path: Optional[str] = None,
+        ssh_key_path: str | None = None,
         remote_path: str = "~/grail",
     ):
         """Initialize experiment runner.
@@ -108,7 +107,7 @@ class NohupExperimentRunner:
         self.ssh_key_path = ssh_key_path
         self.remote_path = remote_path
         self.r2_config = r2_config
-        self._conn: Optional[asyncssh.SSHClientConnection] = None
+        self._conn: asyncssh.SSHClientConnection | None = None
 
     async def connect(self):
         """Establish SSH connection to the pod with keepalive."""
@@ -141,7 +140,7 @@ class NohupExperimentRunner:
     async def run_command(
         self,
         command: str,
-        timeout: Optional[int] = None,
+        timeout: int | None = None,
         check: bool = True,
     ) -> tuple[str, str, int]:
         """Run a command on the remote pod.
@@ -610,7 +609,7 @@ class NohupExperimentRunner:
             rsync_cmd = [
                 "rsync",
                 "-avz",
-                f"-e", f"ssh -p {self.ssh_port} -o StrictHostKeyChecking=no",
+                "-e", f"ssh -p {self.ssh_port} -o StrictHostKeyChecking=no",
                 f"{self.ssh_user}@{self.ssh_host}:{remote_dir}/",
                 f"{local_dir}/",
             ]
@@ -722,10 +721,10 @@ class NohupExperimentRunner:
         self,
         config: ExperimentConfig,
         local_code_path: Path,
-        local_env_path: Optional[Path] = None,
+        local_env_path: Path | None = None,
         sync_code: bool = True,
         setup_env: bool = True,
-        download_dir: Optional[Path] = None,
+        download_dir: Path | None = None,
         upload_to_r2: bool = True,
         cleanup_local: bool = False,
         remote_upload: bool = True,

@@ -13,7 +13,7 @@ import time
 from collections import deque
 from typing import Any
 
-from ..shared.constants import MIN_ROLLOUT_FILE_SIZE_BYTES
+from ..protocol.constants import MIN_ROLLOUT_FILE_SIZE_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +150,7 @@ class MinerSampler:
                         return hotkey, False
 
                     return hotkey, bool(exists)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     elapsed = time.time() - start_time
                     logger.debug(
                         "Window file check TIMEOUT for %s window=%s after %.2fs",

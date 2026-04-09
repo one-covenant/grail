@@ -33,7 +33,11 @@ from grail.trainer.algorithms.grpo import GRPOAlgorithm
 from grail.trainer.config import EvalConfig, TrainingConfig
 from grail.trainer.eval_planner import EvaluationPlan
 from grail.trainer.evaluator import EvaluatorService
-from grail.trainer.inference_server import ServerConfig, VLLMServerManager
+from grail.trainer.inference_server import (
+    ServerConfig,
+    SGLangServerManager,
+    VLLMServerManager,
+)
 from grail_offline.data.offline_rollouts import OfflineRolloutGenerator, RolloutGenConfig
 
 logger = logging.getLogger(__name__)
@@ -256,12 +260,12 @@ async def _run_evaluation(
 def _sync_kl_constant(kl_coef: float) -> None:
     """Patch TRAINER_KL_COEF constant to match config.
 
-    is_kl_enabled() in grail.shared.constants reads the module-level
+    is_kl_enabled() in grail.shared.config reads the module-level
     TRAINER_KL_COEF constant, which is evaluated once at import time from
     the env var. Setting the env var at runtime has no effect on the
     already-loaded constant. We must patch the constant directly.
     """
-    import grail.shared.constants as _constants
+    import grail.shared.config as _constants
 
     _constants.TRAINER_KL_COEF = kl_coef
     os.environ["GRAIL_TRAINER_KL_COEF"] = str(kl_coef)
@@ -306,10 +310,28 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
     """
     _set_global_seed(int(cfg.seed))
 
-    # Patch the module-level TRAINER_KL_COEF constant so that is_kl_enabled()
-    # (called inside GRPOAlgorithm.train_epoch) returns the correct value.
+    # Patch module-level constants that may have been set by the main .env file
+    # (designed for online miner/validator). The offline trainer uses its own
+    # Hydra config for these values.
+    import grail.shared.config as _constants
+
     kl_coef = float(cfg.train.kl_coef)
-    _sync_kl_constant(kl_coef)
+    _constants.TRAINER_KL_COEF = kl_coef
+    os.environ["GRAIL_TRAINER_KL_COEF"] = str(kl_coef)
+    _constants.GRPO_VARIANT = str(cfg.train.get("grpo_variant", "grpo"))
+    _constants.ADV_ESTIMATOR = str(cfg.train.get("grpo_variant", "grpo"))
+    _constants.TRAINER_USE_SEQUENCE_PACKING = False
+    _constants.TRAINER_CHUNKED_LOGITS = bool(cfg.train.get("chunked_logits", False))
+    logger.info(
+        "Patched shared constants for offline training",
+        extra={
+            "grpo_variant": _constants.GRPO_VARIANT,
+            "adv_estimator": _constants.ADV_ESTIMATOR,
+            "use_sequence_packing": _constants.TRAINER_USE_SEQUENCE_PACKING,
+            "chunked_logits": _constants.TRAINER_CHUNKED_LOGITS,
+            "kl_coef": _constants.TRAINER_KL_COEF,
+        },
+    )
 
     # Setup directories
     metrics_dir = workdir / "metrics"
@@ -355,8 +377,8 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
     else:
         logger.info("Loaded train model only (KL disabled)")
 
-    # Save initial model and tokenizer for vLLM server
-    logger.info("Saving initial model checkpoint for vLLM server...")
+    # Save initial model and tokenizer for inference server
+    logger.info("Saving initial model checkpoint for inference server...")
     server_model_dir = _save_checkpoint_for_vllm(
         model=train_model,
         tokenizer=tokenizer,
@@ -364,23 +386,30 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
         iteration=-1,  # -1 indicates initial checkpoint
     )
 
-    # Start vLLM server using the saved checkpoint
-    logger.info("Starting vLLM inference server...")
+    # Determine generation backend (vllm or sglang)
+    gen_backend_name = str(cfg.generation.backend).lower()
+    use_sglang = "sglang" in gen_backend_name
+
+    # Start inference server using the saved checkpoint
+    logger.info(
+        "Starting inference server...",
+        extra={"backend": "sglang" if use_sglang else "vllm"},
+    )
     # Configure server environment (pin GPU for multi-GPU)
     server_env: dict[str, str] | None = None
     if gpu_strategy == "multi":
-        try:
-            server_env = {"CUDA_VISIBLE_DEVICES": str(int(cfg.gpu.vllm_gpu))}
-        except Exception:
-            server_env = None
+        server_env = {**os.environ, "CUDA_VISIBLE_DEVICES": str(int(cfg.gpu.vllm_gpu))}
 
+    # Don't pass chat_template_path to SGLang - it causes the /v1/completions
+    # endpoint to reject requests. The tokenizer in the checkpoint already
+    # includes the chat template for proper prompt formatting.
     server_config = ServerConfig(
         host="127.0.0.1",
         port=int(cfg.generation.get("port", 30001)),
         timeout_s=180.0,
         trust_remote_code=True,
         model_path=str(server_model_dir),  # Use saved checkpoint
-        chat_template_path=str(server_model_dir / "chat_template.jinja"),
+        chat_template_path=None if use_sglang else str(server_model_dir / "chat_template.jinja"),
         env=server_env,
     )
     # Pick memory utilization based on GPU strategy
@@ -389,25 +418,40 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
         if gpu_strategy == "single"
         else float(cfg.gpu.get("vllm_gpu_memory_utilization", 0.75))
     )
+    # SGLang memory fraction: use single-GPU setting when sharing GPU with training
+    sglang_mem = (
+        float(cfg.gpu.get("sglang_mem_fraction_static_single", 0.25))
+        if gpu_strategy == "single"
+        else float(cfg.gpu.get("sglang_mem_fraction_static", 0.85))
+    )
     eval_config = EvalConfig(
         vllm_gpu_memory_utilization=mem_util,
         vllm_max_model_len=int(cfg.generation.get("max_model_len", 2048)),
         vllm_max_num_seqs=int(cfg.generation.get("max_num_seqs", 64)),
+        sglang_mem_fraction_static=sglang_mem,
+        sglang_context_length=int(cfg.generation.get("max_model_len", 2048)),
         stream_server_logs=True,
     )
 
-    server_manager = VLLMServerManager(
-        config=server_config,
-        eval_config=eval_config,
-        python_executable=sys.executable,
-    )
+    if use_sglang:
+        server_manager = SGLangServerManager(
+            config=server_config,
+            eval_config=eval_config,
+            python_executable=sys.executable,
+        )
+    else:
+        server_manager = VLLMServerManager(
+            config=server_config,
+            eval_config=eval_config,
+            python_executable=sys.executable,
+        )
 
     # Use async context manager for server lifecycle
     async with server_manager:
         await server_manager.start_server()
         base_url = server_manager.base_url
         model_name = server_manager.model_name
-        logger.info(f"✓ vLLM server ready at {base_url} serving {model_name}")
+        logger.info(f"Inference server ready at {base_url} serving {model_name}")
 
         # Create optimizer and accelerator (match main trainer betas)
         optimizer = torch.optim.AdamW(
@@ -436,8 +480,8 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
             rollouts_per_problem=int(cfg.data.rollouts_per_problem),
             environment=str(cfg.data.environment),
         )
-        # Pass HF model for computing ground-truth logprobs
-        # This ensures behavior policy logprobs match training logprobs exactly
+        # Pass HF model for computing ground-truth logprobs.
+        # This ensures behavior policy logprobs match training logprobs exactly.
         generator = OfflineRolloutGenerator(
             tokenizer=tokenizer, config=gen_cfg, hf_model=train_model
         )
@@ -451,7 +495,7 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
         train_cfg = TrainingConfig(
             # Basic training parameters
             lr=float(cfg.train.lr),
-            batch_size=int(cfg.train.batch_size),
+            micro_batch_size=int(cfg.train.batch_size),
             grad_clip=float(cfg.train.grad_clip),
             warmup_steps=int(cfg.train.warmup_steps),
             max_length=int(cfg.train.max_length),
@@ -493,7 +537,10 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
         scheduler = _create_lr_scheduler(optimizer, warmup_steps=warmup_iters)
         logger.info(
             "LR scheduler created (warmup + constant)",
-            extra={"warmup_iterations": warmup_iters, "total_iterations": int(cfg.train.iterations)},
+            extra={
+                "warmup_iterations": warmup_iters,
+                "total_iterations": int(cfg.train.iterations),
+            },
         )
 
         # Initialize GRPO algorithm with config
@@ -545,27 +592,52 @@ async def run_training(cfg: DictConfig, workdir: Path, monitor: Any | None = Non
 
             # Generate rollouts
             logger.info("Generating rollouts", extra={"num_seeds": len(iter_seeds)})
-            gen_batch_size = (
-                int(cfg.data.generation_batch_size)
-                if hasattr(cfg.data, "generation_batch_size")
-                else 4
-            )
+            gen_batch_size = int(cfg.data.get("generation_batch_size", 4))
             groups = await generator.generate_groups(
                 iter_seeds,
                 batch_size=gen_batch_size,
             )
+            # Log detailed rollout stats for debugging
+            all_r = [r for g in groups for r in g.rollouts]
+            comp_lens = [r.completion_length for r in all_r]
+            prompt_lens = [r.prompt_length for r in all_r]
+            tok_lens = [len(r.tokens) for r in all_r]
+            has_lps = sum(1 for r in all_r if r.token_logprobs is not None)
             logger.info(
-                "Rollouts generated",
-                extra={
-                    "num_groups": len(groups),
-                    "total_rollouts": sum(len(g.rollouts) for g in groups),
-                },
+                "Rollouts generated: groups=%d rollouts=%d "
+                "comp_lens=[min=%d max=%d] prompt_lens=[min=%d max=%d] "
+                "tok_lens=[min=%d max=%d] has_logprobs=%d/%d",
+                len(groups),
+                len(all_r),
+                min(comp_lens) if comp_lens else 0,
+                max(comp_lens) if comp_lens else 0,
+                min(prompt_lens) if prompt_lens else 0,
+                max(prompt_lens) if prompt_lens else 0,
+                min(tok_lens) if tok_lens else 0,
+                max(tok_lens) if tok_lens else 0,
+                has_lps,
+                len(all_r),
             )
 
             await _log_rollout_stats(monitor, groups)
 
+            # Restore training-mode settings after rollout generation, which
+            # temporarily switches the shared train model to eval() for HF
+            # logprob computation.
+            train_model.train()
+            if use_grad_ckpt and hasattr(train_model, "gradient_checkpointing_enable"):
+                train_model.gradient_checkpointing_enable()
+
             # Train one epoch
-            logger.info("Starting training epoch")
+            _p = next(train_model.parameters())
+            logger.info(
+                "Starting training epoch",
+                extra={
+                    "model_training": train_model.training,
+                    "params_require_grad": _p.requires_grad,
+                    "grad_checkpointing": getattr(train_model, "is_gradient_checkpointing", False),
+                },
+            )
             metrics = await algorithm.train_epoch(
                 model=train_model,
                 ref_model=ref_model,

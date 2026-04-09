@@ -65,6 +65,7 @@ class PipelinedMiningEngine:
         *,
         batch_size: int | None = None,
         seed: int | None = None,
+        gen_params: GenerationParams | None = None,
     ) -> list[GRPORollout]:
         """Generate a full GRPO group with parallel proof + kernel eval.
 
@@ -83,6 +84,10 @@ class PipelinedMiningEngine:
             wallet: Bittensor wallet for signing
             batch_size: If None, uses ``count`` (vLLM handles parallelism)
             seed: Optional seed for environment reset
+            gen_params: Per-call override for generation parameters. Defaults
+                to the engine's ``_gen_params`` (set at construction).  Pass
+                an explicit ``GenerationParams`` here to enforce a checkpoint's
+                ``max_tokens`` / temperature without rebuilding the engine.
 
         Returns:
             List of GRPORollout with advantages computed
@@ -92,6 +97,7 @@ class PipelinedMiningEngine:
 
         backend = self._weight_sync.get_backend()
         tokenizer = self._proof_worker.tokenizer
+        active_gen_params = gen_params if gen_params is not None else self._gen_params
         all_batch_data: list[tuple[list[int], int, float, dict]] = []
         all_proof_results: list[tuple[list[dict], list[float], bytes, dict, str]] = []
 
@@ -136,7 +142,7 @@ class PipelinedMiningEngine:
 
             # 3. Generate via backend (GPU 0)
             gen_start = time.time()
-            gen_results = await backend.generate(prompt_ids_batch, params=self._gen_params)
+            gen_results = await backend.generate(prompt_ids_batch, params=active_gen_params)
             gen_time = time.time() - gen_start
             total_gen_time += gen_time
 
@@ -237,9 +243,11 @@ class PipelinedMiningEngine:
                 )
                 all_proof_results.extend(proof_results)
             except Exception:
-                logger.exception("Proof computation failed")
-                # Remove the batch data for failed proofs
-                all_batch_data = all_batch_data[: -len(batch_data)]
+                logger.exception(
+                    "Proof computation failed; discarding ENTIRE group "
+                    "(partial groups would hard-fail validator group_size check)"
+                )
+                return []
 
         # Check for infrastructure eval errors — if ANY rollout in the group
         # has an infra error, discard the ENTIRE group. Reducing group size

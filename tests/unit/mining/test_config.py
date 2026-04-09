@@ -9,29 +9,24 @@ from grail.mining.config import PipelineConfig
 
 
 def test_defaults() -> None:
-    """Default config has pipeline disabled."""
+    """Default config: SGLang on GPU 0, HF proof on GPU 1.
+
+    SGLang is the production-validated mining backend (Stage 1 e2e); the
+    default flipped from vllm to sglang along with the legacy-path removal.
+    """
     cfg = PipelineConfig()
-    assert cfg.enabled is False
-    assert cfg.backend == "vllm"
+    assert cfg.backend == "sglang"
     assert cfg.vllm_gpu == 0
     assert cfg.proof_gpu == 1
     assert cfg.gpu_memory_utilization == 0.90
 
 
-def test_from_env_enabled() -> None:
-    """GRAIL_PIPELINE_ENABLED=1 enables pipeline."""
-    env = {"GRAIL_PIPELINE_ENABLED": "1"}
+def test_from_env_backend_vllm() -> None:
+    """GRAIL_PIPELINE_BACKEND=vllm overrides the sglang default."""
+    env = {"GRAIL_PIPELINE_BACKEND": "vllm"}
     with patch.dict(os.environ, env, clear=False):
         cfg = PipelineConfig.from_env()
-    assert cfg.enabled is True
-
-
-def test_from_env_backend_sglang() -> None:
-    """GRAIL_PIPELINE_BACKEND=sglang selects SGLang backend."""
-    env = {"GRAIL_PIPELINE_BACKEND": "sglang"}
-    with patch.dict(os.environ, env, clear=False):
-        cfg = PipelineConfig.from_env()
-    assert cfg.backend == "sglang"
+    assert cfg.backend == "vllm"
 
 
 def test_from_env_gpu_ids() -> None:
@@ -61,25 +56,8 @@ def test_from_env_float_params() -> None:
 def test_from_env_empty_values_use_defaults() -> None:
     """Empty env values fall back to class defaults."""
     env = {
-        "GRAIL_PIPELINE_ENABLED": "",
         "GRAIL_PIPELINE_BACKEND": "",
     }
     with patch.dict(os.environ, env, clear=False):
         cfg = PipelineConfig.from_env()
-    assert cfg.enabled is False
-    assert cfg.backend == "vllm"
-
-
-def test_from_env_bool_variants() -> None:
-    """Various true/false string representations."""
-    for true_val in ("1", "true", "True", "TRUE", "yes", "YES"):
-        env = {"GRAIL_PIPELINE_ENABLED": true_val}
-        with patch.dict(os.environ, env, clear=False):
-            cfg = PipelineConfig.from_env()
-        assert cfg.enabled is True, f"Failed for {true_val!r}"
-
-    for false_val in ("0", "false", "no", "nope"):
-        env = {"GRAIL_PIPELINE_ENABLED": false_val}
-        with patch.dict(os.environ, env, clear=False):
-            cfg = PipelineConfig.from_env()
-        assert cfg.enabled is False, f"Failed for {false_val!r}"
+    assert cfg.backend == "sglang"

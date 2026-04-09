@@ -8,8 +8,8 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
+from ..protocol.constants import MAX_NEW_TOKENS_PROTOCOL_CAP
 from ..shared.chat_templates import apply_chat_template as _apply_chat_template
-from ..shared.constants import MAX_NEW_TOKENS
 from ..shared.hf_compat import resolve_hidden_size
 from .advantages import compute_advantages
 from .backends.base import GenerationParams, TextGenBackend
@@ -34,7 +34,7 @@ class AgentEnvLoop:
         model: Any,
         tokenizer: Any,
         device: str = "cuda",
-        max_new_tokens: int = MAX_NEW_TOKENS,
+        max_new_tokens: int = MAX_NEW_TOKENS_PROTOCOL_CAP,
         temperature: float = 0.6,
         *,
         do_sample: bool = True,

@@ -6,7 +6,7 @@ import logging
 import math
 from collections import defaultdict
 
-from ..shared.constants import UNIQUE_ROLLOUTS_CAP
+from ..protocol.constants import UNIQUE_ROLLOUTS_CAP
 
 logger = logging.getLogger(__name__)
 

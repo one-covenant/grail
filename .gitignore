@@ -204,3 +204,6 @@ config.local.*
 
 # monitoring files
 wandb/
+
+# RFC drafts (tracked separately)
+docs/rfcs/

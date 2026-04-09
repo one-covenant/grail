@@ -19,8 +19,7 @@ class PipelineConfig:
     ``GRAIL_PIPELINE_``.
     """
 
-    enabled: bool = False  # GRAIL_PIPELINE_ENABLED
-    backend: str = "vllm"  # GRAIL_PIPELINE_BACKEND (vllm|sglang)
+    backend: str = "sglang"  # GRAIL_PIPELINE_BACKEND (sglang|vllm)
     vllm_gpu: int = 0  # GRAIL_PIPELINE_VLLM_GPU (first GPU for vLLM)
     vllm_tp: int = (
         1  # GRAIL_PIPELINE_VLLM_TP (tensor parallel size, uses consecutive GPUs from vllm_gpu)
@@ -62,7 +61,6 @@ class PipelineConfig:
             return val if val else default
 
         return cls(
-            enabled=_bool("GRAIL_PIPELINE_ENABLED", cls.enabled),
             backend=_str("GRAIL_PIPELINE_BACKEND", cls.backend),
             vllm_gpu=_int("GRAIL_PIPELINE_VLLM_GPU", cls.vllm_gpu),
             vllm_tp=_int("GRAIL_PIPELINE_VLLM_TP", cls.vllm_tp),

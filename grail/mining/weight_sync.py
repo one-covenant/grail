@@ -82,10 +82,17 @@ class SGLangWeightSync(WeightSyncStrategy):
             stream_server_logs=True,
         )
 
+        # Inherit the parent env so SGLang's child processes can find system
+        # binaries (gcc, nvidia-smi, etc.). Triton's lazy JIT during CUDA-graph
+        # capture calls shutil.which("gcc"), which returns None if PATH is
+        # stripped, surfacing as a misleading "Capture cuda graph failed"
+        # error. Override only CUDA_VISIBLE_DEVICES to pin the GPU.
+        sglang_env = os.environ.copy()
+        sglang_env["CUDA_VISIBLE_DEVICES"] = str(self._config.vllm_gpu)
         server_config = ServerConfig(
             model_path=checkpoint_path,
             timeout_s=self._config.server_timeout,
-            env={"CUDA_VISIBLE_DEVICES": str(self._config.vllm_gpu)},
+            env=sglang_env,
         )
 
         self._manager = SGLangServerManager(config=server_config, eval_config=eval_config)
@@ -98,6 +105,7 @@ class SGLangWeightSync(WeightSyncStrategy):
             tokenizer=self._tokenizer,
             timeout=self._config.server_timeout,
             max_concurrent_requests=self._config.max_concurrent_requests,
+            max_model_len=self._config.max_model_len,
         )
 
         logger.info("SGLang generation server started at %s", self._manager.base_url)
@@ -235,17 +243,20 @@ class VLLMWeightSync(WeightSyncStrategy):
         tp = self._config.vllm_tp
         vllm_gpu_ids = ",".join(str(self._config.vllm_gpu + i) for i in range(tp))
 
+        # Inherit the parent env so vLLM's child processes can find system
+        # binaries (gcc, nvidia-smi, etc.). See the SGLang branch above for the
+        # full rationale — same Triton/JIT failure mode applies.
+        vllm_env = os.environ.copy()
+        vllm_env["CUDA_VISIBLE_DEVICES"] = vllm_gpu_ids
+        vllm_env["PYTORCH_CUDA_ALLOC_CONF"] = ""
+        vllm_env["VLLM_SERVER_DEV_MODE"] = "1"
         server_config = ServerConfig(
             model_path=self._symlink_path,
             timeout_s=self._config.server_timeout,
             tokenizer_name=tokenizer_name,
             enable_sleep_mode=True,
             tensor_parallel_size=tp,
-            env={
-                "CUDA_VISIBLE_DEVICES": vllm_gpu_ids,
-                "PYTORCH_CUDA_ALLOC_CONF": "",
-                "VLLM_SERVER_DEV_MODE": "1",
-            },
+            env=vllm_env,
         )
 
         self._manager = VLLMServerManager(
