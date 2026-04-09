@@ -67,7 +67,7 @@ class MinerSampler:
         uid_by_hotkey: dict[str, int] | None = None,
         heartbeat_callback: Any = None,
         deadline_ts: float | None = None,
-    ) -> list[str]:
+    ) -> tuple[list[str], dict[str, float | None]]:
         """Find miners with window files for the given window.
 
         Active miners are those that uploaded:
@@ -85,13 +85,20 @@ class MinerSampler:
             deadline_ts: If set, require LastModified <= this deadline (unix seconds)
 
         Returns:
-            List of hotkeys with available window files
+            Tuple of:
+            - ``active_hotkeys``: Miners whose window file exists, is large
+              enough, and arrived before the deadline.
+            - ``upload_times``: ``{hotkey: unix_timestamp}`` for each active
+              miner, pulled from the S3 ``LastModified`` header of the
+              parquet object. Consumed by the copycat detector's directional
+              attribution to distinguish a copier (later uploader) from a
+              victim (earlier uploader). Values are never miner-supplied.
         """
         semaphore = asyncio.Semaphore(self._concurrency)
         late_counter: dict[str, int] = {"count": 0}
         too_small_counter: dict[str, int] = {"count": 0}
 
-        async def _check(hotkey: str) -> tuple[str, bool]:
+        async def _check(hotkey: str) -> tuple[str, bool, float | None]:
             filename = f"grail/windows/{hotkey}-window-{window}.parquet"
             bucket = chain_manager.get_bucket_for_hotkey(hotkey)
             uid = uid_by_hotkey.get(hotkey) if uid_by_hotkey else None
@@ -99,7 +106,7 @@ class MinerSampler:
 
             # Skip miners without a committed bucket (no fallback)
             if bucket is None:
-                return hotkey, False
+                return hotkey, False, None
 
             async with semaphore:
                 # Update heartbeat to prevent watchdog timeout during long
@@ -135,7 +142,7 @@ class MinerSampler:
                             miner_id,
                             window,
                         )
-                        return hotkey, False
+                        return hotkey, False, None
 
                     # Check if file was late
                     if was_late:
@@ -147,9 +154,9 @@ class MinerSampler:
                             upload_time or -1,
                             deadline_ts,
                         )
-                        return hotkey, False
+                        return hotkey, False, None
 
-                    return hotkey, bool(exists)
+                    return hotkey, bool(exists), upload_time
                 except TimeoutError:
                     elapsed = time.time() - start_time
                     logger.debug(
@@ -158,13 +165,14 @@ class MinerSampler:
                         window,
                         elapsed,
                     )
-                    return hotkey, False
+                    return hotkey, False, None
                 except Exception as e:
                     logger.error(f"Error checking window file for hotkey {hotkey}: {e}")
-                    return hotkey, False
+                    return hotkey, False, None
 
         results = await asyncio.gather(*(_check(hk) for hk in meta_hotkeys))
-        active = [hk for hk, ok in results if ok]
+        active = [hk for hk, ok, _ in results if ok]
+        upload_times: dict[str, float | None] = {hk: ts for hk, ok, ts in results if ok}
 
         logger.info(
             "Discovered %d/%d active miners for window %d", len(active), len(meta_hotkeys), window
@@ -182,7 +190,7 @@ class MinerSampler:
                 window,
             )
 
-        return active
+        return active, upload_times
 
     def select_miners_for_validation(
         self,
