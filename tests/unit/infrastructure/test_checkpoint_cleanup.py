@@ -28,6 +28,7 @@ class TestValidateMetadata:
             "window": 100,
             "file_manifest": {},
             "env_id": "triton_kernel",
+            "thinking_mode": "instructed",
             "generation_params": {
                 "max_tokens": 8192,
                 "temperature": 0.7,
@@ -132,7 +133,34 @@ class TestValidateMetadata:
         missing = meta.validate_metadata()
         assert "env_id" in missing
         assert "generation_params" in missing
+        assert "thinking_mode" not in missing  # still set in defaults
         assert len(missing) == 2
+
+    def test_missing_thinking_mode(self) -> None:
+        meta = self._make_metadata(thinking_mode=None)
+        missing = meta.validate_metadata()
+        assert "thinking_mode" in missing
+
+    def test_empty_thinking_mode(self) -> None:
+        meta = self._make_metadata(thinking_mode="")
+        missing = meta.validate_metadata()
+        assert "thinking_mode" in missing
+
+    def test_invalid_thinking_mode_value(self) -> None:
+        meta = self._make_metadata(thinking_mode="bogus")
+        missing = meta.validate_metadata()
+        # validate_metadata reports the bad value in the field name so
+        # operators see exactly what's wrong in the verdict log.
+        assert any("thinking_mode" in m for m in missing)
+        assert any("bogus" in m for m in missing)
+
+    def test_native_thinking_mode_is_valid(self) -> None:
+        meta = self._make_metadata(thinking_mode="native")
+        assert meta.validate_metadata() == []
+
+    def test_instructed_thinking_mode_is_valid(self) -> None:
+        meta = self._make_metadata(thinking_mode="instructed")
+        assert meta.validate_metadata() == []
 
 
 class TestComputeKeepWindows:
