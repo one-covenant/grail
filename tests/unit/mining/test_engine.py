@@ -13,7 +13,7 @@ from grail.mining.engine import PipelinedMiningEngine
 
 @pytest.fixture
 def config() -> PipelineConfig:
-    return PipelineConfig(enabled=True)
+    return PipelineConfig()
 
 
 @pytest.fixture

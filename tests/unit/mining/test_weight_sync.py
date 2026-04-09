@@ -14,7 +14,6 @@ from grail.mining.weight_sync import SGLangWeightSync, VLLMWeightSync
 @pytest.fixture
 def config() -> PipelineConfig:
     return PipelineConfig(
-        enabled=True,
         backend="vllm",
         vllm_gpu=0,
         proof_gpu=1,
@@ -61,6 +60,50 @@ class TestSGLangWeightSync:
         # Should not raise
         await sync.shutdown()
         assert sync._manager is None
+
+    @pytest.mark.asyncio
+    async def test_start_passes_max_model_len_to_backend(
+        self, config: PipelineConfig, mock_tokenizer: MagicMock
+    ) -> None:
+        """Regression: SGLangServerBackend must receive PipelineConfig.max_model_len.
+
+        Without it, the backend's _cap_max_tokens clamp is a no-op and overlong
+        prompts hit the server, surface as failed retries, and produce empty
+        completions instead of clean clamping. Was a real bug in the Stage 1
+        refactor before being caught in code review.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        cfg = PipelineConfig(
+            backend="sglang",
+            vllm_gpu=0,
+            proof_gpu=1,
+            max_model_len=12288,
+            server_timeout=10.0,
+            max_concurrent_requests=4,
+        )
+        sync = SGLangWeightSync(cfg, mock_tokenizer)
+
+        fake_manager = MagicMock()
+        fake_manager.__aenter__ = AsyncMock(return_value=fake_manager)
+        fake_manager.start_server = AsyncMock()
+        fake_manager.base_url = "http://localhost:30000"
+        fake_manager.model_name = "Qwen/Qwen2.5-0.5B-Instruct"
+
+        with (
+            patch(
+                "grail.trainer.inference_server.SGLangServerManager",
+                return_value=fake_manager,
+            ),
+            patch("grail.environments.backends.SGLangServerBackend") as fake_backend_cls,
+        ):
+            await sync.start("/some/checkpoint/path")
+
+        fake_backend_cls.assert_called_once()
+        kwargs = fake_backend_cls.call_args.kwargs
+        assert kwargs.get("max_model_len") == 12288, (
+            f"SGLangServerBackend was constructed without max_model_len: kwargs={kwargs}"
+        )
 
 
 class TestVLLMWeightSync:

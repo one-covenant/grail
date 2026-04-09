@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import time as _time_mod
 import traceback
 from types import SimpleNamespace
@@ -14,7 +15,6 @@ import torch
 from grail.cli.mine import (
     MiningTimers,
     _pipelined_generation_loop,
-    generate_rollouts_for_window,
     get_conf,
     get_window_randomness,
     has_time_for_next_generation,
@@ -35,6 +35,7 @@ from grail.model.provider import clear_model_and_tokenizer, get_model, get_token
 from grail.monitoring import get_monitoring_manager
 from grail.monitoring.config import MonitoringConfig
 from grail.protocol.constants import TRAINER_UID, WINDOW_LENGTH
+from grail.protocol.errors import ProtocolViolationError
 from grail.shared.window_utils import (
     WindowWaitTracker,
     calculate_next_window,
@@ -156,19 +157,35 @@ class MinerNeuron(BaseNeuron):
                 keep_limit=2,  # Keep only current + previous window
             )
 
-            # Pipeline state (initialized on first checkpoint load if enabled)
+            # Pipeline state (initialized on first checkpoint load)
             pipeline_config = PipelineConfig.from_env()
             pipeline_engine = None
             weight_sync = None
             proof_worker = None
 
-            if pipeline_config.enabled:
-                logger.info(
-                    "Pipeline mode ENABLED: backend=%s, gen_gpu=%d, proof_gpu=%d",
-                    pipeline_config.backend,
-                    pipeline_config.vllm_gpu,
-                    pipeline_config.proof_gpu,
-                )
+            # Validate the pipeline GPU layout against visible CUDA devices
+            # before we attempt any model load. The pipeline is mandatory and
+            # needs distinct GPUs for generation and proof; surfacing the
+            # mismatch loudly here is much clearer than the cryptic
+            # "invalid device ordinal" we'd otherwise get from get_model().
+            if torch.cuda.is_available():
+                n_devs = torch.cuda.device_count()
+                if pipeline_config.proof_gpu >= n_devs or pipeline_config.vllm_gpu >= n_devs:
+                    raise ProtocolViolationError(
+                        f"Pipeline GPU layout is invalid: vllm_gpu="
+                        f"{pipeline_config.vllm_gpu}, proof_gpu="
+                        f"{pipeline_config.proof_gpu}, but only {n_devs} CUDA "
+                        "device(s) visible. Set GRAIL_PIPELINE_VLLM_GPU and "
+                        "GRAIL_PIPELINE_PROOF_GPU to valid indices, or expose "
+                        "more devices via CUDA_VISIBLE_DEVICES."
+                    )
+
+            logger.info(
+                "Pipeline: backend=%s, gen_gpu=%d, proof_gpu=%d",
+                pipeline_config.backend,
+                pipeline_config.vllm_gpu,
+                pipeline_config.proof_gpu,
+            )
 
             # Initialize monitoring for mining operations
             monitor = get_monitoring_manager()
@@ -289,15 +306,12 @@ class MinerNeuron(BaseNeuron):
                                     tokenizer = proof_worker.tokenizer
                                 else:
                                     model, tokenizer = clear_model_and_tokenizer(model, tokenizer)
-                                    # Pipeline: load model to proof GPU to keep gen GPU free
-                                    model_device = (
-                                        f"cuda:{pipeline_config.proof_gpu}"
-                                        if pipeline_config.enabled
-                                        else None
-                                    )
+                                    # Pipeline is mandatory: model lives on the proof GPU
+                                    # so the proof worker can take ownership without a
+                                    # second copy and the gen GPU(s) stay free for SGLang.
                                     model = get_model(
                                         str(checkpoint_path),
-                                        device=model_device,
+                                        device=f"cuda:{pipeline_config.proof_gpu}",
                                         eval_mode=True,
                                     )
                                     tokenizer = get_tokenizer(str(checkpoint_path))
@@ -339,20 +353,24 @@ class MinerNeuron(BaseNeuron):
                         last_window_start = window_start  # Prevent infinite loop
                         continue
 
-                    # Initialize pipeline on first successful checkpoint load
-                    if (
-                        pipeline_config.enabled
-                        and pipeline_engine is None
-                        and checkpoint_path is not None
-                    ):
-                        try:
-                            from grail.mining.engine import PipelinedMiningEngine
-                            from grail.mining.proof_worker import ProofWorker
-                            from grail.mining.weight_sync import (
-                                SGLangWeightSync,
-                                VLLMWeightSync,
-                            )
+                    # Initialize pipeline on first successful checkpoint load.
+                    # The pipeline is the only generation path. Init is a one-shot
+                    # setup phase: a failure here means the SGLang/vLLM backend
+                    # can't come up (missing dep, port collision, GPU OOM at
+                    # startup). Retrying in the outer ``except Exception`` would
+                    # silently spin forever while heartbeats keep firing — the
+                    # watchdog would never see it. Convert init failures to
+                    # ``SystemExit`` so they bypass the outer catch-all and let
+                    # the supervisor (docker / systemd) restart the process.
+                    if pipeline_engine is None and checkpoint_path is not None:
+                        from grail.mining.engine import PipelinedMiningEngine
+                        from grail.mining.proof_worker import ProofWorker
+                        from grail.mining.weight_sync import (
+                            SGLangWeightSync,
+                            VLLMWeightSync,
+                        )
 
+                        try:
                             proof_worker = ProofWorker(pipeline_config)
                             proof_worker.set_model(model, tokenizer)
 
@@ -360,86 +378,136 @@ class MinerNeuron(BaseNeuron):
                                 weight_sync = SGLangWeightSync(
                                     pipeline_config, proof_worker.tokenizer
                                 )
-                            else:
+                            elif pipeline_config.backend == "vllm":
                                 weight_sync = VLLMWeightSync(
                                     pipeline_config, proof_worker.tokenizer
+                                )
+                            else:
+                                raise ValueError(
+                                    f"Unknown GRAIL_PIPELINE_BACKEND="
+                                    f"{pipeline_config.backend!r}; "
+                                    "must be 'sglang' or 'vllm'"
                                 )
 
                             await weight_sync.start(str(checkpoint_path))
                             pipeline_engine = PipelinedMiningEngine(
                                 pipeline_config, weight_sync, proof_worker
                             )
-                            logger.info("Pipeline engine initialized successfully")
-
-                            # Register cleanup callbacks
-                            async def _shutdown_pipeline(
-                                _ws=weight_sync,
-                                _pe=pipeline_engine,
-                            ) -> None:
-                                if _ws is not None:
-                                    await _ws.shutdown()
-                                if _pe is not None:
-                                    _pe.shutdown()
-
-                            def _schedule_pipeline_shutdown() -> None:
-                                asyncio.ensure_future(_shutdown_pipeline())
-
-                            self.register_shutdown_callback(_schedule_pipeline_shutdown)
-                        except Exception as pipe_exc:
-                            logger.error(
-                                "Failed to initialize pipeline, falling back to "
-                                "single-GPU mode: %s",
-                                pipe_exc,
-                                exc_info=True,
+                        except Exception as init_exc:
+                            logger.exception(
+                                "Pipeline init failed (backend=%s); exiting so "
+                                "supervisor restarts the miner",
+                                pipeline_config.backend,
                             )
-                            pipeline_engine = None
-                            weight_sync = None
-                            proof_worker = None
+                            raise SystemExit(1) from init_exc
+                        logger.info("Pipeline engine initialized successfully")
 
-                    # Fetch checkpoint metadata for environment and generation configuration
-                    env_id = None
-                    env_params = {}
-                    generation_params = {}
+                        # Register cleanup callbacks
+                        async def _shutdown_pipeline(
+                            _ws=weight_sync,
+                            _pe=pipeline_engine,
+                        ) -> None:
+                            if _ws is not None:
+                                await _ws.shutdown()
+                            if _pe is not None:
+                                _pe.shutdown()
 
-                    if current_checkpoint_window is not None:
-                        try:
-                            checkpoint_metadata = await checkpoint_manager.get_checkpoint_metadata(
-                                current_checkpoint_window
-                            )
-                            if checkpoint_metadata:
-                                missing = checkpoint_metadata.validate_metadata()
-                                if missing:
-                                    logger.error(
-                                        "Checkpoint %s missing required metadata: %s. "
-                                        "Skipping window — trainer may be misconfigured.",
-                                        current_checkpoint_window,
-                                        ", ".join(missing),
-                                    )
-                                    last_window_start = window_start
-                                    continue
+                        def _schedule_pipeline_shutdown() -> None:
+                            asyncio.ensure_future(_shutdown_pipeline())
 
-                                env_id = checkpoint_metadata.env_id
-                                env_params = checkpoint_metadata.env_params or {}
-                                generation_params = checkpoint_metadata.generation_params or {}
-                                logger.info(
-                                    f"Using checkpoint config: env_id={env_id}, "
-                                    f"generation_params={generation_params}"
-                                )
-                            else:
-                                logger.warning(
-                                    f"No metadata found for checkpoint window {current_checkpoint_window}, "
-                                    f"using defaults"
-                                )
-                        except Exception as e:
-                            logger.warning(
-                                f"Failed to fetch checkpoint metadata (window={current_checkpoint_window}): {e}",
-                                exc_info=True,
-                            )
-                            # Continue with defaults on error
-                    else:
-                        logger.warning(
-                            "current_checkpoint_window is None, using default env config"
+                        self.register_shutdown_callback(_schedule_pipeline_shutdown)
+
+                    # Fetch checkpoint metadata for environment and generation
+                    # configuration. The trainer is the SINGLE source of truth
+                    # for env_id, env_params, generation_params, and
+                    # thinking_mode. Any failure to resolve these (R2 down,
+                    # legacy schema, trainer misconfigured) MUST skip the
+                    # entire window — falling through with defaults would
+                    # silently let the miner generate against an unverifiable
+                    # protocol baseline (the same class of bug the validator
+                    # fix closes on its side).
+                    if current_checkpoint_window is None:
+                        logger.error(
+                            "current_checkpoint_window is None — cannot resolve trainer "
+                            "env config; skipping window %s",
+                            window_start,
                         )
+                        last_window_start = window_start
+                        continue
+
+                    try:
+                        checkpoint_metadata = await checkpoint_manager.get_checkpoint_metadata(
+                            current_checkpoint_window
+                        )
+                    except Exception as e:
+                        logger.error(
+                            "Failed to fetch checkpoint metadata for window %s: %s. "
+                            "Skipping window — trainer/R2 may be unhealthy.",
+                            current_checkpoint_window,
+                            e,
+                            exc_info=True,
+                        )
+                        last_window_start = window_start
+                        continue
+
+                    if checkpoint_metadata is None:
+                        logger.error(
+                            "No metadata found for checkpoint window %s. Skipping window.",
+                            current_checkpoint_window,
+                        )
+                        last_window_start = window_start
+                        continue
+
+                    missing = checkpoint_metadata.validate_metadata()
+                    if missing:
+                        logger.error(
+                            "Checkpoint %s missing required metadata: %s. "
+                            "Skipping window — trainer may be misconfigured.",
+                            current_checkpoint_window,
+                            ", ".join(missing),
+                        )
+                        last_window_start = window_start
+                        continue
+
+                    env_id = checkpoint_metadata.env_id
+                    env_params = checkpoint_metadata.env_params or {}
+                    generation_params = checkpoint_metadata.generation_params or {}
+                    thinking_mode = checkpoint_metadata.thinking_mode
+                    if not thinking_mode:
+                        # validate_metadata() guarantees this is non-None and
+                        # one of {"native", "instructed"}, so this branch is a
+                        # belt-and-suspenders against future schema drift.
+                        # Use an explicit raise (not bare assert: -O strips it).
+                        raise ProtocolViolationError(
+                            f"Checkpoint {current_checkpoint_window} validate_metadata() "
+                            f"passed but thinking_mode is empty: {thinking_mode!r}"
+                        )
+
+                    # Override the process-wide thinking mode from checkpoint
+                    # metadata so all subsequent ``apply_chat_template`` /
+                    # ``get_thinking_config`` calls (engine.py prompt
+                    # rendering, parsers, etc.) see the trainer-published
+                    # value, not whatever happened to be in the local shell
+                    # ``GRAIL_THINKING_MODE``. This is the trust boundary that
+                    # keeps miner and validator in sync when their hosts
+                    # diverge (e.g. validator running in a docker container
+                    # that didn't inherit the var). Must run BEFORE
+                    # ``_pipelined_generation_loop`` renders any prompt.
+                    if os.environ.get("GRAIL_THINKING_MODE") != thinking_mode:
+                        logger.info(
+                            "Overriding GRAIL_THINKING_MODE from checkpoint metadata: "
+                            "prev=%s, new=%s",
+                            os.environ.get("GRAIL_THINKING_MODE", "<unset>"),
+                            thinking_mode,
+                        )
+                        os.environ["GRAIL_THINKING_MODE"] = thinking_mode
+                    logger.info(
+                        "Using checkpoint config: env_id=%s, thinking_mode=%s, "
+                        "generation_params=%s",
+                        env_id,
+                        thinking_mode,
+                        generation_params,
+                    )
 
                     logger.info(
                         f"🔥 Starting inference generation for window "
@@ -457,40 +525,29 @@ class MinerNeuron(BaseNeuron):
                         self.use_drand,
                     )
 
-                    if pipeline_engine is not None:
-                        inferences = await _pipelined_generation_loop(
-                            pipeline_engine,
-                            wallet,
-                            model,
-                            tokenizer,
-                            subtensor,
-                            window_start,
-                            window_block_hash,
-                            combined_randomness,
-                            timers,
-                            monitor,
-                            self.use_drand,
-                            current_checkpoint_window,
-                            env_id=env_id,
-                            env_params=env_params,
+                    # Pipeline is the only generation path; init must have
+                    # succeeded above or the loop body would have raised.
+                    if pipeline_engine is None:
+                        raise RuntimeError(
+                            "Pipeline engine not initialized; cannot generate rollouts."
                         )
-                    else:
-                        inferences = await generate_rollouts_for_window(
-                            wallet,
-                            model,
-                            tokenizer,
-                            subtensor,
-                            window_start,
-                            window_block_hash,
-                            combined_randomness,
-                            timers,
-                            monitor,
-                            self.use_drand,
-                            current_checkpoint_window,
-                            env_id=env_id,
-                            env_params=env_params,
-                            generation_params=generation_params,
-                        )
+                    inferences = await _pipelined_generation_loop(
+                        pipeline_engine,
+                        wallet,
+                        model,
+                        tokenizer,
+                        subtensor,
+                        window_start,
+                        window_block_hash,
+                        combined_randomness,
+                        timers,
+                        monitor,
+                        self.use_drand,
+                        current_checkpoint_window,
+                        env_id=env_id,
+                        env_params=env_params,
+                        generation_params=generation_params,
+                    )
 
                     if inferences:
                         logger.info(
@@ -525,6 +582,18 @@ class MinerNeuron(BaseNeuron):
                     await checkpoint_manager.cleanup_local(window_start)
                 except asyncio.CancelledError:
                     break
+                except ProtocolViolationError as proto_exc:
+                    # Window-scoped data error: bad checkpoint metadata, missing
+                    # required field, etc. Skip this window cleanly so the next
+                    # one can try a fresh checkpoint. No subtensor reconnect,
+                    # no 10s sleep — the next window will arrive soon enough.
+                    logger.warning(
+                        "Skipping window %s due to protocol violation: %s",
+                        window_start,
+                        proto_exc,
+                    )
+                    last_window_start = window_start
+                    continue
                 except Exception as e:
                     traceback.print_exc()
                     logger.error(f"Error in miner loop: {e}. Continuing ...")
