@@ -201,13 +201,16 @@ class TestComputeEntropy:
         tiny_qwen_model_and_tokenizer: tuple[Any, Any],
         sample_batch_inputs: dict[str, Any],
     ) -> None:
-        """Test entropy does not exceed ln(vocab_size)."""
+        """Test entropy does not exceed ln(model.config.vocab_size)."""
         model, _ = tiny_qwen_model_and_tokenizer
         model.eval()
 
         entropies = self._get_entropy(model, sample_batch_inputs)
-        max_entropy = math.log(sample_batch_inputs["vocab_size"])
-        # Allow larger numerical slack for bfloat16 precision and distribution variance
+        # Theoretical bound is ln(model vocab_size); on a random-init model the
+        # softmax is near-uniform and entropy sits right at this ceiling, so the
+        # test must use the model's actual output vocab, not the synthetic input
+        # vocab in sample_batch_inputs.
+        max_entropy = math.log(model.config.vocab_size)
         assert (entropies <= max_entropy + 1.5).all()
 
     def test_entropy_not_returned_when_disabled(

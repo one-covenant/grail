@@ -288,30 +288,53 @@ def seeded_torch_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def _cached_qwen_model_and_tokenizer(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> tuple[Any, Any]:
-    """Session-scoped: load Qwen 1.5B model and tokenizer once per worker.
+    """Session-scoped: build a random-init tiny Qwen2 model and load the real tokenizer.
 
-    Uses a filelock to prevent concurrent HuggingFace cache corruption
-    when running under pytest-xdist (multiple workers downloading simultaneously).
+    The model is a Qwen2ForCausalLM constructed from a small Qwen2Config (hidden_size
+    64, 2 layers, 2 heads) rather than the 1.5B pretrained checkpoint. This keeps the
+    HF architecture surface the tests exercise (`.model`, `.lm_head`, chunked-logit
+    path, attention mask handling) while dropping memory from ~3 GB to ~40 MB per
+    worker, which is what allows CI to run the trainer tests under pytest-xdist on
+    7 GB GitHub-hosted runners without OOMing. Vocab size matches the tokenizer so
+    real pad/eos token ids stay in-range when they flow through the training batch
+    preparation path.
+
+    The real Qwen2.5 tokenizer is still downloaded (it's small and fast) because the
+    trainer reads `pad_token_id` and `eos_token_id` from it and may call `decode()`
+    in debug branches. The filelock serializes concurrent downloads across xdist
+    workers to avoid HF cache corruption.
     """
+    import torch
     from filelock import FileLock
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoTokenizer, Qwen2Config, Qwen2ForCausalLM
 
-    model_name = "Qwen/Qwen2.5-1.5B"
+    tokenizer_name = "Qwen/Qwen2.5-1.5B"
 
-    # Serialize model downloads across xdist workers
+    # Serialize tokenizer downloads across xdist workers.
     lock_path = tmp_path_factory.getbasetemp().parent / "hf_download.lock"
     with FileLock(str(lock_path)):
-        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-        if tokenizer.pad_token_id is None:
-            tokenizer.pad_token_id = tokenizer.eos_token_id
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
 
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            trust_remote_code=True,
-            torch_dtype="auto",
-            device_map="cpu",
-        )
-
+    # Use len(tokenizer) rather than tokenizer.vocab_size: the Qwen2.5 tokenizer
+    # reports vocab_size=151643 but eos/pad_token_id=151643 itself, which lives in
+    # the added-tokens range (len == 151665). Matching len(tokenizer) ensures real
+    # pad/eos ids index cleanly into the model's embedding table.
+    model_vocab_size = len(tokenizer)
+    config = Qwen2Config(
+        vocab_size=model_vocab_size,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        max_position_embeddings=512,
+        tie_word_embeddings=True,
+        torch_dtype="float32",
+    )
+    torch.manual_seed(0)
+    model = Qwen2ForCausalLM(config)
     model.eval()
 
     return model, tokenizer
@@ -321,10 +344,10 @@ def _cached_qwen_model_and_tokenizer(
 def tiny_qwen_model_and_tokenizer(
     _cached_qwen_model_and_tokenizer: tuple[Any, Any],
 ) -> tuple[Any, Any]:
-    """Per-test: return a deep copy of the cached model so training tests can't leak state.
+    """Per-test: return a deep copy of the cached tiny model so tests can't leak state.
 
-    The tokenizer is immutable so it's shared directly. The model is deepcopied
-    (~0.5s) instead of reloaded from disk (~15s).
+    The tokenizer is immutable so it's shared directly. The model is a tiny
+    random-init Qwen2 (~40 MB) so deepcopy is effectively free.
     """
     import copy
 
