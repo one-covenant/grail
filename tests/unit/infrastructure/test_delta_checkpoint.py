@@ -202,6 +202,16 @@ class TestApplySparseDelta:
 
         assert result["weight"].dtype == torch.bfloat16
 
+    def test_empty_base_state_raises_value_error(self) -> None:
+        """Test that empty base_state with target_dtype=None raises ValueError instead of StopIteration."""
+        with pytest.raises(ValueError, match="Cannot infer target_dtype: base_state is empty"):
+            apply_sparse_delta({}, {}, {}, target_dtype=None)
+
+    def test_empty_base_state_with_explicit_dtype(self) -> None:
+        """Test that empty base_state with explicit target_dtype returns empty dict."""
+        result = apply_sparse_delta({}, {}, {}, target_dtype=torch.float32)
+        assert result == {}
+
 
 class TestRoundTrip:
     """Test round-trip: compute delta, apply delta, verify identical."""
