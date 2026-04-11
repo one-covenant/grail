@@ -134,6 +134,8 @@ def apply_sparse_delta(
 
     # Infer dtype from base_state if not specified
     if target_dtype is None:
+        if not base_state:
+            raise ValueError("Cannot infer target_dtype: base_state is empty")
         target_dtype = next(iter(base_state.values())).dtype
 
     for name, base_tensor in base_state.items():
