@@ -21,6 +21,36 @@ logger = logging.getLogger(__name__)
 _SYMLINK_NAME = "vllm_active"
 
 
+def _emit_sync_metric(backend: str, event: str, stages: dict[str, float], **extra: Any) -> None:
+    """Emit a grep-able weight-sync timing record to stdout (and monitoring).
+
+    Bench instrumentation (pyq 2026-07-09, grail docs/goal.md Phase 2 S4):
+    the stdout line survives even when the monitoring backend is disabled, so
+    ``grep SYNC_METRIC`` always yields data. Never raises: measurement must
+    not break the sync path.
+    """
+    try:
+        record: dict[str, Any] = {"metric": "SYNC_METRIC", "backend": backend, "event": event}
+        record.update({k: round(v, 4) for k, v in stages.items()})
+        record.update(extra)
+        print(f"SYNC_METRIC {json.dumps(record)}", flush=True)
+        try:
+            import asyncio
+
+            from grail.monitoring import get_monitoring_manager
+
+            monitor = get_monitoring_manager()
+            if monitor:
+                loop = asyncio.get_running_loop()
+                for key, value in stages.items():
+                    # log_gauge is async: fire-and-forget on the running loop
+                    loop.create_task(monitor.log_gauge(f"weight_sync/{backend}.{event}.{key}", value))
+        except Exception:
+            logger.debug("SYNC_METRIC monitoring emit failed", exc_info=True)
+    except Exception:
+        logger.debug("SYNC_METRIC emit failed", exc_info=True)
+
+
 def _update_symlink(symlink_path: str, target: str) -> None:
     """Atomically update *symlink_path* to point to *target*.
 
@@ -73,6 +103,7 @@ class SGLangWeightSync(WeightSyncStrategy):
         from ..trainer.config import EvalConfig
         from ..trainer.inference_server import ServerConfig, SGLangServerManager
 
+        _t_start = time.perf_counter()
         eval_config = EvalConfig(
             sglang_mem_fraction_static=self._config.gpu_memory_utilization,
             sglang_context_length=self._config.max_model_len,
@@ -109,6 +140,12 @@ class SGLangWeightSync(WeightSyncStrategy):
         )
 
         logger.info("SGLang generation server started at %s", self._manager.base_url)
+        _emit_sync_metric(
+            "sglang",
+            "server_start",
+            {"server_start_s": time.perf_counter() - _t_start},
+            checkpoint=os.path.basename(str(checkpoint_path)),
+        )
 
     async def sync_weights(self, checkpoint_path: str) -> None:
         if self._manager is None:
@@ -119,6 +156,7 @@ class SGLangWeightSync(WeightSyncStrategy):
         base_url = self._manager.base_url
         logger.info("Syncing weights to SGLang server from %s", checkpoint_path)
 
+        _t0 = time.perf_counter()
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"{base_url}/update_weights_from_disk",
@@ -126,8 +164,15 @@ class SGLangWeightSync(WeightSyncStrategy):
                 timeout=self._config.server_timeout,
             )
             resp.raise_for_status()
+        _t_reload = time.perf_counter() - _t0
 
         logger.info("SGLang weight sync complete")
+        _emit_sync_metric(
+            "sglang",
+            "sync_weights",
+            {"update_weights_from_disk_s": _t_reload},
+            checkpoint=os.path.basename(str(checkpoint_path)),
+        )
 
     async def shutdown(self) -> None:
         if self._manager is not None:

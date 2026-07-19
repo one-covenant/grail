@@ -257,7 +257,11 @@ def get_client_ctx(
     # Root cause: botocore and asyncio timeouts conflict when stacked.
     config = Config(
         connect_timeout=3,
-        read_timeout=30,  # Higher than asyncio timeout
+        # Higher than asyncio timeout. Env override for bench setups where the
+        # store is a slow local S3 mock: completing a 57 GB multipart upload
+        # against moto (single-threaded in-memory assembly) takes minutes
+        # (pyq 2026-07-10, grail docs/goal.md Phase 2 S7).
+        read_timeout=int(os.getenv("GRAIL_S3_READ_TIMEOUT_S", "30")),
         retries={"max_attempts": 2, "mode": "standard"},
         max_pool_connections=256,
         region_name=region_name,
