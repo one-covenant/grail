@@ -1,11 +1,13 @@
-"""GRAIL proof computation: commitments and logprobs."""
+# GRAIL proof computation: commitments and logprobs
 
 from __future__ import annotations
 
 import gc
 import hashlib
+import inspect
 import json
 import logging
+import os
 import traceback as _tb
 from typing import Any
 
@@ -17,6 +19,103 @@ from ..protocol.constants import GRAIL_PROOF_VERSION, LAYER_INDEX
 logger = logging.getLogger(__name__)
 
 
+def _get_env_config() -> tuple[int, str]:
+    """Get quant bits and deterministic mode from environment."""
+    quant_bits_str = os.getenv("GRAIL_PROOF_QUANT_BITS", "8")
+    try:
+        quant_bits = int(quant_bits_str)
+        if quant_bits not in (8, 16):
+            logger.warning("GRAIL_PROOF_QUANT_BITS must be 8 or 16, got %s. Defaulting to 8.", quant_bits_str)
+            quant_bits = 8
+    except ValueError:
+        logger.warning("Invalid GRAIL_PROOF_QUANT_BITS: %s. Defaulting to 8.", quant_bits_str)
+        quant_bits = 8
+
+    deterministic_mode = os.getenv("GRAIL_PROOF_DETERMINISTIC_MODE", "fixed_point").lower()
+    if deterministic_mode not in ("fixed_point", "fp32_deterministic", "off"):
+        logger.warning(
+            "Invalid GRAIL_PROOF_DETERMINISTIC_MODE: %s. Defaulting to 'fixed_point'.",
+            deterministic_mode,
+        )
+        deterministic_mode = "fixed_point"
+
+    return quant_bits, deterministic_mode
+
+
+def _project_fixed_point(h_layer: torch.Tensor, r_vec: torch.Tensor, bits: int) -> torch.Tensor:
+    """Project using fixed-point integer arithmetic via float64."""
+    assert r_vec.dim() in (1, 2), "r_vec must be 1D or 2D (batch x hidden)"
+    if r_vec.dim() == 2:
+        assert r_vec.size(0) == 1 or r_vec.size(1) == 1, "r_vec 2D must have a singleton dimension of size 1"
+
+    with torch.no_grad():
+        device = h_layer.device
+        r_vec = r_vec.to(device)
+
+        max_int = (1 << (bits - 1)) - 1
+
+        # Avoid asymmetric saturation
+        r_max = torch.max(torch.abs(r_vec))
+        scale_r = r_max / max_int
+        if scale_r == 0:
+            scale_r = torch.tensor(1.0, dtype=r_vec.dtype, device=device)
+
+        h_max = torch.max(torch.abs(h_layer))
+        scale_h = h_max / max_int
+        if scale_h == 0:
+            scale_h = torch.tensor(1.0, dtype=h_layer.dtype, device=device)
+
+        dtype = torch.int16 if bits <= 8 else torch.int32
+        r_vec_int = (r_vec / scale_r).round().to(dtype)
+        h_layer_int = (h_layer / scale_h).round().to(dtype)
+
+        # Force contiguous float64 to avoid CUDA integer matmul and improve coalescing
+        r_vec_f64 = r_vec_int.to(dtype=torch.float64, device=device).contiguous()
+        h_layer_f64 = h_layer_int.to(dtype=torch.float64, device=device).contiguous()
+
+        hidden_dim = h_layer.size(1)
+        CHUNK_SIZE_HD = min(hidden_dim, 8192)  # dynamic chunking
+
+        if hidden_dim > CHUNK_SIZE_HD:
+            if r_vec_f64.dim() == 1:
+                s_vals_f64 = torch.zeros(h_layer_f64.size(0), dtype=torch.float64, device=device)
+                for start_idx in range(0, hidden_dim, CHUNK_SIZE_HD):
+                    end_idx = min(start_idx + CHUNK_SIZE_HD, hidden_dim)
+                    h_chunk = h_layer_f64[:, start_idx:end_idx]
+                    r_chunk = r_vec_f64[start_idx:end_idx]
+                    s_vals_f64 += torch.matmul(h_chunk, r_chunk)
+            else:
+                if r_vec_f64.size(0) == 1:
+                    s_vals_f64 = torch.zeros((h_layer_f64.size(0), 1), dtype=torch.float64, device=device)
+                    for start_idx in range(0, hidden_dim, CHUNK_SIZE_HD):
+                        end_idx = min(start_idx + CHUNK_SIZE_HD, hidden_dim)
+                        h_chunk = h_layer_f64[:, start_idx:end_idx]
+                        r_chunk = r_vec_f64[:, start_idx:end_idx]
+                        s_vals_f64 += torch.matmul(h_chunk, r_chunk.t())
+                else:
+                    s_vals_f64 = torch.zeros((h_layer_f64.size(0), r_vec_f64.size(1)), dtype=torch.float64, device=device)
+                    for start_idx in range(0, hidden_dim, CHUNK_SIZE_HD):
+                        end_idx = min(start_idx + CHUNK_SIZE_HD, hidden_dim)
+                        h_chunk = h_layer_f64[:, start_idx:end_idx]
+                        r_chunk = r_vec_f64[start_idx:end_idx, :]
+                        s_vals_f64 += torch.matmul(h_chunk, r_chunk)
+        else:
+            if r_vec_f64.dim() == 1:
+                s_vals_f64 = torch.matmul(h_layer_f64, r_vec_f64)
+            elif r_vec_f64.size(0) == 1:
+                s_vals_f64 = torch.matmul(h_layer_f64, r_vec_f64.t())
+            else:
+                s_vals_f64 = torch.matmul(h_layer_f64, r_vec_f64)
+
+        # de-quantize correctly
+        s_vals_fp32 = (s_vals_f64 * (scale_h * scale_r)).float()
+
+        if r_vec.dim() == 1 and s_vals_fp32.dim() == 2:
+            s_vals_fp32 = s_vals_fp32.squeeze(-1)
+
+        return s_vals_fp32
+
+
 def _batched_forward_pass(
     model: Any,
     device: str,
@@ -24,30 +123,7 @@ def _batched_forward_pass(
     *,
     keep_logits_on_gpu: bool = False,
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-    """Run sub-batched forward passes with right-padding.
-
-    Uses ``forward_single_layer`` -- the same function the validator uses --
-    so miner and validator produce identical hidden states and logits for
-    GRAIL proof generation and verification.
-
-    On OOM the sub-batch size is halved automatically (down to 1) before
-    propagating the error.
-
-    Args:
-        model: HuggingFace causal LM
-        device: Device string (e.g. ``"cuda:1"``)
-        all_token_ids_batch: Variable-length token sequences
-        keep_logits_on_gpu: When True, return logits on GPU (no H2D copy).
-            Caller is responsible for freeing them after use. Saves
-            ~1.2 GB/seq H2D transfer when used with GPU log_softmax in
-            ``compute_proofs(..., gpu_logprobs=True)``.
-
-    Returns:
-        ``(per_seq_hidden, per_seq_logits)`` -- lists of tensors, one per
-        sequence.  hidden: ``[seq_len, hidden_dim]`` on *device*.
-        logits: ``[seq_len, vocab]`` on CPU (default) or *device* (if
-        ``keep_logits_on_gpu=True``).
-    """
+    """Run sub‑batched forward passes with right‑padding."""
     from ..protocol.constants import PROOF_BATCH_SIZE
 
     batch_size = len(all_token_ids_batch)
@@ -70,19 +146,15 @@ def _batched_forward_pass(
         sub_bs = len(sub_seqs)
 
         try:
-            # Right-pad variable-length sequences to sub-batch max length
             input_ids = torch.full((sub_bs, sub_max), pad_id, dtype=torch.long, device=device)
             attn_mask = torch.zeros(sub_bs, sub_max, dtype=torch.long, device=device)
             for i, (seq, slen) in enumerate(zip(sub_seqs, sub_lens, strict=True)):
                 input_ids[i, :slen] = torch.tensor(seq, dtype=torch.long, device=device)
                 attn_mask[i, :slen] = 1
 
-            # Shared forward path with validator (use_cache=False, single-layer)
             with torch.inference_mode():
                 h_layer, logits = forward_single_layer(model, input_ids, attn_mask, LAYER_INDEX)
 
-            # Extract per-sequence results, trimming padding.
-            # .clone() decouples from the batched tensor so del frees GPU memory.
             for i, slen in enumerate(sub_lens):
                 per_seq_hidden.append(h_layer[i, :slen, :].clone())
                 if keep_logits_on_gpu:
@@ -111,14 +183,11 @@ def _batched_forward_pass(
                 new_size,
             )
             sub_batch_size = new_size
-            # Clear traceback frame locals -- they hold references to
-            # intermediate GPU tensors from the failed forward pass.
             if e.__traceback__ is not None:
                 _tb.clear_frames(e.__traceback__)
             del e
             gc.collect()
             torch.cuda.empty_cache()
-            # Do NOT advance pos -- retry the same chunk with smaller sub-batch
 
     logger.info(
         "Batched forward pass: %d seqs, sub-batch %d->%d (max_len=%d, min_len=%d)",
@@ -142,40 +211,7 @@ def compute_proofs(
     *,
     gpu_logprobs: bool = True,
 ) -> list[tuple[list[dict], list[float], bytes, dict, str]]:
-    """Compute GRAIL commitments and logprobs for the miner pipeline.
-
-    Two-phase design:
-      Phase 1 -- Forward passes via ``_batched_forward_pass`` (which internally
-        calls ``forward_single_layer``, the same function the validator uses).
-        Sub-batch size is the constant PROOF_BATCH_SIZE (16).
-        Falls back to sequential single-sequence passes on OOM.
-      Phase 2 -- Per-sequence commitment + GPU log_softmax + gather. Only the
-        chosen-token logprobs (~16 KB/seq) are transferred to CPU; full
-        ``[seq_len, vocab]`` logits never leave the GPU.  The validator
-        recomputes the same fp32 ``log_softmax`` so the divergence stays
-        well below ``LOGPROB_IS_EPS=0.10``.
-
-    The ``gpu_logprobs=False`` branch is retained ONLY as the OOM fallback
-    for ``_batched_forward_pass``: when sub-batch=1 still OOMs, the function
-    falls back to sequential CPU forwards which return CPU logits.  In that
-    rare case the per-sequence loop transparently uses the CPU log_softmax
-    branch.  Steady-state mining always runs the GPU path.
-
-    Args:
-        model: The loaded PyTorch model
-        device: Device string (e.g. "cuda:1")
-        hidden_dim: Model hidden dimension
-        all_token_ids_batch: List of full token sequences (prompt + completion)
-        prompt_lens: List of prompt lengths corresponding to each sequence
-        randomness_hex: Hex string for randomness beacon
-        wallet: Bittensor wallet for signing commitments
-        gpu_logprobs: Default True. Set to False only by tests that need
-            bit-identical CPU output.
-
-    Returns:
-        List of tuples: (commitments, logprobs, signature, beacon, proof_version)
-        one per rollout in the batch.
-    """
+    """Compute GRAIL commitments and logprobs for the miner pipeline."""
     batch_size = len(all_token_ids_batch)
     if batch_size == 0:
         return []
@@ -185,7 +221,7 @@ def compute_proofs(
     verifier = GRAILVerifier(hidden_dim=hidden_dim)
     r_vec = verifier.generate_r_vec(randomness_hex)
 
-    # --- Phase 1: Forward passes (batched with OOM fallback) ---
+    # --- Phase 1: forward passes ---
     use_batched = True
     per_seq_hidden: list[torch.Tensor | None] = [None] * batch_size
     per_seq_logits: list[torch.Tensor | None] = [None] * batch_size
@@ -205,7 +241,6 @@ def compute_proofs(
             "Batched proof OOM even at sub-batch=1 (total=%d), falling back to sequential",
             batch_size,
         )
-        # Free any partial results from earlier sub-batches before fallback
         per_seq_hidden = [None] * batch_size
         per_seq_logits = [None] * batch_size
         if e.__traceback__ is not None:
@@ -215,7 +250,7 @@ def compute_proofs(
         torch.cuda.empty_cache()
         use_batched = False
 
-    # --- Phase 2: Per-sequence commitment and logprob computation ---
+    # --- Phase 2: commitments and logprobs per sequence ---
     results: list[tuple[list[dict], list[float], bytes, dict, str]] = []
 
     for idx, all_token_ids in enumerate(all_token_ids_batch):
@@ -232,8 +267,6 @@ def compute_proofs(
                     f"(batch_size={batch_size}); cannot continue"
                 )
         else:
-            # Sequential fallback: one sequence at a time using the same
-            # forward_single_layer path for numerical consistency.
             if idx == 0:
                 logger.debug(
                     "SEQUENTIAL FALLBACK: seq_len=%d prompt_len=%d",
@@ -261,8 +294,57 @@ def compute_proofs(
                 all_token_ids[-4:] if len(all_token_ids) >= 4 else all_token_ids,
             )
 
-        # --- Vectorized commitment computation (all positions at once) ---
-        commitments = verifier.create_commitments_batch(h_layer, r_vec)
+        # deterministic projection
+        quant_bits, deterministic_mode = _get_env_config()
+        s_vals = None
+
+        if deterministic_mode == "fixed_point":
+            s_vals = _project_fixed_point(h_layer, r_vec, quant_bits)
+        elif deterministic_mode == "fp32_deterministic":
+            prev_deterministic = torch.are_deterministic_algorithms_enabled()
+            try:
+                torch.use_deterministic_algorithms(True)
+                if r_vec.dim() == 1:
+                    s_vals = torch.matmul(h_layer, r_vec.to(h_layer.device))
+                elif r_vec.dim() == 2:
+                    if r_vec.size(0) == 1:
+                        s_vals = torch.matmul(h_layer, r_vec.to(h_layer.device).t())
+                    else:
+                        s_vals = torch.matmul(h_layer, r_vec.to(h_layer.device))
+                else:
+                    s_vals = torch.matmul(h_layer, r_vec.to(h_layer.device).view(-1))
+
+                if r_vec.dim() == 1 and s_vals.dim() == 2:
+                    s_vals = s_vals.squeeze(-1)
+            except RuntimeError as e:
+                logger.warning(
+                    "Deterministic fp32 algorithms not fully supported on this platform: %s. "
+                    "Falling back to standard float32 projection.",
+                    e,
+                )
+                s_vals = None
+            finally:
+                torch.use_deterministic_algorithms(prev_deterministic)
+
+        # commitments
+        if s_vals is not None:
+            # check signature compatibility
+            has_projected_arg = False
+            try:
+                sig = inspect.signature(verifier.create_commitments_batch)
+                if "projected_s_vals" in sig.parameters:
+                    has_projected_arg = True
+            except (ValueError, TypeError):
+                has_projected_arg = False
+
+            if has_projected_arg:
+                commitments = verifier.create_commitments_batch(h_layer, r_vec, projected_s_vals=s_vals)
+            else:
+                raise RuntimeError(
+                    "Verifier must support 'projected_s_vals' argument. Please update GRAILVerifier."
+                )
+        else:
+            commitments = verifier.create_commitments_batch(h_layer, r_vec)
 
         if idx == 0:
             for pos in [0, prompt_len - 1, prompt_len, len(all_token_ids) - 1]:
@@ -278,7 +360,7 @@ def compute_proofs(
                         float(h_layer[pos].norm().item()),
                     )
 
-        # --- Vectorized logprob computation ---
+        # logprobs
         completion_ids = all_token_ids[prompt_len:]
         num_completion = len(completion_ids)
         logprobs: list[float] = []
@@ -295,10 +377,6 @@ def compute_proofs(
                 valid_token_ids = completion_ids[skip_front : skip_front + n_valid]
 
                 if gpu_logprobs and logits.is_cuda:
-                    # GPU path: chunked log_softmax on the device, gather only
-                    # the chosen-token logprobs, then tiny H2D for the result.
-                    # Caps GPU peak memory to LOGPROB_CHUNK * vocab * 4 B
-                    # (~312 MB for chunk=512, vocab=152k).
                     token_tensor_gpu = torch.tensor(
                         valid_token_ids, dtype=torch.long, device=logits.device
                     )
@@ -316,7 +394,6 @@ def compute_proofs(
                         del log_probs_chunk
                     del token_tensor_gpu
                 else:
-                    # Legacy CPU path (bit-identical to historical behavior).
                     token_tensor = torch.tensor(valid_token_ids, dtype=torch.long)
                     LOGPROB_CHUNK = 512
                     chunk_logprobs: list[float] = []
@@ -342,7 +419,6 @@ def compute_proofs(
                     logits.size(0),
                 )
 
-        # Free this sequence's logits eagerly when they're on GPU to bound peak memory.
         if gpu_logprobs and use_batched and per_seq_logits[idx] is not None:
             per_seq_logits[idx] = None
 
