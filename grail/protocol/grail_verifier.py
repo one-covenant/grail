@@ -253,7 +253,13 @@ class GRAILVerifier:
             "sketch": sketch_val,
         }
 
-    def create_commitments_batch(self, h_layer: torch.Tensor, r_vec: torch.Tensor) -> list[dict]:
+    # ===================== UPDATED FUNCTION =====================
+    def create_commitments_batch(
+        self, 
+        h_layer: torch.Tensor, 
+        r_vec: torch.Tensor,
+        projected_s_vals: torch.Tensor | None = None
+    ) -> list[dict]:
         """Create commitments for all positions at once (vectorized).
 
         Produces bit-identical results to calling create_commitment() in a loop.
@@ -261,6 +267,9 @@ class GRAILVerifier:
         Args:
             h_layer: Hidden states [seq_len, hidden_dim] on any device.
             r_vec: Coefficient vector [topk] (int8, typically on CPU).
+            projected_s_vals: Optional pre-computed s_vals (for deterministic mode).
+                Currently not used; exists for compatibility with the miner's
+                fixed-point projection path.
 
         Returns:
             List of commitment dicts, one per position.
@@ -296,6 +305,7 @@ class GRAILVerifier:
 
         # Step 4: Package as list of dicts
         return [{"sketch": sketch_vals[pos]} for pos in range(seq_len)]
+    # ============================================================
 
     def verify_commitment(
         self,
